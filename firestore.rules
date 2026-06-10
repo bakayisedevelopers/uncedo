@@ -1,0 +1,112 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && (
+          request.auth.token.email == 'jabuobed1@gmail.com'
+          || get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true
+          || get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'
+          || 'admin' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.roles
+        );
+    }
+
+    function isRequestParticipant(data) {
+      return signedIn()
+        && (
+          data.studentId == request.auth.uid
+          || data.tutorId == request.auth.uid
+          || data.currentOfferTutorId == request.auth.uid
+        );
+    }
+
+    function isSessionParticipant(data) {
+      return signedIn()
+        && (
+          data.studentId == request.auth.uid
+          || data.tutorId == request.auth.uid
+        );
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isAdmin() || (signedIn() && resource.data.activeRole == 'tutor');
+      allow list: if isAdmin() || signedIn();
+      allow create: if isOwner(userId) || isAdmin();
+      allow update: if isOwner(userId) || isAdmin();
+      allow delete: if isOwner(userId) || isAdmin();
+
+      match /aiLogs/{logId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId) || isAdmin();
+        allow update, delete: if isAdmin();
+      }
+    }
+
+    match /classRequests/{requestId} {
+      allow get, list: if isAdmin() || isRequestParticipant(resource.data);
+      allow create: if signedIn() && request.resource.data.studentId == request.auth.uid;
+      allow update: if isAdmin() || isRequestParticipant(resource.data) || isRequestParticipant(request.resource.data);
+      allow delete: if isAdmin();
+
+      match /questions/{questionId} {
+        allow read: if isAdmin()
+          || isRequestParticipant(get(/databases/$(database)/documents/classRequests/$(requestId)).data);
+        allow create, update, delete: if isAdmin();
+      }
+    }
+
+    match /sessions/{sessionId} {
+      allow get, list: if isAdmin() || isSessionParticipant(resource.data);
+      allow create: if isAdmin() || isSessionParticipant(request.resource.data);
+      allow update: if isAdmin() || isSessionParticipant(resource.data) || isSessionParticipant(request.resource.data);
+      allow delete: if isAdmin();
+
+      match /{subcollection}/{documentId} {
+        allow read, write: if isAdmin() || isSessionParticipant(get(/databases/$(database)/documents/sessions/$(sessionId)).data);
+      }
+    }
+
+    match /notifications/{notificationId} {
+      allow get, list: if isAdmin() || isOwner(resource.data.userId);
+      allow create: if signedIn();
+      allow update: if isAdmin() || isOwner(resource.data.userId);
+      allow delete: if isAdmin() || isOwner(resource.data.userId);
+    }
+
+    match /emailEvents/{eventId} {
+      allow create: if signedIn();
+      allow get, list, update, delete: if isAdmin();
+    }
+
+    match /tutorDocuments/{documentId} {
+      allow get, list: if isAdmin() || isOwner(resource.data.uid);
+      allow create: if signedIn() && request.resource.data.uid == request.auth.uid;
+      allow update: if isAdmin() || isOwner(resource.data.uid);
+      allow delete: if isAdmin() || isOwner(resource.data.uid);
+    }
+
+    match /unsupportedSubjectRequests/{subjectId} {
+      allow read: if isAdmin();
+      allow create, update: if signedIn();
+      allow delete: if isAdmin();
+    }
+
+    match /system/{documentId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

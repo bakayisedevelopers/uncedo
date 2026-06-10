@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+web/node_modules/
+uncedo/node_modules/
+helpers/node_modules/
+functions/node_modules/
+services/gemini-live-proxy/node_modules/
+
+# Build outputs
+web/dist/
+web/build/
+uncedo/dist/
+uncedo/build/
+uncedo/android/app/build/
+uncedo/android/.gradle/
+uncedo/.expo/
+uncedo/.expo-shared/
+helpers/dist/
+helpers/build/
+helpers/.expo/
+helpers/.expo-shared/
+
+# Python
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+services/**/.venv/
+services/**/venv/
+services/**/env/
+
+# Environment files
+.env
+.env.*
+!.env.example
+web/.env.local
+uncedo/.env.local
+helpers/.env.local
+functions/.env.local
+
+# Firebase / cloud tooling
+.firebase/
+.firebase-config/
+.gcloud/
+.gemini/
+firebase-debug.log
+firebase-debug.*.log
+
+# Editor / OS / misc
+.vscode/
+.DS_Store
+*.log
+commands.txt
+.tools/

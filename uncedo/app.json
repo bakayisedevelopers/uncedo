@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "Parakleo",
+    "slug": "parakleo-mobile",
+    "scheme": "parakleo",
+    "version": "0.1.0",
+    "icon": "../Logo.png",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "../Logo.png",
+        "backgroundColor": "#ffffff"
+      },
+      "package": "com.anonymous.parakleomobile",
+      "permissions": [
+        "RECORD_AUDIO",
+        "MODIFY_AUDIO_SETTINGS"
+      ]
+    },
+    "ios": {
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Parakleo uses your microphone so you can speak with your tutor during live sessions."
+      },
+      "bundleIdentifier": "com.anonymous.parakleomobile"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "f2cfebb4-9452-4496-8730-b265efb2e25b"
+      }
+    }
+  }
+}

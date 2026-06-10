@@ -1,0 +1,9 @@
+{
+  "expo": {
+    "name": "Uncedo Helpers",
+    "slug": "uncedo-helpers-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "platforms": ["android", "ios", "web"]
+  }
+}
