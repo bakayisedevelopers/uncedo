@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { AttachmentPickerModal } from '../../components/student/AttachmentPickerModal';
 import { MapPlaceholder } from '../../components/customer/MapPlaceholder';
@@ -8,7 +8,7 @@ import { useAuth } from '../../context/AuthContext';
 import { colors } from '../../theme/colors';
 import { getStudentOnboardingStatus } from '../../utils/onboarding';
 
-export function CustomerHomeScreen({ navigate, bottomInset = 0 }) {
+export function CustomerHomeScreen({ navigate, route, bottomInset = 0 }) {
   const { user } = useAuth();
   const onboardingStatus = getStudentOnboardingStatus(user);
   const [composerExpanded, setComposerExpanded] = useState(false);
@@ -18,6 +18,32 @@ export function CustomerHomeScreen({ navigate, bottomInset = 0 }) {
   const [pickerError, setPickerError] = useState('');
   const [mapZoom, setMapZoom] = useState(1);
   const [mapOffset, setMapOffset] = useState({ x: 0, y: 0 });
+  const lastDraftSignatureRef = useRef('');
+
+  const draftText = String(route?.params?.draftText || '').trim();
+  const draftAttachments = route?.params?.draftAttachments;
+
+  useEffect(() => {
+    const attachmentsDraft = Array.isArray(draftAttachments) ? draftAttachments : [];
+    const signature = [draftText, attachmentsDraft.length].join('::');
+    if (!draftText && !attachmentsDraft.length) {
+      lastDraftSignatureRef.current = '';
+      return;
+    }
+    if (lastDraftSignatureRef.current === signature) {
+      return;
+    }
+
+    lastDraftSignatureRef.current = signature;
+    if (draftText) {
+      setRequestText(draftText);
+      setComposerExpanded(true);
+    }
+    if (attachmentsDraft.length) {
+      setAttachments(attachmentsDraft);
+      setComposerExpanded(true);
+    }
+  }, [draftAttachments, draftText]);
 
   const firstName = String(user?.fullName || user?.displayName || 'there').trim().split(' ')[0] || 'there';
   const disabledMessage = onboardingStatus.complete

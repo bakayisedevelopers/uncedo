@@ -1,23 +1,31 @@
-import { StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Card, EmptyState, Screen, SectionHeading, StatusBadge } from '../../components/app/HelperUi';
+import { useHelpersApp } from '../../context/HelpersAppContext';
 import { getServiceById } from '../../constants/serviceCatalog';
 import { formatCurrency, formatDate } from '../../utils/payouts';
 import { colors } from '../../theme/colors';
-import { useHelpersApp } from '../../context/HelpersAppContext';
 
-export function CompletedJobsScreen() {
+function buildStatusLabel(job) {
+  const normalized = String(job?.status || '').toLowerCase();
+  if (normalized === 'completed') return 'Completed';
+  if (normalized === 'canceled') return 'Canceled';
+  if (normalized === 'in_progress') return 'In progress';
+  return 'Job update';
+}
+
+export function CompletedJobsScreen({ navigate }) {
   const { completedJobs } = useHelpersApp();
 
   return (
     <Screen
       eyebrow="Helper"
-      title="Completed Jobs"
-      description="This replaces the tutor classes queue with finished helper work, payout-ready history, and service-level delivery tracking."
+      title="Services delivered"
+      description="A compact history of the work you completed for customers."
     >
       <Card>
         <SectionHeading
-          title="Job history"
-          subtitle="Completed jobs use the same summary logic as tutor classes, but framed around finished helper work."
+          title="Completed services"
+          subtitle="Each card stays minimal here: service, customer, status, and date. Open one for the full delivery summary."
         />
 
         {!completedJobs.length ? (
@@ -26,33 +34,36 @@ export function CompletedJobsScreen() {
             description="Once you finish a helper job, it will appear here with customer, service, and payout details."
           />
         ) : (
-          completedJobs.map((job) => {
-            const service = getServiceById(job.serviceId);
-            return (
-              <View key={job.id} style={styles.jobCard}>
-                <View style={styles.jobTop}>
-                  <View style={styles.jobCopy}>
-                    <Text style={styles.jobTitle}>{job.title}</Text>
-                    <Text style={styles.jobSubtitle}>{`${service?.name || 'Service'} | ${job.customerName}`}</Text>
-                  </View>
-                  <StatusBadge label="Completed" tone="success" />
-                </View>
+          <View style={styles.list}>
+            {completedJobs.map((job) => {
+              const service = getServiceById(job.serviceId);
+              const statusLabel = buildStatusLabel(job);
 
-                <View style={styles.metaRow}>
-                  <Text style={styles.metaLabel}>Skills</Text>
-                  <Text style={styles.metaValue}>{(job.requestedSkills || []).join(', ')}</Text>
-                </View>
-                <View style={styles.metaRow}>
-                  <Text style={styles.metaLabel}>Completed</Text>
-                  <Text style={styles.metaValue}>{formatDate(job.completedAt)}</Text>
-                </View>
-                <View style={styles.metaRow}>
-                  <Text style={styles.metaLabel}>Total made</Text>
-                  <Text style={styles.amountValue}>{formatCurrency(job.totalAmount)}</Text>
-                </View>
-              </View>
-            );
-          })
+              return (
+                <Pressable
+                  key={job.id}
+                  accessibilityRole="button"
+                  onPress={() => navigate({ key: 'JobDetails', params: { jobId: job.id, parentTab: 'CompletedJobs' } })}
+                  style={styles.jobCard}
+                >
+                  <View style={styles.jobLeft}>
+                    <Text style={styles.jobTitle} numberOfLines={1}>{job.title}</Text>
+                    <Text style={styles.jobSubtitle} numberOfLines={1}>
+                      {service?.name || 'Service'} • {job.customerName}
+                    </Text>
+                    <Text style={styles.jobMeta} numberOfLines={1}>
+                      {job.requestedSkills?.length ? job.requestedSkills.join(', ') : 'No skills listed'}
+                    </Text>
+                  </View>
+                  <View style={styles.jobRight}>
+                    <StatusBadge label={statusLabel} tone={job.status === 'completed' ? 'success' : 'info'} />
+                    <Text style={styles.jobDate}>{formatDate(job.completedAt || job.startedAt)}</Text>
+                    <Text style={styles.jobAmount}>{formatCurrency(job.totalAmount)}</Text>
+                  </View>
+                </Pressable>
+              );
+            })}
+          </View>
         )}
       </Card>
     </Screen>
@@ -60,22 +71,26 @@ export function CompletedJobsScreen() {
 }
 
 const styles = StyleSheet.create({
-  jobCard: {
-    borderColor: colors.border,
-    borderRadius: 20,
-    borderWidth: 1,
+  list: {
     gap: 10,
-    padding: 14,
   },
-  jobTop: {
+  jobCard: {
     alignItems: 'flex-start',
+    borderColor: colors.border,
+    borderRadius: 18,
+    borderWidth: 1,
     flexDirection: 'row',
     gap: 12,
     justifyContent: 'space-between',
+    padding: 14,
   },
-  jobCopy: {
+  jobLeft: {
     flex: 1,
-    gap: 4,
+    gap: 6,
+  },
+  jobRight: {
+    alignItems: 'flex-end',
+    gap: 6,
   },
   jobTitle: {
     color: colors.text,
@@ -85,28 +100,21 @@ const styles = StyleSheet.create({
   jobSubtitle: {
     color: colors.muted,
     fontSize: 13,
+    fontWeight: '700',
   },
-  metaRow: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+  jobMeta: {
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 18,
   },
-  metaLabel: {
+  jobDate: {
     color: colors.muted,
     fontSize: 12,
     fontWeight: '700',
   },
-  metaValue: {
-    color: colors.text,
-    flex: 1,
-    fontSize: 12,
-    fontWeight: '700',
-    marginLeft: 12,
-    textAlign: 'right',
-  },
-  amountValue: {
+  jobAmount: {
     color: colors.brandDark,
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '900',
   },
 });

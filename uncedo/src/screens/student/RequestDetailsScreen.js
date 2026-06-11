@@ -8,8 +8,27 @@ import { useAuth } from '../../context/AuthContext';
 import { subscribeToRequestById } from '../../services/classRequestService';
 import { subscribeToStudentSessions } from '../../services/sessionService';
 import { colors } from '../../theme/colors';
-import { formatRand } from '../../utils/pricing';
 import { getRequestStatusMeta } from '../../utils/requestStatus';
+
+function formatDateTime(value) {
+  if (!value) return 'Not available';
+
+  const date = typeof value?.toDate === 'function'
+    ? value.toDate()
+    : typeof value === 'number'
+      ? new Date(value)
+      : new Date(value);
+
+  if (Number.isNaN(date.getTime())) return 'Not available';
+
+  return new Intl.DateTimeFormat('en-ZA', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date);
+}
 
 function AttachmentRow({ attachment, index }) {
   const label = attachment?.fileName || `Attachment ${index + 1}`;
@@ -39,17 +58,22 @@ export function RequestDetailsScreen({ route, navigate, goBack }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  useEffect(() => subscribeToRequestById(
-    requestId,
-    (item) => {
-      setRequest(item);
-      setLoading(false);
-    },
-    (nextError) => {
-      setError(nextError.message || 'Unable to load this request right now.');
-      setLoading(false);
-    },
-  ), [requestId]);
+  useEffect(() => {
+    setLoading(true);
+    setError('');
+
+    return subscribeToRequestById(
+      requestId,
+      (item) => {
+        setRequest(item);
+        setLoading(false);
+      },
+      (nextError) => {
+        setError(nextError.message || 'Unable to load this service right now.');
+        setLoading(false);
+      },
+    );
+  }, [requestId]);
 
   useEffect(() => subscribeToStudentSessions(
     user?.uid,
@@ -63,7 +87,7 @@ export function RequestDetailsScreen({ route, navigate, goBack }) {
   );
 
   if (loading) {
-    return <LoadingState label="Loading job request" />;
+    return <LoadingState label="Loading service details" />;
   }
 
   if (error) {
@@ -71,7 +95,7 @@ export function RequestDetailsScreen({ route, navigate, goBack }) {
   }
 
   if (!request) {
-    return <ErrorState title="Request not found" message="We could not find the job request you are looking for." />;
+    return <ErrorState title="Service not found" message="We could not find the service you are looking for." />;
   }
 
   const attachments = Array.isArray(request.attachments) && request.attachments.length
@@ -79,97 +103,75 @@ export function RequestDetailsScreen({ route, navigate, goBack }) {
     : request.attachment?.downloadUrl
       ? [request.attachment]
       : [];
-  const extractionEntries = Array.isArray(request?.boardPreparationSource?.attachmentExtractions)
-    ? request.boardPreparationSource.attachmentExtractions
-    : [];
   const statusMeta = getRequestStatusMeta(request.status);
+  const statusDetail = request.statusDetail || relatedSession?.statusDetail || '';
+  const details = [
+    { label: 'Service', value: request.subject || request.topic || 'General help' },
+    { label: 'Requested by', value: request.studentName || 'You' },
+    { label: 'Requested on', value: formatDateTime(request.createdAt) },
+    { label: 'Current status', value: statusMeta.label },
+    { label: 'Helper', value: request.tutorName || 'Not assigned yet' },
+    { label: 'Session time', value: relatedSession?.duration || request.duration || 'Not available' },
+  ];
 
   return (
     <View style={styles.wrap}>
       <Card style={styles.heroCard}>
-        <Text style={styles.kicker}>Job request</Text>
-        <Text style={styles.heroTitle}>{request.topic || 'Service request'}</Text>
-        <Text style={styles.heroCopy}>
-          {request.description || 'No extra description provided for this job request.'}
-        </Text>
+        <Text style={styles.kicker}>Service details</Text>
+        <Text style={styles.heroTitle}>{request.subject || request.topic || 'Service request'}</Text>
+        <Text style={styles.heroCopy}>{request.description || 'No extra description provided for this service.'}</Text>
         <StatusBadge label={statusMeta.label} tone={statusMeta.tone} />
       </Card>
 
       <Card style={styles.sectionCard}>
-        <Text style={styles.sectionTitle}>Quick details</Text>
-        <View style={styles.metricList}>
-          <View style={styles.metric}>
-            <Text style={styles.metricLabel}>Request ID</Text>
-            <Text style={styles.metricValue}>{request.id || 'N/A'}</Text>
-          </View>
-          <View style={styles.metric}>
-            <Text style={styles.metricLabel}>Service category</Text>
-            <Text style={styles.metricValue}>{request.subject || 'General help'}</Text>
-          </View>
-          <View style={styles.metric}>
-            <Text style={styles.metricLabel}>Duration</Text>
-            <Text style={styles.metricValue}>{request.duration || 'N/A'}</Text>
-          </View>
-          <View style={styles.metric}>
-            <Text style={styles.metricLabel}>Helper</Text>
-            <Text style={styles.metricValue}>{request.tutorName || 'Not assigned yet'}</Text>
-          </View>
-          <View style={styles.metric}>
-            <Text style={styles.metricLabel}>Quoted total</Text>
-            <Text style={styles.metricValue}>
-              {request.pricingSnapshot?.totalAmount
-                ? `Original ${formatRand(request.pricingSnapshot.originalPrice ?? request.pricingSnapshot.totalAmount)} | Discount ${formatRand(request.pricingSnapshot.discountApplied || 0)} | Pay ${formatRand(request.pricingSnapshot.finalPrice ?? request.pricingSnapshot.totalAmount)}`
-                : 'Not quoted'}
-            </Text>
-          </View>
-          <View style={styles.metric}>
-            <Text style={styles.metricLabel}>Job details</Text>
-            <Text style={styles.metricValue}>
-              {relatedSession
-                ? `Status ${relatedSession.status || 'waiting_student'} | Length ${relatedSession.duration || request.duration || 'TBD'}`
-                : 'Assigned job details will appear here once a helper accepts'}
-            </Text>
-          </View>
-          <View style={styles.metric}>
-            <Text style={styles.metricLabel}>OCR diagnostics</Text>
-            <Text style={styles.metricValue}>
-              {extractionEntries.length
-                ? extractionEntries.map((entry) => `${entry.fileName || 'Attachment'}: ${entry.providerRoute || entry.extractionMethod || 'unknown'}`).join(' | ')
-                : 'No OCR diagnostics saved'}
-            </Text>
-          </View>
+        <Text style={styles.sectionTitle}>At a glance</Text>
+        <View style={styles.detailList}>
+          {details.map((item) => (
+            <View style={styles.detailRow} key={item.label}>
+              <Text style={styles.detailLabel}>{item.label}</Text>
+              <Text style={styles.detailValue}>{item.value}</Text>
+            </View>
+          ))}
         </View>
       </Card>
 
+      {statusDetail ? (
+        <Card style={styles.sectionCard}>
+          <Text style={styles.sectionTitle}>Status note</Text>
+          <Text style={styles.descriptionCopy}>{statusDetail}</Text>
+        </Card>
+      ) : null}
+
       <Card style={styles.sectionCard}>
-        <Text style={styles.sectionTitle}>Request details</Text>
+        <Text style={styles.sectionTitle}>Description</Text>
         <Text style={styles.descriptionCopy}>{request.description || 'No extra description provided.'}</Text>
       </Card>
 
-      <Card style={styles.sectionCard}>
-        <Text style={styles.sectionTitle}>Attachments</Text>
-        {attachments.length ? (
+      {attachments.length ? (
+        <Card style={styles.sectionCard}>
+          <Text style={styles.sectionTitle}>Attachments</Text>
           <View style={styles.attachmentList}>
             {attachments.map((attachment, index) => (
               <AttachmentRow attachment={attachment} index={index} key={`${attachment?.fileName || 'attachment'}-${index}`} />
             ))}
           </View>
-        ) : (
-          <Text style={styles.emptyCopy}>Any files you upload with a request will appear here.</Text>
-        )}
-      </Card>
+        </Card>
+      ) : null}
 
       <View style={styles.actions}>
-        {relatedSession?.id ? (
-          <Button onPress={() => navigate({ key: 'SessionRoom', params: { sessionId: relatedSession.id, parentTab: 'Requests' } })}>
-            Open job
-          </Button>
-        ) : null}
-        <Button variant="secondary" onPress={() => navigate({ key: 'RequestStatus', params: { requestId, parentTab: 'Requests' } })}>
-          View request status
+        <Button
+          onPress={() => navigate({
+            key: 'CustomerHome',
+            params: {
+              parentTab: 'CustomerHome',
+              draftText: request.description || request.topic || request.subject || '',
+            },
+          })}
+        >
+          Re-request this service
         </Button>
         <Button variant="secondary" onPress={() => goBack('Requests')}>
-          Back to My Job Requests
+          Back to Services
         </Button>
       </View>
     </View>
@@ -208,23 +210,24 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '900',
   },
-  metricList: {
+  detailList: {
     gap: 10,
   },
-  metric: {
+  detailRow: {
     backgroundColor: '#fafafa',
     borderColor: colors.border,
-    borderRadius: 20,
+    borderRadius: 18,
     borderWidth: 1,
+    gap: 4,
     padding: 14,
   },
-  metricLabel: {
+  detailLabel: {
     color: colors.muted,
     fontSize: 11,
     fontWeight: '800',
     textTransform: 'uppercase',
   },
-  metricValue: {
+  detailValue: {
     color: colors.text,
     fontSize: 14,
     fontWeight: '700',
@@ -269,11 +272,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
     textTransform: 'uppercase',
-  },
-  emptyCopy: {
-    color: colors.muted,
-    fontSize: 14,
-    lineHeight: 20,
   },
   actions: {
     gap: 10,

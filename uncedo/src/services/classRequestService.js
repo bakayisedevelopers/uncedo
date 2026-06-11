@@ -4,7 +4,6 @@ import {
   doc,
   getDocs,
   onSnapshot,
-  orderBy,
   query,
   serverTimestamp,
   updateDoc,
@@ -97,12 +96,24 @@ export function subscribeToStudentRequests(studentId, callback, onError) {
   const requestsQuery = query(
     collection(db, 'classRequests'),
     where('studentId', '==', studentId),
-    orderBy('createdAt', 'desc'),
   );
+
+  const normalizeTime = (value) => {
+    if (!value) return 0;
+    if (typeof value === 'number') return value;
+    if (typeof value?.toMillis === 'function') return value.toMillis();
+    if (typeof value?.seconds === 'number') return value.seconds * 1000;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
 
   return onSnapshot(
     requestsQuery,
-    (snapshot) => callback(snapshot.docs.map((item) => ({ id: item.id, ...item.data() }))),
+    (snapshot) => {
+      const items = snapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
+      items.sort((left, right) => normalizeTime(right.createdAt) - normalizeTime(left.createdAt));
+      callback(items);
+    },
     onError,
   );
 }

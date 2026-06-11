@@ -6,6 +6,7 @@ import { AgreementScreen } from '../screens/provider/AgreementScreen';
 import { CompletedJobsScreen } from '../screens/provider/CompletedJobsScreen';
 import { EarningsScreen } from '../screens/provider/EarningsScreen';
 import { JobOffersScreen } from '../screens/provider/JobOffersScreen';
+import { JobDetailsScreen } from '../screens/provider/JobDetailsScreen';
 import { ProfileCompletionScreen } from '../screens/provider/ProfileCompletionScreen';
 import { ProviderDashboardScreen } from '../screens/provider/ProviderDashboardScreen';
 import { ProviderProfileScreen } from '../screens/provider/ProviderProfileScreen';
@@ -35,6 +36,7 @@ const secondaryScreens = {
   Agreement: AgreementScreen,
   Verification: VerificationScreen,
   JobOffers: JobOffersScreen,
+  JobDetails: JobDetailsScreen,
   ActiveJob: ActiveJobScreen,
 };
 

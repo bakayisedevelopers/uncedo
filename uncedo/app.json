@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "Parakleo",
-    "slug": "parakleo-mobile",
+    "name": "Uncedo",
+    "slug": "uncedo-mobile",
     "scheme": "parakleo",
     "version": "0.1.0",
     "icon": "../Logo.png",
@@ -29,8 +29,9 @@
     },
     "extra": {
       "eas": {
-        "projectId": "f2cfebb4-9452-4496-8730-b265efb2e25b"
+        "projectId": "44335672-bb65-43aa-a61b-0a8d1c0e8fd1"
       }
-    }
+    },
+    "owner": "bakayisedevelopers"
   }
 }

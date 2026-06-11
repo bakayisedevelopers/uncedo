@@ -1,33 +1,42 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { EmptyState, ErrorState, LoadingState } from '../../components/ui/States';
 import { StatusBadge } from '../../components/ui/StatusBadge';
 import { useAuth } from '../../context/AuthContext';
 import { subscribeToStudentRequests } from '../../services/classRequestService';
-import { subscribeToStudentSessions } from '../../services/sessionService';
 import { colors } from '../../theme/colors';
 import { getRequestStatusMeta } from '../../utils/requestStatus';
 
-function statusLabel(status) {
-  if (['pending', 'matching', 'offered'].includes(status)) return 'Looking for a helper';
-  if (['accepted', 'waiting_student', 'in_progress', 'in_session'].includes(status)) return 'Helper assigned';
-  if (status === 'no_tutor_available') return 'No helper available yet';
-  if (status === 'completed') return 'Job completed';
-  return 'Request update';
+function formatDate(value) {
+  if (!value) return 'Date pending';
+
+  const date = typeof value?.toDate === 'function'
+    ? value.toDate()
+    : typeof value === 'number'
+      ? new Date(value)
+      : new Date(value);
+
+  if (Number.isNaN(date.getTime())) return 'Date pending';
+
+  return new Intl.DateTimeFormat('en-ZA', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  }).format(date);
 }
 
 export function RequestsScreen({ navigate }) {
   const { user } = useAuth();
   const [requests, setRequests] = useState([]);
-  const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [loadingSessions, setLoadingSessions] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
+    setLoading(true);
+    setError('');
+
     return subscribeToStudentRequests(
       user?.uid,
       (items) => {
@@ -35,108 +44,102 @@ export function RequestsScreen({ navigate }) {
         setLoading(false);
       },
       (nextError) => {
-        setError(nextError.message);
+        setError(nextError.message || 'Unable to load your services right now.');
         setLoading(false);
       },
     );
   }, [user?.uid]);
 
-  useEffect(() => subscribeToStudentSessions(
-    user?.uid,
-    (items) => {
-      setSessions(items);
-      setLoadingSessions(false);
-    },
-    () => {
-      setSessions([]);
-      setLoadingSessions(false);
-    },
-  ), [user?.uid]);
-
-  const sessionByRequestId = useMemo(
-    () => new Map(sessions.map((session) => [session.requestId, session])),
-    [sessions],
-  );
-
-  if (loading || loadingSessions) return <LoadingState label="Syncing your job requests..." />;
+  if (loading) return <LoadingState label="Syncing your services..." />;
   if (error) return <ErrorState message={error} />;
   if (!requests.length) {
     return (
       <EmptyState
-        title="No job requests yet"
-        message="Your service requests will appear here once you start asking for help."
-        action={<Button onPress={() => navigate('CustomerHome')}>Go Home</Button>}
+        title="Your services list is empty"
+        message="Request your first service from Home and it will appear here."
+        action={<Button onPress={() => navigate('CustomerHome')}>Request your first service</Button>}
       />
     );
   }
 
   return (
     <View style={styles.wrap}>
-      <Text style={styles.title}>My Job Requests</Text>
-      <Text style={styles.subtitle}>Track requests, assigned helpers, and active jobs in one place.</Text>
-      {requests.map((request) => (
-        <View key={request.id} style={styles.itemWrap}>
-          <Card style={styles.card}>
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => navigate({ key: 'RequestStatus', params: { requestId: request.id, parentTab: 'Requests' } })}
-              style={styles.cardPressable}
-            >
-              <StatusBadge {...getRequestStatusMeta(request.status)} />
-              <Text style={styles.cardTitle}>{request.topic || request.subject || 'Class request'}</Text>
-              <Text style={styles.copy}>{request.description || 'No description added.'}</Text>
-              <Text style={styles.meta}>Service category: {request.subject || 'General help'}</Text>
-            </Pressable>
-          </Card>
+      <Text style={styles.title}>Services received</Text>
+      <Text style={styles.subtitle}>A simple list of every service you requested and its current status.</Text>
 
-          <View style={styles.footerRow}>
-            <Text style={styles.statusText}>{statusLabel(request.status)}</Text>
-            <View style={styles.footerActions}>
-              <View style={styles.durationWrap}>
-                <Ionicons name="time-outline" size={14} color={colors.muted} />
-                <Text style={styles.durationText}>
-                  {request.duration || sessionByRequestId.get(request.id)?.duration || 'Per-minute'}
-                </Text>
-              </View>
-              {sessionByRequestId.get(request.id)?.id ? (
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={() => navigate({ key: 'SessionRoom', params: { sessionId: sessionByRequestId.get(request.id).id, parentTab: 'Requests' } })}
-                >
-                  <Text style={styles.joinText}>
-                    Open job
-                  </Text>
-                </Pressable>
-              ) : null}
-            </View>
+      {requests.map((request) => {
+        const statusMeta = getRequestStatusMeta(request.status);
+
+        return (
+          <View key={request.id} style={styles.itemWrap}>
+            <Card style={styles.card}>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => navigate({ key: 'RequestDetails', params: { requestId: request.id, parentTab: 'Requests' } })}
+                style={styles.cardPressable}
+              >
+                <View style={styles.cardTopRow}>
+                  <View style={styles.cardLeft}>
+                    <Text style={styles.cardTitle} numberOfLines={1}>
+                      {request.subject || request.topic || 'Service request'}
+                    </Text>
+                    <Text style={styles.copy} numberOfLines={1}>
+                      Requested by {request.studentName || user?.displayName || 'you'}
+                    </Text>
+                    <Text style={styles.meta} numberOfLines={1}>
+                      {request.description || 'Tap to open the full service details.'}
+                    </Text>
+                  </View>
+                  <View style={styles.cardRight}>
+                    <StatusBadge {...statusMeta} />
+                    <Text style={styles.dateText}>{formatDate(request.createdAt)}</Text>
+                  </View>
+                </View>
+              </Pressable>
+            </Card>
           </View>
-        </View>
-      ))}
+        );
+      })}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   wrap: {
-    gap: 12,
+    gap: 14,
   },
   title: {
     color: colors.text,
-    fontSize: 28,
+    fontSize: 30,
     fontWeight: '900',
   },
   subtitle: {
     color: colors.muted,
     fontSize: 14,
+    lineHeight: 20,
   },
   itemWrap: {
-    gap: 8,
+    gap: 10,
   },
   card: {
-    gap: 10,
+    gap: 0,
   },
   cardPressable: {
-    gap: 10,
+    gap: 0,
+  },
+  cardTopRow: {
+    flexDirection: 'row',
+    gap: 12,
+    justifyContent: 'space-between',
+  },
+  cardLeft: {
+    flex: 1,
+    gap: 6,
+  },
+  cardRight: {
+    alignItems: 'flex-end',
+    gap: 8,
+    justifyContent: 'space-between',
   },
   cardTitle: {
     color: colors.text,
@@ -145,50 +148,17 @@ const styles = StyleSheet.create({
   },
   copy: {
     color: colors.muted,
-    fontSize: 14,
+    fontSize: 13,
+    fontWeight: '700',
   },
   meta: {
     color: colors.muted,
     fontSize: 12,
     fontWeight: '700',
   },
-  footerRow: {
-    alignItems: 'center',
-    backgroundColor: '#fafafa',
-    borderColor: colors.border,
-    borderRadius: 16,
-    borderWidth: 1,
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    justifyContent: 'space-between',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-  },
-  statusText: {
-    color: colors.text,
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  footerActions: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
-  durationWrap: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 4,
-  },
-  durationText: {
+  dateText: {
     color: colors.muted,
     fontSize: 12,
     fontWeight: '700',
-  },
-  joinText: {
-    color: '#047857',
-    fontSize: 12,
-    fontWeight: '800',
   },
 });
