@@ -1,16 +1,20 @@
-import { Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Image, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useState } from 'react';
 import { Button } from '../ui/Button';
 import { colors } from '../../theme/colors';
 
 export function RequestComposerSheet({
   expanded = false,
   value = '',
+  firstName = 'there',
   placeholder = 'Describe what help you need',
   attachments = [],
   suggestions = [],
   disabled = false,
   disabledMessage = '',
+  errorMessage = '',
+  onHeightChange,
   onExpand,
   onChangeText,
   onSelectSuggestion,
@@ -18,11 +22,20 @@ export function RequestComposerSheet({
   onRemoveAttachment,
   onSubmit,
 }) {
+  const { height: windowHeight } = useWindowDimensions();
+  const [inputHeight, setInputHeight] = useState(42);
   const canSubmit = Boolean(value.trim() || attachments.length) && !disabled;
+  const maxSheetHeight = Math.max(280, windowHeight - 24);
+  const maxInputHeight = Math.max(140, maxSheetHeight - (expanded ? 240 : 140));
+  const resolvedInputHeight = Math.min(Math.max(inputHeight, expanded ? 90 : 42), maxInputHeight);
 
   return (
-    <View style={[styles.sheet, expanded && styles.sheetExpanded]}>
+    <View
+      onLayout={(event) => onHeightChange?.(event.nativeEvent.layout.height)}
+      style={[styles.sheet, { maxHeight: maxSheetHeight }, expanded && styles.sheetExpanded]}
+    >
       <View style={styles.handle} />
+      <Text style={styles.greeting}>Hi {firstName}</Text>
       <Text style={styles.title}>Tell us what you need help with</Text>
       <View
         style={[styles.inputShell, expanded && styles.inputShellExpanded, disabled && styles.inputShellDisabled]}
@@ -30,12 +43,14 @@ export function RequestComposerSheet({
         <TextInput
           editable={!disabled}
           multiline
+          onContentSizeChange={(event) => setInputHeight(event.nativeEvent.contentSize.height)}
           onFocus={() => onExpand?.()}
           onChangeText={onChangeText}
           onPressIn={() => onExpand?.()}
           placeholder={placeholder}
           placeholderTextColor={colors.muted}
-          style={[styles.input, expanded && styles.inputExpanded]}
+          scrollEnabled={resolvedInputHeight >= maxInputHeight}
+          style={[styles.input, { height: resolvedInputHeight }, expanded && styles.inputExpanded]}
           textAlignVertical="top"
           value={value}
         />
@@ -82,6 +97,7 @@ export function RequestComposerSheet({
           </View>
 
           {disabledMessage ? <Text style={styles.disabledMessage}>{disabledMessage}</Text> : null}
+          {errorMessage ? <Text style={styles.errorMessage}>{errorMessage}</Text> : null}
 
           <Button
             disabled={!canSubmit}
@@ -118,10 +134,16 @@ const styles = StyleSheet.create({
     height: 5,
     width: 54,
   },
+  greeting: {
+    color: colors.text,
+    fontSize: 28,
+    fontWeight: '900',
+  },
   title: {
     color: colors.text,
-    fontSize: 18,
-    fontWeight: '900',
+    fontSize: 16,
+    fontWeight: '700',
+    lineHeight: 22,
   },
   inputShell: {
     backgroundColor: '#f8fafc',
@@ -224,6 +246,12 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
     lineHeight: 19,
+  },
+  errorMessage: {
+    color: colors.danger,
+    fontSize: 12,
+    fontWeight: '700',
+    lineHeight: 18,
   },
   submitButton: {
     marginTop: 2,

@@ -139,6 +139,7 @@ export function RootNavigator() {
   const { initializing, user } = useAuth();
   const [authRoute, setAuthRoute] = useState('Home');
   const [activeRoute, setActiveRoute] = useState({ key: 'CustomerHome', params: {} });
+  const [bottomNavVisible, setBottomNavVisible] = useState(true);
   const [notifications, setNotifications] = useState([]);
   const [notificationsLoading, setNotificationsLoading] = useState(true);
   const [sessions, setSessions] = useState([]);
@@ -182,6 +183,7 @@ export function RootNavigator() {
     if (!user?.uid) {
       setAuthRoute('Home');
       setActiveRoute({ key: 'CustomerHome', params: {} });
+      setBottomNavVisible(true);
       setNotifications([]);
       setSessions([]);
       setRatingQueue([]);
@@ -284,6 +286,7 @@ export function RootNavigator() {
   }
 
   const openRoute = (target) => {
+    setBottomNavVisible(true);
     if (typeof target === 'string') {
       setActiveRoute({ key: target, params: {} });
     } else if (target?.key) {
@@ -303,9 +306,11 @@ export function RootNavigator() {
     navigate: openRoute,
     goBack,
     route: activeRoute,
+    bottomNavVisible,
     notifications,
     isLoading: notificationsLoading,
     bottomInset: BOTTOM_NAV_HEIGHT,
+    onBottomNavVisibilityChange: setBottomNavVisible,
     onMarkAllRead: () => markAllNotificationsRead(user?.uid).catch(() => null),
     onOpenNotification: async (notification) => {
       await markNotificationRead(notification?.id).catch(() => null);
@@ -313,7 +318,7 @@ export function RootNavigator() {
     },
   };
 
-  const showBottomNav = !['JobRequestThread', 'SessionRoom'].includes(activeRoute.key);
+  const showBottomNav = bottomNavVisible && !['JobRequestThread', 'SessionRoom'].includes(activeRoute.key);
 
   return (
     <View style={[styles.safe, isFullscreenRoute ? styles.safeFullscreen : null]}>
