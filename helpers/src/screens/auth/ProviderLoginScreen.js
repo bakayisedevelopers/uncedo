@@ -1,17 +1,112 @@
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useState } from 'react';
+import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useAuth } from '../../context/AuthContext';
 import { colors } from '../../theme/colors';
 
-export function ProviderLoginScreen({ onContinue }) {
+export function ProviderLoginScreen() {
+  const { authError, login, signup } = useAuth();
+  const [mode, setMode] = useState('login');
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState('');
+
+  const submit = async () => {
+    const trimmedEmail = String(email || '').trim();
+    const trimmedPassword = String(password || '').trim();
+    const trimmedName = String(name || '').trim();
+
+    if (!trimmedEmail || !trimmedPassword) {
+      setFormError('Email and password are required.');
+      return;
+    }
+
+    if (mode === 'signup' && !trimmedName) {
+      setFormError('Full name is required for helper signup.');
+      return;
+    }
+
+    setSubmitting(true);
+    setFormError('');
+
+    try {
+      if (mode === 'signup') {
+        await signup({ name: trimmedName, email: trimmedEmail, password: trimmedPassword });
+      } else {
+        await login({ email: trimmedEmail, password: trimmedPassword });
+      }
+    } catch (error) {
+      setFormError(error.message || 'Unable to continue.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
     <View style={styles.wrap}>
       <View style={styles.card}>
         <Text style={styles.eyebrow}>Uncedo Helpers</Text>
-        <Text style={styles.title}>Helper app preview</Text>
+        <Text style={styles.title}>{mode === 'signup' ? 'Create helper account' : 'Log in to helpers'}</Text>
         <Text style={styles.copy}>
-          This build now mirrors the tutor flow structure from the web app, but translated into helper logic: services, skills, work photos, completed jobs, and payment tracking.
+          Sign in with a helper account or create one now. This app only accepts helper profiles.
         </Text>
-        <Pressable accessibilityRole="button" onPress={onContinue} style={styles.button}>
-          <Text style={styles.buttonText}>Enter helper app</Text>
+
+        <View style={styles.modeRow}>
+          {['login', 'signup'].map((nextMode) => {
+            const isActive = mode === nextMode;
+            return (
+              <Pressable
+                key={nextMode}
+                accessibilityRole="button"
+                onPress={() => setMode(nextMode)}
+                style={[styles.modePill, isActive && styles.modePillActive]}
+              >
+                <Text style={[styles.modePillLabel, isActive && styles.modePillLabelActive]}>
+                  {nextMode === 'login' ? 'Login' : 'Sign up'}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+
+        {mode === 'signup' ? (
+          <TextInput
+            autoCapitalize="words"
+            placeholder="Full name"
+            placeholderTextColor={colors.muted}
+            style={styles.input}
+            value={name}
+            onChangeText={setName}
+          />
+        ) : null}
+
+        <TextInput
+          autoCapitalize="none"
+          keyboardType="email-address"
+          placeholder="Email address"
+          placeholderTextColor={colors.muted}
+          style={styles.input}
+          value={email}
+          onChangeText={setEmail}
+        />
+        <TextInput
+          autoCapitalize="none"
+          placeholder="Password"
+          placeholderTextColor={colors.muted}
+          secureTextEntry
+          style={styles.input}
+          value={password}
+          onChangeText={setPassword}
+        />
+
+        {formError ? <Text style={styles.error}>{formError}</Text> : null}
+        {!formError && authError ? <Text style={styles.error}>{authError}</Text> : null}
+
+        <Pressable accessibilityRole="button" onPress={submit} style={styles.button} disabled={submitting}>
+          <Text style={styles.buttonText}>
+            {submitting ? 'Please wait...' : mode === 'signup' ? 'Create helper account' : 'Log in'}
+          </Text>
         </Pressable>
       </View>
     </View>
@@ -52,10 +147,50 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 22,
   },
+  modeRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  modePill: {
+    backgroundColor: '#ffffff',
+    borderColor: colors.border,
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  modePillActive: {
+    backgroundColor: colors.brand,
+    borderColor: colors.brand,
+  },
+  modePillLabel: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  modePillLabelActive: {
+    color: '#ffffff',
+  },
+  input: {
+    backgroundColor: '#ffffff',
+    borderColor: colors.border,
+    borderRadius: 16,
+    borderWidth: 1,
+    color: colors.text,
+    fontSize: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  error: {
+    color: '#b91c1c',
+    fontSize: 13,
+    lineHeight: 18,
+  },
   button: {
     alignItems: 'center',
     backgroundColor: colors.brand,
     borderRadius: 18,
+    opacity: 1,
     paddingVertical: 14,
   },
   buttonText: {

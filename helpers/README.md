@@ -1,17 +1,13 @@
-# Uncedo Helpers Mobile
+# Helpers
 
-This is the placeholder provider mobile app scaffold for Uncedo Helpers.
+This is the helper mobile app scaffold for Uncedo.
 
 Current scope:
-- Provider login placeholder
-- Provider dashboard placeholder
-- Provider profile placeholder
-- Services offered placeholder
-- Availability placeholder
-- Job offers placeholder
-- Active job placeholder
-- Earnings placeholder
-- Verification placeholder
-- Agreement placeholder
+- Helper signup and login
+- Helper profile completion
+- Services, skills, and work-photo setup
+- Agreement and verification gating
+- Completed jobs and payment screens
+- Go-online state and helper dashboard flow
 
-Backend wiring, Firebase auth flows, live job dispatch, payouts, and verification uploads are intentionally not implemented yet.
+Some operational data such as live offers, completed jobs, and payout history is still seeded demo data pending backend wiring.

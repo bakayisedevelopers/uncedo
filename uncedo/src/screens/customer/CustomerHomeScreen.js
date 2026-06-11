@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { StyleSheet, Text, View } from 'react-native';
 import { AttachmentPickerModal } from '../../components/student/AttachmentPickerModal';
 import { MapPlaceholder } from '../../components/customer/MapPlaceholder';
 import { RequestComposerSheet } from '../../components/customer/RequestComposerSheet';
@@ -9,7 +8,7 @@ import { useAuth } from '../../context/AuthContext';
 import { colors } from '../../theme/colors';
 import { getStudentOnboardingStatus } from '../../utils/onboarding';
 
-export function CustomerHomeScreen({ navigate, openDrawer }) {
+export function CustomerHomeScreen({ navigate, bottomInset = 0 }) {
   const { user } = useAuth();
   const onboardingStatus = getStudentOnboardingStatus(user);
   const [composerExpanded, setComposerExpanded] = useState(false);
@@ -23,15 +22,17 @@ export function CustomerHomeScreen({ navigate, openDrawer }) {
   const firstName = String(user?.fullName || user?.displayName || 'there').trim().split(' ')[0] || 'there';
   const disabledMessage = onboardingStatus.complete
     ? ''
-    : 'Complete your profile and add a payment card before requesting help.';
+    : 'Profile not completed. Complete your profile and add a payment card before requesting help.';
 
   const providerMarkers = useMemo(() => MOCK_PROVIDER_MARKERS, []);
+  const composerOffset = bottomInset + 12;
+  const mapUiBottomInset = composerOffset + (composerExpanded ? 344 : 184);
 
   const openRequestThread = () => {
     const trimmedText = requestText.trim();
     if (!trimmedText && !attachments.length) return;
 
-        navigate({
+    navigate({
       key: 'JobRequestThread',
       params: {
         parentTab: 'CustomerHome',
@@ -44,6 +45,7 @@ export function CustomerHomeScreen({ navigate, openDrawer }) {
   return (
     <View style={styles.screen}>
       <MapPlaceholder
+        floatingBottomInset={mapUiBottomInset}
         markers={providerMarkers}
         offset={mapOffset}
         zoom={mapZoom}
@@ -52,15 +54,6 @@ export function CustomerHomeScreen({ navigate, openDrawer }) {
         onZoomOut={() => setMapZoom((prev) => Math.max(0.9, prev - 0.08))}
       />
 
-      <View style={styles.topControls}>
-        <Pressable accessibilityRole="button" onPress={openDrawer} style={styles.iconButton}>
-          <Ionicons color={colors.text} name="menu" size={22} />
-        </Pressable>
-        <Pressable accessibilityRole="button" onPress={() => navigate('SafetyLegal')} style={styles.iconButton}>
-          <Ionicons color={colors.text} name="shield-checkmark-outline" size={21} />
-        </Pressable>
-      </View>
-
       <View style={styles.heroCopy}>
         <Text style={styles.kicker}>Welcome back</Text>
         <Text style={styles.title}>Hi {firstName}</Text>
@@ -68,7 +61,7 @@ export function CustomerHomeScreen({ navigate, openDrawer }) {
         {pickerError ? <Text style={styles.errorText}>{pickerError}</Text> : null}
       </View>
 
-      <View style={styles.bottomSheetWrap}>
+      <View style={[styles.bottomSheetWrap, { bottom: composerOffset }]}>
         <RequestComposerSheet
           attachments={attachments}
           disabled={!onboardingStatus.complete}
@@ -83,6 +76,7 @@ export function CustomerHomeScreen({ navigate, openDrawer }) {
             setRequestText(suggestion);
           }}
           onSubmit={openRequestThread}
+          placeholder={onboardingStatus.complete ? 'Describe what help you need' : 'Profile not completed'}
           suggestions={JOB_REQUEST_SUGGESTIONS}
           value={requestText}
         />
@@ -112,29 +106,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#e7f1ec',
     flex: 1,
   },
-  topControls: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    left: 16,
-    position: 'absolute',
-    right: 16,
-    top: 16,
-  },
-  iconButton: {
-    alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.96)',
-    borderColor: 'rgba(15,23,42,0.08)',
-    borderRadius: 999,
-    borderWidth: 1,
-    height: 48,
-    justifyContent: 'center',
-    width: 48,
-  },
   heroCopy: {
     left: 16,
     position: 'absolute',
-    right: 90,
-    top: 86,
+    right: 16,
+    top: 28,
   },
   kicker: {
     color: colors.brandDark,
@@ -163,7 +139,6 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   bottomSheetWrap: {
-    bottom: 0,
     left: 0,
     position: 'absolute',
     right: 0,

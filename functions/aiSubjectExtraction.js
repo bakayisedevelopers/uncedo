@@ -51,7 +51,7 @@ function getFirebaseAiConfig(overrides = {}) {
 
   const missing = ['apiKey', 'projectId', 'appId'].filter((key) => !config[key]);
   if (missing.length) {
-    throw new Error(`PARAKLEO_AI_KEYS is missing Firebase AI Logic config field(s): ${missing.join(', ')}`);
+    throw new Error(`UNCEDO_AI_KEYS is missing Firebase AI Logic config field(s): ${missing.join(', ')}`);
   }
 
   return config;

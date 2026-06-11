@@ -6,9 +6,10 @@ import { getServiceById } from '../../constants/serviceCatalog';
 import { formatCurrency } from '../../utils/payouts';
 import { colors } from '../../theme/colors';
 
-export function ProviderDashboardScreen({ navigate, onLogout }) {
-  const { profile, onboardingStatus, jobOffers, activeJob, actions } = useHelpersApp();
+export function ProviderDashboardScreen({ navigate }) {
+  const { profile, onboardingStatus, jobOffers, activeJob, actions, saveError, saving } = useHelpersApp();
   const [now, setNow] = useState(Date.now());
+  const [toggleMessage, setToggleMessage] = useState('');
   const isOnline = profile.onlineStatus === 'online';
 
   useEffect(() => {
@@ -25,16 +26,26 @@ export function ProviderDashboardScreen({ navigate, onLogout }) {
     recentAssignments: String(Number(profile.metrics.recentAssignmentsCount || 0)),
   }), [profile.metrics]);
 
+  const handleToggleOnline = async () => {
+    const result = await actions.toggleOnlineStatus();
+    if (result?.message) {
+      setToggleMessage(result.message);
+    } else {
+      setToggleMessage('');
+    }
+  };
+
   return (
     <Screen
       eyebrow="Helper"
-      title="Helper Home"
+      title="Home"
       description="Go online to receive helper offers, review your active service skills, and manage the same payout logic used in the tutor experience."
     >
       {!onboardingStatus.complete ? (
         <Card style={styles.warningCard}>
           <Text style={styles.warningTitle}>Finish helper onboarding</Text>
           <Text style={styles.warningCopy}>{onboardingStatus.message}</Text>
+          <ActionButton label="Complete profile" onPress={() => navigate('ProfileCompletion')} />
         </Card>
       ) : null}
 
@@ -44,7 +55,7 @@ export function ProviderDashboardScreen({ navigate, onLogout }) {
           <Text style={styles.liveTitle}>
             {activeJob.status === 'in_progress' ? 'Your helper job is in progress.' : 'A helper job is ready to start.'}
           </Text>
-          <Text style={styles.liveSubtitle}>{activeJob.title} · {getServiceById(activeJob.serviceId)?.name || 'Service'}</Text>
+          <Text style={styles.liveSubtitle}>{`${activeJob.title} | ${getServiceById(activeJob.serviceId)?.name || 'Service'}`}</Text>
           <View style={styles.liveMeta}>
             <Text style={styles.liveMetaLabel}>{activeJob.customerName}</Text>
             <Text style={styles.liveMetaValue}>{activeJob.address}</Text>
@@ -60,14 +71,15 @@ export function ProviderDashboardScreen({ navigate, onLogout }) {
           title="Go online to view requests"
           subtitle="When you are online, nearby helper requests will appear below in real time."
         />
+        {toggleMessage ? <Text style={styles.inlineMessage}>{toggleMessage}</Text> : null}
+        {saveError ? <Text style={styles.inlineError}>{saveError}</Text> : null}
         <View style={styles.buttonRow}>
           <ActionButton
-            label={isOnline ? 'Go Offline' : 'Go Online'}
-            onPress={actions.toggleOnlineStatus}
-            disabled={!onboardingStatus.complete}
+            label={saving ? 'Saving...' : isOnline ? 'Go Offline' : 'Go Online'}
+            onPress={handleToggleOnline}
+            disabled={saving}
           />
           <ActionButton label="Open offers" onPress={() => navigate('JobOffers')} tone="secondary" />
-          <ActionButton label="Logout" onPress={onLogout} tone="secondary" />
         </View>
       </Card>
 
@@ -102,9 +114,9 @@ export function ProviderDashboardScreen({ navigate, onLogout }) {
               <View key={offer.id} style={styles.offerCard}>
                 <Text style={styles.offerTitle}>{offer.title}</Text>
                 <Text style={styles.offerCopy}>{offer.description}</Text>
-                <Text style={styles.offerMeta}>{offer.customerName} · {offer.area}</Text>
+                <Text style={styles.offerMeta}>{`${offer.customerName} | ${offer.area}`}</Text>
                 <Text style={styles.offerMeta}>Skills: {(offer.requestedSkills || []).join(', ')}</Text>
-                <Text style={styles.offerCountdown}>{secondsLeft}s remaining · {formatCurrency(offer.payoutEstimate)}</Text>
+                <Text style={styles.offerCountdown}>{`${secondsLeft}s remaining | ${formatCurrency(offer.payoutEstimate)}`}</Text>
                 <View style={styles.buttonRow}>
                   <ActionButton label="Accept" onPress={() => actions.acceptOffer(offer.id)} />
                   <ActionButton label="Decline" onPress={() => actions.declineOffer(offer.id)} tone="secondary" />
@@ -198,5 +210,15 @@ const styles = StyleSheet.create({
     color: colors.brandDark,
     fontSize: 12,
     fontWeight: '900',
+  },
+  inlineMessage: {
+    color: colors.text,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  inlineError: {
+    color: '#b91c1c',
+    fontSize: 13,
+    lineHeight: 18,
   },
 });

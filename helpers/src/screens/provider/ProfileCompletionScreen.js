@@ -1,0 +1,223 @@
+import { useEffect, useState } from 'react';
+import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActionButton, Card, Screen, SectionHeading, StatusBadge } from '../../components/app/HelperUi';
+import { useHelpersApp } from '../../context/HelpersAppContext';
+import { colors } from '../../theme/colors';
+
+export function ProfileCompletionScreen({ navigate, onClose }) {
+  const { onboardingStatus, profile, saving, saveError, actions } = useHelpersApp();
+  const [firstName, setFirstName] = useState(profile.firstName || '');
+  const [lastName, setLastName] = useState(profile.lastName || '');
+  const [providerType, setProviderType] = useState(profile.providerType || '');
+  const [businessName, setBusinessName] = useState(profile.businessName || '');
+  const [bankName, setBankName] = useState(profile.payout.bankName || '');
+  const [accountHolder, setAccountHolder] = useState(profile.payout.accountHolder || '');
+  const [accountNumber, setAccountNumber] = useState(profile.payout.accountNumber || '');
+  const [recipientCode, setRecipientCode] = useState(profile.payout.recipientCode || '');
+  const [message, setMessage] = useState('');
+
+  useEffect(() => {
+    setFirstName(profile.firstName || '');
+    setLastName(profile.lastName || '');
+    setProviderType(profile.providerType || '');
+    setBusinessName(profile.businessName || '');
+    setBankName(profile.payout.bankName || '');
+    setAccountHolder(profile.payout.accountHolder || '');
+    setAccountNumber(profile.payout.accountNumber || '');
+    setRecipientCode(profile.payout.recipientCode || '');
+  }, [profile]);
+
+  const saveBasics = async () => {
+    const result = await actions.updateProfileBasics({
+      firstName,
+      lastName,
+      providerType,
+      businessName,
+      fullName: [String(firstName || '').trim(), String(lastName || '').trim()].filter(Boolean).join(' '),
+    });
+    if (result?.success) {
+      setMessage('Profile basics saved.');
+    }
+  };
+
+  const savePayout = async () => {
+    const result = await actions.updatePayoutDetails({
+      bankName,
+      accountHolder,
+      accountNumber,
+      recipientCode,
+      verificationStatus: bankName && accountHolder && accountNumber && recipientCode ? 'verified' : 'pending',
+    });
+    if (result?.success) {
+      setMessage('Payout details saved.');
+    }
+  };
+
+  return (
+    <Screen
+      eyebrow="Helper setup"
+      title="Complete helper profile"
+      description="Finish the required helper setup before going online. This is the dedicated completion flow for account basics, services, agreement, payout, and verification."
+      footerAction={
+        <ActionButton label="Close" onPress={onClose} tone="secondary" />
+      }
+    >
+      <Card>
+        <SectionHeading
+          title="Setup status"
+          subtitle={onboardingStatus.message}
+          action={<StatusBadge label={onboardingStatus.complete ? 'Complete' : 'Required'} tone={onboardingStatus.complete ? 'success' : 'warning'} />}
+        />
+        {message ? <Text style={styles.success}>{message}</Text> : null}
+        {saveError ? <Text style={styles.error}>{saveError}</Text> : null}
+      </Card>
+
+      <Card>
+        <SectionHeading title="Profile basics" subtitle="Helper name and provider type are required." />
+        <TextInput
+          placeholder="First name"
+          placeholderTextColor={colors.muted}
+          value={firstName}
+          onChangeText={setFirstName}
+          style={styles.input}
+        />
+        <TextInput
+          placeholder="Last name"
+          placeholderTextColor={colors.muted}
+          value={lastName}
+          onChangeText={setLastName}
+          style={styles.input}
+        />
+        <View style={styles.typeRow}>
+          {['individual', 'business'].map((option) => {
+            const isActive = providerType === option;
+            return (
+              <Pressable
+                key={option}
+                accessibilityRole="button"
+                onPress={() => setProviderType(option)}
+                style={[styles.typePill, isActive && styles.typePillActive]}
+              >
+                <Text style={[styles.typeLabel, isActive && styles.typeLabelActive]}>
+                  {option === 'individual' ? 'Individual' : 'Business'}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+        {providerType === 'business' ? (
+          <TextInput
+            placeholder="Business name"
+            placeholderTextColor={colors.muted}
+            value={businessName}
+            onChangeText={setBusinessName}
+            style={styles.input}
+          />
+        ) : null}
+        <ActionButton label={saving ? 'Saving...' : 'Save basics'} onPress={saveBasics} disabled={saving} />
+      </Card>
+
+      <Card>
+        <SectionHeading title="Services and skills" subtitle="At least one skill with a work photo is required." />
+        <Text style={styles.copy}>Open the service builder to attach services, skills, and skill photos.</Text>
+        <ActionButton label="Open services" onPress={() => navigate('Services')} />
+      </Card>
+
+      <Card>
+        <SectionHeading title="Agreement" subtitle="You must accept the current helper agreement." />
+        <ActionButton label="Open agreement" onPress={() => navigate('Agreement')} />
+      </Card>
+
+      <Card>
+        <SectionHeading title="Payout details" subtitle="Verified payout details are required before going online." />
+        <TextInput
+          placeholder="Bank name"
+          placeholderTextColor={colors.muted}
+          value={bankName}
+          onChangeText={setBankName}
+          style={styles.input}
+        />
+        <TextInput
+          placeholder="Account holder"
+          placeholderTextColor={colors.muted}
+          value={accountHolder}
+          onChangeText={setAccountHolder}
+          style={styles.input}
+        />
+        <TextInput
+          placeholder="Account number"
+          placeholderTextColor={colors.muted}
+          value={accountNumber}
+          onChangeText={setAccountNumber}
+          style={styles.input}
+        />
+        <TextInput
+          placeholder="Recipient code"
+          placeholderTextColor={colors.muted}
+          value={recipientCode}
+          onChangeText={setRecipientCode}
+          style={styles.input}
+        />
+        <ActionButton label={saving ? 'Saving...' : 'Save payout details'} onPress={savePayout} disabled={saving} />
+      </Card>
+
+      <Card>
+        <SectionHeading title="Verification" subtitle="Verification remains a required blocker before going online." />
+        <ActionButton label="Open verification" onPress={() => navigate('Verification')} />
+      </Card>
+    </Screen>
+  );
+}
+
+const styles = StyleSheet.create({
+  input: {
+    backgroundColor: '#ffffff',
+    borderColor: colors.border,
+    borderRadius: 16,
+    borderWidth: 1,
+    color: colors.text,
+    fontSize: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  typeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  typePill: {
+    backgroundColor: '#f8fafc',
+    borderColor: colors.border,
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  typePillActive: {
+    backgroundColor: colors.brand,
+    borderColor: colors.brand,
+  },
+  typeLabel: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  typeLabelActive: {
+    color: '#ffffff',
+  },
+  copy: {
+    color: colors.muted,
+    fontSize: 13,
+    lineHeight: 20,
+  },
+  success: {
+    color: '#166534',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  error: {
+    color: '#b91c1c',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+});

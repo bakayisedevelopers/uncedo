@@ -1,13 +1,14 @@
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { colors } from '../../theme/colors';
 
-export function Screen({ eyebrow = 'Helper', title, description, children }) {
+export function Screen({ eyebrow = 'Helper', title, description, footerAction, children }) {
   return (
     <ScrollView contentContainerStyle={styles.screen}>
       <View style={styles.hero}>
         <Text style={styles.eyebrow}>{eyebrow}</Text>
         <Text style={styles.title}>{title}</Text>
         {description ? <Text style={styles.description}>{description}</Text> : null}
+        {footerAction ? <View style={styles.heroAction}>{footerAction}</View> : null}
       </View>
       {children}
     </ScrollView>
@@ -140,6 +141,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     gap: 10,
     padding: 20,
+  },
+  heroAction: {
+    marginTop: 4,
   },
   eyebrow: {
     color: colors.brandDark,

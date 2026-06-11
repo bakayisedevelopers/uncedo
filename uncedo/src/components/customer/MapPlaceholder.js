@@ -10,6 +10,7 @@ export function MapPlaceholder({
   markers = [],
   zoom = 1,
   offset = { x: 0, y: 0 },
+  floatingBottomInset = 196,
   onZoomIn,
   onZoomOut,
   onPan,
@@ -48,7 +49,7 @@ export function MapPlaceholder({
         );
       })}
 
-      <View style={styles.controls}>
+      <View style={[styles.controls, { bottom: floatingBottomInset, top: 'auto' }]}>
         <View style={styles.zoomControls}>
           <Pressable accessibilityRole="button" onPress={onZoomIn} style={styles.controlButton}>
             <Ionicons color={colors.text} name="add" size={18} />
@@ -76,7 +77,7 @@ export function MapPlaceholder({
         </View>
       </View>
 
-      <View style={styles.legend}>
+      <View style={[styles.legend, { bottom: floatingBottomInset }]}>
         <Text style={styles.legendTitle}>Nearby helpers</Text>
         <Text style={styles.legendCopy}>Placeholder map markers until live provider locations are connected.</Text>
       </View>
@@ -171,7 +172,6 @@ const styles = StyleSheet.create({
     gap: 12,
     position: 'absolute',
     right: 16,
-    top: 110,
   },
   zoomControls: {
     gap: 8,
@@ -199,7 +199,6 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(15,23,42,0.08)',
     borderRadius: 20,
     borderWidth: 1,
-    bottom: 186,
     left: 16,
     maxWidth: 220,
     paddingHorizontal: 14,

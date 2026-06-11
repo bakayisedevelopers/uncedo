@@ -33,7 +33,7 @@ export function CompletedJobsScreen() {
                 <View style={styles.jobTop}>
                   <View style={styles.jobCopy}>
                     <Text style={styles.jobTitle}>{job.title}</Text>
-                    <Text style={styles.jobSubtitle}>{service?.name || 'Service'} · {job.customerName}</Text>
+                    <Text style={styles.jobSubtitle}>{`${service?.name || 'Service'} | ${job.customerName}`}</Text>
                   </View>
                   <StatusBadge label="Completed" tone="success" />
                 </View>

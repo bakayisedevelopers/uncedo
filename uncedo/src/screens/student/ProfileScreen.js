@@ -1,15 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
 import { Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { FormField } from '../../components/ui/FormField';
+import {
+  BUSINESS_CATEGORY_OPTIONS,
+  CUSTOMER_ACCOUNT_TYPE_OPTIONS,
+  INDIVIDUAL_CUSTOMER_TYPE_OPTIONS,
+} from '../../constants/customer';
 import { LEGAL_LINKS } from '../../constants/legal';
 import { useAuth } from '../../context/AuthContext';
 import { getUserProfile, updateUserProfile } from '../../services/userService';
 import { colors } from '../../theme/colors';
 import { getStudentOnboardingStatus } from '../../utils/onboarding';
 
-export function ProfileScreen({ navigate }) {
+export function ProfileScreen({ navigate, bottomInset = 0 }) {
   const { deleteAccount, logout, setUser, user } = useAuth();
   const currentUser = user;
   const onboardingStatus = getStudentOnboardingStatus(currentUser);
@@ -21,9 +27,13 @@ export function ProfileScreen({ navigate }) {
   const [form, setForm] = useState({
     fullName: '',
     phoneNumber: '',
+    accountType: '',
     customerType: '',
     serviceAddress: '',
     discoverySource: '',
+    businessName: '',
+    businessEmail: '',
+    businessCategory: '',
   });
 
   useEffect(() => {
@@ -44,9 +54,13 @@ export function ProfileScreen({ navigate }) {
         setForm({
           fullName: profileData.fullName || profileData.displayName || '',
           phoneNumber: profileData.phoneNumber || '',
+          accountType: profileData.customerProfile?.accountType || '',
           customerType: profileData.customerProfile?.customerType || '',
           serviceAddress: profileData.customerProfile?.serviceAddress || '',
           discoverySource: profileData.customerProfile?.discoverySource || profileData.studentProfile?.discoverySource || '',
+          businessName: profileData.customerProfile?.businessName || '',
+          businessEmail: profileData.customerProfile?.businessEmail || profileData.email || '',
+          businessCategory: profileData.customerProfile?.businessCategory || '',
         });
       }
     });
@@ -57,6 +71,8 @@ export function ProfileScreen({ navigate }) {
   }, [setUser, user?.uid]);
 
   const openLegalUrl = (url) => Linking.openURL(url).catch(() => null);
+  const isBusinessAccount = form.accountType === 'business';
+  const isIndividualAccount = form.accountType === 'individual';
 
   const handleSave = async () => {
     if (!user?.uid) return;
@@ -70,9 +86,13 @@ export function ProfileScreen({ navigate }) {
         phoneNumber: form.phoneNumber.trim(),
         customerProfile: {
           ...(user?.customerProfile || {}),
-          customerType: form.customerType.trim(),
+          accountType: form.accountType,
+          customerType: form.accountType === 'individual' ? form.customerType.trim() : '',
           serviceAddress: form.serviceAddress.trim(),
           discoverySource: form.discoverySource.trim(),
+          businessName: form.accountType === 'business' ? form.businessName.trim() : '',
+          businessEmail: form.accountType === 'business' ? form.businessEmail.trim() : '',
+          businessCategory: form.accountType === 'business' ? form.businessCategory.trim() : '',
         },
         studentProfile: {
           ...(user?.studentProfile || {}),
@@ -106,7 +126,7 @@ export function ProfileScreen({ navigate }) {
   };
 
   return (
-    <ScrollView contentContainerStyle={styles.wrap}>
+    <ScrollView contentContainerStyle={[styles.wrap, { paddingBottom: bottomInset + 28 }]}>
       <View style={styles.header}>
         <Text style={styles.title}>Profile & Settings</Text>
         <Text style={styles.copy}>Manage your customer details, service location, payment readiness, and account settings.</Text>
@@ -134,12 +154,80 @@ export function ProfileScreen({ navigate }) {
           onChangeText={(value) => setForm((prev) => ({ ...prev, phoneNumber: value }))}
           placeholder="Phone number"
         />
-        <FormField
-          label="Customer type"
-          value={form.customerType}
-          onChangeText={(value) => setForm((prev) => ({ ...prev, customerType: value }))}
-          placeholder="Homeowner"
-        />
+        <View style={styles.fieldGroup}>
+          <Text style={styles.metaLabel}>Account type</Text>
+          <View style={styles.optionWrap}>
+            {CUSTOMER_ACCOUNT_TYPE_OPTIONS.map((option) => {
+              const isActive = option.key === form.accountType;
+              return (
+                <Pressable
+                  accessibilityRole="button"
+                  key={option.key}
+                  onPress={() => setForm((prev) => ({ ...prev, accountType: option.key }))}
+                  style={[styles.optionChip, isActive && styles.optionChipActive]}
+                >
+                  <Text style={[styles.optionText, isActive && styles.optionTextActive]}>{option.label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+        {isBusinessAccount ? (
+          <>
+            <FormField
+              label="Business name"
+              value={form.businessName}
+              onChangeText={(value) => setForm((prev) => ({ ...prev, businessName: value }))}
+              placeholder="Business name"
+            />
+            <FormField
+              label="Business email"
+              autoCapitalize="none"
+              keyboardType="email-address"
+              value={form.businessEmail}
+              onChangeText={(value) => setForm((prev) => ({ ...prev, businessEmail: value }))}
+              placeholder="business@example.com"
+            />
+            <View style={styles.fieldGroup}>
+              <Text style={styles.metaLabel}>Business type</Text>
+              <View style={styles.optionWrap}>
+                {BUSINESS_CATEGORY_OPTIONS.map((option) => {
+                  const isActive = option === form.businessCategory;
+                  return (
+                    <Pressable
+                      accessibilityRole="button"
+                      key={option}
+                      onPress={() => setForm((prev) => ({ ...prev, businessCategory: option }))}
+                      style={[styles.optionChip, isActive && styles.optionChipActive]}
+                    >
+                      <Text style={[styles.optionText, isActive && styles.optionTextActive]}>{option}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </View>
+          </>
+        ) : null}
+        {isIndividualAccount ? (
+          <View style={styles.fieldGroup}>
+            <Text style={styles.metaLabel}>Customer type</Text>
+            <View style={styles.optionWrap}>
+              {INDIVIDUAL_CUSTOMER_TYPE_OPTIONS.map((option) => {
+                const isActive = option === form.customerType;
+                return (
+                  <Pressable
+                    accessibilityRole="button"
+                    key={option}
+                    onPress={() => setForm((prev) => ({ ...prev, customerType: option }))}
+                    style={[styles.optionChip, isActive && styles.optionChipActive]}
+                  >
+                    <Text style={[styles.optionText, isActive && styles.optionTextActive]}>{option}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+        ) : null}
         <FormField
           label="Address or service location"
           multiline
@@ -191,7 +279,17 @@ export function ProfileScreen({ navigate }) {
 
       <Card style={styles.card}>
         <Text style={styles.sectionTitle}>Safety & legal</Text>
-        <Text style={styles.copy}>Open the latest policies and platform documents.</Text>
+        <Text style={styles.copy}>Open safety guidance and the latest platform documents from your profile.</Text>
+        <Pressable accessibilityRole="button" onPress={() => navigate('SafetyLegal')} style={styles.safetyEntry}>
+          <View style={styles.safetyEntryIcon}>
+            <Ionicons color={colors.brandDark} name="shield-checkmark-outline" size={18} />
+          </View>
+          <View style={styles.safetyEntryCopy}>
+            <Text style={styles.safetyEntryTitle}>Safety hub</Text>
+            <Text style={styles.safetyEntryText}>Emergency guidance, trust notes, and app protections.</Text>
+          </View>
+          <Ionicons color={colors.muted} name="chevron-forward" size={18} />
+        </Pressable>
         <View style={styles.legalList}>
           {LEGAL_LINKS.map((link) => (
             <Pressable key={link.href} onPress={() => openLegalUrl(link.href)} style={styles.legalLink}>
@@ -263,6 +361,9 @@ const styles = StyleSheet.create({
   detailItem: {
     gap: 4,
   },
+  fieldGroup: {
+    gap: 8,
+  },
   meta: {
     color: colors.text,
     fontSize: 14,
@@ -282,6 +383,64 @@ const styles = StyleSheet.create({
   },
   legalList: {
     gap: 10,
+  },
+  safetyEntry: {
+    alignItems: 'center',
+    backgroundColor: '#ecfdf5',
+    borderColor: '#bbf7d0',
+    borderRadius: 18,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+  },
+  safetyEntryIcon: {
+    alignItems: 'center',
+    backgroundColor: '#d1fae5',
+    borderRadius: 14,
+    height: 36,
+    justifyContent: 'center',
+    width: 36,
+  },
+  safetyEntryCopy: {
+    flex: 1,
+    gap: 2,
+  },
+  safetyEntryTitle: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  safetyEntryText: {
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  optionWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  optionChip: {
+    backgroundColor: '#fafafa',
+    borderColor: colors.border,
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  optionChipActive: {
+    backgroundColor: colors.brand,
+    borderColor: colors.brand,
+  },
+  optionText: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  optionTextActive: {
+    color: '#ffffff',
   },
   legalLink: {
     backgroundColor: 'rgba(16,185,129,0.06)',

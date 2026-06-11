@@ -6,6 +6,7 @@ import { colors } from '../../theme/colors';
 export function RequestComposerSheet({
   expanded = false,
   value = '',
+  placeholder = 'Describe what help you need',
   attachments = [],
   suggestions = [],
   disabled = false,
@@ -23,18 +24,16 @@ export function RequestComposerSheet({
     <View style={[styles.sheet, expanded && styles.sheetExpanded]}>
       <View style={styles.handle} />
       <Text style={styles.title}>Tell us what you need help with</Text>
-      <Pressable
-        accessibilityRole="button"
-        disabled={disabled}
-        onPress={onExpand}
+      <View
         style={[styles.inputShell, expanded && styles.inputShellExpanded, disabled && styles.inputShellDisabled]}
       >
         <TextInput
           editable={!disabled}
           multiline
-          onFocus={onExpand}
+          onFocus={() => onExpand?.()}
           onChangeText={onChangeText}
-          placeholder="Describe what help you need"
+          onPressIn={() => onExpand?.()}
+          placeholder={placeholder}
           placeholderTextColor={colors.muted}
           style={[styles.input, expanded && styles.inputExpanded]}
           textAlignVertical="top"
@@ -44,7 +43,7 @@ export function RequestComposerSheet({
           <Ionicons color={colors.brandDark} name="image-outline" size={18} />
           <Text style={styles.uploadLabel}>Add photo</Text>
         </Pressable>
-      </Pressable>
+      </View>
 
       {attachments.length ? (
         <ScrollView contentContainerStyle={styles.previewRow} horizontal showsHorizontalScrollIndicator={false}>

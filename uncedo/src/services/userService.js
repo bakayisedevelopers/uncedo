@@ -25,9 +25,13 @@ export function buildDefaultStudentProfile({ uid, email, displayName }) {
       discoverySource: '',
     },
     customerProfile: {
+      accountType: '',
       customerType: '',
       serviceAddress: '',
       discoverySource: '',
+      businessName: '',
+      businessEmail: '',
+      businessCategory: '',
     },
     paymentMethods: [],
     wallet: {

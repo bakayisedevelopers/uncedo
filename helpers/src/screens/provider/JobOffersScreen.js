@@ -5,7 +5,7 @@ import { useHelpersApp } from '../../context/HelpersAppContext';
 import { formatCurrency } from '../../utils/payouts';
 import { colors } from '../../theme/colors';
 
-export function JobOffersScreen() {
+export function JobOffersScreen({ onClose }) {
   const { jobOffers, actions } = useHelpersApp();
   const [now, setNow] = useState(Date.now());
 
@@ -19,6 +19,7 @@ export function JobOffersScreen() {
       eyebrow="Helper"
       title="Job Offers"
       description="Incoming helper offers follow the same accept or decline rhythm as tutor request offers."
+      footerAction={<ActionButton label="Close" onPress={onClose} tone="secondary" />}
     >
       <Card>
         <SectionHeading
@@ -37,7 +38,7 @@ export function JobOffersScreen() {
                 <Text style={styles.offerMeta}>Customer: {offer.customerName}</Text>
                 <Text style={styles.offerMeta}>Area: {offer.area}</Text>
                 <Text style={styles.offerMeta}>Skills: {(offer.requestedSkills || []).join(', ')}</Text>
-                <Text style={styles.offerAmount}>{formatCurrency(offer.payoutEstimate)} · {secondsLeft}s remaining</Text>
+                <Text style={styles.offerAmount}>{`${formatCurrency(offer.payoutEstimate)} | ${secondsLeft}s remaining`}</Text>
                 <View style={styles.buttonRow}>
                   <ActionButton label="Accept offer" onPress={() => actions.acceptOffer(offer.id)} />
                   <ActionButton label="Decline" tone="secondary" onPress={() => actions.declineOffer(offer.id)} />

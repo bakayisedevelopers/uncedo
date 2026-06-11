@@ -5,6 +5,7 @@ import { connectStorageEmulator, getStorage } from 'firebase/storage';
 import {
   FIREBASE_EMULATOR_HOST,
   FIREBASE_PUBLIC_CONFIG,
+  WEB_APP_BASE_URL,
   USE_FIREBASE_EMULATORS,
 } from '../constants/runtimeConfig';
 
@@ -46,8 +47,34 @@ export function getFirebaseClients() {
 }
 
 export function getFunctionEndpoint(functionName) {
+  const hostingRewriteMap = {
+    getIceConfig: '/ice-config',
+    verifyPaystack: '/verify-paystack',
+    finalizeSessionBilling: '/finalize-session-billing',
+    payOutstandingBalance: '/pay-outstanding-balance',
+    deletePaymentMethod: '/delete-payment-method',
+    verifyTutorPayoutAccount: '/verify-tutor-payout-account',
+    listTutorPayoutBanks: '/list-tutor-payout-banks',
+    getPricingQuote: '/pricing-quote',
+    syncStudentGrowth: '/sync-student-growth',
+    extractImageOcr: '/image-ocr',
+    classifySubject: '/classify-subject',
+    extractAttachmentAi: '/extract-attachment-ai',
+    streamAttachmentAi: '/stream-board-extraction',
+    mobileWebviewAuth: '/mobile-webview-auth',
+    getTutorAgreement: '/getTutorAgreement',
+    acceptTutorAgreement: '/acceptTutorAgreement',
+    emailSignedTutorAgreement: '/emailSignedTutorAgreement',
+    publishTutorAgreementVersion: '/publishTutorAgreementVersion',
+    saveAcademicBrainFeedback: '/save-academic-brain-feedback',
+  };
+
   if (USE_FIREBASE_EMULATORS) {
     return `http://${FIREBASE_EMULATOR_HOST}:5001/${projectId}/us-central1/${functionName}`;
+  }
+
+  if (hostingRewriteMap[functionName]) {
+    return `${WEB_APP_BASE_URL}${hostingRewriteMap[functionName]}`;
   }
 
   return `https://us-central1-${projectId}.cloudfunctions.net/${functionName}`;

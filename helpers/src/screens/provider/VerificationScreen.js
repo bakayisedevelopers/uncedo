@@ -3,8 +3,8 @@ import { ActionButton, Card, Screen, SectionHeading, StatusBadge } from '../../c
 import { useHelpersApp } from '../../context/HelpersAppContext';
 import { colors } from '../../theme/colors';
 
-export function VerificationScreen({ navigate }) {
-  const { profile, actions } = useHelpersApp();
+export function VerificationScreen({ navigate, onClose }) {
+  const { profile, actions, saveError, saving } = useHelpersApp();
   const isVerified = profile.verificationStatus === 'verified';
 
   return (
@@ -12,6 +12,7 @@ export function VerificationScreen({ navigate }) {
       eyebrow="Helper"
       title="Verification"
       description="Verification remains a dedicated trust checkpoint, just like the tutor flow, but tailored to helper onboarding."
+      footerAction={<ActionButton label="Close" onPress={onClose} tone="secondary" />}
     >
       <Card>
         <SectionHeading
@@ -26,10 +27,12 @@ export function VerificationScreen({ navigate }) {
           <Text style={styles.item}>3. Payout destination verified for weekly disbursement</Text>
         </View>
 
+        {saveError ? <Text style={styles.error}>{saveError}</Text> : null}
         <View style={styles.buttonRow}>
           <ActionButton
-            label={isVerified ? 'Mark pending review' : 'Mark verified'}
+            label={saving ? 'Saving...' : isVerified ? 'Mark pending review' : 'Mark verified'}
             onPress={() => actions.setVerificationStatus(isVerified ? 'pending' : 'verified')}
+            disabled={saving}
           />
           <ActionButton label="Review agreement" tone="secondary" onPress={() => navigate('Agreement')} />
         </View>
@@ -51,5 +54,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 10,
+  },
+  error: {
+    color: '#b91c1c',
+    fontSize: 13,
+    fontWeight: '700',
   },
 });

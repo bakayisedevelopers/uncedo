@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Linking, Modal, Platform, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, View } from 'react-native';
+import { Linking, Platform, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LoadingState } from '../components/ui/States';
 import { SessionRatingPrompt } from '../components/student/SessionRatingPrompt';
@@ -47,13 +47,14 @@ const appScreens = {
   SessionRoom: SessionRoomScreen,
 };
 
-const drawerItems = [
-  { key: 'CustomerHome', label: 'Home', icon: 'home-outline' },
-  { key: 'Requests', label: 'My Job Requests', icon: 'briefcase-outline' },
-  { key: 'Wallet', label: 'Payments / Wallet', icon: 'card-outline' },
-  { key: 'Profile', label: 'Profile', icon: 'person-outline' },
-  { key: 'SafetyLegal', label: 'Safety / Legal', icon: 'shield-checkmark-outline' },
+const bottomNavItems = [
+  { key: 'CustomerHome', label: 'Home', icon: 'home-outline', activeIcon: 'home' },
+  { key: 'Requests', label: 'Requests', icon: 'briefcase-outline', activeIcon: 'briefcase' },
+  { key: 'Wallet', label: 'Wallet', icon: 'wallet-outline', activeIcon: 'wallet' },
+  { key: 'Profile', label: 'Profile', icon: 'person-outline', activeIcon: 'person' },
 ];
+
+const BOTTOM_NAV_HEIGHT = 84;
 
 function resolveDeepLink(url) {
   if (!url) {
@@ -131,10 +132,9 @@ function resolveNotificationRoute(notification = {}) {
 }
 
 export function RootNavigator() {
-  const { initializing, logout, user } = useAuth();
+  const { initializing, user } = useAuth();
   const [authRoute, setAuthRoute] = useState('Home');
   const [activeRoute, setActiveRoute] = useState({ key: 'CustomerHome', params: {} });
-  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [notifications, setNotifications] = useState([]);
   const [notificationsLoading, setNotificationsLoading] = useState(true);
   const [sessions, setSessions] = useState([]);
@@ -178,7 +178,6 @@ export function RootNavigator() {
     if (!user?.uid) {
       setAuthRoute('Home');
       setActiveRoute({ key: 'CustomerHome', params: {} });
-      setIsDrawerOpen(false);
       setNotifications([]);
       setSessions([]);
       setRatingQueue([]);
@@ -286,8 +285,6 @@ export function RootNavigator() {
     } else if (target?.key) {
       setActiveRoute({ key: target.key, params: target.params || {} });
     }
-
-    setIsDrawerOpen(false);
   };
 
   const goBack = (fallbackKey = 'CustomerHome') => {
@@ -298,27 +295,13 @@ export function RootNavigator() {
   const ActiveScreen = appScreens[activeRoute.key] || appScreens.CustomerHome;
   const isFullscreenRoute = ['CustomerHome', 'JobRequestThread', 'SessionRoom'].includes(activeRoute.key);
   const isScrollableRoute = !isFullscreenRoute;
-  const unreadCount = notifications.filter((item) => !item?.read).length;
-
-  const handleLogout = async () => {
-    setAuthRoute('Home');
-    setIsDrawerOpen(false);
-    setActiveRoute({ key: 'CustomerHome', params: {} });
-    setSessions([]);
-    setRatingQueue([]);
-    setHandledRatingSessionIds([]);
-    previousSessionStatusesRef.current = new Map();
-    await logout();
-  };
-
   const screenProps = {
     navigate: openRoute,
     goBack,
-    openDrawer: () => setIsDrawerOpen(true),
     route: activeRoute,
     notifications,
     isLoading: notificationsLoading,
-    unreadCount,
+    bottomInset: BOTTOM_NAV_HEIGHT,
     onMarkAllRead: () => markAllNotificationsRead(user?.uid).catch(() => null),
     onOpenNotification: async (notification) => {
       await markNotificationRead(notification?.id).catch(() => null);
@@ -326,12 +309,17 @@ export function RootNavigator() {
     },
   };
 
+  const showBottomNav = !['JobRequestThread', 'SessionRoom'].includes(activeRoute.key);
+
   return (
     <View style={[styles.safe, isFullscreenRoute ? styles.safeFullscreen : null]}>
       <View style={styles.shell}>
         {isScrollableRoute ? (
           <SafeAreaView style={styles.contentSafe}>
-            <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+            <ScrollView
+              contentContainerStyle={[styles.content, showBottomNav && styles.contentWithBottomNav]}
+              showsVerticalScrollIndicator={false}
+            >
               <ActiveScreen {...screenProps} />
             </ScrollView>
           </SafeAreaView>
@@ -339,44 +327,30 @@ export function RootNavigator() {
           <ActiveScreen {...screenProps} />
         )}
 
-        <Modal animationType="fade" transparent visible={isDrawerOpen} onRequestClose={() => setIsDrawerOpen(false)}>
-          <View style={styles.overlay}>
-            <Pressable accessibilityRole="button" onPress={() => setIsDrawerOpen(false)} style={styles.scrim} />
-            <View style={styles.drawer}>
-              <View style={styles.drawerHeader}>
-                <View style={styles.logo}>
-                  <Text style={styles.logoText}>U</Text>
-                </View>
-                <View style={styles.drawerHeaderCopy}>
-                  <Text style={styles.drawerTitle}>Uncedo</Text>
-                  <Text style={styles.drawerSubtitle}>Customer app</Text>
-                </View>
-              </View>
-
-              <View style={styles.drawerList}>
-                {drawerItems.map((item) => {
-                  const isActive = activeTabKey === item.key;
-                  return (
-                    <Pressable
-                      accessibilityRole="button"
-                      key={item.key}
-                      onPress={() => openRoute(item.key)}
-                      style={[styles.drawerItem, isActive && styles.drawerItemActive]}
-                    >
-                      <Ionicons color={isActive ? '#ffffff' : colors.text} name={item.icon} size={18} />
-                      <Text style={[styles.drawerItemText, isActive && styles.drawerItemTextActive]}>{item.label}</Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-
-              <Pressable accessibilityRole="button" onPress={handleLogout} style={styles.logoutButton}>
-                <Ionicons color={colors.text} name="log-out-outline" size={18} />
-                <Text style={styles.logoutText}>Logout</Text>
-              </Pressable>
+        {showBottomNav ? (
+          <SafeAreaView pointerEvents="box-none" style={styles.bottomNavSafeArea}>
+            <View style={styles.bottomNav}>
+              {bottomNavItems.map((item) => {
+                const isActive = activeTabKey === item.key;
+                return (
+                  <Pressable
+                    accessibilityLabel={item.label}
+                    accessibilityRole="button"
+                    key={item.key}
+                    onPress={() => openRoute(item.key)}
+                    style={[styles.bottomNavItem, isActive && styles.bottomNavItemActive]}
+                  >
+                    <Ionicons
+                      color={isActive ? '#ffffff' : colors.muted}
+                      name={isActive ? item.activeIcon : item.icon}
+                      size={22}
+                    />
+                  </Pressable>
+                );
+              })}
             </View>
-          </View>
-        </Modal>
+          </SafeAreaView>
+        ) : null}
 
         <SessionRatingPrompt
           session={ratingTarget}
@@ -414,95 +388,36 @@ const styles = StyleSheet.create({
     paddingBottom: 32,
     paddingTop: 18,
   },
-  overlay: {
-    flex: 1,
+  contentWithBottomNav: {
+    paddingBottom: BOTTOM_NAV_HEIGHT + 24,
   },
-  scrim: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(15,23,42,0.24)',
-  },
-  drawer: {
-    backgroundColor: 'rgba(255,255,255,0.98)',
-    borderColor: colors.border,
-    borderRadius: 32,
-    borderWidth: 1,
-    bottom: 14,
-    left: 14,
-    padding: 18,
+  bottomNavSafeArea: {
+    bottom: 0,
+    left: 0,
     position: 'absolute',
-    top: 14,
-    width: '84%',
+    right: 0,
   },
-  drawerHeader: {
+  bottomNav: {
     alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.98)',
+    borderTopColor: colors.border,
+    borderTopWidth: 1,
     flexDirection: 'row',
-    gap: 12,
-    marginBottom: 24,
+    justifyContent: 'space-around',
+    minHeight: BOTTOM_NAV_HEIGHT,
+    paddingHorizontal: 18,
+    paddingTop: 10,
+    paddingBottom: 14,
   },
-  logo: {
+  bottomNavItem: {
     alignItems: 'center',
-    backgroundColor: colors.brand,
-    borderRadius: 16,
-    height: 42,
+    borderRadius: 999,
+    height: 48,
     justifyContent: 'center',
-    width: 42,
+    position: 'relative',
+    width: 56,
   },
-  logoText: {
-    color: '#ffffff',
-    fontSize: 18,
-    fontWeight: '900',
-  },
-  drawerHeaderCopy: {
-    flex: 1,
-  },
-  drawerTitle: {
-    color: colors.text,
-    fontSize: 16,
-    fontWeight: '900',
-  },
-  drawerSubtitle: {
-    color: colors.muted,
-    fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
-  },
-  drawerList: {
-    gap: 8,
-  },
-  drawerItem: {
-    alignItems: 'center',
-    borderRadius: 18,
-    flexDirection: 'row',
-    gap: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-  },
-  drawerItemActive: {
+  bottomNavItemActive: {
     backgroundColor: colors.brand,
-  },
-  drawerItemText: {
-    color: colors.text,
-    fontSize: 14,
-    fontWeight: '800',
-  },
-  drawerItemTextActive: {
-    color: '#ffffff',
-  },
-  logoutButton: {
-    alignItems: 'center',
-    borderColor: colors.border,
-    borderRadius: 18,
-    borderWidth: 1,
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 'auto',
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-  },
-  logoutText: {
-    color: colors.text,
-    fontSize: 14,
-    fontWeight: '800',
   },
 });

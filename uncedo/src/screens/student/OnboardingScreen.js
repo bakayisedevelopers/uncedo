@@ -5,7 +5,11 @@ import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { FormField } from '../../components/ui/FormField';
 import { StatusBadge } from '../../components/ui/StatusBadge';
-import { CUSTOMER_TYPE_OPTIONS } from '../../constants/customer';
+import {
+  BUSINESS_CATEGORY_OPTIONS,
+  CUSTOMER_ACCOUNT_TYPE_OPTIONS,
+  INDIVIDUAL_CUSTOMER_TYPE_OPTIONS,
+} from '../../constants/customer';
 import { useAuth } from '../../context/AuthContext';
 import { syncStudentGrowth } from '../../services/studentGrowthService';
 import { updateUserProfile } from '../../services/userService';
@@ -16,7 +20,11 @@ export function OnboardingScreen() {
   const { setUser, user } = useAuth();
   const [fullName, setFullName] = useState(user?.fullName || user?.displayName || '');
   const [phoneNumber, setPhoneNumber] = useState(user?.phoneNumber || '');
+  const [accountType, setAccountType] = useState(user?.customerProfile?.accountType || '');
   const [customerType, setCustomerType] = useState(user?.customerProfile?.customerType || '');
+  const [businessName, setBusinessName] = useState(user?.customerProfile?.businessName || '');
+  const [businessEmail, setBusinessEmail] = useState(user?.customerProfile?.businessEmail || user?.email || '');
+  const [businessCategory, setBusinessCategory] = useState(user?.customerProfile?.businessCategory || '');
   const [serviceAddress, setServiceAddress] = useState(user?.customerProfile?.serviceAddress || '');
   const [discoverySource, setDiscoverySource] = useState(
     user?.customerProfile?.discoverySource || user?.studentProfile?.discoverySource || '',
@@ -27,10 +35,14 @@ export function OnboardingScreen() {
   useEffect(() => {
     setFullName(user?.fullName || user?.displayName || '');
     setPhoneNumber(user?.phoneNumber || '');
+    setAccountType(user?.customerProfile?.accountType || '');
     setCustomerType(user?.customerProfile?.customerType || '');
+    setBusinessName(user?.customerProfile?.businessName || '');
+    setBusinessEmail(user?.customerProfile?.businessEmail || user?.email || '');
+    setBusinessCategory(user?.customerProfile?.businessCategory || '');
     setServiceAddress(user?.customerProfile?.serviceAddress || '');
     setDiscoverySource(user?.customerProfile?.discoverySource || user?.studentProfile?.discoverySource || '');
-  }, [user?.uid]);
+  }, [user?.email, user?.uid]);
 
   const status = useMemo(() => getStudentOnboardingStatus(user), [user]);
 
@@ -48,9 +60,13 @@ export function OnboardingScreen() {
         phoneNumber: phoneNumber.trim(),
         customerProfile: {
           ...(user?.customerProfile || {}),
-          customerType,
+          accountType,
+          customerType: accountType === 'individual' ? customerType : '',
           serviceAddress: serviceAddress.trim(),
           discoverySource: discoverySource.trim(),
+          businessName: accountType === 'business' ? businessName.trim() : '',
+          businessEmail: accountType === 'business' ? businessEmail.trim() : '',
+          businessCategory: accountType === 'business' ? businessCategory : '',
         },
         studentProfile: {
           ...(user?.studentProfile || {}),
@@ -67,12 +83,19 @@ export function OnboardingScreen() {
     }
   }
 
+  const isBusinessAccount = accountType === 'business';
+  const isIndividualAccount = accountType === 'individual';
   const canSave = Boolean(
     fullName.trim()
     && phoneNumber.trim()
-    && customerType
+    && accountType
     && serviceAddress.trim()
-    && discoverySource.trim(),
+    && discoverySource.trim()
+    && (
+      isBusinessAccount
+        ? businessName.trim() && businessEmail.trim() && businessCategory
+        : customerType
+    ),
   );
 
   return (
@@ -90,23 +113,79 @@ export function OnboardingScreen() {
         <FormField label="Full name" value={fullName} onChangeText={setFullName} placeholder="Jane Doe" />
         <FormField label="Phone number" value={phoneNumber} onChangeText={setPhoneNumber} placeholder="+27 71 234 5678" />
         <View style={styles.fieldGroup}>
-          <Text style={styles.fieldLabel}>Customer type</Text>
+          <Text style={styles.fieldLabel}>Account type</Text>
           <View style={styles.optionWrap}>
-            {CUSTOMER_TYPE_OPTIONS.map((option) => {
-              const isActive = option === customerType;
+            {CUSTOMER_ACCOUNT_TYPE_OPTIONS.map((option) => {
+              const isActive = option.key === accountType;
               return (
                 <Pressable
                   accessibilityRole="button"
-                  key={option}
-                  onPress={() => setCustomerType(option)}
+                  key={option.key}
+                  onPress={() => setAccountType(option.key)}
                   style={[styles.optionChip, isActive && styles.optionChipActive]}
                 >
-                  <Text style={[styles.optionText, isActive && styles.optionTextActive]}>{option}</Text>
+                  <Text style={[styles.optionText, isActive && styles.optionTextActive]}>{option.label}</Text>
                 </Pressable>
               );
             })}
           </View>
         </View>
+        {isBusinessAccount ? (
+          <>
+            <FormField
+              label="Business name"
+              value={businessName}
+              onChangeText={setBusinessName}
+              placeholder="Acme Catering"
+            />
+            <FormField
+              label="Business email"
+              autoCapitalize="none"
+              keyboardType="email-address"
+              value={businessEmail}
+              onChangeText={setBusinessEmail}
+              placeholder="bookings@acme.co.za"
+            />
+            <View style={styles.fieldGroup}>
+              <Text style={styles.fieldLabel}>Business type</Text>
+              <View style={styles.optionWrap}>
+                {BUSINESS_CATEGORY_OPTIONS.map((option) => {
+                  const isActive = option === businessCategory;
+                  return (
+                    <Pressable
+                      accessibilityRole="button"
+                      key={option}
+                      onPress={() => setBusinessCategory(option)}
+                      style={[styles.optionChip, isActive && styles.optionChipActive]}
+                    >
+                      <Text style={[styles.optionText, isActive && styles.optionTextActive]}>{option}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </View>
+          </>
+        ) : null}
+        {isIndividualAccount ? (
+          <View style={styles.fieldGroup}>
+            <Text style={styles.fieldLabel}>Customer type</Text>
+            <View style={styles.optionWrap}>
+              {INDIVIDUAL_CUSTOMER_TYPE_OPTIONS.map((option) => {
+                const isActive = option === customerType;
+                return (
+                  <Pressable
+                    accessibilityRole="button"
+                    key={option}
+                    onPress={() => setCustomerType(option)}
+                    style={[styles.optionChip, isActive && styles.optionChipActive]}
+                  >
+                    <Text style={[styles.optionText, isActive && styles.optionTextActive]}>{option}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+        ) : null}
         <FormField
           label="Address or service location"
           multiline

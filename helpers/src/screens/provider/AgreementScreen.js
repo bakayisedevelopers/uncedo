@@ -4,8 +4,8 @@ import { useHelpersApp } from '../../context/HelpersAppContext';
 import { formatDate } from '../../utils/payouts';
 import { colors } from '../../theme/colors';
 
-export function AgreementScreen() {
-  const { profile, actions } = useHelpersApp();
+export function AgreementScreen({ onClose }) {
+  const { profile, actions, saving, saveError } = useHelpersApp();
   const isCurrent = profile.agreement.acceptedVersion === profile.agreement.requiredVersion;
 
   return (
@@ -13,6 +13,7 @@ export function AgreementScreen() {
       eyebrow="Helper"
       title="Agreement"
       description="The agreement step stays parallel to the tutor flow, but it now gates helper service activation and payout readiness."
+      footerAction={<ActionButton label="Close" onPress={onClose} tone="secondary" />}
     >
       <Card>
         <SectionHeading
@@ -32,7 +33,12 @@ export function AgreementScreen() {
           <Text style={styles.metaLabel}>Accepted at</Text>
           <Text style={styles.metaValue}>{formatDate(profile.agreement.acceptedAt)}</Text>
         </View>
-        <ActionButton label={isCurrent ? 'Agreement accepted' : 'Accept agreement'} onPress={actions.acceptAgreement} disabled={isCurrent} />
+        {saveError ? <Text style={styles.error}>{saveError}</Text> : null}
+        <ActionButton
+          label={isCurrent ? 'Agreement accepted' : saving ? 'Saving...' : 'Accept agreement'}
+          onPress={actions.acceptAgreement}
+          disabled={isCurrent || saving}
+        />
       </Card>
     </Screen>
   );
@@ -53,5 +59,10 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 13,
     fontWeight: '900',
+  },
+  error: {
+    color: '#b91c1c',
+    fontSize: 13,
+    fontWeight: '700',
   },
 });

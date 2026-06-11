@@ -7,14 +7,27 @@ export function getStudentOnboardingStatus(user) {
   const studentProfile = user?.studentProfile || {};
   const customerProfile = user?.customerProfile || {};
   const paymentMethods = Array.isArray(user?.paymentMethods) ? user.paymentMethods : [];
-
-  const hasBasicProfile = Boolean(
+  const accountType = String(customerProfile.accountType || '').trim().toLowerCase();
+  const baseProfileReady = Boolean(
     String(user?.fullName || user?.displayName || '').trim()
       && String(user?.phoneNumber || '').trim()
-      && String(customerProfile.customerType || '').trim()
       && String(customerProfile.serviceAddress || '').trim()
       && String(customerProfile.discoverySource || studentProfile.discoverySource || '').trim(),
   );
+  const hasBusinessProfile = Boolean(
+    baseProfileReady
+      && accountType === 'business'
+      && String(customerProfile.businessName || '').trim()
+      && String(customerProfile.businessEmail || user?.email || '').trim()
+      && String(customerProfile.businessCategory || '').trim(),
+  );
+  const hasIndividualProfile = Boolean(
+    baseProfileReady
+      && accountType === 'individual'
+      && String(customerProfile.customerType || '').trim(),
+  );
+
+  const hasBasicProfile = hasBusinessProfile || hasIndividualProfile;
   const hasPayment = paymentMethods.length > 0;
 
   if (hasBasicProfile && hasPayment) {
@@ -31,7 +44,7 @@ export function getStudentOnboardingStatus(user) {
       complete: false,
       step: STUDENT_PROFILE_STEPS.PROFILE,
       title: 'Complete your customer profile',
-      message: 'Add your phone number, customer type, service location, and discovery source to continue.',
+      message: 'Complete your individual or business profile, then add a card before requesting help.',
     };
   }
 

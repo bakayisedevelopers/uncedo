@@ -5,8 +5,8 @@ import { SERVICE_CATALOG } from '../../constants/serviceCatalog';
 import { useHelpersApp } from '../../context/HelpersAppContext';
 import { colors } from '../../theme/colors';
 
-export function ServicesOfferedScreen() {
-  const { profile, actions } = useHelpersApp();
+export function ServicesOfferedScreen({ onClose }) {
+  const { profile, actions, saving, saveError } = useHelpersApp();
   const [drafts, setDrafts] = useState({});
   const [message, setMessage] = useState('');
 
@@ -22,9 +22,9 @@ export function ServicesOfferedScreen() {
     }));
   };
 
-  const handleAddSkill = (serviceId, skillName) => {
+  const handleAddSkill = async (serviceId, skillName) => {
     const draft = drafts[serviceId] || {};
-    const result = actions.addSkillPicture({
+    const result = await actions.addSkillPicture({
       serviceId,
       skillName,
       pictureUri: draft.pictureUri,
@@ -45,6 +45,7 @@ export function ServicesOfferedScreen() {
       eyebrow="Helper"
       title="Services & Skills"
       description="This mirrors the tutor qualification flow, but replaces subjects with services, topics with skills, and result documents with work photos tied to each skill."
+      footerAction={<ActionButton label="Close" onPress={onClose} tone="secondary" />}
     >
       <Card>
         <SectionHeading
@@ -53,6 +54,7 @@ export function ServicesOfferedScreen() {
         />
         <StatusBadge label="Work photos required" tone="warning" />
         {message ? <Text style={styles.message}>{message}</Text> : null}
+        {saveError ? <Text style={styles.error}>{saveError}</Text> : null}
       </Card>
 
       {!activeServices.length ? (
@@ -90,6 +92,7 @@ export function ServicesOfferedScreen() {
                   accessibilityRole="button"
                   onPress={() => handleAddSkill(service.id, skill)}
                   style={styles.skillButton}
+                  disabled={saving}
                 >
                   <Text style={styles.skillButtonLabel}>Add {skill}</Text>
                 </Pressable>
@@ -109,6 +112,7 @@ export function ServicesOfferedScreen() {
                         label="Remove skill"
                         tone="danger"
                         onPress={() => actions.removeSkill({ serviceId: service.id, skillName: skill.name })}
+                        disabled={saving}
                       />
                     </View>
 
@@ -125,6 +129,7 @@ export function ServicesOfferedScreen() {
                               skillName: skill.name,
                               pictureId: picture.id,
                             })}
+                            disabled={saving}
                           />
                         </View>
                       ))}
@@ -148,6 +153,11 @@ export function ServicesOfferedScreen() {
 const styles = StyleSheet.create({
   message: {
     color: colors.brandDark,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  error: {
+    color: '#b91c1c',
     fontSize: 13,
     fontWeight: '700',
   },

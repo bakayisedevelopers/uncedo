@@ -1,9 +1,28 @@
 {
   "expo": {
-    "name": "Uncedo Helpers",
-    "slug": "uncedo-helpers-mobile",
+    "name": "Helpers",
+    "slug": "helpers",
     "version": "0.1.0",
     "orientation": "portrait",
-    "platforms": ["android", "ios", "web"]
+    "platforms": [
+      "android",
+      "ios",
+      "web"
+    ],
+    "android": {
+      "package": "com.bakayisedevelopers.helpers"
+    },
+    "ios": {
+      "bundleIdentifier": "com.bakayisedevelopers.helpers"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "577bc9b1-d455-47e6-a086-160b633ee7ce"
+      }
+    },
+    "owner": "bakayisedevelopers",
+    "plugins": [
+      "expo-font"
+    ]
   }
 }

@@ -5,7 +5,7 @@ import { getServiceById } from '../../constants/serviceCatalog';
 import { formatCurrency } from '../../utils/payouts';
 import { colors } from '../../theme/colors';
 
-export function ActiveJobScreen() {
+export function ActiveJobScreen({ onClose }) {
   const { activeJob, actions } = useHelpersApp();
 
   return (
@@ -13,6 +13,7 @@ export function ActiveJobScreen() {
       eyebrow="Helper"
       title="Active Job"
       description="This screen keeps the same in-progress operational focus as the tutor live flow, but framed around helper delivery milestones."
+      footerAction={<ActionButton label="Close" onPress={onClose} tone="secondary" />}
     >
       <Card>
         <SectionHeading
@@ -26,7 +27,7 @@ export function ActiveJobScreen() {
           <>
             <StatusBadge label={activeJob.status} tone="success" />
             <Text style={styles.title}>{activeJob.title}</Text>
-            <Text style={styles.subtitle}>{getServiceById(activeJob.serviceId)?.name || 'Service'} · {activeJob.customerName}</Text>
+            <Text style={styles.subtitle}>{`${getServiceById(activeJob.serviceId)?.name || 'Service'} | ${activeJob.customerName}`}</Text>
             <Text style={styles.meta}>Requested skills: {(activeJob.requestedSkills || []).join(', ')}</Text>
             <Text style={styles.meta}>Address: {activeJob.address}</Text>
             <Text style={styles.amount}>{formatCurrency(activeJob.totalAmount)}</Text>

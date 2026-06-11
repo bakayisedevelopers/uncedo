@@ -2,7 +2,7 @@
 
 Use grouped JSON secrets for Firebase Functions to reduce active Secret Manager version count while keeping related credentials together.
 
-## PARAKLEO_PAYMENTS_SECRETS
+## UNCEDO_PAYMENTS_SECRETS
 
 ```json
 {
@@ -10,7 +10,7 @@ Use grouped JSON secrets for Firebase Functions to reduce active Secret Manager 
 }
 ```
 
-## PARAKLEO_EMAIL_SECRETS
+## UNCEDO_EMAIL_SECRETS
 
 ```json
 {
@@ -19,7 +19,7 @@ Use grouped JSON secrets for Firebase Functions to reduce active Secret Manager 
 }
 ```
 
-## PARAKLEO_REALTIME_SECRETS
+## UNCEDO_REALTIME_SECRETS
 
 ```json
 {
@@ -29,7 +29,7 @@ Use grouped JSON secrets for Firebase Functions to reduce active Secret Manager 
 }
 ```
 
-## PARAKLEO_AI_KEYS
+## UNCEDO_AI_KEYS
 
 ```json
 {

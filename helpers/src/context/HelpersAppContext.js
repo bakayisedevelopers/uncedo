@@ -1,69 +1,42 @@
-import { createContext, useContext, useMemo, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { getServiceById } from '../constants/serviceCatalog';
+import { useAuth } from './AuthContext';
+import { updateHelperProfile } from '../services/userService';
+import { logError } from '../services/logger';
 import { groupCompletedJobsByWeek, HELPER_PAYOUT_RATE, PLATFORM_FEE_RATE } from '../utils/payouts';
 
 const HelpersAppContext = createContext(null);
 
-const INITIAL_PROFILE = {
-  firstName: 'Nomsa',
-  lastName: 'Dlamini',
-  fullName: 'Nomsa Dlamini',
-  providerType: 'individual',
+const FALLBACK_PROFILE = {
+  firstName: '',
+  lastName: '',
+  fullName: '',
+  providerType: '',
   businessName: '',
   city: 'Johannesburg',
-  rating: 4.87,
-  onlineStatus: 'online',
-  verificationStatus: 'verified',
+  rating: 0,
+  onlineStatus: 'offline',
+  verificationStatus: 'pending',
   agreement: {
-    acceptedVersion: '1.0.1',
+    acceptedVersion: '',
     requiredVersion: '1.0.1',
-    acceptedAt: '2026-05-18T10:20:00.000Z',
+    acceptedAt: null,
   },
   payout: {
-    bankName: 'FNB',
-    accountHolder: 'Nomsa Dlamini',
-    accountNumber: '**** 1904',
-    recipientCode: 'RCP_uncedo_helper_1904',
-    verificationStatus: 'verified',
+    bankName: '',
+    accountHolder: '',
+    accountNumber: '',
+    recipientCode: '',
+    verificationStatus: 'pending',
   },
-  services: [
-    {
-      serviceId: 'laundry',
-      skills: [
-        {
-          name: 'Hand wash',
-          pictures: [
-            { id: 'pic_1', uri: 'https://images.unsplash.com/photo-1527515637462-cff94eecc1ac?auto=format&fit=crop&w=600&q=80' },
-            { id: 'pic_2', uri: 'https://images.unsplash.com/photo-1517677208171-0bc6725a3e60?auto=format&fit=crop&w=600&q=80' },
-          ],
-        },
-        {
-          name: 'Ironing',
-          pictures: [
-            { id: 'pic_3', uri: 'https://images.unsplash.com/photo-1582735689369-4fe89db7114c?auto=format&fit=crop&w=600&q=80' },
-          ],
-        },
-      ],
-    },
-    {
-      serviceId: 'cleaning',
-      skills: [
-        {
-          name: 'Kitchen cleaning',
-          pictures: [
-            { id: 'pic_4', uri: 'https://images.unsplash.com/photo-1581578731548-c64695cc6952?auto=format&fit=crop&w=600&q=80' },
-          ],
-        },
-      ],
-    },
-  ],
+  services: [],
   metrics: {
-    acceptanceRate: 0.92,
-    completionRate: 0.96,
-    overallRating: 4.87,
-    avgResponseMinutes: 4,
-    cancellationRate: 0.05,
-    recentAssignmentsCount: 8,
+    acceptanceRate: 0,
+    completionRate: 0,
+    overallRating: 0,
+    avgResponseMinutes: 0,
+    cancellationRate: 0,
+    recentAssignmentsCount: 0,
   },
 };
 
@@ -159,97 +132,6 @@ function createPicture(uri) {
   };
 }
 
-function getHelperOnboardingStatus(profile) {
-  const firstName = String(profile?.firstName || '').trim();
-  const lastName = String(profile?.lastName || '').trim();
-  const fullName = String(profile?.fullName || '').trim();
-  const providerType = String(profile?.providerType || '').trim().toLowerCase();
-  const businessName = String(profile?.businessName || '').trim();
-  const hasAgreement = profile?.agreement?.acceptedVersion && profile?.agreement?.acceptedVersion === profile?.agreement?.requiredVersion;
-  const payout = profile?.payout || {};
-  const hasPayout = Boolean(payout.bankName && payout.accountNumber && payout.recipientCode && payout.verificationStatus === 'verified');
-  const isVerified = profile?.verificationStatus === 'verified';
-  const services = Array.isArray(profile?.services) ? profile.services : [];
-  const hasAnyService = services.length > 0;
-  const hasQualifiedSkills = services.some((service) =>
-    Array.isArray(service.skills)
-    && service.skills.some((skill) => Array.isArray(skill.pictures) && skill.pictures.length > 0),
-  );
-  const hasName = Boolean(fullName || (firstName && lastName));
-  const hasProviderType = providerType === 'individual' || providerType === 'business';
-  const hasBusinessName = providerType !== 'business' || Boolean(businessName);
-
-  if (!hasName) {
-    return {
-      complete: false,
-      step: 'profile',
-      message: 'Add the helper name before going online.',
-    };
-  }
-
-  if (!hasProviderType) {
-    return {
-      complete: false,
-      step: 'profile',
-      message: 'Choose whether the helper profile is an individual or a business.',
-    };
-  }
-
-  if (!hasBusinessName) {
-    return {
-      complete: false,
-      step: 'profile',
-      message: 'Add the business name before going online.',
-    };
-  }
-
-  if (!hasAnyService) {
-    return {
-      complete: false,
-      step: 'services',
-      message: 'Select at least one service before going online.',
-    };
-  }
-
-  if (!hasQualifiedSkills) {
-    return {
-      complete: false,
-      step: 'services',
-      message: 'Add at least one skill with a linked work photo before going online.',
-    };
-  }
-
-  if (!hasAgreement) {
-    return {
-      complete: false,
-      step: 'agreement',
-      message: 'Accept the latest Helper Agreement before going online.',
-    };
-  }
-
-  if (!hasPayout) {
-    return {
-      complete: false,
-      step: 'payout',
-      message: 'Add verified payout details so Uncedo can pay your helper share.',
-    };
-  }
-
-  if (!isVerified) {
-    return {
-      complete: false,
-      step: 'verification',
-      message: 'Your account must be verified before you can accept helper jobs.',
-    };
-  }
-
-  return {
-    complete: true,
-    step: null,
-    message: 'Helper profile complete. You can go online, accept jobs, and receive payouts.',
-  };
-}
-
 function withServiceMetadata(profile) {
   return {
     ...profile,
@@ -261,12 +143,144 @@ function withServiceMetadata(profile) {
   };
 }
 
+function normalizeProfile(user) {
+  if (!user) return withServiceMetadata(FALLBACK_PROFILE);
+
+  const fullName = String(user.fullName || user.displayName || '').trim();
+  const firstName = String(user.firstName || '').trim();
+  const lastName = String(user.lastName || '').trim();
+
+  return withServiceMetadata({
+    ...FALLBACK_PROFILE,
+    ...user,
+    fullName,
+    firstName,
+    lastName,
+    payout: {
+      ...FALLBACK_PROFILE.payout,
+      ...(user.payout || {}),
+    },
+    agreement: {
+      ...FALLBACK_PROFILE.agreement,
+      ...(user.agreement || {}),
+    },
+    metrics: {
+      ...FALLBACK_PROFILE.metrics,
+      ...(user.metrics || {}),
+    },
+    services: Array.isArray(user.services) ? user.services : [],
+  });
+}
+
+function getHelperOnboardingStatus(profile) {
+  const firstName = String(profile?.firstName || '').trim();
+  const lastName = String(profile?.lastName || '').trim();
+  const fullName = String(profile?.fullName || '').trim();
+  const providerType = String(profile?.providerType || '').trim().toLowerCase();
+  const businessName = String(profile?.businessName || '').trim();
+  const hasAgreement = profile?.agreement?.acceptedVersion
+    && profile?.agreement?.acceptedVersion === profile?.agreement?.requiredVersion;
+  const payout = profile?.payout || {};
+  const hasPayout = Boolean(
+    payout.bankName
+    && payout.accountHolder
+    && payout.accountNumber
+    && payout.recipientCode
+    && payout.verificationStatus === 'verified'
+  );
+  const isVerified = profile?.verificationStatus === 'verified';
+  const services = Array.isArray(profile?.services) ? profile.services : [];
+  const hasAnyService = services.length > 0;
+  const hasQualifiedSkills = services.some((service) => (
+    Array.isArray(service.skills)
+    && service.skills.some((skill) => Array.isArray(skill.pictures) && skill.pictures.length > 0)
+  ));
+  const hasName = Boolean(fullName || (firstName && lastName));
+  const hasProviderType = providerType === 'individual' || providerType === 'business';
+  const hasBusinessName = providerType !== 'business' || Boolean(businessName);
+
+  if (!hasName) {
+    return { complete: false, step: 'profile', message: 'Add the helper name before going online.' };
+  }
+
+  if (!hasProviderType) {
+    return { complete: false, step: 'profile', message: 'Choose whether the helper profile is an individual or a business.' };
+  }
+
+  if (!hasBusinessName) {
+    return { complete: false, step: 'profile', message: 'Add the business name before going online.' };
+  }
+
+  if (!hasAnyService) {
+    return { complete: false, step: 'services', message: 'Select at least one service before going online.' };
+  }
+
+  if (!hasQualifiedSkills) {
+    return { complete: false, step: 'services', message: 'Add at least one skill with a linked work photo before going online.' };
+  }
+
+  if (!hasAgreement) {
+    return { complete: false, step: 'agreement', message: 'Accept the latest Helper Agreement before going online.' };
+  }
+
+  if (!hasPayout) {
+    return { complete: false, step: 'payout', message: 'Add verified payout details so Uncedo can pay your helper share.' };
+  }
+
+  if (!isVerified) {
+    return { complete: false, step: 'verification', message: 'Your account must be verified before you can accept helper jobs.' };
+  }
+
+  return {
+    complete: true,
+    step: null,
+    message: 'Helper profile complete. You can go online, accept jobs, and receive payouts.',
+  };
+}
+
 export function HelpersAppProvider({ children }) {
-  const [profile, setProfile] = useState(() => withServiceMetadata(INITIAL_PROFILE));
+  const { user } = useAuth();
+  const [profile, setProfile] = useState(() => normalizeProfile(user));
   const [jobOffers, setJobOffers] = useState(INITIAL_OFFERS);
   const [activeJob, setActiveJob] = useState(INITIAL_ACTIVE_JOB);
   const [completedJobs, setCompletedJobs] = useState(INITIAL_COMPLETED_JOBS);
   const [weeklyPayouts, setWeeklyPayouts] = useState(INITIAL_WEEKLY_PAYOUTS);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+
+  useEffect(() => {
+    setProfile(normalizeProfile(user));
+  }, [user]);
+
+  const persistProfileUpdate = async (updates) => {
+    if (!user?.uid) {
+      throw new Error('A helper session is required.');
+    }
+
+    setSaving(true);
+    setSaveError('');
+
+    try {
+      await updateHelperProfile(user.uid, updates);
+      return { success: true };
+    } catch (error) {
+      logError('HelpersAppContext.persistProfileUpdate', error);
+      setSaveError(error.message || 'Unable to save helper profile changes.');
+      return { success: false, message: error.message || 'Unable to save helper profile changes.' };
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const applyProfileUpdate = async (updater) => {
+    const nextProfile = withServiceMetadata(updater(profile));
+    setProfile(nextProfile);
+    const result = await persistProfileUpdate(nextProfile);
+    if (!result.success) {
+      setProfile(normalizeProfile(user));
+    }
+    return result;
+  };
 
   const onboardingStatus = useMemo(() => getHelperOnboardingStatus(profile), [profile]);
 
@@ -292,15 +306,18 @@ export function HelpersAppProvider({ children }) {
     };
   }, [weeklyGroups]);
 
-  const toggleOnlineStatus = () => {
-    if (!onboardingStatus.complete) return;
-    setProfile((current) => ({
+  const toggleOnlineStatus = async () => {
+    if (!onboardingStatus.complete) {
+      return { success: false, message: onboardingStatus.message };
+    }
+
+    return applyProfileUpdate((current) => ({
       ...current,
       onlineStatus: current.onlineStatus === 'online' ? 'offline' : 'online',
     }));
   };
 
-  const acceptOffer = (offerId) => {
+  const acceptOffer = async (offerId) => {
     const offer = jobOffers.find((item) => item.id === offerId);
     if (!offer) return;
 
@@ -316,7 +333,8 @@ export function HelpersAppProvider({ children }) {
       startedAt: new Date().toISOString(),
       address: offer.area,
     });
-    setProfile((current) => ({
+
+    await applyProfileUpdate((current) => ({
       ...current,
       metrics: {
         ...current.metrics,
@@ -351,18 +369,18 @@ export function HelpersAppProvider({ children }) {
     setActiveJob(null);
   };
 
-  const addSkillPicture = ({ serviceId, skillName, pictureUri }) => {
+  const addSkillPicture = async ({ serviceId, skillName, pictureUri }) => {
     const normalizedUri = String(pictureUri || '').trim();
     if (!serviceId || !skillName || !normalizedUri) {
       return { success: false, message: 'A service, skill, and work photo are required.' };
     }
 
-    setProfile((current) => {
+    return applyProfileUpdate((current) => {
       const existingServices = Array.isArray(current.services) ? [...current.services] : [];
       const targetIndex = existingServices.findIndex((service) => service.serviceId === serviceId);
       const serviceMeta = getServiceById(serviceId);
       const nextService = targetIndex >= 0
-        ? { ...existingServices[targetIndex], skills: [...existingServices[targetIndex].skills] }
+        ? { ...existingServices[targetIndex], skills: [...(existingServices[targetIndex].skills || [])] }
         : {
             serviceId,
             serviceName: serviceMeta?.name || serviceId,
@@ -375,7 +393,7 @@ export function HelpersAppProvider({ children }) {
         const currentSkill = nextService.skills[existingSkillIndex];
         nextService.skills[existingSkillIndex] = {
           ...currentSkill,
-          pictures: [...currentSkill.pictures, createPicture(normalizedUri)],
+          pictures: [...(currentSkill.pictures || []), createPicture(normalizedUri)],
         };
       } else {
         nextService.skills.push({
@@ -391,13 +409,15 @@ export function HelpersAppProvider({ children }) {
       }
 
       return { ...current, services: existingServices };
-    });
-
-    return { success: true, message: `${skillName} added with a linked work photo.` };
+    }).then((result) => (
+      result.success
+        ? { success: true, message: `${skillName} added with a linked work photo.` }
+        : result
+    ));
   };
 
-  const removeSkill = ({ serviceId, skillName }) => {
-    setProfile((current) => ({
+  const removeSkill = async ({ serviceId, skillName }) => {
+    return applyProfileUpdate((current) => ({
       ...current,
       services: (current.services || [])
         .map((service) => (
@@ -409,8 +429,8 @@ export function HelpersAppProvider({ children }) {
     }));
   };
 
-  const removeSkillPicture = ({ serviceId, skillName, pictureId }) => {
-    setProfile((current) => ({
+  const removeSkillPicture = async ({ serviceId, skillName, pictureId }) => {
+    return applyProfileUpdate((current) => ({
       ...current,
       services: (current.services || [])
         .map((service) => {
@@ -432,8 +452,8 @@ export function HelpersAppProvider({ children }) {
     }));
   };
 
-  const acceptAgreement = () => {
-    setProfile((current) => ({
+  const acceptAgreement = async () => {
+    return applyProfileUpdate((current) => ({
       ...current,
       agreement: {
         ...current.agreement,
@@ -443,26 +463,37 @@ export function HelpersAppProvider({ children }) {
     }));
   };
 
-  const setVerificationStatus = (verificationStatus) => {
-    setProfile((current) => ({ ...current, verificationStatus }));
+  const setVerificationStatus = async (verificationStatus) => {
+    return applyProfileUpdate((current) => ({ ...current, verificationStatus }));
   };
 
-  const updateProfileBasics = (updates = {}) => {
-    setProfile((current) => {
+  const updateProfileBasics = async (updates = {}) => {
+    return applyProfileUpdate((current) => {
       const next = {
         ...current,
         ...updates,
       };
       const nextFirstName = String(next.firstName || '').trim();
       const nextLastName = String(next.lastName || '').trim();
-      if (!String(next.fullName || '').trim()) {
-        next.fullName = [nextFirstName, nextLastName].filter(Boolean).join(' ').trim();
-      }
+      next.fullName = String(
+        next.fullName
+        || [nextFirstName, nextLastName].filter(Boolean).join(' ')
+      ).trim();
       if (String(next.providerType || '').trim().toLowerCase() !== 'business') {
         next.businessName = '';
       }
       return next;
     });
+  };
+
+  const updatePayoutDetails = async (updates = {}) => {
+    return applyProfileUpdate((current) => ({
+      ...current,
+      payout: {
+        ...current.payout,
+        ...updates,
+      },
+    }));
   };
 
   const value = useMemo(() => ({
@@ -474,6 +505,8 @@ export function HelpersAppProvider({ children }) {
     weeklyGroups,
     weeklyPayouts,
     paymentSummary,
+    saving,
+    saveError,
     payoutRates: {
       platform: PLATFORM_FEE_RATE,
       helper: HELPER_PAYOUT_RATE,
@@ -490,6 +523,7 @@ export function HelpersAppProvider({ children }) {
       acceptAgreement,
       setVerificationStatus,
       updateProfileBasics,
+      updatePayoutDetails,
     },
   }), [
     activeJob,
@@ -498,6 +532,8 @@ export function HelpersAppProvider({ children }) {
     onboardingStatus,
     paymentSummary,
     profile,
+    saveError,
+    saving,
     weeklyGroups,
     weeklyPayouts,
   ]);

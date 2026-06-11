@@ -1,9 +1,26 @@
-export const CUSTOMER_TYPE_OPTIONS = [
+export const CUSTOMER_ACCOUNT_TYPE_OPTIONS = [
+  { key: 'individual', label: 'Individual' },
+  { key: 'business', label: 'Business' },
+];
+
+export const INDIVIDUAL_CUSTOMER_TYPE_OPTIONS = [
   'Homeowner',
   'Tenant',
-  'Business owner',
+  'Family representative',
   'Event organizer',
   'Guest house / accommodation owner',
+  'Other',
+];
+
+export const BUSINESS_CATEGORY_OPTIONS = [
+  'Catering',
+  'Mechanic',
+  'Salon / beauty',
+  'Hospitality',
+  'Retail',
+  'Office / corporate',
+  'Property management',
+  'Events',
   'Other',
 ];
 

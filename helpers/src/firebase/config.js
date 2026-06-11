@@ -1,7 +1,8 @@
 import { getApp, getApps, initializeApp } from 'firebase/app';
-import { connectAuthEmulator, getAuth, inMemoryPersistence, initializeAuth } from 'firebase/auth';
+import { connectAuthEmulator, getAuth, getReactNativePersistence, initializeAuth } from 'firebase/auth';
 import { connectFirestoreEmulator, getFirestore } from 'firebase/firestore';
 import { connectStorageEmulator, getStorage } from 'firebase/storage';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   FIREBASE_EMULATOR_HOST,
   FIREBASE_PUBLIC_CONFIG,
@@ -20,7 +21,7 @@ function getFirebaseAuth(app) {
 
   try {
     authInstance = initializeAuth(app, {
-      persistence: inMemoryPersistence,
+      persistence: getReactNativePersistence(AsyncStorage),
     });
   } catch (error) {
     authInstance = getAuth(app);

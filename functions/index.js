@@ -323,10 +323,10 @@ async function deleteStorageObjectIfPresent(bucket, objectPath) {
   }
 }
 
-const PARAKLEO_PAYMENTS_SECRETS = defineSecret('PARAKLEO_PAYMENTS_SECRETS');
-const PARAKLEO_EMAIL_SECRETS = defineSecret('PARAKLEO_EMAIL_SECRETS');
-const PARAKLEO_REALTIME_SECRETS = defineSecret('PARAKLEO_REALTIME_SECRETS');
-const PARAKLEO_AI_KEYS = defineSecret('PARAKLEO_AI_KEYS');
+const UNCEDO_PAYMENTS_SECRETS = defineSecret('UNCEDO_PAYMENTS_SECRETS');
+const UNCEDO_EMAIL_SECRETS = defineSecret('UNCEDO_EMAIL_SECRETS');
+const UNCEDO_REALTIME_SECRETS = defineSecret('UNCEDO_REALTIME_SECRETS');
+const UNCEDO_AI_KEYS = defineSecret('UNCEDO_AI_KEYS');
 
 const DEFAULT_STUN_URLS = ['stun:stun.l.google.com:19302'];
 const DEFAULT_TURN_TTL_SECONDS = 600;
@@ -1398,7 +1398,7 @@ exports.trackTutorRequestStats = onDocumentWritten('classRequests/{requestId}', 
 
 exports.contentExtractionForWhiteboard = onDocumentWritten({
   document: 'classRequests/{requestId}',
-  secrets: [PARAKLEO_AI_KEYS],
+  secrets: [UNCEDO_AI_KEYS],
 }, async (event) => {
   const before = event.data.before.exists ? event.data.before.data() : null;
   const after = event.data.after.exists ? event.data.after.data() : null;
@@ -1974,7 +1974,7 @@ async function processTutorDocumentRecord({ docId, data = {} }) {
 
 exports.processTutorDocument = onDocumentCreated({
   document: 'tutorDocuments/{docId}',
-  secrets: [PARAKLEO_AI_KEYS],
+  secrets: [UNCEDO_AI_KEYS],
   memory: '1GiB',
   timeoutSeconds: 300,
 }, async (event) => {
@@ -1985,7 +1985,7 @@ exports.processTutorDocument = onDocumentCreated({
 
 exports.retryTutorDocumentProcessing = onDocumentWritten({
   document: 'tutorDocuments/{docId}',
-  secrets: [PARAKLEO_AI_KEYS],
+  secrets: [UNCEDO_AI_KEYS],
   memory: '1GiB',
   timeoutSeconds: 300,
 }, async (event) => {
@@ -2922,25 +2922,25 @@ function assertRequiredSecrets(groupName, secrets, requiredKeys) {
 
 function getPaymentsSecrets() {
   const groupedSecrets = parseGroupedSecretJson(
-    'PARAKLEO_PAYMENTS_SECRETS',
-    PARAKLEO_PAYMENTS_SECRETS.value(),
+    'UNCEDO_PAYMENTS_SECRETS',
+    UNCEDO_PAYMENTS_SECRETS.value(),
   );
   const secrets = {
     PAYSTACK_SECRET_KEY: String(groupedSecrets.PAYSTACK_SECRET_KEY || '').trim(),
   };
 
-  assertRequiredSecrets('PARAKLEO_PAYMENTS_SECRETS', secrets, ['PAYSTACK_SECRET_KEY']);
+  assertRequiredSecrets('UNCEDO_PAYMENTS_SECRETS', secrets, ['PAYSTACK_SECRET_KEY']);
   return secrets;
 }
 
 function getEmailSecrets() {
-  const groupedSecrets = parseGroupedSecretJson('PARAKLEO_EMAIL_SECRETS', PARAKLEO_EMAIL_SECRETS.value());
+  const groupedSecrets = parseGroupedSecretJson('UNCEDO_EMAIL_SECRETS', UNCEDO_EMAIL_SECRETS.value());
   const secrets = {
     RESEND_API_KEY: String(groupedSecrets.RESEND_API_KEY || '').trim(),
     EMAIL_FROM: String(groupedSecrets.EMAIL_FROM || '').trim(),
   };
 
-  assertRequiredSecrets('PARAKLEO_EMAIL_SECRETS', secrets, ['RESEND_API_KEY', 'EMAIL_FROM']);
+  assertRequiredSecrets('UNCEDO_EMAIL_SECRETS', secrets, ['RESEND_API_KEY', 'EMAIL_FROM']);
   return secrets;
 }
 
@@ -3011,8 +3011,8 @@ async function sendTutorAgreementEmailWithAttachment({
 
 function getRealtimeSecrets() {
   const groupedSecrets = parseGroupedSecretJson(
-    'PARAKLEO_REALTIME_SECRETS',
-    PARAKLEO_REALTIME_SECRETS.value(),
+    'UNCEDO_REALTIME_SECRETS',
+    UNCEDO_REALTIME_SECRETS.value(),
   );
   const secrets = {
     CLOUDFLARE_TURN_KEY_ID: String(groupedSecrets.CLOUDFLARE_TURN_KEY_ID || '').trim(),
@@ -3020,7 +3020,7 @@ function getRealtimeSecrets() {
     CLOUDFLARE_TURN_TTL_SECONDS: String(groupedSecrets.CLOUDFLARE_TURN_TTL_SECONDS || '').trim(),
   };
 
-  assertRequiredSecrets('PARAKLEO_REALTIME_SECRETS', secrets, [
+  assertRequiredSecrets('UNCEDO_REALTIME_SECRETS', secrets, [
     'CLOUDFLARE_TURN_KEY_ID',
     'CLOUDFLARE_TURN_API_TOKEN',
   ]);
@@ -3028,7 +3028,7 @@ function getRealtimeSecrets() {
 }
 
 function getAiSecrets() {
-  const groupedSecrets = parseGroupedSecretJson('PARAKLEO_AI_KEYS', PARAKLEO_AI_KEYS.value());
+  const groupedSecrets = parseGroupedSecretJson('UNCEDO_AI_KEYS', UNCEDO_AI_KEYS.value());
   const secrets = {
     apiKey: groupedSecrets.FIREBASE_API_KEY || groupedSecrets.VITE_FIREBASE_API_KEY || '',
     authDomain: groupedSecrets.FIREBASE_AUTH_DOMAIN || groupedSecrets.VITE_FIREBASE_AUTH_DOMAIN || '',
@@ -3051,7 +3051,7 @@ function getAiSecrets() {
     DOCUMENT_AI_LOCATION: groupedSecrets.DOCUMENT_AI_LOCATION || '',
   };
 
-  assertRequiredSecrets('PARAKLEO_AI_KEYS', secrets, ['apiKey', 'projectId', 'appId']);
+  assertRequiredSecrets('UNCEDO_AI_KEYS', secrets, ['apiKey', 'projectId', 'appId']);
   return secrets;
 }
 
@@ -3238,7 +3238,7 @@ exports.acceptTutorAgreement = onRequest({ cors: true, memory: '1GiB' }, async (
   }
 });
 
-exports.emailSignedTutorAgreement = onRequest({ cors: true, memory: '1GiB', secrets: [PARAKLEO_EMAIL_SECRETS] }, async (req, res) => {
+exports.emailSignedTutorAgreement = onRequest({ cors: true, memory: '1GiB', secrets: [UNCEDO_EMAIL_SECRETS] }, async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, message: 'Method not allowed' });
     return;
@@ -3618,7 +3618,7 @@ exports.streamAttachmentAi = onRequest({ cors: true }, async (req, res) => {
 });
 
 /* Deprecated Gemini stream implementation retained below for reference.
-exports.streamAttachmentAi = onRequest({ cors: true, secrets: [PARAKLEO_AI_KEYS] }, async (req, res) => {
+exports.streamAttachmentAi = onRequest({ cors: true, secrets: [UNCEDO_AI_KEYS] }, async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, message: 'Method not allowed' });
     return;
@@ -3965,7 +3965,7 @@ exports.streamAttachmentAi = onRequest({ cors: true, secrets: [PARAKLEO_AI_KEYS]
 });
 */
 
-exports.extractImageOcr = onRequest({ cors: true, secrets: [PARAKLEO_AI_KEYS], memory: '512MiB', timeoutSeconds: 120 }, async (req, res) => {
+exports.extractImageOcr = onRequest({ cors: true, secrets: [UNCEDO_AI_KEYS], memory: '512MiB', timeoutSeconds: 120 }, async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, message: 'Method not allowed' });
     return;
@@ -4166,7 +4166,7 @@ exports.extractImageOcr = onRequest({ cors: true, secrets: [PARAKLEO_AI_KEYS], m
   }
 });
 
-exports.classifySubject = onRequest({ cors: true, secrets: [PARAKLEO_AI_KEYS] }, async (req, res) => {
+exports.classifySubject = onRequest({ cors: true, secrets: [UNCEDO_AI_KEYS] }, async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, message: 'Method not allowed' });
     return;
@@ -4696,7 +4696,7 @@ exports.mobileWebviewAuth = onRequest({ cors: true }, async (req, res) => {
 exports.getIceConfig = onRequest(
   {
     cors: true,
-    secrets: [PARAKLEO_REALTIME_SECRETS],
+    secrets: [UNCEDO_REALTIME_SECRETS],
   },
   async (req, res) => {
     if (req.method !== 'POST') {
@@ -4817,7 +4817,7 @@ exports.getIceConfig = onRequest(
   },
 );
 
-exports.verifyPaystack = onRequest({ cors: true, secrets: [PARAKLEO_PAYMENTS_SECRETS] }, async (req, res) => {
+exports.verifyPaystack = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRETS] }, async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, message: 'Method not allowed' });
     return;
@@ -5108,7 +5108,7 @@ exports.verifyPaystack = onRequest({ cors: true, secrets: [PARAKLEO_PAYMENTS_SEC
   }
 });
 
-exports.verifyTutorPayoutAccount = onRequest({ cors: true, secrets: [PARAKLEO_PAYMENTS_SECRETS] }, async (req, res) => {
+exports.verifyTutorPayoutAccount = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRETS] }, async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, message: 'Method not allowed' });
     return;
@@ -5241,7 +5241,7 @@ exports.verifyTutorPayoutAccount = onRequest({ cors: true, secrets: [PARAKLEO_PA
   }
 });
 
-exports.listTutorPayoutBanks = onRequest({ cors: true, secrets: [PARAKLEO_PAYMENTS_SECRETS] }, async (req, res) => {
+exports.listTutorPayoutBanks = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRETS] }, async (req, res) => {
   if (req.method !== 'GET') {
     res.status(405).json({ success: false, message: 'Method not allowed' });
     return;
@@ -5469,7 +5469,7 @@ async function initiatePaystackTransfer({ paystackSecretKey, amount, recipientCo
   return payload?.data || {};
 }
 
-exports.finalizeSessionBilling = onRequest({ cors: true, secrets: [PARAKLEO_PAYMENTS_SECRETS] }, async (req, res) => {
+exports.finalizeSessionBilling = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRETS] }, async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, message: 'Method not allowed' });
     return;
@@ -5834,7 +5834,7 @@ exports.finalizeSessionBilling = onRequest({ cors: true, secrets: [PARAKLEO_PAYM
   });
 });
 
-exports.payOutstandingBalance = onRequest({ cors: true, secrets: [PARAKLEO_PAYMENTS_SECRETS] }, async (req, res) => {
+exports.payOutstandingBalance = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRETS] }, async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, message: 'Method not allowed' });
     return;
@@ -6174,7 +6174,7 @@ async function syncBackendWeeklyPayoutRecords() {
 exports.processWeeklyTutorPayouts = onSchedule({
   schedule: '0 0 * * 1',
   timeZone: 'Africa/Johannesburg',
-  secrets: [PARAKLEO_PAYMENTS_SECRETS],
+  secrets: [UNCEDO_PAYMENTS_SECRETS],
 }, async () => {
   let paymentsSecrets;
   try {
@@ -6454,7 +6454,7 @@ exports.processWeeklyTutorPayouts = onSchedule({
 exports.sendEmailFromQueue = onDocumentCreated(
   {
     document: 'emailEvents/{eventId}',
-    secrets: [PARAKLEO_EMAIL_SECRETS],
+    secrets: [UNCEDO_EMAIL_SECRETS],
   },
   async (event) => {
     const data = event.data?.data();

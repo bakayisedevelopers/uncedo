@@ -70,6 +70,10 @@
         "function": "streamAttachmentAi"
       },
       {
+        "source": "/save-academic-brain-feedback",
+        "function": "saveAcademicBrainFeedback"
+      },
+      {
         "source": "/mobile-webview-auth",
         "function": "mobileWebviewAuth"
       },
