@@ -1,10 +1,12 @@
-export const STUDENT_PROFILE_STEPS = {
+export const CUSTOMER_PROFILE_STEPS = {
   PROFILE: 'customer_profile',
   PAYMENT: 'payment_setup',
 };
 
-export function getStudentOnboardingStatus(user) {
-  const studentProfile = user?.studentProfile || {};
+export const STUDENT_PROFILE_STEPS = CUSTOMER_PROFILE_STEPS;
+
+export function getCustomerOnboardingStatus(user) {
+  const legacyProfile = user?.studentProfile || {};
   const customerProfile = user?.customerProfile || {};
   const paymentMethods = Array.isArray(user?.paymentMethods) ? user.paymentMethods : [];
   const accountType = String(customerProfile.accountType || '').trim().toLowerCase();
@@ -12,7 +14,7 @@ export function getStudentOnboardingStatus(user) {
     String(user?.fullName || user?.displayName || '').trim()
       && String(user?.phoneNumber || '').trim()
       && String(customerProfile.serviceAddress || '').trim()
-      && String(customerProfile.discoverySource || studentProfile.discoverySource || '').trim(),
+      && String(customerProfile.discoverySource || legacyProfile.discoverySource || '').trim(),
   );
   const hasBusinessProfile = Boolean(
     baseProfileReady
@@ -42,7 +44,7 @@ export function getStudentOnboardingStatus(user) {
   if (!hasBasicProfile) {
     return {
       complete: false,
-      step: STUDENT_PROFILE_STEPS.PROFILE,
+      step: CUSTOMER_PROFILE_STEPS.PROFILE,
       title: 'Complete your customer profile',
       message: 'Complete your individual or business profile, then add a card before requesting help.',
     };
@@ -50,8 +52,10 @@ export function getStudentOnboardingStatus(user) {
 
   return {
     complete: false,
-    step: STUDENT_PROFILE_STEPS.PAYMENT,
+    step: CUSTOMER_PROFILE_STEPS.PAYMENT,
     title: 'Add a payment method',
     message: 'Add and verify at least one card before requesting help.',
   };
 }
+
+export const getStudentOnboardingStatus = getCustomerOnboardingStatus;

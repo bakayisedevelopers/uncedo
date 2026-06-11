@@ -2,22 +2,24 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Linking, Platform, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LoadingState } from '../components/ui/States';
-import { SessionRatingPrompt } from '../components/student/SessionRatingPrompt';
+import { SessionRatingPrompt } from '../components/customer/SessionRatingPrompt';
 import { useAuth } from '../context/AuthContext';
 import { HomeScreen } from '../screens/auth/HomeScreen';
 import { LoginScreen } from '../screens/auth/LoginScreen';
 import { SignupScreen } from '../screens/auth/SignupScreen';
-import { SafetyLegalScreen } from '../screens/customer/SafetyLegalScreen';
 import { CustomerHomeScreen } from '../screens/customer/CustomerHomeScreen';
+import { CustomerDetailsScreen } from '../screens/customer/CustomerDetailsScreen';
+import { CustomerLegalScreen } from '../screens/customer/CustomerLegalScreen';
+import { CustomerOnboardingScreen } from '../screens/customer/CustomerOnboardingScreen';
+import { CustomerPaymentsScreen } from '../screens/customer/CustomerPaymentsScreen';
+import { CustomerProfileScreen } from '../screens/customer/CustomerProfileScreen';
+import { CustomerSecurityScreen } from '../screens/customer/CustomerSecurityScreen';
 import { JobRequestThreadScreen } from '../screens/customer/JobRequestThreadScreen';
 import { NotificationsScreen } from '../screens/student/NotificationsScreen';
-import { OnboardingScreen } from '../screens/student/OnboardingScreen';
-import { ProfileScreen } from '../screens/student/ProfileScreen';
 import { RequestDetailsScreen } from '../screens/student/RequestDetailsScreen';
 import { RequestStatusScreen } from '../screens/student/RequestStatusScreen';
 import { RequestsScreen } from '../screens/student/RequestsScreen';
 import { SessionRoomScreen } from '../screens/student/SessionRoomScreen';
-import { WalletScreen } from '../screens/student/WalletScreen';
 import {
   markAllNotificationsRead,
   markNotificationRead,
@@ -36,10 +38,12 @@ const authScreens = {
 const appScreens = {
   CustomerHome: CustomerHomeScreen,
   Requests: RequestsScreen,
-  Wallet: WalletScreen,
-  Profile: ProfileScreen,
-  Onboarding: OnboardingScreen,
-  SafetyLegal: SafetyLegalScreen,
+  Wallet: CustomerPaymentsScreen,
+  Profile: CustomerProfileScreen,
+  Onboarding: CustomerOnboardingScreen,
+  CustomerDetails: CustomerDetailsScreen,
+  CustomerSecurity: CustomerSecurityScreen,
+  CustomerLegal: CustomerLegalScreen,
   Notifications: NotificationsScreen,
   RequestStatus: RequestStatusScreen,
   RequestDetails: RequestDetailsScreen,
@@ -354,7 +358,7 @@ export function RootNavigator() {
 
         <SessionRatingPrompt
           session={ratingTarget}
-          role="student"
+          role="customer"
           onHandled={(sessionId) => {
             if (!sessionId) {
               return;

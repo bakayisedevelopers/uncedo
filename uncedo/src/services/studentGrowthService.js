@@ -26,7 +26,7 @@ export function estimateFreeMinutePricing({ originalPrice, requestedDurationMinu
   };
 }
 
-export async function syncStudentGrowth() {
+export async function syncCustomerGrowth() {
   const { auth } = getFirebaseClients();
   const token = await auth.currentUser?.getIdToken();
   if (!token) return null;
@@ -42,8 +42,10 @@ export async function syncStudentGrowth() {
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || payload?.success === false) {
-    throw new Error(payload?.message || 'Unable to sync student growth status right now.');
+    throw new Error(payload?.message || 'Unable to sync customer growth status right now.');
   }
 
   return payload?.profile || null;
 }
+
+export const syncStudentGrowth = syncCustomerGrowth;

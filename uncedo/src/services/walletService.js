@@ -1,9 +1,11 @@
 import { subscribeToUserProfile } from './userService';
 
-export function subscribeToStudentWallet(studentId, callback, onError) {
+export function subscribeToCustomerWallet(customerId, callback, onError) {
   return subscribeToUserProfile(
-    studentId,
+    customerId,
     (profile) => callback(profile?.wallet || { balance: 0, currency: 'ZAR' }),
     onError,
   );
 }
+
+export const subscribeToStudentWallet = subscribeToCustomerWallet;

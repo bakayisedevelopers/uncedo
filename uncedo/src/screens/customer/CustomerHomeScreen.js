@@ -1,16 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import { AttachmentPickerModal } from '../../components/student/AttachmentPickerModal';
+import { AttachmentPickerModal } from '../../components/customer/AttachmentPickerModal';
 import { MapPlaceholder } from '../../components/customer/MapPlaceholder';
 import { RequestComposerSheet } from '../../components/customer/RequestComposerSheet';
 import { JOB_REQUEST_SUGGESTIONS, MOCK_PROVIDER_MARKERS } from '../../constants/customer';
 import { useAuth } from '../../context/AuthContext';
 import { colors } from '../../theme/colors';
-import { getStudentOnboardingStatus } from '../../utils/onboarding';
+import { getCustomerOnboardingStatus } from '../../utils/onboarding';
 
 export function CustomerHomeScreen({ navigate, route, bottomInset = 0 }) {
   const { user } = useAuth();
-  const onboardingStatus = getStudentOnboardingStatus(user);
+  const onboardingStatus = getCustomerOnboardingStatus(user);
   const [composerExpanded, setComposerExpanded] = useState(false);
   const [requestText, setRequestText] = useState('');
   const [attachments, setAttachments] = useState([]);
