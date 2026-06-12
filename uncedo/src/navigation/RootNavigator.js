@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Linking, Platform, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, View } from 'react-native';
+import {
+  Linking,
+  PermissionsAndroid,
+  Platform,
+  Pressable,
+  SafeAreaView,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  View,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LoadingState } from '../components/ui/States';
 import { SessionRatingPrompt } from '../components/customer/SessionRatingPrompt';
@@ -157,6 +167,7 @@ function resolveNotificationRoute(notification = {}) {
 
 export function RootNavigator() {
   const { initializing, user } = useAuth();
+  const permissionPromptedUserRef = useRef('');
   const [authRoute, setAuthRoute] = useState('Home');
   const [activeRoute, setActiveRoute] = useState({ key: 'CustomerHome', params: {} });
   const [bottomNavVisible, setBottomNavVisible] = useState(true);
@@ -198,6 +209,52 @@ export function RootNavigator() {
       subscription.remove();
     };
   }, []);
+
+  useEffect(() => {
+    if (!user?.uid) {
+      permissionPromptedUserRef.current = '';
+      return;
+    }
+
+    if (permissionPromptedUserRef.current === user.uid) {
+      return;
+    }
+
+    permissionPromptedUserRef.current = user.uid;
+
+    const requestSignedInPermissions = async () => {
+      if (Platform.OS !== 'android') {
+        return;
+      }
+
+      try {
+        const permissionsToRequest = [];
+        const permissionChecks = [
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+          PermissionsAndroid.PERMISSIONS.ACCESS_COARSE_LOCATION,
+        ];
+
+        for (const permission of permissionChecks) {
+          const granted = await PermissionsAndroid.check(permission);
+          if (!granted) {
+            permissionsToRequest.push(permission);
+          }
+        }
+
+        if (!permissionsToRequest.length) {
+          return;
+        }
+
+        await PermissionsAndroid.requestMultiple(permissionsToRequest);
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.log(`[RootNavigator] Permission bootstrap failed: ${String(error?.message || error)}`);
+      }
+    };
+
+    requestSignedInPermissions();
+  }, [user?.uid]);
 
   useEffect(() => {
     if (!user?.uid) {

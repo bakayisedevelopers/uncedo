@@ -12,6 +12,7 @@ import { ProviderDashboardScreen } from '../screens/provider/ProviderDashboardSc
 import { ProviderProfileScreen } from '../screens/provider/ProviderProfileScreen';
 import { ServicesOfferedScreen } from '../screens/provider/ServicesOfferedScreen';
 import { VerificationScreen } from '../screens/provider/VerificationScreen';
+import { HelperOfferOverlay } from '../components/app/HelperOfferOverlay';
 import { useAuth } from '../context/AuthContext';
 import { useHelpersApp } from '../context/HelpersAppContext';
 import { colors } from '../theme/colors';
@@ -123,6 +124,8 @@ export function RootNavigator() {
           <ActiveOverlayScreen navigate={navigate} onClose={closeOverlay} />
         </View>
       ) : null}
+
+      <HelperOfferOverlay />
 
       <View style={styles.bottomBar}>
         {rootTabs.map((item) => {

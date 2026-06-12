@@ -4,6 +4,15 @@ import { useAuth } from './AuthContext';
 import { updateHelperProfile } from '../services/userService';
 import { logError } from '../services/logger';
 import { groupCompletedJobsByWeek, HELPER_PAYOUT_RATE, PLATFORM_FEE_RATE } from '../utils/payouts';
+import {
+  acceptServiceRequestOffer,
+  declineServiceRequestOffer,
+  mapServiceRequestToActiveJob,
+  mapServiceRequestToOffer,
+  subscribeToHelperActiveServiceRequest,
+  subscribeToHelperAvailableServiceRequests,
+  updateHelperActiveRequestStatus,
+} from '../services/serviceRequestService';
 
 const HelpersAppContext = createContext(null);
 
@@ -38,43 +47,6 @@ const FALLBACK_PROFILE = {
     cancellationRate: 0,
     recentAssignmentsCount: 0,
   },
-};
-
-const INITIAL_OFFERS = [
-  {
-    id: 'offer_1',
-    title: 'Family laundry refresh',
-    description: 'Need same-day wash, iron, and folding for school uniforms and work shirts.',
-    customerName: 'Amahle N.',
-    serviceId: 'laundry',
-    requestedSkills: ['Machine wash', 'Ironing', 'Folding'],
-    payoutEstimate: 540,
-    offerExpiresAt: Date.now() + 1000 * 60 * 18,
-    area: 'Sandton',
-  },
-  {
-    id: 'offer_2',
-    title: 'Weekend deep clean',
-    description: 'Kitchen and bathroom deep clean with dusting in the lounge.',
-    customerName: 'Lerato P.',
-    serviceId: 'cleaning',
-    requestedSkills: ['Kitchen cleaning', 'Bathroom cleaning', 'Dusting'],
-    payoutEstimate: 720,
-    offerExpiresAt: Date.now() + 1000 * 60 * 32,
-    area: 'Midrand',
-  },
-];
-
-const INITIAL_ACTIVE_JOB = {
-  id: 'job_live_1',
-  title: 'Wardrobe reset and ironing',
-  customerName: 'Thabiso M.',
-  serviceId: 'laundry',
-  requestedSkills: ['Ironing', 'Folding'],
-  status: 'in_progress',
-  totalAmount: 480,
-  startedAt: '2026-06-10T07:30:00.000Z',
-  address: 'Rosebank',
 };
 
 const INITIAL_COMPLETED_JOBS = [
@@ -241,8 +213,8 @@ function getHelperOnboardingStatus(profile) {
 export function HelpersAppProvider({ children }) {
   const { user } = useAuth();
   const [profile, setProfile] = useState(() => normalizeProfile(user));
-  const [jobOffers, setJobOffers] = useState(INITIAL_OFFERS);
-  const [activeJob, setActiveJob] = useState(INITIAL_ACTIVE_JOB);
+  const [jobOffers, setJobOffers] = useState([]);
+  const [activeJob, setActiveJob] = useState(null);
   const [completedJobs, setCompletedJobs] = useState(INITIAL_COMPLETED_JOBS);
   const [weeklyPayouts, setWeeklyPayouts] = useState(INITIAL_WEEKLY_PAYOUTS);
   const [saving, setSaving] = useState(false);
@@ -251,6 +223,40 @@ export function HelpersAppProvider({ children }) {
   useEffect(() => {
     setProfile(normalizeProfile(user));
   }, [user]);
+
+  useEffect(() => {
+    if (!user?.uid) {
+      setJobOffers([]);
+      return () => {};
+    }
+
+    return subscribeToHelperAvailableServiceRequests(
+      user.uid,
+      (items) => {
+        setJobOffers(items.map(mapServiceRequestToOffer).filter(Boolean));
+      },
+      (error) => {
+        logError('HelpersAppContext.jobOffers', error);
+      },
+    );
+  }, [user?.uid]);
+
+  useEffect(() => {
+    if (!user?.uid) {
+      setActiveJob(null);
+      return () => {};
+    }
+
+    return subscribeToHelperActiveServiceRequest(
+      user.uid,
+      (item) => {
+        setActiveJob(item ? mapServiceRequestToActiveJob(item) : null);
+      },
+      (error) => {
+        logError('HelpersAppContext.activeJob', error);
+      },
+    );
+  }, [user?.uid]);
 
   const persistProfileUpdate = async (updates) => {
     if (!user?.uid) {
@@ -319,40 +325,73 @@ export function HelpersAppProvider({ children }) {
 
   const acceptOffer = async (offerId) => {
     const offer = jobOffers.find((item) => item.id === offerId);
-    if (!offer) return;
+    if (!offer || !user?.uid) return;
 
-    setJobOffers((current) => current.filter((item) => item.id !== offerId));
-    setActiveJob({
-      id: `active_${offer.id}`,
-      title: offer.title,
-      customerName: offer.customerName,
-      serviceId: offer.serviceId,
-      requestedSkills: offer.requestedSkills,
-      status: 'accepted',
-      totalAmount: offer.payoutEstimate,
-      startedAt: new Date().toISOString(),
-      address: offer.area,
-    });
-
-    await applyProfileUpdate((current) => ({
-      ...current,
-      metrics: {
-        ...current.metrics,
-        recentAssignmentsCount: Number(current.metrics.recentAssignmentsCount || 0) + 1,
-      },
-    }));
+    setSaveError('');
+    try {
+      await acceptServiceRequestOffer({
+        requestId: offer.requestId || offer.id,
+        helperId: user.uid,
+        helperName: user.fullName || user.displayName || user.email,
+        helperEmail: user.email || '',
+      });
+    } catch (error) {
+      logError('HelpersAppContext.acceptOffer', error);
+      setSaveError(error.message || 'Unable to accept this helper offer right now.');
+    }
   };
 
-  const declineOffer = (offerId) => {
-    setJobOffers((current) => current.filter((item) => item.id !== offerId));
+  const declineOffer = async (offerId) => {
+    const offer = jobOffers.find((item) => item.id === offerId);
+    if (!offer || !user?.uid) return;
+
+    setSaveError('');
+    try {
+      await declineServiceRequestOffer({
+        requestId: offer.requestId || offer.id,
+        helperId: user.uid,
+      });
+    } catch (error) {
+      logError('HelpersAppContext.declineOffer', error);
+      setSaveError(error.message || 'Unable to decline this helper offer right now.');
+    }
   };
 
-  const updateActiveJobStatus = (status) => {
-    setActiveJob((current) => (current ? { ...current, status } : current));
+  const updateActiveJobStatus = async (status) => {
+    if (!activeJob?.requestId || !user?.uid) return;
+
+    const nextStatus = status === 'in_progress' ? 'en_route' : status;
+    setSaveError('');
+    try {
+      await updateHelperActiveRequestStatus({
+        requestId: activeJob.requestId,
+        helperId: user.uid,
+        status: nextStatus,
+      });
+    } catch (error) {
+      logError('HelpersAppContext.updateActiveJobStatus', error);
+      setSaveError(error.message || 'Unable to update this helper job.');
+    }
   };
 
-  const completeActiveJob = () => {
+  const completeActiveJob = async () => {
     if (!activeJob) return;
+
+    setSaveError('');
+    try {
+      if (activeJob.requestId && user?.uid) {
+        await updateHelperActiveRequestStatus({
+          requestId: activeJob.requestId,
+          helperId: user.uid,
+          status: 'completed',
+        });
+      }
+    } catch (error) {
+      logError('HelpersAppContext.completeActiveJob', error);
+      setSaveError(error.message || 'Unable to complete this helper job.');
+      return;
+    }
+
     const completedAt = new Date().toISOString();
     const completedJob = {
       ...activeJob,
@@ -366,7 +405,6 @@ export function HelpersAppProvider({ children }) {
       if (!weekKey || current.some((item) => item.weekKey === weekKey)) return current;
       return [{ weekKey, status: 'unpaid', notes: 'Awaiting payout batch.', paidAt: null }, ...current];
     });
-    setActiveJob(null);
   };
 
   const addSkillPicture = async ({ serviceId, skillName, pictureUri }) => {

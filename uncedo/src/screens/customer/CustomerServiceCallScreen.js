@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Modal,
+  PermissionsAndroid,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { AttachmentPickerModal } from '../../components/customer/AttachmentPickerModal';
 import { CustomerAiCallBridge } from '../../components/customer/CustomerAiCallBridge';
@@ -26,6 +36,7 @@ import {
   deriveTimingDetails,
   finalizeCustomerServiceRequest,
   saveCustomerServiceQuotePreview,
+  subscribeToServiceCallById,
   subscribeToServiceRequestById,
   updateCustomerServiceRequest,
   uploadCustomerServiceReference,
@@ -137,6 +148,8 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
   const [quoteAwaitingApproval, setQuoteAwaitingApproval] = useState(false);
   const [quotePreview, setQuotePreview] = useState(null);
   const [uploadedReferences, setUploadedReferences] = useState([]);
+  const [aiUsageSnapshot, setAiUsageSnapshot] = useState(null);
+  const [hasMicPermission, setHasMicPermission] = useState(Platform.OS === 'android' ? null : true);
   const [structuredRequest, setStructuredRequest] = useState(() => ({
     ...createServiceRequestDraft(),
     structuredAnswers: {},
@@ -163,9 +176,48 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
 
   useEffect(() => {
     let active = true;
+    const ensureMicPermission = async () => {
+      if (Platform.OS !== 'android') {
+        if (active) setHasMicPermission(true);
+        return;
+      }
+
+      try {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+          {
+            title: 'Microphone permission required',
+            message: 'Uncedo needs microphone access so the live service call can hear you.',
+            buttonPositive: 'Allow',
+            buttonNegative: 'Not now',
+          },
+        );
+        if (active) {
+          setHasMicPermission(granted === PermissionsAndroid.RESULTS.GRANTED);
+        }
+      } catch {
+        if (active) setHasMicPermission(false);
+      }
+    };
+
+    ensureMicPermission();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
 
     async function bootstrap() {
       try {
+        if (hasMicPermission === false) {
+          throw new Error('Microphone permission is required before starting the service call.');
+        }
+        if (hasMicPermission == null) {
+          return;
+        }
+
         const clients = await getFirebaseClients();
         const token = await clients?.auth?.currentUser?.getIdToken?.();
         if (!token) {
@@ -196,7 +248,7 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
     return () => {
       active = false;
     };
-  }, [user]);
+  }, [hasMicPermission, user]);
 
   useEffect(() => {
     if (!requestId) return () => {};
@@ -225,6 +277,20 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
       () => null,
     );
   }, [requestId]);
+
+  useEffect(() => {
+    if (!callId) return () => {};
+    return subscribeToServiceCallById(
+      callId,
+      (call) => {
+        const nextUsage = call?.aiLive?.usageSummary || null;
+        if (nextUsage) {
+          setAiUsageSnapshot(nextUsage);
+        }
+      },
+      () => null,
+    );
+  }, [callId]);
 
   useEffect(() => {
     if (!['connected', 'listening', 'speaking'].includes(callStatus)) return () => {};
@@ -273,6 +339,7 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
         structuredAnswers: nextStructuredState.structuredAnswers,
         selectedPortfolioReferences: nextStructuredState.selectedPortfolioReferences || [],
         referenceAttachments: uploadedReferences,
+        aiUsageSnapshot,
       });
 
       callCompletionStatusRef.current = 'completed';
@@ -314,12 +381,14 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
         categoryId: nextStructuredState.categoryId,
         serviceIds: nextStructuredState.serviceIds,
         structuredAnswers: nextStructuredState.structuredAnswers,
+        aiUsageSnapshot,
       });
       const nextQuotePreview = await saveCustomerServiceQuotePreview({
         requestId,
         categoryId: nextStructuredState.categoryId,
         serviceIds: nextStructuredState.serviceIds,
         structuredAnswers: nextStructuredState.structuredAnswers,
+        aiUsageSnapshot,
         selectedPortfolioReferences: nextStructuredState.selectedPortfolioReferences || [],
         referenceAttachments: uploadedReferences,
       });
@@ -415,8 +484,36 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
         return;
       }
 
+      if (payload.type === 'usage') {
+        if (payload?.usage && typeof payload.usage === 'object') {
+          setAiUsageSnapshot(payload.usage);
+        }
+        return;
+      }
+
       if (payload.type === 'error') {
         setError(payload.message || 'AI call error.');
+        return;
+      }
+
+      if (payload.type === 'log') {
+        const message = payload?.payload?.message || 'Customer AI bridge log';
+        const details = [];
+        if (payload?.payload?.detail !== undefined) {
+          try {
+            details.push(typeof payload.payload.detail === 'string'
+              ? payload.payload.detail
+              : JSON.stringify(payload.payload.detail));
+          } catch {
+            details.push(String(payload.payload.detail));
+          }
+        }
+        if (payload?.payload?.error) {
+          details.push(String(payload.payload.error));
+        }
+        const detail = details.length ? ` (${details.join(' | ')})` : '';
+        // eslint-disable-next-line no-console
+        console.log(`[CustomerAiBridge] ${message}${detail}`);
         return;
       }
 
@@ -547,7 +644,7 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
     goBack('CustomerHome');
   };
 
-  if (loading) {
+  if (loading || hasMicPermission == null) {
     return <LoadingState label="Starting your service request call" />;
   }
 
@@ -557,14 +654,16 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
 
   return (
     <View style={styles.screen}>
-      <CustomerAiCallBridge
-        key={`${callId}-${bridgeInstanceKey}`}
-        ref={bridgeRef}
-        callId={callId}
-        idToken={idToken}
-        onBridgeMessage={handleBridgeMessage}
-        wsBaseUrl={AI_LIVE_PROXY_WS_URL}
-      />
+      {hasMicPermission ? (
+        <CustomerAiCallBridge
+          key={`${callId}-${bridgeInstanceKey}`}
+          ref={bridgeRef}
+          callId={callId}
+          idToken={idToken}
+          onBridgeMessage={handleBridgeMessage}
+          wsBaseUrl={AI_LIVE_PROXY_WS_URL}
+        />
+      ) : null}
 
       <View style={styles.header}>
         <Text style={styles.headerEyebrow}>Live request call</Text>

@@ -15,6 +15,27 @@ const ai = new GoogleGenAI({
 });
 
 const port = Number(process.env.PORT || 8080);
+const LIVE_MODEL = 'gemini-live-2.5-flash-preview';
+const AI_LIVE_PRICING_REFERENCE = {
+  billingModel: 'gemini-3.1-flash-live-preview',
+  pricingUrl: 'https://ai.google.dev/gemini-api/docs/pricing',
+  pricingAsOf: '2026-06-12',
+  usdToZarRate: 16.2489,
+  inputRatesUsdPerMillion: {
+    text: 0.75,
+    audio: 3,
+    image: 1,
+    video: 1,
+    document: 0.75,
+  },
+  outputRatesUsdPerMillion: {
+    text: 4.5,
+    audio: 12,
+    image: 4.5,
+    video: 4.5,
+    document: 4.5,
+  },
+};
 
 const AI_TUTOR_SYSTEM_INSTRUCTION = [
   'You are an AI tutor for Parakleo.',
@@ -55,6 +76,116 @@ function clip(value, max = 700) {
   const text = String(value || '').trim();
   if (text.length <= max) return text;
   return `${text.slice(0, max)}...`;
+}
+
+function roundMoney(value) {
+  return Math.round(Number(value || 0) * 10000) / 10000;
+}
+
+function roundCurrency(value) {
+  return Math.round(Number(value || 0) * 100) / 100;
+}
+
+function normalizeModality(value, fallback = 'text') {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized || fallback;
+}
+
+function modalityListToTotals(list = [], fallbackTotal = 0, fallbackModality = 'text') {
+  const totals = {};
+  if (Array.isArray(list) && list.length) {
+    list.forEach((item) => {
+      const modality = normalizeModality(item?.modality, fallbackModality);
+      const tokens = Number(item?.tokenCount ?? item?.tokens ?? 0);
+      if (!Number.isFinite(tokens) || tokens <= 0) return;
+      totals[modality] = Number(totals[modality] || 0) + tokens;
+    });
+    return totals;
+  }
+
+  const fallbackTokens = Number(fallbackTotal || 0);
+  if (Number.isFinite(fallbackTokens) && fallbackTokens > 0) {
+    totals[normalizeModality(fallbackModality)] = fallbackTokens;
+  }
+  return totals;
+}
+
+function mergeTokenTotals(current = {}, next = {}) {
+  const merged = { ...(current || {}) };
+  Object.entries(next || {}).forEach(([key, value]) => {
+    const numeric = Number(value || 0);
+    if (!Number.isFinite(numeric) || numeric <= 0) return;
+    merged[key] = Number(merged[key] || 0) + numeric;
+  });
+  return merged;
+}
+
+function computeCostUsd(tokenTotals = {}, pricing = {}) {
+  return Object.entries(tokenTotals || {}).reduce((sum, [modality, tokens]) => {
+    const rate = Number(pricing?.[modality] ?? pricing?.text ?? 0);
+    const numericTokens = Number(tokens || 0);
+    if (!Number.isFinite(rate) || !Number.isFinite(numericTokens) || numericTokens <= 0) {
+      return sum;
+    }
+    return sum + ((numericTokens / 1000000) * rate);
+  }, 0);
+}
+
+function buildUsageSummary(currentSummary = null, usageMetadata = null) {
+  if (!usageMetadata || typeof usageMetadata !== 'object') return currentSummary;
+
+  const nextPromptTokensByModality = modalityListToTotals(
+    usageMetadata.promptTokensDetails,
+    usageMetadata.promptTokenCount,
+    'text',
+  );
+  const nextResponseTokensByModality = modalityListToTotals(
+    usageMetadata.responseTokensDetails,
+    usageMetadata.responseTokenCount,
+    'audio',
+  );
+  const nextToolUseTokensByModality = modalityListToTotals(
+    usageMetadata.toolUsePromptTokensDetails,
+    usageMetadata.toolUsePromptTokenCount,
+    'text',
+  );
+
+  const promptTokensByModality = mergeTokenTotals(currentSummary?.promptTokensByModality, nextPromptTokensByModality);
+  const responseTokensByModality = mergeTokenTotals(currentSummary?.responseTokensByModality, nextResponseTokensByModality);
+  const toolUseTokensByModality = mergeTokenTotals(currentSummary?.toolUseTokensByModality, nextToolUseTokensByModality);
+
+  const promptTokenCount = Object.values(promptTokensByModality).reduce((sum, value) => sum + Number(value || 0), 0);
+  const responseTokenCount = Object.values(responseTokensByModality).reduce((sum, value) => sum + Number(value || 0), 0);
+  const toolUsePromptTokenCount = Object.values(toolUseTokensByModality).reduce((sum, value) => sum + Number(value || 0), 0);
+  const totalTokenCount = promptTokenCount + responseTokenCount + toolUsePromptTokenCount;
+
+  const inputCostUsd = computeCostUsd(promptTokensByModality, AI_LIVE_PRICING_REFERENCE.inputRatesUsdPerMillion);
+  const outputCostUsd = computeCostUsd(responseTokensByModality, AI_LIVE_PRICING_REFERENCE.outputRatesUsdPerMillion);
+  const toolUseCostUsd = computeCostUsd(toolUseTokensByModality, AI_LIVE_PRICING_REFERENCE.inputRatesUsdPerMillion);
+  const totalCostUsd = roundMoney(inputCostUsd + outputCostUsd + toolUseCostUsd);
+  const totalCostZar = roundCurrency(totalCostUsd * AI_LIVE_PRICING_REFERENCE.usdToZarRate);
+
+  return {
+    liveModel: LIVE_MODEL,
+    pricingReferenceModel: AI_LIVE_PRICING_REFERENCE.billingModel,
+    pricingUrl: AI_LIVE_PRICING_REFERENCE.pricingUrl,
+    pricingAsOf: AI_LIVE_PRICING_REFERENCE.pricingAsOf,
+    usdToZarRate: AI_LIVE_PRICING_REFERENCE.usdToZarRate,
+    currency: 'ZAR',
+    promptTokenCount,
+    responseTokenCount,
+    toolUsePromptTokenCount,
+    totalTokenCount,
+    promptTokensByModality,
+    responseTokensByModality,
+    toolUseTokensByModality,
+    inputCostUsd: roundMoney(inputCostUsd),
+    outputCostUsd: roundMoney(outputCostUsd),
+    toolUseCostUsd: roundMoney(toolUseCostUsd),
+    totalCostUsd,
+    totalCostZar,
+    updatedAtMs: Date.now(),
+  };
 }
 
 function parseAiPayload(text = '') {
@@ -336,9 +467,11 @@ wss.on('connection', async (ws, request, context) => {
   const contextState = createContextState(session);
   let geminiLiveSession = null;
   let ended = false;
+  let usageSummary = session?.aiLive?.usageSummary || null;
 
   await writeAiSnapshot(resourceKind, resourceId, {
     status: 'connected',
+    model: LIVE_MODEL,
     wsConnected: true,
     audioInActive: false,
     audioOutActive: false,
@@ -349,6 +482,17 @@ wss.on('connection', async (ws, request, context) => {
   send(ws, { type: 'status', status: 'connected', wsConnected: true });
 
   const onGeminiMessage = (message) => {
+    if (message?.usageMetadata) {
+      usageSummary = buildUsageSummary(usageSummary, message.usageMetadata);
+      if (usageSummary) {
+        send(ws, { type: 'usage', usage: usageSummary });
+        writeAiSnapshot(resourceKind, resourceId, {
+          model: LIVE_MODEL,
+          usageSummary,
+        }).catch(() => {});
+      }
+    }
+
     const inputText = extractInputTranscription(message);
     if (inputText) {
       contextState.conversation.push({ role: 'student', text: inputText, ts: Date.now() });
@@ -437,7 +581,7 @@ wss.on('connection', async (ws, request, context) => {
       location: process.env.GOOGLE_CLOUD_LOCATION || 'us-central1',
     }));
     geminiLiveSession = await ai.live.connect({
-      model: 'gemini-live-2.5-flash-preview',
+      model: LIVE_MODEL,
       config: {
         responseModalities: ['AUDIO', 'TEXT'],
         inputAudioTranscription: {},
@@ -468,6 +612,8 @@ wss.on('connection', async (ws, request, context) => {
     try { await geminiLiveSession?.close?.(); } catch {}
     await writeAiSnapshot(resourceKind, resourceId, {
       status,
+      model: LIVE_MODEL,
+      usageSummary,
       wsConnected: false,
       audioInActive: false,
       audioOutActive: false,

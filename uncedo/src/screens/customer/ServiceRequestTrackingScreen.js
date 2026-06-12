@@ -133,6 +133,8 @@ export function ServiceRequestTrackingScreen({ route, goBack }) {
           <Text style={styles.detailLine}>
             {request.status === 'matching'
               ? 'This page will update as soon as a helper is found.'
+              : request.status === 'no_helper_available'
+                ? 'No helper has accepted yet. We will keep matching as more helpers come online.'
               : request.status === 'scheduled_pending'
                 ? 'This request is scheduled for later. Matching will begin closer to the requested time.'
               : request.status === 'accepted'

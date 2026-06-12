@@ -33,11 +33,6 @@ const { classifySubjectLocally } = require('./extraction/localSubjectClassifier'
 const { detectTopicsLocally } = require('./extraction/localTopicClassifier');
 const { estimateMinutesLocally, clampMinutes } = require('./extraction/minutesEstimator');
 const { classifyWithLocalMl } = require('./extraction/localMlClassifier');
-const { extractDocumentText } = require('./academicBrain/extraction');
-const { runAcademicBrainMini } = require('./academicBrain/engine');
-const { saveAcademicBrainFeedback } = require('./academicBrain/feedback');
-const { AcademicBrain, SUBJECTS } = require('./ai/AcademicBrain');
-const { TrainingPipeline } = require('./ai/TrainingPipeline');
 const {
   LEGAL_ENTITY_NAME,
   TUTOR_AGREEMENT_DOCUMENT_ID,
@@ -57,6 +52,10 @@ let aiSubjectExtractionModule = null;
 let geminiExtractionModule = null;
 let ocrProviderRouterModule = null;
 let academicBrainPromise = null;
+let academicBrainExtractionModule = null;
+let academicBrainEngineModule = null;
+let academicBrainFeedbackModule = null;
+let academicBrainModule = null;
 const ENABLE_ACADEMIC_BRAIN = String(process.env.ENABLE_ACADEMICBRAIN_MINI || 'true').toLowerCase() !== 'false';
 
 function getAiSubjectExtractionModule() {
@@ -80,8 +79,37 @@ function getOcrProviderRouterModule() {
   return ocrProviderRouterModule;
 }
 
+function getAcademicBrainExtractionModule() {
+  if (!academicBrainExtractionModule) {
+    academicBrainExtractionModule = require('./academicBrain/extraction');
+  }
+  return academicBrainExtractionModule;
+}
+
+function getAcademicBrainEngineModule() {
+  if (!academicBrainEngineModule) {
+    academicBrainEngineModule = require('./academicBrain/engine');
+  }
+  return academicBrainEngineModule;
+}
+
+function getAcademicBrainFeedbackModule() {
+  if (!academicBrainFeedbackModule) {
+    academicBrainFeedbackModule = require('./academicBrain/feedback');
+  }
+  return academicBrainFeedbackModule;
+}
+
+function getAcademicBrainModule() {
+  if (!academicBrainModule) {
+    academicBrainModule = require('./ai/AcademicBrain');
+  }
+  return academicBrainModule;
+}
+
 async function getAcademicBrain() {
   if (!academicBrainPromise) {
+    const { AcademicBrain } = getAcademicBrainModule();
     const brain = new AcademicBrain();
     academicBrainPromise = brain.init().then(() => brain);
   }
@@ -384,6 +412,24 @@ const ACTIVE_REQUEST_STATUSES = new Set([
   REQUEST_STATUS.MATCHING,
   REQUEST_STATUS.OFFERED,
   REQUEST_STATUS.NO_TUTOR_AVAILABLE,
+]);
+const SERVICE_REQUEST_STATUS = {
+  COLLECTING_DETAILS: 'collecting_details',
+  SCHEDULED_PENDING: 'scheduled_pending',
+  MATCHING: 'matching',
+  HELPER_FOUND: 'helper_found',
+  ACCEPTED: 'accepted',
+  EN_ROUTE: 'en_route',
+  ARRIVED: 'arrived',
+  COMPLETED: 'completed',
+  CANCELED: 'canceled',
+  EXPIRED: 'expired',
+  NO_HELPER_AVAILABLE: 'no_helper_available',
+};
+const ACTIVE_SERVICE_REQUEST_STATUSES = new Set([
+  SERVICE_REQUEST_STATUS.MATCHING,
+  SERVICE_REQUEST_STATUS.HELPER_FOUND,
+  SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE,
 ]);
 let visionClient = null;
 const GEMINI_FLASH_EXTRACTION_SOURCE = 'gemini_2_5_flash_after_tutor_accept';
@@ -1185,6 +1231,331 @@ async function getTutorQueueForSubject(subject) {
 
   return rankTutorsWithFairness(eligibleTutors);
 }
+
+const HELPER_CATEGORY_SERVICE_MAP = {
+  cleaning: ['cleaning', 'laundry'],
+  yard_maintenance: ['yard_maintenance', 'gardening'],
+  beauty: ['beauty'],
+  barber: ['barber', 'beauty'],
+  care: ['care'],
+  car_wash: ['car_wash'],
+};
+
+function isHelperAgreementCurrent(helper = {}) {
+  const agreement = helper?.agreement || {};
+  return Boolean(
+    agreement.acceptedVersion
+    && agreement.requiredVersion
+    && agreement.acceptedVersion === agreement.requiredVersion,
+  );
+}
+
+function helperSupportsCategory(helper = {}, categoryId = '') {
+  const supportedServiceIds = HELPER_CATEGORY_SERVICE_MAP[String(categoryId || '').trim().toLowerCase()] || [];
+  if (!supportedServiceIds.length) return false;
+
+  const helperServices = Array.isArray(helper.services) ? helper.services : [];
+  return helperServices.some((entry) => {
+    const serviceId = String(entry?.serviceId || '').trim().toLowerCase();
+    const hasQualifiedSkills = Array.isArray(entry?.skills)
+      && entry.skills.some((skill) => Array.isArray(skill?.pictures) && skill.pictures.length > 0);
+    return supportedServiceIds.includes(serviceId) && hasQualifiedSkills;
+  });
+}
+
+function isHelperDispatchEligible(helper = {}, categoryId = '') {
+  const isDispatchPaused = isTruthyFlag(helper.dispatchPaused ?? helper.isDispatchPaused);
+  const isSuspendedOrBlocked = isTruthyFlag(
+    helper.suspended
+      ?? helper.isSuspended
+      ?? helper.blocked
+      ?? helper.isBlocked,
+  );
+  const payoutVerificationStatus = String(helper?.payout?.verificationStatus || '').toLowerCase();
+  const verificationStatus = String(helper?.verificationStatus || '').toLowerCase();
+
+  return verificationStatus === 'verified'
+    && payoutVerificationStatus === 'verified'
+    && isHelperAgreementCurrent(helper)
+    && helperSupportsCategory(helper, categoryId)
+    && !isDispatchPaused
+    && !isSuspendedOrBlocked;
+}
+
+function getHelperScore(helper = {}) {
+  const metrics = helper.metrics || {};
+  const acceptanceRate = normalizePositiveNumber(metrics.acceptanceRate, 0);
+  const completionRate = normalizePositiveNumber(metrics.completionRate, 0);
+  const overallRating = normalizePositiveNumber(metrics.overallRating, 0);
+  const avgResponseMinutes = normalizePositiveNumber(metrics.avgResponseMinutes, 999);
+  const cancellationRate = normalizePositiveNumber(metrics.cancellationRate, 0);
+  const recentAssignmentsCount = normalizePositiveNumber(metrics.recentAssignmentsCount, 0);
+  const responseScore = Math.max(0, 1 - Math.min(avgResponseMinutes, 60) / 60);
+
+  return Number((
+    acceptanceRate * 0.3
+    + completionRate * 0.25
+    + Math.min(overallRating / 5, 1) * 0.2
+    + responseScore * 0.15
+    - cancellationRate * 0.1
+    - Math.min(recentAssignmentsCount, FAIRNESS_WORKLOAD_CAP) * 0.02
+  ).toFixed(6));
+}
+
+function getHelperLastOfferAtMillis(helper = {}) {
+  return normalizeMillis(helper?.lastOfferAt);
+}
+
+function getHelperRecentAssignmentsCount(helper = {}) {
+  return normalizePositiveNumber(helper?.metrics?.recentAssignmentsCount, 0);
+}
+
+function rankHelpersWithFairness(candidates = []) {
+  const remaining = [...candidates]
+    .map((helper) => ({
+      helper,
+      score: getHelperScore(helper),
+      lastOfferAtMs: getHelperLastOfferAtMillis(helper),
+      recentAssignmentsCount: getHelperRecentAssignmentsCount(helper),
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  const ordered = [];
+  while (remaining.length) {
+    const highestScore = remaining[0].score;
+    const bucket = remaining.filter((entry) => (highestScore - entry.score) <= DISPATCH_NEAR_EQUAL_THRESHOLD);
+    const oldestLastOfferAt = bucket.reduce(
+      (min, entry) => Math.min(min, entry.lastOfferAtMs || 0),
+      Number.POSITIVE_INFINITY,
+    );
+    const leastRecentlyOffered = bucket.filter((entry) => (entry.lastOfferAtMs || 0) === oldestLastOfferAt);
+    const smallestRecentAssignments = leastRecentlyOffered.reduce(
+      (min, entry) => Math.min(min, entry.recentAssignmentsCount),
+      Number.POSITIVE_INFINITY,
+    );
+    const leastAssigned = leastRecentlyOffered.filter(
+      (entry) => entry.recentAssignmentsCount === smallestRecentAssignments,
+    );
+    const picked = leastAssigned[randomIndex(leastAssigned.length)];
+    ordered.push(picked.helper.uid);
+
+    const removeIndex = remaining.findIndex((entry) => entry.helper.uid === picked.helper.uid);
+    if (removeIndex >= 0) {
+      remaining.splice(removeIndex, 1);
+    } else {
+      break;
+    }
+  }
+
+  return ordered;
+}
+
+async function getHelperQueueForServiceRequest(request = {}) {
+  const categoryId = String(request.categoryId || '').trim().toLowerCase();
+  if (!categoryId) return [];
+
+  const [helpersSnap, activeRequestsSnap] = await Promise.all([
+    db.collection('users')
+      .where('activeRole', '==', 'helper')
+      .where('onlineStatus', '==', 'online')
+      .get(),
+    db.collection('serviceRequests')
+      .where('status', 'in', [
+        SERVICE_REQUEST_STATUS.ACCEPTED,
+        SERVICE_REQUEST_STATUS.EN_ROUTE,
+        SERVICE_REQUEST_STATUS.ARRIVED,
+      ])
+      .get(),
+  ]);
+
+  const busyHelperIds = new Set(
+    activeRequestsSnap.docs
+      .map((item) => item.data()?.helperAssignment?.helperId)
+      .filter(Boolean),
+  );
+
+  const eligibleHelpers = helpersSnap.docs
+    .map((item) => ({ uid: item.id, ...item.data() }))
+    .filter((helper) => !busyHelperIds.has(helper.uid))
+    .filter((helper) => isHelperDispatchEligible(helper, categoryId));
+
+  return rankHelpersWithFairness(eligibleHelpers);
+}
+
+exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{requestId}', async (event) => {
+  const afterData = event.data.after.exists ? event.data.after.data() : null;
+  if (!afterData) return;
+
+  if (!ACTIVE_SERVICE_REQUEST_STATUSES.has(afterData.status) || afterData?.helperAssignment?.helperId) {
+    return;
+  }
+
+  const requestId = event.params.requestId;
+  const requestRef = db.collection('serviceRequests').doc(requestId);
+  const candidateQueue = await getHelperQueueForServiceRequest(afterData);
+
+  await db.runTransaction(async (transaction) => {
+    const snap = await transaction.get(requestRef);
+    if (!snap.exists) return;
+    const request = snap.data() || {};
+
+    if (!ACTIVE_SERVICE_REQUEST_STATUSES.has(request.status) || request?.helperAssignment?.helperId) {
+      return;
+    }
+
+    if (
+      request.status === SERVICE_REQUEST_STATUS.HELPER_FOUND
+      && request.currentOfferHelperId
+      && normalizeMillis(request.offerExpiresAt) > Date.now()
+    ) {
+      return;
+    }
+
+    let queue = Array.isArray(candidateQueue) ? [...candidateQueue] : [];
+    if (request.status === SERVICE_REQUEST_STATUS.HELPER_FOUND && request.currentOfferHelperId) {
+      queue = queue.filter((id) => id !== request.currentOfferHelperId);
+    }
+
+    if (!queue.length) {
+      transaction.update(requestRef, {
+        status: SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE,
+        statusDetail: 'No helper accepted yet. Matching will continue as helpers come online.',
+        helperQueue: [],
+        currentOfferHelperId: null,
+        offerExpiresAt: null,
+        offerToken: null,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      return;
+    }
+
+    const selectedHelperId = queue[0];
+    const selectedHelperRef = db.collection('users').doc(selectedHelperId);
+    const offerRevision = nextOfferRevision(request);
+
+    transaction.update(requestRef, {
+      status: SERVICE_REQUEST_STATUS.HELPER_FOUND,
+      statusDetail: 'Helper notified. Waiting for acceptance.',
+      helperQueue: queue,
+      currentOfferHelperId: selectedHelperId,
+      offerExpiresAt: Date.now() + OFFER_TIMEOUT_MS,
+      lastOfferAt: Date.now(),
+      offerRevision,
+      offerToken: randomUUID(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    transaction.set(selectedHelperRef, {
+      lastOfferAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+  });
+});
+
+exports.syncServiceRequestAssignmentState = onDocumentWritten('serviceRequests/{requestId}', async (event) => {
+  const before = event.data.before.exists ? event.data.before.data() : null;
+  const after = event.data.after.exists ? event.data.after.data() : null;
+  if (!after) return;
+
+  const requestId = event.params.requestId;
+  const beforeStatus = String(before?.status || '').toLowerCase();
+  const afterStatus = String(after?.status || '').toLowerCase();
+  const helperId = after?.helperAssignment?.helperId || before?.helperAssignment?.helperId || null;
+
+  if (afterStatus === SERVICE_REQUEST_STATUS.ACCEPTED && helperId) {
+    await Promise.all([
+      db.collection('users').doc(helperId).set({
+        activeServiceRequestId: requestId,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true }),
+      createUserNotification({
+        userId: after.customerId || before?.customerId || null,
+        title: 'Helper selected',
+        message: `${after?.helperAssignment?.helperName || 'A helper'} accepted your request.`,
+        type: 'request_accepted',
+        requestId,
+        targetPath: `/customer/requests/${requestId}`,
+      }),
+    ]);
+    return;
+  }
+
+  if (
+    helperId
+    && [SERVICE_REQUEST_STATUS.COMPLETED, SERVICE_REQUEST_STATUS.CANCELED, SERVICE_REQUEST_STATUS.EXPIRED].includes(afterStatus)
+    && beforeStatus !== afterStatus
+  ) {
+    await db.collection('users').doc(helperId).set({
+      activeServiceRequestId: admin.firestore.FieldValue.delete(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+  }
+
+  if (afterStatus === SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE && beforeStatus !== SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE) {
+    await createUserNotification({
+      userId: after.customerId || before?.customerId || null,
+      title: 'Still matching helpers',
+      message: 'No helper has accepted yet. We will keep matching as more helpers become available.',
+      type: 'matching_update',
+      requestId,
+      targetPath: `/customer/requests/${requestId}`,
+    });
+  }
+});
+
+exports.reconcileServiceRequestOffers = onSchedule('every 1 minutes', async () => {
+  const now = Date.now();
+  const snapshot = await db.collection('serviceRequests')
+    .where('status', 'in', [
+      SERVICE_REQUEST_STATUS.MATCHING,
+      SERVICE_REQUEST_STATUS.HELPER_FOUND,
+      SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE,
+    ])
+    .get();
+
+  if (snapshot.empty) {
+    return;
+  }
+
+  const batch = db.batch();
+  let updatesCount = 0;
+
+  snapshot.docs.forEach((docSnap) => {
+    const request = docSnap.data() || {};
+    const status = String(request.status || '').toLowerCase();
+    const offerExpiresAt = normalizeMillis(request.offerExpiresAt);
+    const updatedAtMs = normalizeMillis(request.updatedAt);
+
+    if (status === SERVICE_REQUEST_STATUS.HELPER_FOUND && offerExpiresAt > 0 && offerExpiresAt <= now) {
+      batch.update(docSnap.ref, {
+        status: SERVICE_REQUEST_STATUS.MATCHING,
+        statusDetail: 'Helper offer expired. Matching the next helper.',
+        currentOfferHelperId: null,
+        offerExpiresAt: null,
+        offerToken: null,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      updatesCount += 1;
+      return;
+    }
+
+    if (
+      status === SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE
+      && updatedAtMs > 0
+      && now - updatedAtMs >= 60 * 1000
+    ) {
+      batch.update(docSnap.ref, {
+        status: SERVICE_REQUEST_STATUS.MATCHING,
+        statusDetail: 'Retrying helper matching.',
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      updatesCount += 1;
+    }
+  });
+
+  if (updatesCount) {
+    await batch.commit();
+  }
+});
 
 exports.syncClassRequestLifecycle = onDocumentWritten('classRequests/{requestId}', async (event) => {
   const afterData = event.data.after.exists ? event.data.after.data() : null;
@@ -2867,7 +3238,7 @@ async function runVisionOcrOnBuffer(imageBuffer) {
 }
 
 async function runPdfVisionOcr(pdfBuffer) {
-  return extractDocumentText({
+  return getAcademicBrainExtractionModule().extractDocumentText({
     mimeType: 'application/pdf',
     imageBuffer: pdfBuffer,
     runVisionOcrOnBuffer,
@@ -4239,7 +4610,7 @@ exports.classifySubject = onRequest({ cors: true, secrets: [UNCEDO_AI_KEYS] }, a
 
     const normalizedSupported = new Set((supportedSubjects || []).map((item) => String(item?.value || item || '').trim()).filter(Boolean));
     const academicBrain = ENABLE_ACADEMIC_BRAIN
-      ? runAcademicBrainMini({
+      ? getAcademicBrainEngineModule().runAcademicBrainMini({
         extractedText: inputText,
         ocrBlocks: Array.isArray(inputPayload?.ocrBlocks) ? inputPayload.ocrBlocks : [],
         country: String(inputPayload?.country || 'ZA'),
@@ -4356,7 +4727,7 @@ exports.classifySubject = onRequest({ cors: true, secrets: [UNCEDO_AI_KEYS] }, a
     });
 
     if (academicBrain) {
-      await saveAcademicBrainFeedback(db, {
+      await getAcademicBrainFeedbackModule().saveAcademicBrainFeedback(db, {
         userId: decoded.uid,
         role: 'student',
         country: String(inputPayload?.country || 'ZA'),
@@ -4461,7 +4832,7 @@ exports.saveAcademicBrainFeedback = onRequest({ cors: true }, async (req, res) =
 
   try {
     const feedback = req.body && typeof req.body === 'object' ? req.body : {};
-    const result = await saveAcademicBrainFeedback(db, {
+    const result = await getAcademicBrainFeedbackModule().saveAcademicBrainFeedback(db, {
       ...feedback,
       userId: decoded.uid,
     });

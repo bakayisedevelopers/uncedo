@@ -27,6 +27,13 @@ const STATUS_META = {
     title: 'Helper found',
     description: 'We found a suitable helper and are waiting for a response.',
   },
+  no_helper_available: {
+    label: 'Searching for helper',
+    badge: 'Still matching',
+    tone: 'warning',
+    title: 'Still searching for a helper',
+    description: 'No helper accepted yet. We will continue matching as more helpers become available.',
+  },
   accepted: {
     label: 'Accepted',
     badge: 'Helper confirmed',
@@ -109,7 +116,9 @@ export function getServiceRequestToneStyle(status) {
 }
 
 export function getServiceRequestProgress(status) {
-  const normalized = String(status || '').toLowerCase();
+  const normalized = String(status || '').toLowerCase() === 'no_helper_available'
+    ? 'matching'
+    : String(status || '').toLowerCase();
   const currentIndex = STATUS_SEQUENCE.indexOf(normalized);
   return STATUS_SEQUENCE.map((step, index) => ({
     id: step,

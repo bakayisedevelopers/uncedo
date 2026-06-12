@@ -18,12 +18,15 @@
       "package": "com.anonymous.parakleomobile",
       "permissions": [
         "RECORD_AUDIO",
-        "MODIFY_AUDIO_SETTINGS"
+        "MODIFY_AUDIO_SETTINGS",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
       ]
     },
     "ios": {
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "Parakleo uses your microphone so you can speak with your tutor during live sessions."
+        "NSMicrophoneUsageDescription": "Uncedo uses your microphone so you can speak during live service calls.",
+        "NSLocationWhenInUseUsageDescription": "Uncedo uses your location to find nearby helpers and route them to your service address."
       },
       "bundleIdentifier": "com.anonymous.parakleomobile"
     },

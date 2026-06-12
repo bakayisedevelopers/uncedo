@@ -37,9 +37,65 @@ function buildBridgeHtml({ wsUrl }) {
         function ensureAudioContext() {
           if (!audioContext) {
             var AudioCtx = window.AudioContext || window.webkitAudioContext;
+            if (!AudioCtx) {
+              throw new Error('This device does not expose an AudioContext for live call audio.');
+            }
             audioContext = new AudioCtx();
           }
           return audioContext;
+        }
+
+        function resolveGetUserMedia() {
+          if (navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function') {
+            return function (constraints) {
+              return navigator.mediaDevices.getUserMedia(constraints);
+            };
+          }
+
+          var legacyGetUserMedia = navigator.getUserMedia
+            || navigator.webkitGetUserMedia
+            || navigator.mozGetUserMedia
+            || navigator.msGetUserMedia;
+
+          if (typeof legacyGetUserMedia === 'function') {
+            return function (constraints) {
+              return new Promise(function (resolve, reject) {
+                try {
+                  legacyGetUserMedia.call(navigator, constraints, resolve, reject);
+                } catch (error) {
+                  reject(error);
+                }
+              });
+            };
+          }
+
+          return null;
+        }
+
+        function postRuntimeProbe() {
+          try {
+            post({
+              type: 'log',
+              payload: {
+                message: 'Customer AI bridge runtime probe',
+                detail: {
+                  href: String(window.location && window.location.href || ''),
+                  secureContext: Boolean(window.isSecureContext),
+                  hasMediaDevices: Boolean(navigator.mediaDevices),
+                  hasModernGetUserMedia: Boolean(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+                  hasLegacyGetUserMedia: Boolean(
+                    navigator.getUserMedia
+                    || navigator.webkitGetUserMedia
+                    || navigator.mozGetUserMedia
+                    || navigator.msGetUserMedia
+                  ),
+                  userAgent: String(navigator.userAgent || ''),
+                },
+              },
+            });
+          } catch (_error) {
+            // no-op
+          }
         }
 
         function startRinging() {
@@ -141,7 +197,11 @@ function buildBridgeHtml({ wsUrl }) {
 
         async function startAudio() {
           var ctx = ensureAudioContext();
-          mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          var getUserMedia = resolveGetUserMedia();
+          if (!getUserMedia) {
+            throw new Error('Microphone capture is not available in this WebView. Please allow microphone access and try again.');
+          }
+          mediaStream = await getUserMedia({ audio: true });
           source = ctx.createMediaStreamSource(mediaStream);
           processor = ctx.createScriptProcessor(4096, 1, 1);
           var gainNode = ctx.createGain();
@@ -224,6 +284,7 @@ function buildBridgeHtml({ wsUrl }) {
         };
 
         window.addEventListener('load', function () {
+          postRuntimeProbe();
           post({ type: 'bridge_ready' });
           connect();
         });

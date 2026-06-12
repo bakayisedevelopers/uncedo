@@ -23,7 +23,7 @@ import {
 import { uploadUserFile } from './storageService';
 import { getFirebaseClients } from '../firebase/config';
 
-const ACTIVE_SERVICE_REQUEST_STATUSES = ['collecting_details', 'scheduled_pending', 'matching', 'helper_found', 'accepted', 'en_route', 'arrived'];
+const ACTIVE_SERVICE_REQUEST_STATUSES = ['collecting_details', 'scheduled_pending', 'matching', 'helper_found', 'accepted', 'en_route', 'arrived', 'no_helper_available'];
 const CATEGORY_ENGINE_LOOKUP = {
   cleaning: cleaningPricingEngine,
   yard_maintenance: yardMaintenancePricingEngine,
@@ -93,6 +93,7 @@ export function buildServicePricingSnapshot({
   structuredAnswers = {},
   serviceOverrides = {},
   travelDistanceKm = null,
+  aiUsageSnapshot = null,
 } = {}) {
   const engine = CATEGORY_ENGINE_LOOKUP[categoryId];
   if (!engine || !serviceIds.length) return null;
@@ -101,6 +102,7 @@ export function buildServicePricingSnapshot({
     structuredAnswers,
     serviceOverrides,
     travelDistanceKm,
+    aiUsageSnapshot,
   });
   return {
     ...result,
@@ -149,7 +151,14 @@ export async function createCustomerServiceRequest({ user }) {
     description: '',
     serviceSummary: '',
     pricingSnapshot: null,
+    aiUsageSnapshot: null,
     helperAssignment: null,
+    helperQueue: [],
+    currentOfferHelperId: null,
+    offerExpiresAt: null,
+    offerToken: null,
+    offerRevision: 0,
+    lastOfferAt: null,
     transcript: [],
     structuredAnswers: {},
     createdAt: serverTimestamp(),
@@ -177,11 +186,13 @@ export async function createCustomerServiceCall({ requestId, user }) {
     status: 'dialing',
     aiLive: {
       agentType: 'customer_request',
+      model: 'gemini-live-2.5-flash-preview',
       status: 'dialing',
       wsConnected: false,
       audioInActive: false,
       audioOutActive: false,
       transcriptStatus: 'idle',
+      usageSummary: null,
       startedAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     },
@@ -247,6 +258,7 @@ export async function saveCustomerServiceQuotePreview({
   categoryId,
   serviceIds,
   structuredAnswers = {},
+  aiUsageSnapshot = null,
   selectedPortfolioReferences = [],
   referenceAttachments = [],
   serviceOverrides = {},
@@ -260,6 +272,7 @@ export async function saveCustomerServiceQuotePreview({
     serviceIds,
     structuredAnswers,
     serviceOverrides,
+    aiUsageSnapshot,
   });
   const summary = buildServiceRequestSummary({ categoryId, serviceIds, structuredAnswers });
   const timingDetails = deriveTimingDetails(structuredAnswers);
@@ -273,8 +286,14 @@ export async function saveCustomerServiceQuotePreview({
     selectedPortfolioReferences,
     referenceAttachments,
     pricingSnapshot,
+    aiUsageSnapshot,
     status: 'collecting_details',
     statusDetail: 'Quote ready. Waiting for customer approval.',
+    helperQueue: [],
+    currentOfferHelperId: null,
+    offerExpiresAt: null,
+    offerToken: null,
+    lastOfferAt: null,
     requestPayload: {
       categoryId,
       serviceIds,
@@ -283,6 +302,7 @@ export async function saveCustomerServiceQuotePreview({
       selectedPortfolioReferences,
       attachments: referenceAttachments,
       pricingSnapshot,
+      aiUsageSnapshot,
       timingPreference: timingDetails.timingPreference,
       scheduledForText: timingDetails.scheduledForText,
     },
@@ -291,6 +311,7 @@ export async function saveCustomerServiceQuotePreview({
 
   return {
     pricingSnapshot,
+    aiUsageSnapshot,
     summary,
     timingPreference: timingDetails.timingPreference,
     scheduledForText: timingDetails.scheduledForText,
@@ -303,6 +324,7 @@ export async function finalizeCustomerServiceRequest({
   categoryId,
   serviceIds,
   structuredAnswers = {},
+  aiUsageSnapshot = null,
   selectedPortfolioReferences = [],
   referenceAttachments = [],
   serviceOverrides = {},
@@ -312,6 +334,7 @@ export async function finalizeCustomerServiceRequest({
     serviceIds,
     structuredAnswers,
     serviceOverrides,
+    aiUsageSnapshot,
   });
   const summary = buildServiceRequestSummary({ categoryId, serviceIds, structuredAnswers });
   const timingDetails = deriveTimingDetails(structuredAnswers);
@@ -338,8 +361,16 @@ export async function finalizeCustomerServiceRequest({
     selectedPortfolioReferences,
     referenceAttachments,
     pricingSnapshot,
+    aiUsageSnapshot,
     status: nextStatus,
     statusDetail: nextStatusDetail,
+    helperQueue: [],
+    currentOfferHelperId: null,
+    offerExpiresAt: null,
+    offerToken: null,
+    lastOfferAt: null,
+    offerRevision: 0,
+    helperAssignment: null,
     requestPayload: {
       categoryId,
       serviceIds,
@@ -348,6 +379,7 @@ export async function finalizeCustomerServiceRequest({
       selectedPortfolioReferences,
       attachments: referenceAttachments,
       pricingSnapshot,
+      aiUsageSnapshot,
       timingPreference: timingDetails.timingPreference,
       scheduledForText: timingDetails.scheduledForText,
     },
@@ -401,6 +433,20 @@ export function subscribeToServiceRequestById(requestId, callback, onError) {
   const { db } = getFirebaseClients();
   return onSnapshot(
     doc(db, 'serviceRequests', requestId),
+    (snapshot) => callback(snapshot.exists() ? { id: snapshot.id, ...snapshot.data() } : null),
+    onError,
+  );
+}
+
+export function subscribeToServiceCallById(callId, callback, onError) {
+  if (!callId) {
+    callback(null);
+    return () => {};
+  }
+
+  const { db } = getFirebaseClients();
+  return onSnapshot(
+    doc(db, 'serviceCalls', callId),
     (snapshot) => callback(snapshot.exists() ? { id: snapshot.id, ...snapshot.data() } : null),
     onError,
   );
