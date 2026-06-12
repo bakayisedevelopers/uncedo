@@ -87,10 +87,21 @@ export function buildServiceRequestSummary({ categoryId = '', serviceIds = [], s
   return notableAnswers.length ? `${title}. ${notableAnswers.join('. ')}` : title;
 }
 
-export function buildServicePricingSnapshot({ categoryId = '', serviceIds = [], serviceOverrides = {} } = {}) {
+export function buildServicePricingSnapshot({
+  categoryId = '',
+  serviceIds = [],
+  structuredAnswers = {},
+  serviceOverrides = {},
+  travelDistanceKm = null,
+} = {}) {
   const engine = CATEGORY_ENGINE_LOOKUP[categoryId];
   if (!engine || !serviceIds.length) return null;
-  const result = engine({ serviceIds, serviceOverrides });
+  const result = engine({
+    serviceIds,
+    structuredAnswers,
+    serviceOverrides,
+    travelDistanceKm,
+  });
   return {
     ...result,
     quoteId: `service_quote_${Date.now()}`,
@@ -244,7 +255,12 @@ export async function saveCustomerServiceQuotePreview({
     throw new Error('Service request id is required.');
   }
 
-  const pricingSnapshot = buildServicePricingSnapshot({ categoryId, serviceIds, serviceOverrides });
+  const pricingSnapshot = buildServicePricingSnapshot({
+    categoryId,
+    serviceIds,
+    structuredAnswers,
+    serviceOverrides,
+  });
   const summary = buildServiceRequestSummary({ categoryId, serviceIds, structuredAnswers });
   const timingDetails = deriveTimingDetails(structuredAnswers);
 
@@ -291,7 +307,12 @@ export async function finalizeCustomerServiceRequest({
   referenceAttachments = [],
   serviceOverrides = {},
 }) {
-  const pricingSnapshot = buildServicePricingSnapshot({ categoryId, serviceIds, serviceOverrides });
+  const pricingSnapshot = buildServicePricingSnapshot({
+    categoryId,
+    serviceIds,
+    structuredAnswers,
+    serviceOverrides,
+  });
   const summary = buildServiceRequestSummary({ categoryId, serviceIds, structuredAnswers });
   const timingDetails = deriveTimingDetails(structuredAnswers);
   const categoryLabel = getCustomerServiceCategoryById(categoryId)?.label || 'Service request';

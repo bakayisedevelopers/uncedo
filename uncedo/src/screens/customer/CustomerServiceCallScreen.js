@@ -6,13 +6,14 @@ import { CustomerAiCallBridge } from '../../components/customer/CustomerAiCallBr
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { ErrorState, LoadingState } from '../../components/ui/States';
-import { AI_LIVE_PROXY_WS_URL } from '../../constants/runtimeConfig';
 import {
   buildCustomerIntakePromptCatalog,
   buildCustomerIntakeQuestionPlan,
+  buildMissingRequiredFields,
   getSelectedServiceMetadata,
 } from '../../constants/customerIntakeQuestions';
 import { createServiceRequestDraft } from '../../constants/requestPayload';
+import { AI_LIVE_PROXY_WS_URL } from '../../constants/runtimeConfig';
 import { getCustomerServiceById, getCustomerServiceCategoryById, getCustomerServicesForCategory } from '../../constants/serviceCatalog';
 import { useAuth } from '../../context/AuthContext';
 import { getFirebaseClients } from '../../firebase/config';
@@ -66,8 +67,14 @@ function buildCallIntroContext({ customerName = '', requestState = {} } = {}) {
     agentType: 'customer_request',
     customerName,
     topic: 'Uncedo customer service request intake',
-    description: 'Collect the category, service, timing, location, and any required follow-up details for a customer service request.',
-    primer: `Greet ${customerName || 'the customer'} by name, ask what help they need, identify exactly one category, collect at least one service, and ask whether they need help now or later.`,
+    description: 'Collect the category, service, timing, location, and all required follow-up details for a customer service request.',
+    primer: [
+      `Greet ${customerName || 'the customer'} by name and ask what help they need.`,
+      'Identify exactly one category and at least one service.',
+      'Use the question plan and store answers using the exact question ids in requestDraft.requiredAnswers or requestDraft.optionalAnswers.',
+      'All required category questions and all required service questions must be collected before the app can price the request.',
+      'Ask whether the customer needs help now or later.',
+    ].join(' '),
     serviceCatalog,
     questionPlan,
     requestState,
@@ -75,23 +82,31 @@ function buildCallIntroContext({ customerName = '', requestState = {} } = {}) {
 }
 
 function mergeStructuredDraft(current, nextDraft = {}) {
+  const nextCategoryId = nextDraft.categoryId || current.categoryId;
+  const nextServiceIds = Array.isArray(nextDraft.serviceIds) && nextDraft.serviceIds.length
+    ? nextDraft.serviceIds
+    : current.serviceIds;
+  const nextStructuredAnswers = {
+    ...(current.structuredAnswers || {}),
+    ...(nextDraft.structuredAnswers || {}),
+    ...(nextDraft.requiredAnswers || {}),
+    ...(nextDraft.optionalAnswers || {}),
+  };
+
   return {
     ...current,
-    categoryId: nextDraft.categoryId || current.categoryId,
-    serviceIds: Array.isArray(nextDraft.serviceIds) && nextDraft.serviceIds.length
-      ? nextDraft.serviceIds
-      : current.serviceIds,
-    structuredAnswers: {
-      ...(current.structuredAnswers || {}),
-      ...(nextDraft.structuredAnswers || {}),
-      ...(nextDraft.requiredAnswers || {}),
-      ...(nextDraft.optionalAnswers || {}),
-    },
+    categoryId: nextCategoryId,
+    serviceIds: nextServiceIds,
+    structuredAnswers: nextStructuredAnswers,
     selectedPortfolioReferences: Array.isArray(nextDraft.selectedPortfolioReferences)
       ? nextDraft.selectedPortfolioReferences
       : current.selectedPortfolioReferences,
     safetyFlags: Array.isArray(nextDraft.safetyFlags) ? nextDraft.safetyFlags : current.safetyFlags,
-    missingRequired: Array.isArray(nextDraft.missingRequired) ? nextDraft.missingRequired : current.missingRequired,
+    missingRequired: buildMissingRequiredFields({
+      categoryId: nextCategoryId,
+      serviceIds: nextServiceIds,
+      structuredAnswers: nextStructuredAnswers,
+    }),
   };
 }
 
@@ -290,6 +305,7 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
 
   const presentQuoteForApproval = async (nextStructuredState) => {
     if (!requestId || quotePresentedRef.current) return;
+    if (nextStructuredState.missingRequired?.length) return;
     if (!nextStructuredState.categoryId || !(nextStructuredState.serviceIds || []).length) return;
 
     setQuoteLoading(true);
@@ -297,6 +313,7 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
       const fallbackPricingSnapshot = buildServicePricingSnapshot({
         categoryId: nextStructuredState.categoryId,
         serviceIds: nextStructuredState.serviceIds,
+        structuredAnswers: nextStructuredState.structuredAnswers,
       });
       const nextQuotePreview = await saveCustomerServiceQuotePreview({
         requestId,
@@ -450,7 +467,7 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
         setStructuredRequest(nextStructuredState);
         setSelectionRequest(nextSelectionRequest);
         persistStructuredState(nextStructuredState).catch(() => null);
-        if ((message.agentStatus || nextDraft.status) === 'ready_to_search' && !nextStructuredState.missingRequired?.length) {
+        if (!nextStructuredState.missingRequired?.length) {
           presentQuoteForApproval(nextStructuredState);
         }
       }
@@ -479,8 +496,12 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
       serviceIds: structuredRequest.serviceIds.includes(serviceId)
         ? structuredRequest.serviceIds
         : [...structuredRequest.serviceIds, serviceId],
-      missingRequired: [],
     };
+    nextStructuredState.missingRequired = buildMissingRequiredFields({
+      categoryId: nextStructuredState.categoryId,
+      serviceIds: nextStructuredState.serviceIds,
+      structuredAnswers: nextStructuredState.structuredAnswers,
+    });
     setStructuredRequest(nextStructuredState);
     setSelectionRequest(null);
     persistStructuredState(nextStructuredState).catch(() => null);
@@ -552,7 +573,7 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
         <Text style={styles.headerTimer}>{formatElapsed(elapsedSeconds)}</Text>
         <Text style={styles.headerDetail}>
           {quoteAwaitingApproval
-            ? 'Your quote is ready. Review it in the pop-up and say “I approve” to continue.'
+            ? 'Your quote is ready. Review it in the pop-up and say "I approve" to continue.'
             : callStatusMeta.detail}
         </Text>
       </View>
@@ -739,7 +760,7 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
                   <Text style={styles.quoteTotalValue}>{formatCurrency(quotePreview.pricingSnapshot.total)}</Text>
                 </View>
                 <Text style={styles.quoteHint}>
-                  Say “I approve” to continue, or say “decline” to review the details again. Buttons stay available as fallback.
+                  Say "I approve" to continue, or say "decline" to review the details again. Buttons stay available as fallback.
                 </Text>
                 {quoteAwaitingApproval ? (
                   <View style={styles.quoteActions}>
