@@ -1,3 +1,4 @@
 import { createCategoryPricingEngine } from './categoryPricingEngineFactory';
 
-export const beautyPricingEngine = createCategoryPricingEngine('beauty');
+export const barberPricingEngine = createCategoryPricingEngine('barber');
+

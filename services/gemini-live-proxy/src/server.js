@@ -29,6 +29,22 @@ const AI_TUTOR_SYSTEM_INSTRUCTION = [
   'Do not hallucinate unseen diagrams.',
 ].join(' ');
 
+const AI_CUSTOMER_REQUEST_SYSTEM_INSTRUCTION = [
+  'You are the Uncedo AI service request agent.',
+  'Your job is to help a customer request a real-world service through a natural voice call.',
+  'Always identify exactly one category first, then at least one service inside that category.',
+  'Ask one follow-up question at a time.',
+  'Prioritize required questions before optional questions.',
+  'If a customer mixes categories, ask them to choose one category for this request.',
+  'Speak naturally, briefly, and clearly.',
+  'Address the customer by name when available.',
+  'Do not calculate prices yourself. The app pricing engine calculates the price and may send you a quote to announce.',
+  'When the app sends a quote, explain it clearly, ask for approval, and wait for the customer to confirm or decline.',
+  'Return compact JSON whenever possible in this shape: {"speak":"...","status":"collecting|ready_to_search","requestDraft":{"categoryId":"","serviceIds":[],"requiredAnswers":{},"optionalAnswers":{},"missingRequired":[],"selectedPortfolioReferences":[],"safetyFlags":[]},"selectionRequest":{"type":"service_selection|reference_upload|none","prompt":"..."}}.',
+  'Only mark status as ready_to_search when category and at least one service are confirmed.',
+  'Do not invent categories or services outside the provided catalog.',
+].join(' ');
+
 function normalizeQuestionId(value, fallback = 'q1') {
   const next = String(value || '').trim();
   return next || fallback;
@@ -43,7 +59,7 @@ function clip(value, max = 700) {
 function parseAiPayload(text = '') {
   const raw = String(text || '').trim();
   if (!raw) return {
-    speak: '', boardActions: [], textMode: 'readonly', questionId: null,
+    speak: '', boardActions: [], textMode: 'readonly', questionId: null, requestDraft: null, selectionRequest: null, status: '',
   };
 
   const parse = (candidate) => {
@@ -53,6 +69,9 @@ function parseAiPayload(text = '') {
       boardActions: Array.isArray(parsed?.boardActions) ? parsed.boardActions : [],
       textMode: String(parsed?.textMode || 'readonly').toLowerCase() === 'readwrite' ? 'readwrite' : 'readonly',
       questionId: parsed?.questionId || null,
+      requestDraft: parsed?.requestDraft && typeof parsed.requestDraft === 'object' ? parsed.requestDraft : null,
+      selectionRequest: parsed?.selectionRequest && typeof parsed.selectionRequest === 'object' ? parsed.selectionRequest : null,
+      status: String(parsed?.status || '').trim().toLowerCase(),
     };
   };
 
@@ -66,14 +85,14 @@ function parseAiPayload(text = '') {
         return parse(raw.slice(start, end + 1));
       } catch {
         return {
-          speak: raw, boardActions: [], textMode: 'readonly', questionId: null,
+          speak: raw, boardActions: [], textMode: 'readonly', questionId: null, requestDraft: null, selectionRequest: null, status: '',
         };
       }
     }
   }
 
   return {
-    speak: raw, boardActions: [], textMode: 'readonly', questionId: null,
+    speak: raw, boardActions: [], textMode: 'readonly', questionId: null, requestDraft: null, selectionRequest: null, status: '',
   };
 }
 
@@ -81,19 +100,28 @@ function send(ws, payload) {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(payload));
 }
 
-async function verifyAndLoadSession(token, sessionId) {
+async function verifyAndLoadSession(token, sessionId, callId) {
   const decoded = await admin.auth().verifyIdToken(String(token || ''));
   const uid = decoded.uid;
+  if (callId) {
+    const callSnap = await db.collection('serviceCalls').doc(callId).get();
+    if (!callSnap.exists) throw new Error('Service call not found.');
+    const call = callSnap.data() || {};
+    if (call.customerId !== uid && call.userId !== uid) throw new Error('Unauthorized service call access.');
+    return { uid, resourceId: callId, resourceKind: 'service_call', session: call };
+  }
+
   const snap = await db.collection('sessions').doc(sessionId).get();
   if (!snap.exists) throw new Error('Session not found.');
   const session = snap.data() || {};
   if (session.sessionType !== 'ai') throw new Error('Session is not an AI session.');
   if (session.studentId !== uid && session.tutorId !== uid) throw new Error('Unauthorized session access.');
-  return { uid, session };
+  return { uid, resourceId: sessionId, resourceKind: 'session', session };
 }
 
-async function writeAiSnapshot(sessionId, patch = {}) {
-  await db.collection('sessions').doc(sessionId).set({
+async function writeAiSnapshot(resourceKind, resourceId, patch = {}) {
+  const collectionName = resourceKind === 'service_call' ? 'serviceCalls' : 'sessions';
+  await db.collection(collectionName).doc(resourceId).set({
     aiLive: {
       ...patch,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -102,7 +130,8 @@ async function writeAiSnapshot(sessionId, patch = {}) {
   }, { merge: true });
 }
 
-function createBufferedWriters(sessionId) {
+function createBufferedWriters(resourceKind, resourceId) {
+  const collectionName = resourceKind === 'service_call' ? 'serviceCalls' : 'sessions';
   const transcriptBuffer = [];
   const boardBuffer = [];
   let flushing = false;
@@ -115,7 +144,7 @@ function createBufferedWriters(sessionId) {
       const batch = db.batch();
       while (transcriptBuffer.length) {
         const item = transcriptBuffer.shift();
-        const ref = db.collection('sessions').doc(sessionId).collection('aiTranscriptEvents').doc();
+        const ref = db.collection(collectionName).doc(resourceId).collection('aiTranscriptEvents').doc();
         batch.set(ref, {
           ...item,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -123,7 +152,7 @@ function createBufferedWriters(sessionId) {
       }
       while (boardBuffer.length) {
         const item = boardBuffer.shift();
-        const ref = db.collection('sessions').doc(sessionId).collection('aiBoardActions').doc();
+        const ref = db.collection(collectionName).doc(resourceId).collection('aiBoardActions').doc();
         batch.set(ref, {
           ...item,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -145,6 +174,7 @@ function createBufferedWriters(sessionId) {
 
 function createContextState(session = {}) {
   return {
+    agentType: String(session?.aiLive?.agentType || 'tutor').trim().toLowerCase() || 'tutor',
     topic: String(session.topic || ''),
     description: String(session.requestDescription || ''),
     extractedText: String(session?.boardPreparationSource?.extractedText || ''),
@@ -152,6 +182,11 @@ function createContextState(session = {}) {
     activeQuestionId: null,
     answersByQuestion: {},
     conversation: [],
+    customerName: '',
+    serviceCatalog: [],
+    questionPlan: {},
+    requestState: {},
+    primer: '',
   };
 }
 
@@ -184,7 +219,24 @@ function buildConversationSummary(state) {
     .join('\n');
 }
 
+function buildCustomerRequestPrompt(state, studentText = '') {
+  return [
+    'CUSTOMER SERVICE REQUEST CONTEXT:',
+    `Customer name: ${clip(state.customerName || 'Customer', 120)}`,
+    `Current request state: ${clip(JSON.stringify(state.requestState || {}), 1800)}`,
+    `Service catalog: ${clip(JSON.stringify(state.serviceCatalog || []), 6000)}`,
+    `Question plan: ${clip(JSON.stringify(state.questionPlan || {}), 6000)}`,
+    `Recent conversation summary:\n${buildConversationSummary(state) || '(none)'}`,
+    'Follow the service request agent system rules.',
+    'Return compact JSON whenever possible with speak, status, requestDraft, and selectionRequest.',
+    `Customer turn: ${studentText}`,
+  ].join('\n\n');
+}
+
 function buildEffectiveContextPrompt(state, studentText = '') {
+  if (state.agentType === 'customer_request') {
+    return buildCustomerRequestPrompt(state, studentText);
+  }
   const current = buildQuestionSummary(state, state.activeQuestionId);
   return [
     'CONTEXT FOR THIS TURN:',
@@ -277,13 +329,13 @@ function writeUpgradeError(socket, statusCode, message) {
 }
 
 wss.on('connection', async (ws, request, context) => {
-  const { sessionId, uid, session } = context;
-  const writers = createBufferedWriters(sessionId);
+  const { resourceId, resourceKind, uid, session } = context;
+  const writers = createBufferedWriters(resourceKind, resourceId);
   const contextState = createContextState(session);
   let geminiLiveSession = null;
   let ended = false;
 
-  await writeAiSnapshot(sessionId, {
+  await writeAiSnapshot(resourceKind, resourceId, {
     status: 'connected',
     wsConnected: true,
     audioInActive: false,
@@ -323,10 +375,10 @@ wss.on('connection', async (ws, request, context) => {
 
       if (speak) {
         send(ws, {
-          type: 'transcript_delta', text: speak, questionId, textMode,
+          type: 'transcript_delta', text: speak, questionId, textMode, requestDraft: parsed.requestDraft, selectionRequest: parsed.selectionRequest, agentStatus: parsed.status,
         });
         send(ws, {
-          type: 'transcript_final', text: speak, questionId, textMode,
+          type: 'transcript_final', text: speak, questionId, textMode, requestDraft: parsed.requestDraft, selectionRequest: parsed.selectionRequest, agentStatus: parsed.status,
         });
         writers.pushTranscript({
           role: 'assistant',
@@ -357,11 +409,11 @@ wss.on('connection', async (ws, request, context) => {
       send(ws, {
         type: 'conversation_event',
         event: {
-          role: 'assistant', text: speak, questionId, textMode,
+          role: 'assistant', text: speak, questionId, textMode, requestDraft: parsed.requestDraft, selectionRequest: parsed.selectionRequest, agentStatus: parsed.status,
         },
       });
       send(ws, { type: 'status', status: 'speaking' });
-      writeAiSnapshot(sessionId, {
+      writeAiSnapshot(resourceKind, resourceId, {
         status: 'speaking',
         audioInActive: true,
         audioOutActive: true,
@@ -378,7 +430,7 @@ wss.on('connection', async (ws, request, context) => {
   try {
     console.log(JSON.stringify({
       event: 'gemini_live_connect_start',
-      sessionId,
+      sessionId: resourceId,
       project: process.env.GOOGLE_CLOUD_PROJECT || '',
       location: process.env.GOOGLE_CLOUD_LOCATION || 'us-central1',
     }));
@@ -388,18 +440,20 @@ wss.on('connection', async (ws, request, context) => {
         responseModalities: ['AUDIO', 'TEXT'],
         inputAudioTranscription: {},
         outputAudioTranscription: {},
-        systemInstruction: AI_TUTOR_SYSTEM_INSTRUCTION,
+        systemInstruction: contextState.agentType === 'customer_request'
+          ? AI_CUSTOMER_REQUEST_SYSTEM_INSTRUCTION
+          : AI_TUTOR_SYSTEM_INSTRUCTION,
       },
       callbacks: { onmessage: onGeminiMessage },
     });
     console.log(JSON.stringify({
       event: 'gemini_live_connect_success',
-      sessionId,
+      sessionId: resourceId,
     }));
   } catch (error) {
     console.error(JSON.stringify({
       event: 'gemini_live_connect_failed',
-      sessionId,
+      sessionId: resourceId,
       message: error?.message || 'Unknown Gemini connection error',
     }));
     send(ws, { type: 'error', message: `Gemini connection failed: ${error.message}` });
@@ -410,7 +464,7 @@ wss.on('connection', async (ws, request, context) => {
     ended = true;
     try { await writers.close(); } catch {}
     try { await geminiLiveSession?.close?.(); } catch {}
-    await writeAiSnapshot(sessionId, {
+    await writeAiSnapshot(resourceKind, resourceId, {
       status,
       wsConnected: false,
       audioInActive: false,
@@ -439,6 +493,12 @@ wss.on('connection', async (ws, request, context) => {
       contextState.topic = String(incoming.topic || contextState.topic || '');
       contextState.description = String(incoming.description || contextState.description || '');
       contextState.extractedText = String(incoming.extractedText || contextState.extractedText || '');
+      contextState.agentType = String(incoming.agentType || contextState.agentType || 'tutor').trim().toLowerCase() || 'tutor';
+      contextState.customerName = String(incoming.customerName || contextState.customerName || '');
+      contextState.serviceCatalog = Array.isArray(incoming.serviceCatalog) ? incoming.serviceCatalog : [];
+      contextState.questionPlan = incoming.questionPlan && typeof incoming.questionPlan === 'object' ? incoming.questionPlan : {};
+      contextState.requestState = incoming.requestState && typeof incoming.requestState === 'object' ? incoming.requestState : {};
+      contextState.primer = String(incoming.primer || '').trim();
       contextState.questions = Array.isArray(incoming.questions)
         ? incoming.questions.map((question, index) => ({
           questionId: normalizeQuestionId(question?.questionId, `q${index + 1}`),
@@ -453,37 +513,46 @@ wss.on('connection', async (ws, request, context) => {
 
       const primer = buildEffectiveContextPrompt(
         contextState,
-        'Session initialized. Start from active question and ask learner readiness.',
+        contextState.primer || (contextState.agentType === 'customer_request'
+          ? `Greet ${contextState.customerName || 'the customer'} and ask what help they need.`
+          : 'Session initialized. Start from active question and ask learner readiness.'),
       );
       geminiLiveSession?.sendClientContent?.({ turns: [{ role: 'user', parts: [{ text: primer }] }] });
       send(ws, { type: 'status', status: 'connected' });
       return;
     }
 
-    if (message.type === 'student_text') {
-      const studentText = String(message.text || '').trim();
-      if (!studentText) return;
+    if (message.type === 'customer_text' || message.type === 'student_text') {
+      const customerText = String(message.text || '').trim();
+      if (!customerText) return;
       const qid = normalizeQuestionId(
         message?.metadata?.questionId,
         contextState.activeQuestionId || 'q1',
       );
       contextState.activeQuestionId = qid;
       contextState.conversation.push({
-        role: 'student', text: studentText, ts: Date.now(), questionId: qid,
+        role: 'student', text: customerText, ts: Date.now(), questionId: qid,
       });
       writers.pushTranscript({
-        role: 'student', type: 'manual_text', text: studentText, uid, questionId: qid,
+        role: 'student', type: 'manual_text', text: customerText, uid, questionId: qid,
       });
-      send(ws, { type: 'conversation_event', event: { role: 'student', text: studentText, questionId: qid } });
+      send(ws, { type: 'conversation_event', event: { role: 'student', text: customerText, questionId: qid } });
 
-      const prompt = buildEffectiveContextPrompt(contextState, studentText);
+      const prompt = buildEffectiveContextPrompt(contextState, customerText);
       geminiLiveSession?.sendClientContent?.({ turns: [{ role: 'user', parts: [{ text: prompt }] }] });
+      return;
+    }
+
+    if (message.type === 'app_prompt') {
+      const appPrompt = String(message.text || '').trim();
+      if (!appPrompt) return;
+      geminiLiveSession?.sendClientContent?.({ turns: [{ role: 'user', parts: [{ text: appPrompt }] }] });
       return;
     }
 
     if (message.type === 'audio_in') {
       send(ws, { type: 'status', status: 'listening' });
-      await writeAiSnapshot(sessionId, {
+      await writeAiSnapshot(resourceKind, resourceId, {
         status: 'listening',
         audioInActive: true,
         transcriptStatus: 'streaming',
@@ -507,7 +576,7 @@ wss.on('connection', async (ws, request, context) => {
 
   ws.on('close', async () => { await endSession('disconnected'); });
   ws.on('error', async (error) => {
-    await writeAiSnapshot(sessionId, {
+    await writeAiSnapshot(resourceKind, resourceId, {
       status: 'error',
       wsConnected: false,
       lastError: String(error?.message || 'Unknown websocket error'),
@@ -524,20 +593,21 @@ server.on('upgrade', async (request, socket, head) => {
       return;
     }
     const sessionId = String(url.searchParams.get('sessionId') || '').trim();
+    const callId = String(url.searchParams.get('callId') || '').trim();
     const token = String(url.searchParams.get('token') || '').trim();
-    if (!sessionId || !token) {
-      writeUpgradeError(socket, 400, 'Missing sessionId or token');
+    if ((!sessionId && !callId) || !token) {
+      writeUpgradeError(socket, 400, 'Missing resource id or token');
       return;
     }
-    const { uid, session } = await verifyAndLoadSession(token, sessionId);
+    const { uid, session, resourceId, resourceKind } = await verifyAndLoadSession(token, sessionId, callId);
     console.log(JSON.stringify({
       event: 'ai_live_upgrade_allowed',
-      sessionId,
+      sessionId: resourceId,
       uid,
-      sessionType: session.sessionType || null,
+      sessionType: session.sessionType || session.callType || null,
     }));
     wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit('connection', ws, request, { sessionId, uid, session });
+      wss.emit('connection', ws, request, { resourceId, resourceKind, uid, session });
     });
   } catch (error) {
     console.error(JSON.stringify({

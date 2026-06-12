@@ -24,5 +24,9 @@ export const FIREBASE_PUBLIC_CONFIG = {
 };
 
 export const WEB_APP_BASE_URL = readPublicEnv(process.env.EXPO_PUBLIC_WEB_APP_URL, 'https://parakleo.bakayise.com').replace(/\/+$/, '');
+export const AI_LIVE_PROXY_WS_URL = readPublicEnv(
+  process.env.EXPO_PUBLIC_AI_LIVE_PROXY_WS_URL,
+  WEB_APP_BASE_URL.replace(/^https:\/\//i, 'wss://').replace(/^http:\/\//i, 'ws://'),
+).replace(/\/+$/, '');
 export const FIREBASE_EMULATOR_HOST = readPublicEnv(process.env.EXPO_PUBLIC_FIREBASE_EMULATOR_HOST, '10.0.2.2');
 export const USE_FIREBASE_EMULATORS = readPublicEnv(process.env.EXPO_PUBLIC_USE_FIREBASE_EMULATORS) === 'true';

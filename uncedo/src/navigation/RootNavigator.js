@@ -14,11 +14,14 @@ import { CustomerOnboardingScreen } from '../screens/customer/CustomerOnboarding
 import { CustomerPaymentsScreen } from '../screens/customer/CustomerPaymentsScreen';
 import { CustomerProfileScreen } from '../screens/customer/CustomerProfileScreen';
 import { CustomerSecurityScreen } from '../screens/customer/CustomerSecurityScreen';
+import { CustomerServiceCallScreen } from '../screens/customer/CustomerServiceCallScreen';
+import { CustomerServiceRequestsScreen } from '../screens/customer/CustomerServiceRequestsScreen';
 import { JobRequestThreadScreen } from '../screens/customer/JobRequestThreadScreen';
+import { ServiceRequestTrackingScreen } from '../screens/customer/ServiceRequestTrackingScreen';
 import { NotificationsScreen } from '../screens/student/NotificationsScreen';
 import { RequestDetailsScreen } from '../screens/student/RequestDetailsScreen';
-import { RequestStatusScreen } from '../screens/student/RequestStatusScreen';
 import { RequestsScreen } from '../screens/student/RequestsScreen';
+import { RequestStatusScreen } from '../screens/student/RequestStatusScreen';
 import { SessionRoomScreen } from '../screens/student/SessionRoomScreen';
 import {
   markAllNotificationsRead,
@@ -37,7 +40,7 @@ const authScreens = {
 
 const appScreens = {
   CustomerHome: CustomerHomeScreen,
-  Requests: RequestsScreen,
+  Requests: CustomerServiceRequestsScreen,
   Wallet: CustomerPaymentsScreen,
   Profile: CustomerProfileScreen,
   Onboarding: CustomerOnboardingScreen,
@@ -45,9 +48,12 @@ const appScreens = {
   CustomerSecurity: CustomerSecurityScreen,
   CustomerLegal: CustomerLegalScreen,
   Notifications: NotificationsScreen,
+  CustomerServiceCall: CustomerServiceCallScreen,
+  ServiceRequestTracking: ServiceRequestTrackingScreen,
+  JobRequestThread: JobRequestThreadScreen,
   RequestStatus: RequestStatusScreen,
   RequestDetails: RequestDetailsScreen,
-  JobRequestThread: JobRequestThreadScreen,
+  StudentRequests: RequestsScreen,
   SessionRoom: SessionRoomScreen,
 };
 
@@ -70,12 +76,8 @@ function resolveDeepLink(url) {
   const host = String(parts[0] || '').toLowerCase();
   const firstPathSegment = parts[1] || '';
 
-  if (host === 'request' && firstPathSegment) {
-    return { key: 'RequestStatus', params: { requestId: firstPathSegment, parentTab: 'Requests' } };
-  }
-
-  if (host === 'request-details' && firstPathSegment) {
-    return { key: 'RequestDetails', params: { requestId: firstPathSegment, parentTab: 'Requests' } };
+  if (host === 'service-request' && firstPathSegment) {
+    return { key: 'ServiceRequestTracking', params: { requestId: firstPathSegment, parentTab: 'Requests' } };
   }
 
   if (host === 'session' && firstPathSegment) {
@@ -90,12 +92,20 @@ function getParentTab(routeKey, params) {
     return params.parentTab;
   }
 
-  if (['RequestStatus', 'RequestDetails', 'SessionRoom'].includes(routeKey)) {
+  if (['ServiceRequestTracking', 'SessionRoom'].includes(routeKey)) {
     return 'Requests';
   }
 
   if (routeKey === 'JobRequestThread') {
     return 'CustomerHome';
+  }
+
+  if (routeKey === 'CustomerServiceCall') {
+    return 'CustomerHome';
+  }
+
+  if (['RequestStatus', 'RequestDetails', 'StudentRequests'].includes(routeKey)) {
+    return 'Requests';
   }
 
   return routeKey;
@@ -106,11 +116,19 @@ function resolveNotificationRoute(notification = {}) {
   const type = String(notification?.type || '').toLowerCase();
   const requestId = notification?.requestId || '';
   const sessionId = notification?.sessionId || '';
+  const requestType = String(notification?.requestType || notification?.entityType || '').toLowerCase();
 
   if (targetPath.startsWith('/app/session/')) {
     const targetSessionId = targetPath.split('/app/session/')[1] || sessionId;
     return targetSessionId
       ? { key: 'SessionRoom', params: { sessionId: targetSessionId, parentTab: 'Requests' } }
+      : { key: 'Requests', params: {} };
+  }
+
+  if (targetPath.startsWith('/service-request/')) {
+    const targetRequestId = targetPath.split('/service-request/')[1] || requestId;
+    return targetRequestId
+      ? { key: 'ServiceRequestTracking', params: { requestId: targetRequestId, parentTab: 'Requests' } }
       : { key: 'Requests', params: {} };
   }
 
@@ -129,7 +147,9 @@ function resolveNotificationRoute(notification = {}) {
   }
 
   if (requestId) {
-    return { key: 'RequestStatus', params: { requestId, parentTab: 'Requests' } };
+    return requestType === 'customer_service'
+      ? { key: 'ServiceRequestTracking', params: { requestId, parentTab: 'Requests' } }
+      : { key: 'RequestStatus', params: { requestId, parentTab: 'Requests' } };
   }
 
   return { key: 'CustomerHome', params: {} };
@@ -300,7 +320,7 @@ export function RootNavigator() {
 
   const activeTabKey = getParentTab(activeRoute.key, activeRoute.params);
   const ActiveScreen = appScreens[activeRoute.key] || appScreens.CustomerHome;
-  const isFullscreenRoute = ['CustomerHome', 'JobRequestThread', 'SessionRoom'].includes(activeRoute.key);
+  const isFullscreenRoute = ['CustomerHome', 'CustomerServiceCall', 'ServiceRequestTracking', 'JobRequestThread', 'SessionRoom'].includes(activeRoute.key);
   const isScrollableRoute = !isFullscreenRoute;
   const screenProps = {
     navigate: openRoute,
@@ -318,7 +338,7 @@ export function RootNavigator() {
     },
   };
 
-  const showBottomNav = bottomNavVisible && !['JobRequestThread', 'SessionRoom'].includes(activeRoute.key);
+  const showBottomNav = bottomNavVisible && !['CustomerServiceCall', 'ServiceRequestTracking', 'JobRequestThread', 'SessionRoom'].includes(activeRoute.key);
 
   return (
     <View style={[styles.safe, isFullscreenRoute ? styles.safeFullscreen : null]}>
