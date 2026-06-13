@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
   Modal,
   PermissionsAndroid,
   Platform,
@@ -24,7 +25,7 @@ import {
 } from '../../constants/customerIntakeQuestions';
 import { createServiceRequestDraft } from '../../constants/requestPayload';
 import { AI_LIVE_PROXY_WS_URL } from '../../constants/runtimeConfig';
-import { getCustomerServiceById, getCustomerServiceCategoryById, getCustomerServicesForCategory } from '../../constants/serviceCatalog';
+import { getCustomerServiceById, getCustomerServicesForCategory } from '../../constants/serviceCatalog';
 import { useAuth } from '../../context/AuthContext';
 import { getFirebaseClients } from '../../firebase/config';
 import {
@@ -42,7 +43,7 @@ import {
   uploadCustomerServiceReference,
 } from '../../services/customerServiceRequestService';
 import { colors } from '../../theme/colors';
-import { formatMissingRequirementLabel, getCallStatusMeta } from '../../utils/serviceRequestStatus';
+import { getCallStatusMeta } from '../../utils/serviceRequestStatus';
 
 function formatElapsed(seconds) {
   const total = Math.max(0, Number(seconds || 0));
@@ -55,6 +56,14 @@ function formatCurrency(value) {
   const amount = Number(value || 0);
   if (!Number.isFinite(amount)) return 'R0.00';
   return `R${amount.toFixed(2)}`;
+}
+
+function formatTimestamp(value) {
+  const date = new Date(Number(value || Date.now()));
+  return date.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
 function isLikelyApprovalText(value = '') {
@@ -124,12 +133,14 @@ function mergeStructuredDraft(current, nextDraft = {}) {
 export function CustomerServiceCallScreen({ navigate, goBack }) {
   const { user } = useAuth();
   const bridgeRef = useRef(null);
+  const scrollViewRef = useRef(null);
   const initSentRef = useRef(false);
   const finalizingRef = useRef(false);
   const callClosedRef = useRef(false);
   const callCompletionStatusRef = useRef('active');
   const quotePresentedRef = useRef(false);
   const quoteDecisionPendingRef = useRef(false);
+  const micPulseAnim = useRef(new Animated.Value(0)).current;
 
   const [requestId, setRequestId] = useState('');
   const [callId, setCallId] = useState('');
@@ -150,6 +161,8 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
   const [uploadedReferences, setUploadedReferences] = useState([]);
   const [aiUsageSnapshot, setAiUsageSnapshot] = useState(null);
   const [hasMicPermission, setHasMicPermission] = useState(Platform.OS === 'android' ? null : true);
+  const [audioInputLevel, setAudioInputLevel] = useState(0);
+  const [audioOutputLevel, setAudioOutputLevel] = useState(0);
   const [structuredRequest, setStructuredRequest] = useState(() => ({
     ...createServiceRequestDraft(),
     structuredAnswers: {},
@@ -173,6 +186,14 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
     [structuredRequest.structuredAnswers],
   );
   const quoteModalVisible = quoteLoading || !!quotePreview?.pricingSnapshot;
+  const micRingScale = micPulseAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [1, 1.34],
+  });
+  const micRingOpacity = micPulseAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.18, 0.55],
+  });
 
   useEffect(() => {
     let active = true;
@@ -297,6 +318,14 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
     const timer = setInterval(() => setElapsedSeconds((current) => current + 1), 1000);
     return () => clearInterval(timer);
   }, [callStatus]);
+
+  useEffect(() => {
+    Animated.timing(micPulseAnim, {
+      toValue: Math.max(audioInputLevel, 0),
+      duration: 120,
+      useNativeDriver: true,
+    }).start();
+  }, [audioInputLevel, micPulseAnim]);
 
   useEffect(() => () => {
     bridgeRef.current?.close?.();
@@ -484,6 +513,18 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
         return;
       }
 
+      if (payload.type === 'audio_level') {
+        const direction = String(payload?.payload?.direction || '').trim().toLowerCase();
+        const nextLevel = Math.max(0, Math.min(1, Number(payload?.payload?.level || 0)));
+        if (direction === 'input') {
+          setAudioInputLevel(nextLevel);
+        }
+        if (direction === 'output') {
+          setAudioOutputLevel(nextLevel);
+        }
+        return;
+      }
+
       if (payload.type === 'usage') {
         if (payload?.usage && typeof payload.usage === 'object') {
           setAiUsageSnapshot(payload.usage);
@@ -544,6 +585,7 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
           role: message.event.role,
           text: message.event.text || '',
           questionId: message.event.questionId || '',
+          createdAt: Date.now(),
         };
         setConversation((current) => [...current, nextEvent]);
         appendCustomerServiceTranscript(requestId, nextEvent).catch(() => null);
@@ -580,6 +622,8 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
     setError('');
     setCallStatus('dialing');
     setElapsedSeconds(0);
+    setAudioInputLevel(0);
+    setAudioOutputLevel(0);
     setBridgeInstanceKey((current) => current + 1);
   };
 
@@ -667,7 +711,7 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
 
       <View style={styles.header}>
         <Text style={styles.headerEyebrow}>Live request call</Text>
-        <Text style={styles.headerTitle}>Calling Uncedo AI</Text>
+        <Text style={styles.headerTitle}>Uncedo</Text>
         <Text style={styles.headerStatus}>{callStatusMeta.label}</Text>
         <Text style={styles.headerTimer}>{formatElapsed(elapsedSeconds)}</Text>
         <Text style={styles.headerDetail}>
@@ -675,70 +719,63 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
             ? 'Your quote is ready. Review it in the pop-up and say "I approve" to continue.'
             : callStatusMeta.detail}
         </Text>
+        <View style={styles.audioMeters}>
+          <View style={styles.audioMeterPill}>
+            <Text style={styles.audioMeterLabel}>You</Text>
+            <View style={styles.audioMeterTrack}>
+              <View style={[styles.audioMeterFill, { width: `${Math.max(8, audioInputLevel * 100)}%` }]} />
+            </View>
+          </View>
+          <View style={styles.audioMeterPill}>
+            <Text style={styles.audioMeterLabel}>AI</Text>
+            <View style={styles.audioMeterTrack}>
+              <View style={[styles.audioMeterFill, styles.audioMeterFillSecondary, { width: `${Math.max(8, audioOutputLevel * 100)}%` }]} />
+            </View>
+          </View>
+        </View>
       </View>
 
-      <ScrollView contentContainerStyle={styles.content}>
-        <Card style={styles.statusCard}>
-          <Text style={styles.sectionTitle}>What happens now</Text>
-          <Text style={styles.selectionCopy}>
-            {quoteAwaitingApproval
-              ? 'The quote is waiting for your approval. Matching will only start after you confirm.'
-              : callStatusMeta.detail}
-          </Text>
-          {canRetryCall ? (
-            <Button onPress={handleRetryCall} variant="secondary">
-              Retry live call
-            </Button>
-          ) : null}
-        </Card>
-
-        <Card style={styles.summaryCard}>
-          <Text style={styles.sectionTitle}>Current request</Text>
-          <Text style={styles.summaryLine}>
-            Category: {structuredRequest.categoryId ? (getCustomerServiceCategoryById(structuredRequest.categoryId)?.label || structuredRequest.categoryId) : 'Not selected yet'}
-          </Text>
-          <Text style={styles.summaryLine}>
-            Services: {selectedServiceMetadata.length ? selectedServiceMetadata.map((item) => item.label).join(', ') : 'Not selected yet'}
-          </Text>
-          <Text style={styles.summaryLine}>
-            Timing: {timingDetails.timingPreference === 'later' ? (timingDetails.scheduledForText || 'Scheduled for later') : 'Now / as soon as possible'}
-          </Text>
-          <Text style={styles.summaryLine}>
-            Saved address: {structuredRequest.serviceAddress || user?.customerProfile?.serviceAddress || 'Not available'}
-          </Text>
-          {structuredRequest.missingRequired?.length ? (
-            <View style={styles.requirementList}>
-              {structuredRequest.missingRequired.map((item) => (
-                <View key={item} style={styles.requirementPill}>
-                  <Text style={styles.requirementText}>{formatMissingRequirementLabel(item)}</Text>
-                </View>
-              ))}
-            </View>
-          ) : (
-            <View style={styles.readyPill}>
-              <Ionicons color="#166534" name="checkmark-circle" size={16} />
-              <Text style={styles.readyPillText}>Required request details collected</Text>
-            </View>
-          )}
-        </Card>
-
+      <ScrollView
+        ref={scrollViewRef}
+        contentContainerStyle={styles.content}
+        onContentSizeChange={() => scrollViewRef.current?.scrollToEnd({ animated: true })}
+      >
         {conversation.length ? (
-          <Card style={styles.transcriptCard}>
-            <Text style={styles.sectionTitle}>Conversation</Text>
-            <View style={styles.transcriptList}>
-              {conversation.map((item) => (
-                <View key={item.id} style={[styles.transcriptBubble, item.role === 'assistant' ? styles.assistantBubble : styles.customerBubble]}>
+          <View style={styles.transcriptList}>
+            {conversation.map((item) => (
+              <View
+                key={item.id}
+                style={[
+                  styles.transcriptRow,
+                  item.role === 'assistant' ? styles.assistantRow : styles.customerRow,
+                ]}
+              >
+                <View
+                  style={[
+                    styles.transcriptBubble,
+                    item.role === 'assistant' ? styles.assistantBubble : styles.customerBubble,
+                  ]}
+                >
                   <Text style={[styles.transcriptRole, item.role === 'assistant' ? styles.assistantRole : styles.customerRole]}>
-                    {item.role === 'assistant' ? 'Uncedo AI' : 'You'}
+                    {item.role === 'assistant' ? 'Uncedo' : 'You'}
                   </Text>
                   <Text style={[styles.transcriptText, item.role === 'assistant' ? null : styles.customerText]}>
                     {item.text}
                   </Text>
+                  <Text style={[styles.transcriptTime, item.role === 'assistant' ? styles.assistantTime : styles.customerTime]}>
+                    {formatTimestamp(item.createdAt)}
+                  </Text>
                 </View>
-              ))}
-            </View>
-          </Card>
-        ) : null}
+              </View>
+            ))}
+          </View>
+        ) : (
+          <View style={styles.emptyConversationState}>
+            <Text style={styles.emptyConversationText}>
+              Once the call connects, the conversation will appear here.
+            </Text>
+          </View>
+        )}
 
         {(selectionRequest || structuredRequest.categoryId) ? (
           <Card style={styles.selectionCard}>
@@ -797,12 +834,30 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
             <Text style={styles.errorText}>{error}</Text>
           </Card>
         ) : null}
+
+        {canRetryCall ? (
+          <Button onPress={handleRetryCall} variant="secondary">
+            Retry live call
+          </Button>
+        ) : null}
       </ScrollView>
 
       <View style={styles.controls}>
-        <Pressable accessibilityRole="button" onPress={() => bridgeRef.current?.toggleMute?.()} style={styles.iconButton}>
-          <Ionicons color={colors.text} name={isMuted ? 'mic-off' : 'mic'} size={22} />
-        </Pressable>
+        <View style={styles.micButtonWrap}>
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.micPulseRing,
+              {
+                opacity: isMuted ? 0.1 : micRingOpacity,
+                transform: [{ scale: isMuted ? 1 : micRingScale }],
+              },
+            ]}
+          />
+          <Pressable accessibilityRole="button" onPress={() => bridgeRef.current?.toggleMute?.()} style={[styles.iconButton, isMuted ? styles.iconButtonInactive : null]}>
+            <Ionicons color={colors.text} name={isMuted ? 'mic-off' : 'mic'} size={22} />
+          </Pressable>
+        </View>
         <Pressable accessibilityRole="button" style={[styles.iconButton, styles.iconButtonInactive]}>
           <Ionicons color={colors.text} name="volume-high" size={22} />
         </Pressable>
@@ -810,6 +865,9 @@ export function CustomerServiceCallScreen({ navigate, goBack }) {
           <Ionicons color="#ffffff" name="call" size={22} style={styles.endIcon} />
         </Pressable>
       </View>
+      <Text style={styles.disclaimerText}>
+        This is an AI-assisted conversation. AI can make mistakes.
+      </Text>
 
       <AttachmentPickerModal
         mode="library"
@@ -922,6 +980,42 @@ const styles = StyleSheet.create({
     marginTop: 8,
     textAlign: 'center',
   },
+  audioMeters: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 14,
+  },
+  audioMeterPill: {
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderColor: 'rgba(255,255,255,0.14)',
+    borderRadius: 999,
+    borderWidth: 1,
+    minWidth: 120,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  audioMeterLabel: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 10,
+    fontWeight: '800',
+    marginBottom: 6,
+    textTransform: 'uppercase',
+  },
+  audioMeterTrack: {
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 999,
+    height: 6,
+    overflow: 'hidden',
+    width: '100%',
+  },
+  audioMeterFill: {
+    backgroundColor: '#22c55e',
+    borderRadius: 999,
+    height: '100%',
+  },
+  audioMeterFillSecondary: {
+    backgroundColor: '#38bdf8',
+  },
   quoteModalBackdrop: {
     alignItems: 'center',
     backgroundColor: 'rgba(2,6,23,0.72)',
@@ -979,72 +1073,33 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: '900',
   },
-  summaryCard: {
-    gap: 8,
-  },
-  statusCard: {
-    gap: 10,
-  },
-  summaryLine: {
-    color: colors.muted,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  requirementList: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginTop: 4,
-  },
-  requirementPill: {
-    backgroundColor: '#fff7ed',
-    borderColor: '#fdba74',
-    borderRadius: 999,
-    borderWidth: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-  },
-  requirementText: {
-    color: '#9a3412',
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  readyPill: {
-    alignItems: 'center',
-    alignSelf: 'flex-start',
-    backgroundColor: '#dcfce7',
-    borderRadius: 999,
-    flexDirection: 'row',
-    gap: 6,
-    marginTop: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-  },
-  readyPillText: {
-    color: '#166534',
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  transcriptCard: {
-    gap: 12,
-  },
   transcriptList: {
     gap: 10,
+  },
+  transcriptRow: {
+    flexDirection: 'row',
+  },
+  assistantRow: {
+    justifyContent: 'flex-start',
+  },
+  customerRow: {
+    justifyContent: 'flex-end',
   },
   transcriptBubble: {
     borderRadius: 20,
     paddingHorizontal: 14,
     paddingVertical: 12,
+    width: '84%',
   },
   assistantBubble: {
-    backgroundColor: '#ffffff',
-    borderColor: colors.border,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderColor: 'rgba(255,255,255,0.1)',
     borderWidth: 1,
   },
   customerBubble: {
-    alignSelf: 'flex-end',
-    backgroundColor: colors.brand,
-    maxWidth: '88%',
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    borderColor: 'rgba(255,255,255,0.18)',
+    borderWidth: 1,
   },
   transcriptRole: {
     fontSize: 11,
@@ -1053,18 +1108,41 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
   assistantRole: {
-    color: colors.brandDark,
+    color: 'rgba(255,255,255,0.72)',
   },
   customerRole: {
-    color: 'rgba(255,255,255,0.8)',
+    color: 'rgba(255,255,255,0.72)',
   },
   transcriptText: {
-    color: colors.text,
+    color: '#ffffff',
     fontSize: 14,
     lineHeight: 21,
   },
   customerText: {
     color: '#ffffff',
+  },
+  transcriptTime: {
+    fontSize: 10,
+    marginTop: 8,
+  },
+  assistantTime: {
+    color: 'rgba(255,255,255,0.45)',
+  },
+  customerTime: {
+    color: 'rgba(255,255,255,0.45)',
+    textAlign: 'right',
+  },
+  emptyConversationState: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 240,
+    paddingHorizontal: 18,
+  },
+  emptyConversationText: {
+    color: 'rgba(255,255,255,0.48)',
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: 'center',
   },
   selectionCard: {
     gap: 12,
@@ -1184,6 +1262,26 @@ const styles = StyleSheet.create({
     paddingBottom: 24,
     position: 'absolute',
     right: 0,
+  },
+  disclaimerText: {
+    bottom: 6,
+    color: 'rgba(255,255,255,0.42)',
+    fontSize: 10,
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    textAlign: 'center',
+  },
+  micButtonWrap: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  micPulseRing: {
+    backgroundColor: '#22c55e',
+    borderRadius: 999,
+    height: 72,
+    position: 'absolute',
+    width: 72,
   },
   iconButton: {
     alignItems: 'center',

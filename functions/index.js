@@ -1240,6 +1240,11 @@ const HELPER_CATEGORY_SERVICE_MAP = {
   care: ['care'],
   car_wash: ['car_wash'],
 };
+const EARTH_RADIUS_KM = 6371;
+const DEFAULT_NEARBY_HELPERS_RADIUS_KM = 20;
+const MAX_NEARBY_HELPERS_RADIUS_KM = 50;
+const MAX_NEARBY_HELPERS_LIMIT = 50;
+const HELPER_LOCATION_STALE_MS = 15 * 60 * 1000;
 
 function isHelperAgreementCurrent(helper = {}) {
   const agreement = helper?.agreement || {};
@@ -1280,6 +1285,109 @@ function isHelperDispatchEligible(helper = {}, categoryId = '') {
     && helperSupportsCategory(helper, categoryId)
     && !isDispatchPaused
     && !isSuspendedOrBlocked;
+}
+
+function normalizeCoordinate(value) {
+  const next = Number(value);
+  return Number.isFinite(next) ? next : null;
+}
+
+function buildLiveLocationPayload(payload = {}) {
+  const latitude = normalizeCoordinate(payload.latitude);
+  const longitude = normalizeCoordinate(payload.longitude);
+  if (latitude === null || longitude === null) {
+    return null;
+  }
+
+  return {
+    latitude,
+    longitude,
+    accuracy: normalizeCoordinate(payload.accuracy),
+    altitude: normalizeCoordinate(payload.altitude),
+    altitudeAccuracy: normalizeCoordinate(payload.altitudeAccuracy),
+    heading: normalizeCoordinate(payload.heading),
+    speed: normalizeCoordinate(payload.speed),
+    source: String(payload.source || 'device').trim() || 'device',
+    updatedAtMs: Date.now(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
+}
+
+function getLiveLocationSnapshot(user = {}) {
+  const location = user?.liveLocation || {};
+  const latitude = normalizeCoordinate(location.latitude);
+  const longitude = normalizeCoordinate(location.longitude);
+  if (latitude === null || longitude === null) {
+    return null;
+  }
+
+  return {
+    latitude,
+    longitude,
+    accuracy: normalizeCoordinate(location.accuracy),
+    altitude: normalizeCoordinate(location.altitude),
+    altitudeAccuracy: normalizeCoordinate(location.altitudeAccuracy),
+    heading: normalizeCoordinate(location.heading),
+    speed: normalizeCoordinate(location.speed),
+    updatedAtMs: normalizeMillis(location.updatedAtMs ?? location.updatedAt),
+  };
+}
+
+function toRadians(value) {
+  return (Number(value) * Math.PI) / 180;
+}
+
+function computeDistanceKm(origin = {}, destination = {}) {
+  const originLatitude = normalizeCoordinate(origin.latitude);
+  const originLongitude = normalizeCoordinate(origin.longitude);
+  const destinationLatitude = normalizeCoordinate(destination.latitude);
+  const destinationLongitude = normalizeCoordinate(destination.longitude);
+
+  if (
+    originLatitude === null
+    || originLongitude === null
+    || destinationLatitude === null
+    || destinationLongitude === null
+  ) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const deltaLatitude = toRadians(destinationLatitude - originLatitude);
+  const deltaLongitude = toRadians(destinationLongitude - originLongitude);
+  const lat1 = toRadians(originLatitude);
+  const lat2 = toRadians(destinationLatitude);
+
+  const haversine = Math.sin(deltaLatitude / 2) ** 2
+    + Math.cos(lat1) * Math.cos(lat2) * (Math.sin(deltaLongitude / 2) ** 2);
+  const arc = 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+  return EARTH_RADIUS_KM * arc;
+}
+
+function getInitials(value = '') {
+  return String(value || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part.charAt(0).toUpperCase())
+    .join('');
+}
+
+function isHelperMapVisible(helper = {}) {
+  const isOnline = String(helper?.onlineStatus || '').toLowerCase() === 'online';
+  const hasLocationSharing = helper?.locationSharingEnabled !== false;
+  const location = getLiveLocationSnapshot(helper);
+  const isFresh = location?.updatedAtMs ? (Date.now() - location.updatedAtMs) <= HELPER_LOCATION_STALE_MS : false;
+  const verificationStatus = String(helper?.verificationStatus || '').toLowerCase();
+  const isDispatchPaused = isTruthyFlag(helper.dispatchPaused ?? helper.isDispatchPaused);
+
+  return isOnline
+    && hasLocationSharing
+    && isFresh
+    && verificationStatus === 'verified'
+    && isHelperAgreementCurrent(helper)
+    && !isDispatchPaused
+    && !isTruthyFlag(helper.suspended ?? helper.isSuspended ?? helper.blocked ?? helper.isBlocked);
 }
 
 function getHelperScore(helper = {}) {
@@ -3843,6 +3951,170 @@ exports.getPricingQuote = onRequest({ cors: true }, async (req, res) => {
   });
 
   res.status(200).json({ success: true, quote: sanitizePricingSnapshot(quotePayload) });
+});
+
+exports.updateHelperLiveLocation = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') {
+    res.status(405).json({ success: false, message: 'Method not allowed' });
+    return;
+  }
+
+  const token = getBearerToken(req);
+  if (!token) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+
+  const decoded = await admin.auth().verifyIdToken(token).catch(() => null);
+  if (!decoded?.uid) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+
+  const userRef = db.collection('users').doc(decoded.uid);
+  const userSnap = await userRef.get();
+  const userData = userSnap.data() || {};
+  const isHelper = String(userData.activeRole || userData.role || '').toLowerCase() === 'helper';
+  if (!isHelper) {
+    res.status(403).json({ success: false, message: 'Only helper accounts can publish live location.' });
+    return;
+  }
+
+  const liveLocation = buildLiveLocationPayload(req.body || {});
+  if (!liveLocation) {
+    res.status(400).json({ success: false, message: 'Valid latitude and longitude are required.' });
+    return;
+  }
+
+  try {
+    await userRef.set({
+      liveLocation,
+      locationSharingEnabled: true,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    res.json({
+      success: true,
+      location: {
+        latitude: liveLocation.latitude,
+        longitude: liveLocation.longitude,
+        accuracy: liveLocation.accuracy,
+        updatedAtMs: liveLocation.updatedAtMs,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: getSafeErrorMessage(error, 'Unable to update helper live location.'),
+    });
+  }
+});
+
+exports.getNearbyHelpersMapData = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') {
+    res.status(405).json({ success: false, message: 'Method not allowed' });
+    return;
+  }
+
+  const token = getBearerToken(req);
+  if (!token) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+
+  const decoded = await admin.auth().verifyIdToken(token).catch(() => null);
+  if (!decoded?.uid) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+
+  const latitude = normalizeCoordinate(req.body?.latitude);
+  const longitude = normalizeCoordinate(req.body?.longitude);
+  const radiusKm = Math.min(
+    MAX_NEARBY_HELPERS_RADIUS_KM,
+    Math.max(1, normalizePositiveNumber(req.body?.radiusKm, DEFAULT_NEARBY_HELPERS_RADIUS_KM)),
+  );
+  const limit = Math.min(
+    MAX_NEARBY_HELPERS_LIMIT,
+    Math.max(1, Math.floor(normalizePositiveNumber(req.body?.limit, 24))),
+  );
+
+  if (latitude === null || longitude === null) {
+    res.status(400).json({ success: false, message: 'Valid latitude and longitude are required.' });
+    return;
+  }
+
+  const currentUserRef = db.collection('users').doc(decoded.uid);
+
+  try {
+    await currentUserRef.set({
+      lastKnownLocation: {
+        latitude,
+        longitude,
+        source: 'customer_map',
+        updatedAtMs: Date.now(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    const helpersSnap = await db.collection('users')
+      .where('activeRole', '==', 'helper')
+      .where('onlineStatus', '==', 'online')
+      .limit(150)
+      .get();
+
+    const origin = { latitude, longitude };
+    const helpers = helpersSnap.docs
+      .map((item) => ({ uid: item.id, ...item.data() }))
+      .filter(isHelperMapVisible)
+      .map((helper) => {
+        const location = getLiveLocationSnapshot(helper);
+        const distanceKm = computeDistanceKm(origin, location);
+        const fullName = String(helper.fullName || helper.displayName || helper.firstName || 'Helper').trim();
+
+        return {
+          id: helper.uid,
+          fullName,
+          initials: getInitials(fullName),
+          profilePhoto: String(helper.profilePhoto || helper.selfieUrl || helper.photoURL || '').trim(),
+          distanceKm,
+          liveLocation: location,
+        };
+      })
+      .filter((helper) => Number.isFinite(helper.distanceKm) && helper.distanceKm <= radiusKm)
+      .sort((a, b) => a.distanceKm - b.distanceKm)
+      .slice(0, limit)
+      .map((helper) => ({
+        id: helper.id,
+        fullName: helper.fullName,
+        initials: helper.initials,
+        profilePhoto: helper.profilePhoto,
+        distanceKm: Number(helper.distanceKm.toFixed(2)),
+        liveLocation: {
+          latitude: helper.liveLocation.latitude,
+          longitude: helper.liveLocation.longitude,
+          accuracy: helper.liveLocation.accuracy,
+          updatedAtMs: helper.liveLocation.updatedAtMs,
+        },
+      }));
+
+    res.json({
+      success: true,
+      radiusKm,
+      currentUser: {
+        id: decoded.uid,
+        latitude,
+        longitude,
+      },
+      helpers,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: getSafeErrorMessage(error, 'Unable to load nearby helpers right now.'),
+    });
+  }
 });
 
 

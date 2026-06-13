@@ -2,7 +2,7 @@
   "expo": {
     "name": "Uncedo",
     "slug": "uncedo-mobile",
-    "scheme": "parakleo",
+    "scheme": "uncedo",
     "version": "0.1.0",
     "icon": "../Logo.png",
     "orientation": "default",
@@ -15,7 +15,7 @@
         "foregroundImage": "../Logo.png",
         "backgroundColor": "#ffffff"
       },
-      "package": "com.anonymous.parakleomobile",
+      "package": "com.anonymous.uncedomobile",
       "permissions": [
         "RECORD_AUDIO",
         "MODIFY_AUDIO_SETTINGS",
@@ -28,7 +28,7 @@
         "NSMicrophoneUsageDescription": "Uncedo uses your microphone so you can speak during live service calls.",
         "NSLocationWhenInUseUsageDescription": "Uncedo uses your location to find nearby helpers and route them to your service address."
       },
-      "bundleIdentifier": "com.anonymous.parakleomobile"
+      "bundleIdentifier": "com.anonymous.uncedomobile"
     },
     "extra": {
       "eas": {

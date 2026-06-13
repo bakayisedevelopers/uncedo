@@ -1,4 +1,4 @@
-export const WEB_APP_BASE_URL = 'https://parakleo.bakayise.com';
+export const WEB_APP_BASE_URL = 'https://uncedo.bakayise.com';
 
 export const LEGAL_URLS = {
   terms: `${WEB_APP_BASE_URL}/terms`,

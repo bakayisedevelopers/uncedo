@@ -143,6 +143,38 @@ const CATEGORY_QUESTION_PLAN = {
       }),
     ],
   },
+  body_care: {
+    required: [
+      q('timing_preference', 'Do you need this help now or later?', {
+        answerType: 'enum',
+        options: ['now', 'later'],
+      }),
+      q('service_for_person', 'Is this for you or someone else?', {
+        answerType: 'enum',
+        options: ['self', 'someone_else'],
+      }),
+      q('service_address_target', 'Where should the body care service happen?', {
+        answerType: 'enum',
+        options: ['current_location', 'saved_home_address', 'another_address'],
+      }),
+      q('body_care_setup', 'Should the helper bring oils, towels, and treatment items?', {
+        answerType: 'enum',
+        options: ['bring_everything', 'bring_some_items', 'use_mine'],
+      }),
+    ],
+    optional: [
+      q('scheduled_for_text', 'If this is for later, what date and time do you want the helper to come?', {
+        answerType: 'text',
+      }),
+      q('body_care_preference_notes', 'Any pressure, comfort, or scent preferences to share?', {
+        answerType: 'text',
+      }),
+      q('body_care_reference_photo_preference', 'Would you like to upload any reference photo or treatment inspiration?', {
+        answerType: 'enum',
+        options: ['yes', 'no'],
+      }),
+    ],
+  },
   care: {
     required: [
       q('timing_preference', 'Do you need this help now or later?', {
@@ -487,6 +519,117 @@ const SERVICE_QUESTION_PLAN = {
       }),
     ],
     optional: [q('hair_dye_reference_photo', 'Would you like to upload a reference photo?', { answerType: 'enum', options: ['yes', 'no'] })],
+  },
+  full_body_massage: {
+    required: [
+      q('massage_duration_preference', 'Would you like a 60-minute, 90-minute, or 120-minute session?', {
+        answerType: 'enum',
+        options: ['60_minutes', '90_minutes', '120_minutes'],
+      }),
+      q('massage_pressure_preference', 'What pressure do you prefer?', {
+        answerType: 'enum',
+        options: ['gentle', 'medium', 'firm'],
+      }),
+      q('massage_focus_goal', 'Is this for relaxation, tension relief, or recovery after activity?', {
+        answerType: 'enum',
+        options: ['relaxation', 'tension_relief', 'post_activity_recovery'],
+      }),
+    ],
+    optional: [q('massage_oil_preference', 'Do you want aromatherapy oils included?', {
+      answerType: 'enum',
+      options: ['yes', 'no'],
+    })],
+  },
+  back_neck_shoulder_massage: {
+    required: [
+      q('targeted_massage_duration', 'Would you like a 30-minute, 45-minute, or 60-minute session?', {
+        answerType: 'enum',
+        options: ['30_minutes', '45_minutes', '60_minutes'],
+      }),
+      q('targeted_massage_focus_area', 'Is the main focus your back, neck, shoulders, or all three?', {
+        answerType: 'enum',
+        options: ['back', 'neck', 'shoulders', 'all_three'],
+      }),
+      q('massage_pressure_preference', 'What pressure do you prefer?', {
+        answerType: 'enum',
+        options: ['gentle', 'medium', 'firm'],
+      }),
+    ],
+    optional: [q('targeted_massage_pain_notes', 'Any comfort notes the helper should know about?', { answerType: 'text' })],
+  },
+  foot_rub: {
+    required: [
+      q('foot_rub_duration', 'Would you like a 20-minute, 30-minute, or 45-minute foot rub?', {
+        answerType: 'enum',
+        options: ['20_minutes', '30_minutes', '45_minutes'],
+      }),
+      q('foot_rub_scope', 'Do you want feet only or feet and calves?', {
+        answerType: 'enum',
+        options: ['feet_only', 'feet_and_calves'],
+      }),
+      q('foot_rub_pressure_preference', 'What pressure do you prefer?', {
+        answerType: 'enum',
+        options: ['gentle', 'medium', 'firm'],
+      }),
+    ],
+    optional: [q('foot_rub_soak_addon', 'Would you like a warm soak included if available?', {
+      answerType: 'enum',
+      options: ['yes', 'no'],
+    })],
+  },
+  hand_arm_massage: {
+    required: [
+      q('hand_arm_massage_duration', 'Would you like a 20-minute, 30-minute, or 45-minute session?', {
+        answerType: 'enum',
+        options: ['20_minutes', '30_minutes', '45_minutes'],
+      }),
+      q('hand_arm_massage_scope', 'Do you want hands only, forearms only, or both?', {
+        answerType: 'enum',
+        options: ['hands_only', 'forearms_only', 'hands_and_forearms'],
+      }),
+      q('massage_pressure_preference', 'What pressure do you prefer?', {
+        answerType: 'enum',
+        options: ['gentle', 'medium', 'firm'],
+      }),
+    ],
+    optional: [q('hand_arm_massage_notes', 'Any comfort or sensitivity notes?', { answerType: 'text' })],
+  },
+  aromatherapy_massage: {
+    required: [
+      q('aromatherapy_duration', 'Would you like a 60-minute, 90-minute, or 120-minute session?', {
+        answerType: 'enum',
+        options: ['60_minutes', '90_minutes', '120_minutes'],
+      }),
+      q('aromatherapy_goal', 'Is this for relaxation, stress relief, or better sleep support?', {
+        answerType: 'enum',
+        options: ['relaxation', 'stress_relief', 'sleep_support'],
+      }),
+      q('aromatherapy_scent_profile', 'Do you prefer floral, citrus, mint, or unscented oils?', {
+        answerType: 'enum',
+        options: ['floral', 'citrus', 'mint', 'unscented'],
+      }),
+    ],
+    optional: [q('aromatherapy_skin_sensitivity', 'Any skin sensitivity the helper should know about?', {
+      answerType: 'enum',
+      options: ['yes', 'no'],
+    })],
+  },
+  body_scrub_treatment: {
+    required: [
+      q('body_scrub_scope', 'Do you want upper body, lower body, or a full body scrub?', {
+        answerType: 'enum',
+        options: ['upper_body', 'lower_body', 'full_body'],
+      }),
+      q('body_scrub_texture_preference', 'Do you want a gentle, medium, or exfoliating scrub?', {
+        answerType: 'enum',
+        options: ['gentle', 'medium', 'exfoliating'],
+      }),
+      q('body_scrub_finish', 'Should this include moisturising after the treatment?', {
+        answerType: 'enum',
+        options: ['yes', 'no'],
+      }),
+    ],
+    optional: [q('body_scrub_skin_notes', 'Any skin notes or product preferences?', { answerType: 'text' })],
   },
   babysitting: {
     required: [

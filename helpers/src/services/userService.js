@@ -21,6 +21,8 @@ export function buildDefaultHelperProfile({ uid, email, fullName }) {
     city: 'Johannesburg',
     rating: 0,
     onlineStatus: 'offline',
+    locationSharingEnabled: false,
+    liveLocation: null,
     verificationStatus: 'pending',
     referralSlug: buildReferralSlug(),
     agreement: {

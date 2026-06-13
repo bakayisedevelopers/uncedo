@@ -1,6 +1,9 @@
 import Expo
 import React
 import ReactAppDependencyProvider
+#if canImport(GoogleMaps)
+import GoogleMaps
+#endif
 
 @UIApplicationMain
 public class AppDelegate: ExpoAppDelegate {
@@ -27,6 +30,10 @@ public class AppDelegate: ExpoAppDelegate {
       withModuleName: "main",
       in: window,
       launchOptions: launchOptions)
+#endif
+
+#if canImport(GoogleMaps)
+    GMSServices.provideAPIKey("__GOOGLE_MAPS_API_KEY__")
 #endif
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)

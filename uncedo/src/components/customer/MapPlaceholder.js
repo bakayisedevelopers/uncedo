@@ -1,89 +1,197 @@
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { Image, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../../theme/colors';
 
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
+let NativeMapView = null;
+let NativeMarker = null;
+let PROVIDER_GOOGLE = null;
+
+if (Platform.OS !== 'web') {
+  const maps = require('react-native-maps');
+  NativeMapView = maps.default;
+  NativeMarker = maps.Marker;
+  PROVIDER_GOOGLE = maps.PROVIDER_GOOGLE;
+}
+
+const DEFAULT_REGION = {
+  latitude: -26.2041,
+  longitude: 28.0473,
+  latitudeDelta: 0.22,
+  longitudeDelta: 0.22,
+};
+
+function getInitials(name = '') {
+  const parts = String(name || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (!parts.length) return 'U';
+  if (parts.length === 1) {
+    return parts[0].slice(0, 2).toUpperCase() || 'U';
+  }
+
+  return `${parts[0][0] || ''}${parts[1][0] || ''}`.toUpperCase() || 'U';
+}
+
+function buildRegion(center = DEFAULT_REGION, radiusKm = 20) {
+  const latitude = Number(center?.latitude || DEFAULT_REGION.latitude);
+  const longitude = Number(center?.longitude || DEFAULT_REGION.longitude);
+  const latitudeDelta = Math.max(0.015, (radiusKm / 111) * 2.4);
+  const longitudeDelta = Math.max(
+    0.015,
+    latitudeDelta / Math.max(Math.cos((latitude * Math.PI) / 180), 0.35),
+  );
+
+  return {
+    latitude,
+    longitude,
+    latitudeDelta,
+    longitudeDelta,
+  };
+}
+
+function AvatarMarker({ initials, photoUri, isCurrentUser = false }) {
+  return (
+    <View style={styles.markerRoot}>
+      <View style={[styles.markerAvatar, isCurrentUser && styles.markerAvatarCurrent]}>
+        {photoUri ? (
+          <Image source={{ uri: photoUri }} style={styles.markerImage} />
+        ) : (
+          <Text style={styles.markerInitials}>{getInitials(initials)}</Text>
+        )}
+      </View>
+      <View style={[styles.markerPin, isCurrentUser && styles.markerPinCurrent]} />
+    </View>
+  );
 }
 
 export function MapPlaceholder({
-  markers = [],
-  zoom = 1,
-  offset = { x: 0, y: 0 },
+  currentUserMarker = null,
+  helperMarkers = [],
   floatingBottomInset = 196,
-  onZoomIn,
-  onZoomOut,
-  onPan,
+  radiusKm = 20,
+  isLoading = false,
+  errorMessage = '',
 }) {
+  const [region, setRegion] = useState(() => buildRegion(currentUserMarker, radiusKm));
+  const mapRef = useRef(null);
+
+  useEffect(() => {
+    if (!currentUserMarker) return;
+    setRegion(buildRegion(currentUserMarker, radiusKm));
+  }, [currentUserMarker, radiusKm]);
+
+  const recenter = () => {
+    if (!currentUserMarker) return;
+    const next = buildRegion(currentUserMarker, radiusKm);
+    setRegion(next);
+    mapRef.current?.animateToRegion?.(next, 350);
+  };
+
+  const zoom = (factor) => {
+    setRegion((current) => {
+      const next = {
+        ...current,
+        latitudeDelta: Math.max(0.004, current.latitudeDelta * factor),
+        longitudeDelta: Math.max(0.004, current.longitudeDelta * factor),
+      };
+      mapRef.current?.animateToRegion?.(next, 250);
+      return next;
+    });
+  };
+
+  const helperCount = helperMarkers.length;
+  const legendTitle = isLoading ? 'Finding nearby helpers' : `${helperCount} nearby helper${helperCount === 1 ? '' : 's'}`;
+  const legendCopy = errorMessage
+    || (currentUserMarker
+      ? `Showing helpers within ${radiusKm} km of your current location.`
+      : 'Allow location access to see your position and nearby helpers.');
+
+  if (!NativeMapView || !NativeMarker) {
+    return (
+      <View style={styles.map}>
+        <View style={styles.webFallback}>
+          <Ionicons color={colors.brandDark} name="map-outline" size={28} />
+          <Text style={styles.webFallbackTitle}>Live map is available in the mobile build.</Text>
+          <Text style={styles.webFallbackCopy}>{legendCopy}</Text>
+        </View>
+        <View style={[styles.legend, { bottom: floatingBottomInset }]}>
+          <Text style={styles.legendTitle}>{legendTitle}</Text>
+          <Text style={styles.legendCopy}>{legendCopy}</Text>
+        </View>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.map}>
-      <View style={styles.grid} />
-      <View style={styles.roadPrimary} />
-      <View style={styles.roadSecondary} />
-      <View style={styles.parkOne} />
-      <View style={styles.parkTwo} />
+      <NativeMapView
+        ref={mapRef}
+        customMapStyle={MAP_STYLE}
+        initialRegion={region}
+        onRegionChangeComplete={setRegion}
+        provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}
+        region={region}
+        showsBuildings
+        showsCompass={false}
+        showsIndoorLevelPicker={false}
+        showsMyLocationButton={false}
+        style={StyleSheet.absoluteFill}
+        toolbarEnabled={false}
+      >
+        {currentUserMarker ? (
+          <NativeMarker coordinate={currentUserMarker} identifier="current-user">
+            <AvatarMarker
+              initials={currentUserMarker.initials || 'You'}
+              isCurrentUser
+              photoUri={currentUserMarker.profilePhoto}
+            />
+          </NativeMarker>
+        ) : null}
 
-      {markers.map((marker) => {
-        const left = clamp(marker.x + (offset.x * 0.18 * zoom), 8, 86);
-        const top = clamp(marker.y + (offset.y * 0.18 * zoom), 10, 84);
-        return (
-          <View
-            key={marker.id}
-            style={[
-              styles.markerWrap,
-              {
-                left: `${left}%`,
-                top: `${top}%`,
-                transform: [{ scale: clamp(zoom, 0.88, 1.28) }],
-              },
-            ]}
+        {helperMarkers.map((helper) => (
+          <NativeMarker
+            coordinate={helper.coordinate}
+            identifier={helper.id}
+            key={helper.id}
           >
-            <View style={styles.markerDot}>
-              <Ionicons name="person" color="#ffffff" size={12} />
-            </View>
-            <View style={styles.markerLabel}>
-              <Text numberOfLines={1} style={styles.markerName}>{marker.name}</Text>
-              <Text numberOfLines={1} style={styles.markerMeta}>{marker.category}</Text>
-            </View>
-          </View>
-        );
-      })}
+            <AvatarMarker initials={helper.initials || helper.fullName} photoUri={helper.profilePhoto} />
+          </NativeMarker>
+        ))}
+      </NativeMapView>
 
       <View style={[styles.controls, { bottom: floatingBottomInset, top: 'auto' }]}>
-        <View style={styles.zoomControls}>
-          <Pressable accessibilityRole="button" onPress={onZoomIn} style={styles.controlButton}>
-            <Ionicons color={colors.text} name="add" size={18} />
-          </Pressable>
-          <Pressable accessibilityRole="button" onPress={onZoomOut} style={styles.controlButton}>
-            <Ionicons color={colors.text} name="remove" size={18} />
-          </Pressable>
-        </View>
-
-        <View style={styles.panControls}>
-          <Pressable accessibilityRole="button" onPress={() => onPan?.(0, -12)} style={styles.controlButton}>
-            <Ionicons color={colors.text} name="chevron-up" size={18} />
-          </Pressable>
-          <View style={styles.panRow}>
-            <Pressable accessibilityRole="button" onPress={() => onPan?.(-12, 0)} style={styles.controlButton}>
-              <Ionicons color={colors.text} name="chevron-back" size={18} />
-            </Pressable>
-            <Pressable accessibilityRole="button" onPress={() => onPan?.(12, 0)} style={styles.controlButton}>
-              <Ionicons color={colors.text} name="chevron-forward" size={18} />
-            </Pressable>
-          </View>
-          <Pressable accessibilityRole="button" onPress={() => onPan?.(0, 12)} style={styles.controlButton}>
-            <Ionicons color={colors.text} name="chevron-down" size={18} />
-          </Pressable>
-        </View>
+        <Pressable accessibilityRole="button" onPress={() => zoom(0.75)} style={styles.controlButton}>
+          <Ionicons color={colors.text} name="add" size={18} />
+        </Pressable>
+        <Pressable accessibilityRole="button" onPress={() => zoom(1.25)} style={styles.controlButton}>
+          <Ionicons color={colors.text} name="remove" size={18} />
+        </Pressable>
+        <Pressable accessibilityRole="button" onPress={recenter} style={styles.controlButton}>
+          <Ionicons color={colors.text} name="locate" size={18} />
+        </Pressable>
       </View>
 
       <View style={[styles.legend, { bottom: floatingBottomInset }]}>
-        <Text style={styles.legendTitle}>Nearby helpers</Text>
-        <Text style={styles.legendCopy}>Placeholder map markers until live provider locations are connected.</Text>
+        <Text style={styles.legendTitle}>{legendTitle}</Text>
+        <Text style={styles.legendCopy}>{legendCopy}</Text>
       </View>
     </View>
   );
 }
+
+const MAP_STYLE = [
+  {
+    featureType: 'poi.business',
+    stylers: [{ visibility: 'off' }],
+  },
+  {
+    featureType: 'transit',
+    stylers: [{ visibility: 'off' }],
+  },
+];
 
 const styles = StyleSheet.create({
   map: {
@@ -91,98 +199,70 @@ const styles = StyleSheet.create({
     flex: 1,
     overflow: 'hidden',
   },
-  grid: {
-    ...StyleSheet.absoluteFillObject,
-    borderColor: 'rgba(15,23,42,0.04)',
-    borderWidth: 12,
+  webFallback: {
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'center',
+    paddingHorizontal: 28,
   },
-  roadPrimary: {
-    backgroundColor: 'rgba(255,255,255,0.9)',
-    borderRadius: 999,
-    height: 18,
-    left: '-12%',
-    position: 'absolute',
-    top: '40%',
-    transform: [{ rotate: '-12deg' }],
-    width: '132%',
+  webFallbackTitle: {
+    color: colors.text,
+    fontSize: 18,
+    fontWeight: '800',
+    marginTop: 12,
+    textAlign: 'center',
   },
-  roadSecondary: {
-    backgroundColor: 'rgba(255,255,255,0.9)',
-    borderRadius: 999,
-    height: 18,
-    position: 'absolute',
-    right: '-24%',
-    top: '58%',
-    transform: [{ rotate: '72deg' }],
-    width: '92%',
+  webFallbackCopy: {
+    color: colors.muted,
+    fontSize: 13,
+    lineHeight: 20,
+    marginTop: 8,
+    textAlign: 'center',
   },
-  parkOne: {
-    backgroundColor: '#ccefd6',
-    borderRadius: 28,
-    height: 140,
-    left: '8%',
-    position: 'absolute',
-    top: '14%',
-    width: 110,
+  markerRoot: {
+    alignItems: 'center',
   },
-  parkTwo: {
-    backgroundColor: '#d3f2de',
-    borderRadius: 999,
-    bottom: '14%',
-    height: 180,
-    position: 'absolute',
-    right: '-4%',
-    width: 180,
-  },
-  markerWrap: {
-    position: 'absolute',
-  },
-  markerDot: {
+  markerAvatar: {
     alignItems: 'center',
     backgroundColor: colors.brand,
     borderColor: '#ffffff',
     borderRadius: 999,
     borderWidth: 3,
-    height: 28,
+    height: 34,
     justifyContent: 'center',
-    width: 28,
+    overflow: 'hidden',
+    width: 34,
   },
-  markerLabel: {
-    backgroundColor: 'rgba(255,255,255,0.96)',
-    borderColor: 'rgba(15,23,42,0.08)',
-    borderRadius: 14,
-    borderWidth: 1,
-    gap: 2,
-    marginTop: 6,
-    maxWidth: 112,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
+  markerAvatarCurrent: {
+    backgroundColor: '#2563eb',
   },
-  markerName: {
-    color: colors.text,
+  markerImage: {
+    height: '100%',
+    width: '100%',
+  },
+  markerInitials: {
+    color: '#ffffff',
     fontSize: 12,
-    fontWeight: '800',
+    fontWeight: '900',
   },
-  markerMeta: {
-    color: colors.muted,
-    fontSize: 10,
-    fontWeight: '700',
+  markerPin: {
+    backgroundColor: colors.brand,
+    borderBottomLeftRadius: 8,
+    borderBottomRightRadius: 8,
+    borderTopLeftRadius: 2,
+    borderTopRightRadius: 2,
+    height: 14,
+    marginTop: -2,
+    transform: [{ rotate: '45deg' }],
+    width: 14,
+  },
+  markerPinCurrent: {
+    backgroundColor: '#2563eb',
   },
   controls: {
-    gap: 12,
+    gap: 8,
     position: 'absolute',
     right: 16,
-  },
-  zoomControls: {
-    gap: 8,
-  },
-  panControls: {
-    alignItems: 'center',
-    gap: 8,
-  },
-  panRow: {
-    flexDirection: 'row',
-    gap: 8,
   },
   controlButton: {
     alignItems: 'center',
@@ -200,7 +280,7 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     borderWidth: 1,
     left: 16,
-    maxWidth: 220,
+    maxWidth: 240,
     paddingHorizontal: 14,
     paddingVertical: 12,
     position: 'absolute',

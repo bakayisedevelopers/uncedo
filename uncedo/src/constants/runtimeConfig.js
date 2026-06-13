@@ -23,7 +23,7 @@ export const FIREBASE_PUBLIC_CONFIG = {
   measurementId: readPublicEnv(process.env.EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID, DEFAULT_FIREBASE_CONFIG.measurementId),
 };
 
-export const WEB_APP_BASE_URL = readPublicEnv(process.env.EXPO_PUBLIC_WEB_APP_URL, 'https://parakleo.bakayise.com').replace(/\/+$/, '');
+export const WEB_APP_BASE_URL = readPublicEnv(process.env.EXPO_PUBLIC_WEB_APP_URL, 'https://uncedo.bakayise.com').replace(/\/+$/, '');
 export const AI_LIVE_PROXY_WS_URL = readPublicEnv(
   process.env.EXPO_PUBLIC_AI_LIVE_PROXY_WS_URL,
   WEB_APP_BASE_URL.replace(/^https:\/\//i, 'wss://').replace(/^http:\/\//i, 'ws://'),

@@ -71,9 +71,12 @@ export function StudentRtcSessionView({
   }, [authHandoff]);
   const injectedRuntimeProbe = `
     (function () {
+      function getSessionBridge() {
+        return window.UncedoSessionBridge || window.ParakleoSessionBridge || null;
+      }
       try {
-        if (!window.__PARAKLEO_CONSOLE_BRIDGED__) {
-          window.__PARAKLEO_CONSOLE_BRIDGED__ = true;
+        if (!window.__UNCEDO_CONSOLE_BRIDGED__) {
+          window.__UNCEDO_CONSOLE_BRIDGED__ = true;
           var originalLog = console.log;
           var originalWarn = console.warn;
           var originalError = console.error;
@@ -83,7 +86,7 @@ export function StudentRtcSessionView({
                 if (typeof entry === 'string') return entry;
                 try { return JSON.stringify(entry); } catch (_e) { return String(entry); }
               }).join(' ');
-              if (serialized.indexOf('parakleo:') === -1 && serialized.indexOf('webrtc') === -1) return;
+              if (serialized.indexOf('uncedo:') === -1 && serialized.indexOf('webrtc') === -1) return;
               if (window.ReactNativeWebView && typeof window.ReactNativeWebView.postMessage === 'function') {
                 window.ReactNativeWebView.postMessage(JSON.stringify({
                   type: 'log',
@@ -99,8 +102,8 @@ export function StudentRtcSessionView({
           console.error = function () { forward('error', arguments); originalError && originalError.apply(console, arguments); };
         }
 
-        if (!window.__PARAKLEO_RTC_PROBE__) {
-          window.__PARAKLEO_RTC_PROBE__ = true;
+        if (!window.__UNCEDO_RTC_PROBE__) {
+          window.__UNCEDO_RTC_PROBE__ = true;
 
           if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
             var originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
@@ -300,8 +303,9 @@ export function StudentRtcSessionView({
         var muted = ${mutedRef.current ? 'true' : 'false'};
         var media = document.querySelectorAll('video, audio');
         media.forEach(function (el) { el.muted = muted; });
-        if (window.ParakleoSessionBridge && typeof window.ParakleoSessionBridge.toggleAudio === 'function') {
-          window.ParakleoSessionBridge.toggleAudio();
+        var bridge = getSessionBridge();
+        if (bridge && typeof bridge.toggleAudio === 'function') {
+          bridge.toggleAudio();
         }
       })();
       true;
@@ -313,8 +317,9 @@ export function StudentRtcSessionView({
   const closeRtc = async () => {
     webViewRef.current?.injectJavaScript(`
       (function () {
-        if (window.ParakleoSessionBridge && typeof window.ParakleoSessionBridge.close === 'function') {
-          window.ParakleoSessionBridge.close();
+        var bridge = getSessionBridge();
+        if (bridge && typeof bridge.close === 'function') {
+          bridge.close();
         }
       })();
       true;

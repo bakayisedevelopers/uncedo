@@ -10,10 +10,17 @@
       "web"
     ],
     "android": {
-      "package": "com.bakayisedevelopers.helpers"
+      "package": "com.bakayisedevelopers.helpers",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ]
     },
     "ios": {
-      "bundleIdentifier": "com.bakayisedevelopers.helpers"
+      "bundleIdentifier": "com.bakayisedevelopers.helpers",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Helpers uses your location while you are online so nearby customers can find you on the map."
+      }
     },
     "extra": {
       "eas": {

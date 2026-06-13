@@ -7,7 +7,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>$(DEVELOPMENT_LANGUAGE)</string>
     <key>CFBundleDisplayName</key>
-    <string>Parakleo</string>
+    <string>Uncedo</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>
@@ -27,8 +27,8 @@
       <dict>
         <key>CFBundleURLSchemes</key>
         <array>
-          <string>parakleo</string>
-          <string>com.anonymous.parakleomobile</string>
+          <string>uncedo</string>
+          <string>com.anonymous.uncedomobile</string>
         </array>
       </dict>
     </array>
@@ -46,7 +46,9 @@
       <true/>
     </dict>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Parakleo uses your microphone so you can speak with your tutor during live sessions.</string>
+    <string>Uncedo uses your microphone so you can speak during live service calls.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Uncedo uses your location to show your position and nearby helpers on the home map.</string>
     <key>RCTNewArchEnabled</key>
     <true/>
     <key>UILaunchStoryboardName</key>

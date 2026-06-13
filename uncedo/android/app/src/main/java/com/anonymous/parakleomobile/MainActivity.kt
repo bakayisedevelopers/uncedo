@@ -1,4 +1,4 @@
-package com.anonymous.parakleomobile
+package com.anonymous.uncedomobile
 
 import android.os.Build
 import android.os.Bundle

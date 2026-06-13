@@ -20,7 +20,7 @@ export function DashboardScreen({ navigate }) {
   const [composerStage, setComposerStage] = useState('input');
   const [shareFeedback, setShareFeedback] = useState('');
   const referralSlug = String(user?.referralSlug || user?.referralCode || '').trim();
-  const referralLink = referralSlug ? `https://parakleo.bakayise.com/signup?ref=${encodeURIComponent(referralSlug)}` : '';
+  const referralLink = referralSlug ? `https://uncedo.bakayise.com/signup?ref=${encodeURIComponent(referralSlug)}` : '';
   const referralPreview = referralLink.length > 42 ? `${referralLink.slice(0, 42)}...` : referralLink;
 
   useEffect(() => subscribeToStudentRequests(
@@ -51,8 +51,8 @@ export function DashboardScreen({ navigate }) {
     if (!referralLink) return;
     try {
       await Share.share({
-        title: 'Join Parakleo',
-        message: `Use my Parakleo referral link to sign up and start learning.\n${referralLink}`,
+        title: 'Join Uncedo',
+        message: `Use my Uncedo referral link to sign up and start learning.\n${referralLink}`,
         url: referralLink,
       });
       setShareFeedback('Link shared.');

@@ -15,6 +15,7 @@ import { getCustomerServiceCategoryById, getCustomerServiceById } from '../const
 import {
   beautyPricingEngine,
   barberPricingEngine,
+  bodyCarePricingEngine,
   carWashPricingEngine,
   carePricingEngine,
   cleaningPricingEngine,
@@ -29,6 +30,7 @@ const CATEGORY_ENGINE_LOOKUP = {
   yard_maintenance: yardMaintenancePricingEngine,
   beauty: beautyPricingEngine,
   barber: barberPricingEngine,
+  body_care: bodyCarePricingEngine,
   care: carePricingEngine,
   car_wash: carWashPricingEngine,
 };

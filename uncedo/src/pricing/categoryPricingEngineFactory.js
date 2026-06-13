@@ -582,6 +582,167 @@ function priceCare(service, answers = {}) {
   return createServiceResult(service, amount, [{ label: 'Base service rate', amount }]);
 }
 
+function priceBodyCare(service, answers = {}) {
+  if (service.id === 'full_body_massage') {
+    const durationAdder = optionAdder(getAnswer(answers, 'massage_duration_preference'), {
+      '60_minutes': 0,
+      '90_minutes': 120,
+      '120_minutes': 220,
+    }, 0);
+    const pressureAdder = optionAdder(getAnswer(answers, 'massage_pressure_preference'), {
+      gentle: 0,
+      medium: 25,
+      firm: 45,
+    }, 0);
+    const goalAdder = optionAdder(getAnswer(answers, 'massage_focus_goal'), {
+      relaxation: 0,
+      tension_relief: 35,
+      post_activity_recovery: 55,
+    }, 0);
+    const oilAdder = booleanAdder(getAnswer(answers, 'massage_oil_preference'), 20, 0);
+    const amount = 320 + durationAdder + pressureAdder + goalAdder + oilAdder;
+    return createServiceResult(service, amount, [
+      { label: 'Base full body massage', amount: 320 },
+      { label: 'Duration adjustment', amount: durationAdder },
+      { label: 'Pressure adjustment', amount: pressureAdder },
+      { label: 'Session goal adjustment', amount: goalAdder },
+      { label: 'Aromatherapy oils', amount: oilAdder },
+    ]);
+  }
+
+  if (service.id === 'back_neck_shoulder_massage') {
+    const durationAdder = optionAdder(getAnswer(answers, 'targeted_massage_duration'), {
+      '30_minutes': 0,
+      '45_minutes': 55,
+      '60_minutes': 95,
+    }, 0);
+    const focusAdder = optionAdder(getAnswer(answers, 'targeted_massage_focus_area'), {
+      back: 25,
+      neck: 15,
+      shoulders: 15,
+      all_three: 55,
+    }, 20);
+    const pressureAdder = optionAdder(getAnswer(answers, 'massage_pressure_preference'), {
+      gentle: 0,
+      medium: 15,
+      firm: 30,
+    }, 0);
+    const amount = 240 + durationAdder + focusAdder + pressureAdder;
+    return createServiceResult(service, amount, [
+      { label: 'Base targeted massage', amount: 240 },
+      { label: 'Duration adjustment', amount: durationAdder },
+      { label: 'Focus-area adjustment', amount: focusAdder },
+      { label: 'Pressure adjustment', amount: pressureAdder },
+    ]);
+  }
+
+  if (service.id === 'foot_rub') {
+    const durationAdder = optionAdder(getAnswer(answers, 'foot_rub_duration'), {
+      '20_minutes': 0,
+      '30_minutes': 35,
+      '45_minutes': 65,
+    }, 0);
+    const scopeAdder = optionAdder(getAnswer(answers, 'foot_rub_scope'), {
+      feet_only: 0,
+      feet_and_calves: 40,
+    }, 0);
+    const pressureAdder = optionAdder(getAnswer(answers, 'foot_rub_pressure_preference'), {
+      gentle: 0,
+      medium: 10,
+      firm: 20,
+    }, 0);
+    const soakAdder = booleanAdder(getAnswer(answers, 'foot_rub_soak_addon'), 18, 0);
+    const amount = 180 + durationAdder + scopeAdder + pressureAdder + soakAdder;
+    return createServiceResult(service, amount, [
+      { label: 'Base foot rub', amount: 180 },
+      { label: 'Duration adjustment', amount: durationAdder },
+      { label: 'Calf add-on', amount: scopeAdder },
+      { label: 'Pressure adjustment', amount: pressureAdder },
+      { label: 'Warm soak add-on', amount: soakAdder },
+    ]);
+  }
+
+  if (service.id === 'hand_arm_massage') {
+    const durationAdder = optionAdder(getAnswer(answers, 'hand_arm_massage_duration'), {
+      '20_minutes': 0,
+      '30_minutes': 30,
+      '45_minutes': 55,
+    }, 0);
+    const scopeAdder = optionAdder(getAnswer(answers, 'hand_arm_massage_scope'), {
+      hands_only: 0,
+      forearms_only: 15,
+      hands_and_forearms: 35,
+    }, 0);
+    const pressureAdder = optionAdder(getAnswer(answers, 'massage_pressure_preference'), {
+      gentle: 0,
+      medium: 10,
+      firm: 20,
+    }, 0);
+    const amount = 190 + durationAdder + scopeAdder + pressureAdder;
+    return createServiceResult(service, amount, [
+      { label: 'Base hand and arm massage', amount: 190 },
+      { label: 'Duration adjustment', amount: durationAdder },
+      { label: 'Scope adjustment', amount: scopeAdder },
+      { label: 'Pressure adjustment', amount: pressureAdder },
+    ]);
+  }
+
+  if (service.id === 'aromatherapy_massage') {
+    const durationAdder = optionAdder(getAnswer(answers, 'aromatherapy_duration'), {
+      '60_minutes': 0,
+      '90_minutes': 110,
+      '120_minutes': 200,
+    }, 0);
+    const goalAdder = optionAdder(getAnswer(answers, 'aromatherapy_goal'), {
+      relaxation: 0,
+      stress_relief: 30,
+      sleep_support: 25,
+    }, 0);
+    const scentAdder = optionAdder(getAnswer(answers, 'aromatherapy_scent_profile'), {
+      floral: 18,
+      citrus: 18,
+      mint: 20,
+      unscented: 0,
+    }, 0);
+    const sensitivityAdder = booleanAdder(getAnswer(answers, 'aromatherapy_skin_sensitivity'), 15, 0);
+    const amount = 280 + durationAdder + goalAdder + scentAdder + sensitivityAdder;
+    return createServiceResult(service, amount, [
+      { label: 'Base aromatherapy massage', amount: 280 },
+      { label: 'Duration adjustment', amount: durationAdder },
+      { label: 'Session goal adjustment', amount: goalAdder },
+      { label: 'Oil selection adjustment', amount: scentAdder },
+      { label: 'Sensitive-skin product adjustment', amount: sensitivityAdder },
+    ]);
+  }
+
+  if (service.id === 'body_scrub_treatment') {
+    const scopeAdder = optionAdder(getAnswer(answers, 'body_scrub_scope'), {
+      upper_body: 20,
+      lower_body: 20,
+      full_body: 90,
+    }, 0);
+    const textureAdder = optionAdder(getAnswer(answers, 'body_scrub_texture_preference'), {
+      gentle: 0,
+      medium: 15,
+      exfoliating: 30,
+    }, 0);
+    const finishAdder = optionAdder(getAnswer(answers, 'body_scrub_finish'), {
+      yes: 25,
+      no: 0,
+    }, 0);
+    const amount = 260 + scopeAdder + textureAdder + finishAdder;
+    return createServiceResult(service, amount, [
+      { label: 'Base body scrub treatment', amount: 260 },
+      { label: 'Coverage adjustment', amount: scopeAdder },
+      { label: 'Scrub intensity adjustment', amount: textureAdder },
+      { label: 'Moisturising finish', amount: finishAdder },
+    ]);
+  }
+
+  const amount = Number(service?.pricing?.basePrice || 0);
+  return createServiceResult(service, amount, [{ label: 'Base service rate', amount }]);
+}
+
 function priceCarWash(service, answers = {}) {
   const vehicleType = getAnswer(answers, 'vehicle_type');
   const vehicleFactor = vehicleMultiplier(vehicleType);
@@ -651,6 +812,7 @@ function createServicePricer(categoryId) {
   if (categoryId === 'yard_maintenance') return priceYardMaintenance;
   if (categoryId === 'beauty') return priceBeauty;
   if (categoryId === 'barber') return priceBarber;
+  if (categoryId === 'body_care') return priceBodyCare;
   if (categoryId === 'care') return priceCare;
   if (categoryId === 'car_wash') return priceCarWash;
   return (service) => createServiceResult(service, Number(service?.pricing?.basePrice || 0), [{ label: 'Base service rate', amount: Number(service?.pricing?.basePrice || 0) }]);

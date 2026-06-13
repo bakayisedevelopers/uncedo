@@ -232,6 +232,336 @@ function send(ws, payload) {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(payload));
 }
 
+function buildCustomerCallBridgePage() {
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <style>
+      html, body { margin: 0; padding: 0; background: #000; }
+    </style>
+  </head>
+  <body>
+    <script>
+      (function () {
+        var search = new URLSearchParams(window.location.search || '');
+        var callId = String(search.get('callId') || '').trim();
+        var token = String(search.get('token') || '').trim();
+        var wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        var WS_URL = wsProtocol + '//' + window.location.host + '/live?callId=' + encodeURIComponent(callId) + '&token=' + encodeURIComponent(token);
+        var ws = null;
+        var audioContext = null;
+        var mediaStream = null;
+        var source = null;
+        var processor = null;
+        var muted = false;
+        var closed = false;
+        var ringInterval = null;
+        var lastInputLevelAt = 0;
+        var lastOutputLevelAt = 0;
+
+        function post(payload) {
+          if (window.ReactNativeWebView && typeof window.ReactNativeWebView.postMessage === 'function') {
+            window.ReactNativeWebView.postMessage(JSON.stringify(payload));
+          }
+        }
+
+        function ensureAudioContext() {
+          if (!audioContext) {
+            var AudioCtx = window.AudioContext || window.webkitAudioContext;
+            if (!AudioCtx) {
+              throw new Error('This device does not expose an AudioContext for live call audio.');
+            }
+            audioContext = new AudioCtx();
+          }
+          return audioContext;
+        }
+
+        function resolveGetUserMedia() {
+          if (navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function') {
+            return function (constraints) {
+              return navigator.mediaDevices.getUserMedia(constraints);
+            };
+          }
+
+          var legacyGetUserMedia = navigator.getUserMedia
+            || navigator.webkitGetUserMedia
+            || navigator.mozGetUserMedia
+            || navigator.msGetUserMedia;
+
+          if (typeof legacyGetUserMedia === 'function') {
+            return function (constraints) {
+              return new Promise(function (resolve, reject) {
+                try {
+                  legacyGetUserMedia.call(navigator, constraints, resolve, reject);
+                } catch (error) {
+                  reject(error);
+                }
+              });
+            };
+          }
+
+          return null;
+        }
+
+        function postRuntimeProbe() {
+          try {
+            post({
+              type: 'log',
+              payload: {
+                message: 'Customer AI bridge runtime probe',
+                detail: {
+                  href: String(window.location && window.location.href || ''),
+                  secureContext: Boolean(window.isSecureContext),
+                  hasMediaDevices: Boolean(navigator.mediaDevices),
+                  hasModernGetUserMedia: Boolean(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+                  hasLegacyGetUserMedia: Boolean(
+                    navigator.getUserMedia
+                    || navigator.webkitGetUserMedia
+                    || navigator.mozGetUserMedia
+                    || navigator.msGetUserMedia
+                  ),
+                  userAgent: String(navigator.userAgent || ''),
+                },
+              },
+            });
+          } catch (_error) {}
+        }
+
+        function startRinging() {
+          stopRinging();
+          ringInterval = setInterval(function () {
+            try {
+              var ctx = ensureAudioContext();
+              var oscillator = ctx.createOscillator();
+              var gain = ctx.createGain();
+              oscillator.type = 'sine';
+              oscillator.frequency.setValueAtTime(660, ctx.currentTime);
+              gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+              gain.gain.exponentialRampToValueAtTime(0.04, ctx.currentTime + 0.03);
+              gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.28);
+              oscillator.connect(gain);
+              gain.connect(ctx.destination);
+              oscillator.start();
+              oscillator.stop(ctx.currentTime + 0.3);
+            } catch (_error) {}
+          }, 1300);
+        }
+
+        function stopRinging() {
+          if (ringInterval) {
+            clearInterval(ringInterval);
+            ringInterval = null;
+          }
+        }
+
+        function decodePcm16ToFloat32(base64) {
+          var binary = atob(base64);
+          var buffer = new ArrayBuffer(binary.length);
+          var bytes = new Uint8Array(buffer);
+          for (var i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+          var view = new DataView(buffer);
+          var out = new Float32Array(binary.length / 2);
+          for (var index = 0; index < out.length; index += 1) {
+            var sample = view.getInt16(index * 2, true);
+            out[index] = sample / 32768;
+          }
+          return out;
+        }
+
+        function computeLevel(floatData) {
+          if (!floatData || !floatData.length) return 0;
+          var sum = 0;
+          for (var i = 0; i < floatData.length; i += 1) {
+            var sample = Number(floatData[i] || 0);
+            sum += sample * sample;
+          }
+          var rms = Math.sqrt(sum / floatData.length);
+          return Math.min(1, Math.max(0, rms * 4.5));
+        }
+
+        function postAudioLevel(direction, level) {
+          var now = Date.now();
+          if (direction === 'input') {
+            if (now - lastInputLevelAt < 90) return;
+            lastInputLevelAt = now;
+          } else {
+            if (now - lastOutputLevelAt < 120) return;
+            lastOutputLevelAt = now;
+          }
+          post({ type: 'audio_level', payload: { direction: direction, level: level } });
+        }
+
+        function playPcm16(base64, sampleRate) {
+          try {
+            var ctx = ensureAudioContext();
+            var float = decodePcm16ToFloat32(base64);
+            postAudioLevel('output', computeLevel(float));
+            var audioBuffer = ctx.createBuffer(1, float.length, sampleRate || 16000);
+            audioBuffer.copyToChannel(float, 0);
+            var bufferSource = ctx.createBufferSource();
+            var gainNode = ctx.createGain();
+            bufferSource.buffer = audioBuffer;
+            bufferSource.connect(gainNode);
+            gainNode.connect(ctx.destination);
+            bufferSource.start();
+            post({ type: 'audio_state', payload: { audioOutActive: true } });
+            bufferSource.onended = function () {
+              post({ type: 'audio_state', payload: { audioOutActive: false } });
+              postAudioLevel('output', 0);
+            };
+          } catch (error) {
+            post({ type: 'error', message: error.message || 'Unable to play AI audio.' });
+          }
+        }
+
+        function sendWs(payload) {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          ws.send(JSON.stringify(payload));
+        }
+
+        function attachSocketHandlers() {
+          ws.onopen = function () {
+            stopRinging();
+            post({ type: 'status', payload: { status: 'connected', wsConnected: true } });
+          };
+
+          ws.onclose = function () {
+            if (closed) return;
+            post({ type: 'status', payload: { status: 'disconnected', wsConnected: false } });
+          };
+
+          ws.onerror = function () {
+            if (closed) return;
+            post({ type: 'error', message: 'AI websocket connection interrupted.' });
+          };
+
+          ws.onmessage = function (event) {
+            var message = null;
+            try {
+              message = JSON.parse(String(event.data || '{}'));
+            } catch (_error) {
+              return;
+            }
+
+            if (message.type === 'audio' && message.base64Pcm16) {
+              playPcm16(message.base64Pcm16, Number(message.sampleRate || 16000));
+            }
+
+            post({ type: 'bridge_event', payload: message });
+          };
+        }
+
+        async function startAudio() {
+          var ctx = ensureAudioContext();
+          if (typeof ctx.resume === 'function' && ctx.state === 'suspended') {
+            try { await ctx.resume(); } catch (_resumeError) {}
+          }
+          var getUserMedia = resolveGetUserMedia();
+          if (!getUserMedia) {
+            throw new Error('Microphone capture is not available in this WebView runtime.');
+          }
+          mediaStream = await getUserMedia({ audio: true });
+          source = ctx.createMediaStreamSource(mediaStream);
+          processor = ctx.createScriptProcessor(4096, 1, 1);
+          var gainNode = ctx.createGain();
+          gainNode.gain.value = 0;
+          source.connect(processor);
+          processor.connect(gainNode);
+          gainNode.connect(ctx.destination);
+
+          processor.onaudioprocess = function (audioProcessingEvent) {
+            if (!ws || ws.readyState !== WebSocket.OPEN || muted) return;
+            var input = audioProcessingEvent.inputBuffer.getChannelData(0);
+            postAudioLevel('input', computeLevel(input));
+            var pcm = new Int16Array(input.length);
+            for (var i = 0; i < input.length; i += 1) {
+              var sample = Math.max(-1, Math.min(1, input[i]));
+              pcm[i] = sample < 0 ? sample * 32768 : sample * 32767;
+            }
+            var bytes = new Uint8Array(pcm.buffer);
+            var binary = '';
+            for (var index = 0; index < bytes.length; index += 1) {
+              binary += String.fromCharCode(bytes[index]);
+            }
+            sendWs({ type: 'audio_in', base64Pcm16: btoa(binary), sampleRate: ctx.sampleRate });
+          };
+        }
+
+        async function connect() {
+          try {
+            if (!callId || !token) throw new Error('Missing call identity for the AI bridge.');
+            post({ type: 'status', payload: { status: 'dialing', wsConnected: false } });
+            startRinging();
+            await startAudio();
+            ws = new WebSocket(WS_URL);
+            attachSocketHandlers();
+          } catch (error) {
+            stopRinging();
+            post({
+              type: 'error',
+              message: (error && error.message) || 'Unable to start the AI call.',
+            });
+          }
+        }
+
+        function close() {
+          closed = true;
+          stopRinging();
+          try { processor && processor.disconnect(); } catch (_error) {}
+          try { source && source.disconnect(); } catch (_error) {}
+          try { mediaStream && mediaStream.getTracks().forEach(function (track) { track.stop(); }); } catch (_error) {}
+          try {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'client_close' }));
+            }
+          } catch (_error) {}
+          try { ws && ws.close(); } catch (_error) {}
+          try { audioContext && audioContext.close(); } catch (_error) {}
+          post({ type: 'audio_level', payload: { direction: 'input', level: 0 } });
+          post({ type: 'audio_level', payload: { direction: 'output', level: 0 } });
+          post({ type: 'status', payload: { status: 'ended', wsConnected: false } });
+        }
+
+        window.UncedoAiBridge = {
+          receiveCommand: function (command) {
+            var payload = command || {};
+            if (payload.type === 'init_context') {
+              sendWs({ type: 'init_context', context: payload.context || {} });
+              return;
+            }
+            if (payload.type === 'customer_text') {
+              sendWs({ type: 'customer_text', text: payload.text || '', metadata: payload.metadata || {} });
+              return;
+            }
+            if (payload.type === 'app_prompt') {
+              sendWs({ type: 'app_prompt', text: payload.text || '' });
+              return;
+            }
+            if (payload.type === 'toggle_mute') {
+              muted = !muted;
+              post({ type: 'audio_state', payload: { audioInActive: !muted, isMuted: muted } });
+              if (muted) post({ type: 'audio_level', payload: { direction: 'input', level: 0 } });
+              return;
+            }
+            if (payload.type === 'close') {
+              close();
+            }
+          },
+        };
+
+        window.addEventListener('load', function () {
+          postRuntimeProbe();
+          post({ type: 'bridge_ready' });
+          connect();
+        });
+      })();
+    </script>
+  </body>
+</html>`;
+}
+
 async function verifyAndLoadSession(token, sessionId, callId) {
   const decoded = await admin.auth().verifyIdToken(String(token || ''));
   const uid = decoded.uid;
@@ -439,6 +769,15 @@ const server = http.createServer((req, res) => {
   if (req.url === '/healthz') {
     res.writeHead(200);
     res.end('ok');
+    return;
+  }
+  if (req.url && req.url.startsWith('/customer-call-bridge')) {
+    const html = buildCustomerCallBridgePage();
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+    });
+    res.end(html);
     return;
   }
   res.writeHead(404);

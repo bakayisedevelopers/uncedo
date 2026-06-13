@@ -10,7 +10,7 @@ import {
 } from '../constants/runtimeConfig';
 
 const firebaseConfig = FIREBASE_PUBLIC_CONFIG;
-const projectId = firebaseConfig.projectId || 'parakleo';
+const projectId = firebaseConfig.projectId || 'bakayise-uncedo';
 let emulatorsConnected = false;
 let authInstance = null;
 

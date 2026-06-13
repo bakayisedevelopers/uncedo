@@ -1,9 +1,14 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { getServiceById } from '../constants/serviceCatalog';
 import { useAuth } from './AuthContext';
 import { updateHelperProfile } from '../services/userService';
 import { logError } from '../services/logger';
 import { groupCompletedJobsByWeek, HELPER_PAYOUT_RATE, PLATFORM_FEE_RATE } from '../utils/payouts';
+import {
+  requestHelperLocationPermission,
+  syncHelperCurrentLocation,
+  watchAndSyncHelperLocation,
+} from '../services/helperLocationService';
 import {
   acceptServiceRequestOffer,
   declineServiceRequestOffer,
@@ -25,6 +30,8 @@ const FALLBACK_PROFILE = {
   city: 'Johannesburg',
   rating: 0,
   onlineStatus: 'offline',
+  locationSharingEnabled: false,
+  liveLocation: null,
   verificationStatus: 'pending',
   agreement: {
     acceptedVersion: '',
@@ -219,6 +226,7 @@ export function HelpersAppProvider({ children }) {
   const [weeklyPayouts, setWeeklyPayouts] = useState(INITIAL_WEEKLY_PAYOUTS);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
+  const helperLocationWatchRef = useRef(null);
 
   useEffect(() => {
     setProfile(normalizeProfile(user));
@@ -257,6 +265,52 @@ export function HelpersAppProvider({ children }) {
       },
     );
   }, [user?.uid]);
+
+  useEffect(() => {
+    let active = true;
+
+    const stopWatchingLocation = () => {
+      helperLocationWatchRef.current?.remove?.();
+      helperLocationWatchRef.current = null;
+    };
+
+    if (!user?.uid || profile.onlineStatus !== 'online') {
+      stopWatchingLocation();
+      return () => {
+        active = false;
+      };
+    }
+
+    const startLocationSharing = async () => {
+      try {
+        const granted = await requestHelperLocationPermission();
+        if (!active) return;
+
+        if (!granted) {
+          setSaveError('Location permission is required to show this helper on the nearby customer map.');
+          return;
+        }
+
+        setSaveError('');
+        await syncHelperCurrentLocation();
+        if (!active) return;
+
+        helperLocationWatchRef.current = await watchAndSyncHelperLocation();
+      } catch (error) {
+        logError('HelpersAppContext.locationSharing', error);
+        if (active) {
+          setSaveError(error.message || 'Unable to share helper location right now.');
+        }
+      }
+    };
+
+    startLocationSharing();
+
+    return () => {
+      active = false;
+      stopWatchingLocation();
+    };
+  }, [profile.onlineStatus, user?.uid]);
 
   const persistProfileUpdate = async (updates) => {
     if (!user?.uid) {
@@ -320,6 +374,7 @@ export function HelpersAppProvider({ children }) {
     return applyProfileUpdate((current) => ({
       ...current,
       onlineStatus: current.onlineStatus === 'online' ? 'offline' : 'online',
+      locationSharingEnabled: current.onlineStatus === 'online' ? false : current.locationSharingEnabled,
     }));
   };
 

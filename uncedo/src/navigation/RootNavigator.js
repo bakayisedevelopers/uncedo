@@ -8,6 +8,7 @@ import {
   ScrollView,
   StatusBar,
   StyleSheet,
+  Text,
   View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -68,9 +69,8 @@ const appScreens = {
 };
 
 const bottomNavItems = [
+  { key: 'Requests', label: 'Services', icon: 'briefcase-outline', activeIcon: 'briefcase' },
   { key: 'CustomerHome', label: 'Home', icon: 'home-outline', activeIcon: 'home' },
-  { key: 'Requests', label: 'Requests', icon: 'briefcase-outline', activeIcon: 'briefcase' },
-  { key: 'Wallet', label: 'Wallet', icon: 'wallet-outline', activeIcon: 'wallet' },
   { key: 'Profile', label: 'Profile', icon: 'person-outline', activeIcon: 'person' },
 ];
 
@@ -427,10 +427,13 @@ export function RootNavigator() {
                     style={[styles.bottomNavItem, isActive && styles.bottomNavItemActive]}
                   >
                     <Ionicons
-                      color={isActive ? '#ffffff' : colors.muted}
+                      color={isActive ? colors.brand : colors.text}
                       name={isActive ? item.activeIcon : item.icon}
                       size={22}
                     />
+                    <Text style={[styles.bottomNavLabel, isActive && styles.bottomNavLabelActive]}>
+                      {item.label}
+                    </Text>
                   </Pressable>
                 );
               })}
@@ -498,12 +501,18 @@ const styles = StyleSheet.create({
   bottomNavItem: {
     alignItems: 'center',
     borderRadius: 999,
-    height: 48,
+    gap: 2,
+    height: 56,
     justifyContent: 'center',
     position: 'relative',
-    width: 56,
+    width: 88,
   },
-  bottomNavItemActive: {
-    backgroundColor: colors.brand,
+  bottomNavLabel: {
+    color: colors.text,
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  bottomNavLabelActive: {
+    color: colors.brand,
   },
 });

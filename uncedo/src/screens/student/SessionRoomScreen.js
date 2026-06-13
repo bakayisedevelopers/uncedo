@@ -255,7 +255,7 @@ export function SessionRoomScreen({ route, navigate, goBack }) {
       if (typeof bridgeRef.current.close === 'function') {
         bridgeRef.current.close();
       } else {
-        bridgeRef.current.injectJavaScript?.('window.ParakleoSessionBridge && window.ParakleoSessionBridge.close && window.ParakleoSessionBridge.close(); true;');
+        bridgeRef.current.injectJavaScript?.('((window.UncedoSessionBridge||window.ParakleoSessionBridge)&&((window.UncedoSessionBridge||window.ParakleoSessionBridge).close)&&((window.UncedoSessionBridge||window.ParakleoSessionBridge).close())); true;');
       }
     }
   }, []);
@@ -301,7 +301,7 @@ export function SessionRoomScreen({ route, navigate, goBack }) {
       bridgeRef.current.close();
       return;
     }
-    bridgeRef.current?.injectJavaScript?.('window.ParakleoSessionBridge && window.ParakleoSessionBridge.close && window.ParakleoSessionBridge.close(); true;');
+    bridgeRef.current?.injectJavaScript?.('((window.UncedoSessionBridge||window.ParakleoSessionBridge)&&((window.UncedoSessionBridge||window.ParakleoSessionBridge).close)&&((window.UncedoSessionBridge||window.ParakleoSessionBridge).close())); true;');
   };
 
   const navigateToRequestStatus = useCallback((requestId) => {
