@@ -3,6 +3,7 @@ const path = require('path');
 
 const PLACEHOLDER = '__GOOGLE_MAPS_API_KEY__';
 const root = path.resolve(__dirname, '..');
+const mode = String(process.argv[2] || 'inject').trim().toLowerCase();
 const shouldFailWithoutKey = String(process.env.EAS_BUILD || '').toLowerCase() === 'true'
   || String(process.env.CI || '').toLowerCase() === 'true';
 
@@ -58,18 +59,18 @@ function replaceInFile(filePath, transform) {
 function updateAndroidManifest(contents) {
   return contents.replace(
     /(<meta-data\s+android:name="com\.google\.android\.geo\.API_KEY"\s+android:value=")([^"]*)(")/,
-    `$1${apiKey}$3`,
+    `$1${mode === 'restore' ? PLACEHOLDER : apiKey}$3`,
   );
 }
 
 function updateIosAppDelegate(contents) {
   return contents.replace(
     /(GMSServices\.provideAPIKey\(")([^"]*)("\))/,
-    `$1${apiKey}$3`,
+    `$1${mode === 'restore' ? PLACEHOLDER : apiKey}$3`,
   );
 }
 
-if (!apiKey) {
+if (mode !== 'restore' && !apiKey) {
   const message = 'GOOGLE_MAPS_API_KEY is missing. Set it in EAS secrets or your local environment before building.';
   if (shouldFailWithoutKey) {
     throw new Error(message);
@@ -86,4 +87,8 @@ for (const file of files) {
   }
 }
 
-console.log('[google-maps-config] Google Maps API key injected into native build files.');
+if (mode === 'restore') {
+  console.log('[google-maps-config] Google Maps placeholders restored in native build files.');
+} else {
+  console.log('[google-maps-config] Google Maps API key injected into native build files.');
+}
