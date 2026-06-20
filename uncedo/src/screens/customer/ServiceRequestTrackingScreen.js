@@ -1,0 +1,1113 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  Animated,
+  Image,
+  Linking,
+  Modal,
+  PanResponder,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+  useWindowDimensions,
+} from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { doc, onSnapshot } from 'firebase/firestore';
+import { MapPlaceholder } from '../../components/customer/MapPlaceholder';
+import { getCustomerServiceById } from '../../constants/serviceCatalog';
+import { getFirebaseClients } from '../../firebase/config';
+import {
+  cancelServiceRequestByCustomer,
+  subscribeToServiceRequestById,
+} from '../../services/customerServiceRequestService';
+import { colors } from '../../theme/colors';
+
+const FREE_WAIT_SECONDS = 120;
+
+function getDistanceInMeters(lat1, lon1, lat2, lon2) {
+  if (
+    !Number.isFinite(Number(lat1))
+    || !Number.isFinite(Number(lon1))
+    || !Number.isFinite(Number(lat2))
+    || !Number.isFinite(Number(lon2))
+  ) {
+    return null;
+  }
+
+  const R = 6371e3;
+  const phi1 = (lat1 * Math.PI) / 180;
+  const phi2 = (lat2 * Math.PI) / 180;
+  const deltaPhi = ((lat2 - lat1) * Math.PI) / 180;
+  const deltaLambda = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(deltaPhi / 2) * Math.sin(deltaPhi / 2)
+    + Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda / 2) * Math.sin(deltaLambda / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return R * c;
+}
+
+function formatDistance(distance) {
+  if (!Number.isFinite(distance)) return 'Waiting for helper location';
+  if (distance < 1000) return `${Math.round(distance)} m away`;
+  return `${(distance / 1000).toFixed(1)} km away`;
+}
+
+function formatEta(distance) {
+  if (!Number.isFinite(distance)) return null;
+  return Math.max(1, Math.round(distance / 11 / 60));
+}
+
+function formatCurrency(value) {
+  const amount = Number(value || 0);
+  if (!Number.isFinite(amount) || amount <= 0) return 'R0.00';
+  return `R${amount.toFixed(2)}`;
+}
+
+function getInitials(name = '') {
+  const parts = String(name || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (!parts.length) return 'H';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase() || 'H';
+  return `${parts[0][0] || ''}${parts[1][0] || ''}`.toUpperCase() || 'H';
+}
+
+function getStatusMeta(status) {
+  const normalized = String(status || '').toLowerCase();
+
+  switch (normalized) {
+    case 'matching':
+      return {
+        label: 'Searching for a helper',
+        detail: 'We are matching your request with an available helper.',
+        tone: 'info',
+      };
+    case 'helper_found':
+      return {
+        label: 'Helper offer sent',
+        detail: 'A helper has been found and asked to accept your request.',
+        tone: 'info',
+      };
+    case 'accepted':
+      return {
+        label: 'Helper is preparing to travel',
+        detail: 'Your helper accepted the request and is getting ready to leave.',
+        tone: 'info',
+      };
+    case 'driving':
+    case 'en_route':
+      return {
+        label: 'Helper is driving to you',
+        detail: 'Track the helper route on the map as they travel to your location.',
+        tone: 'success',
+      };
+    case 'buying_resources':
+      return {
+        label: 'Helper stopped to buy resources',
+        detail: 'The helper updated the trip status while getting resources for your job.',
+        tone: 'warning',
+      };
+    case 'arrived':
+      return {
+        label: 'Helper has arrived',
+        detail: 'Please open for the helper. The free waiting time has started.',
+        tone: 'success',
+      };
+    case 'work_started':
+      return {
+        label: 'Job in progress',
+        detail: 'The helper has started the service.',
+        tone: 'info',
+      };
+    case 'completed':
+      return {
+        label: 'Job completed',
+        detail: 'The service is complete and billing has been finalized.',
+        tone: 'success',
+      };
+    default:
+      return {
+        label: 'Live job tracking',
+        detail: 'We will keep updating your request here.',
+        tone: 'info',
+      };
+  }
+}
+
+function getToneStyles(tone) {
+  if (tone === 'success') {
+    return {
+      badgeBg: '#dcfce7',
+      badgeText: '#166534',
+      cardBg: 'rgba(220,252,231,0.9)',
+    };
+  }
+
+  if (tone === 'warning') {
+    return {
+      badgeBg: '#fef3c7',
+      badgeText: '#92400e',
+      cardBg: 'rgba(254,243,199,0.92)',
+    };
+  }
+
+  return {
+    badgeBg: '#e0f2fe',
+    badgeText: '#075985',
+    cardBg: 'rgba(224,242,254,0.92)',
+  };
+}
+
+export function ServiceRequestTrackingScreen({ route, goBack }) {
+  const requestId = route?.params?.requestId || '';
+  const [request, setRequest] = useState(null);
+  const [helperLocation, setHelperLocation] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [showSafetyModal, setShowSafetyModal] = useState(false);
+  const [showCancelModal, setShowCancelModal] = useState(false);
+  const [cancelReason, setCancelReason] = useState('');
+  const [nowTime, setNowTime] = useState(Date.now());
+  const { width, height } = useWindowDimensions();
+  const isLandscape = width > height;
+
+  const collapsedHeight = useMemo(() => Math.min(Math.max(height * 0.32, 260), 330), [height]);
+  const maxExpandedHeight = useMemo(() => Math.min(Math.max(height * 0.82, 500), height - 72), [height]);
+  const [sheetContentHeight, setSheetContentHeight] = useState(collapsedHeight);
+  const expandedHeight = useMemo(
+    () => Math.min(Math.max(sheetContentHeight + 12, collapsedHeight), maxExpandedHeight),
+    [collapsedHeight, maxExpandedHeight, sheetContentHeight],
+  );
+  const sheetHeight = useRef(new Animated.Value(collapsedHeight)).current;
+  const canScrollExpandedSheet = isExpanded && sheetContentHeight > maxExpandedHeight;
+
+  useEffect(() => {
+    Animated.spring(sheetHeight, {
+      toValue: isExpanded ? expandedHeight : collapsedHeight,
+      useNativeDriver: false,
+      bounciness: 0,
+      speed: 18,
+    }).start();
+  }, [collapsedHeight, expandedHeight, isExpanded, sheetHeight]);
+
+  const panResponder = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: (_, gesture) => Math.abs(gesture.dy) > 12,
+    onPanResponderRelease: (_, gesture) => {
+      if (gesture.dy < -30) {
+        setIsExpanded(true);
+      } else if (gesture.dy > 30) {
+        setIsExpanded(false);
+      }
+    },
+  }), []);
+
+  useEffect(() => {
+    if (!requestId) {
+      setLoading(false);
+      setError('Missing service request ID.');
+      return () => {};
+    }
+
+    return subscribeToServiceRequestById(
+      requestId,
+      (item) => {
+        setRequest(item);
+        setLoading(false);
+      },
+      (nextError) => {
+        setError(nextError.message || 'Unable to subscribe to this service request.');
+        setLoading(false);
+      },
+    );
+  }, [requestId]);
+
+  useEffect(() => {
+    const helperId = request?.helperAssignment?.helperId;
+    if (!helperId) {
+      setHelperLocation(null);
+      return () => {};
+    }
+
+    try {
+      const { db } = getFirebaseClients();
+      const unsubscribe = onSnapshot(doc(db, 'users', helperId), (snapshot) => {
+        if (!snapshot.exists()) return;
+        const data = snapshot.data() || {};
+        if (data.liveLocation) {
+          setHelperLocation(data.liveLocation);
+        }
+      });
+      return unsubscribe;
+    } catch (nextError) {
+      console.warn('[uncedo:helper-location]', nextError?.message || nextError);
+      return () => {};
+    }
+  }, [request?.helperAssignment?.helperId]);
+
+  useEffect(() => {
+    let interval = null;
+    if (request?.status === 'arrived') {
+      interval = setInterval(() => {
+        setNowTime(Date.now());
+      }, 1000);
+    }
+
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [request?.status]);
+
+  const clientLocation = request?.location || request?.requestPayload?.location || null;
+
+  const distance = useMemo(() => {
+    if (!clientLocation || !helperLocation) return null;
+    return getDistanceInMeters(
+      clientLocation.latitude,
+      clientLocation.longitude,
+      helperLocation.latitude,
+      helperLocation.longitude,
+    );
+  }, [clientLocation, helperLocation]);
+
+  const etaMinutes = useMemo(() => formatEta(distance), [distance]);
+
+  const waitInfo = useMemo(() => {
+    const arrivedAt = request?.arrivedAt || request?.helperAssignment?.arrivedAt;
+    const workStartedAt = request?.workStartedAt || request?.helperAssignment?.workStartedAt;
+
+    if (!arrivedAt) {
+      return { elapsedSeconds: 0, waitFee: 0, isGrace: true, active: false };
+    }
+
+    let arrivedAtMs = 0;
+    if (typeof arrivedAt.toMillis === 'function') {
+      arrivedAtMs = arrivedAt.toMillis();
+    } else if (arrivedAt.seconds) {
+      arrivedAtMs = arrivedAt.seconds * 1000;
+    } else {
+      arrivedAtMs = Date.parse(arrivedAt);
+    }
+
+    if (Number.isNaN(arrivedAtMs)) {
+      return { elapsedSeconds: 0, waitFee: 0, isGrace: true, active: false };
+    }
+
+    let endMs = nowTime;
+    let active = true;
+
+    if (workStartedAt) {
+      let workStartedAtMs = 0;
+      if (typeof workStartedAt.toMillis === 'function') {
+        workStartedAtMs = workStartedAt.toMillis();
+      } else if (workStartedAt.seconds) {
+        workStartedAtMs = workStartedAt.seconds * 1000;
+      } else {
+        workStartedAtMs = Date.parse(workStartedAt);
+      }
+
+      if (!Number.isNaN(workStartedAtMs)) {
+        endMs = workStartedAtMs;
+        active = false;
+      }
+    }
+
+    const elapsedSeconds = Math.max(0, Math.floor((endMs - arrivedAtMs) / 1000));
+    const waitMinutes = Number((elapsedSeconds / 60).toFixed(2));
+    const waitFee = waitMinutes > 2 ? Math.round(waitMinutes - 2) * 1.0 : 0;
+
+    return {
+      elapsedSeconds,
+      waitFee,
+      isGrace: elapsedSeconds <= FREE_WAIT_SECONDS,
+      active,
+    };
+  }, [nowTime, request]);
+
+  const statusMeta = useMemo(() => getStatusMeta(request?.status), [request?.status]);
+  const toneStyles = useMemo(() => getToneStyles(statusMeta.tone), [statusMeta.tone]);
+  const canCancelRequest = !['completed', 'canceled'].includes(String(request?.status || '').toLowerCase());
+
+  const helperMarkers = helperLocation ? [{
+    id: request?.helperAssignment?.helperId || 'helper',
+    coordinate: helperLocation,
+    heading: helperLocation.heading,
+    fullName: request?.helperAssignment?.helperName || 'Helper',
+    profilePhoto: request?.helperAssignment?.helperPhoto || null,
+  }] : [];
+
+  const handleCallHelper = () => {
+    const phone = request?.helperAssignment?.helperPhone;
+    if (!phone) {
+      Alert.alert('Phone unavailable', 'The helper has not shared a phone number for this request.');
+      return;
+    }
+
+    Linking.openURL(`tel:${phone}`);
+  };
+
+  const handleCancelSubmit = async () => {
+    if (!cancelReason.trim()) {
+      Alert.alert('Reason required', 'Please provide a reason for cancellation.');
+      return;
+    }
+
+    setShowCancelModal(false);
+
+    try {
+      await cancelServiceRequestByCustomer({
+        requestId: request.id,
+        reason: cancelReason,
+      });
+      Alert.alert('Cancelled', 'Your service request has been cancelled.');
+      goBack('CustomerHome');
+    } catch (nextError) {
+      Alert.alert('Error', nextError.message || 'Unable to cancel this request.');
+    }
+  };
+
+  if (loading) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator color={colors.brand} size="large" />
+        <Text style={styles.loadingText}>Connecting to live tracking...</Text>
+      </View>
+    );
+  }
+
+  if (error || !request) {
+    return (
+      <View style={styles.emptyContainer}>
+        <Ionicons name="alert-circle-outline" size={64} color={colors.danger} />
+        <Text style={styles.emptyTitle}>Unable to load tracking</Text>
+        <Text style={styles.emptyCopy}>{error || 'The requested service could not be found.'}</Text>
+        <Pressable style={styles.primaryAction} onPress={() => goBack('CustomerHome')}>
+          <Text style={styles.primaryActionText}>Back to dashboard</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  const renderWaitCard = () => {
+    if (!['arrived', 'work_started'].includes(String(request.status || '').toLowerCase())) return null;
+
+    if (waitInfo.isGrace) {
+      const remainingSeconds = Math.max(0, FREE_WAIT_SECONDS - waitInfo.elapsedSeconds);
+      const remMins = Math.floor(remainingSeconds / 60);
+      const remSecs = remainingSeconds % 60;
+
+      return (
+        <View style={[styles.infoBanner, styles.graceBanner]}>
+          <Ionicons name="time-outline" size={18} color="#1e40af" />
+          <View style={styles.infoBannerBody}>
+            <Text style={styles.infoBannerTitle}>Helper arrived</Text>
+            <Text style={styles.infoBannerText}>{`${remMins}m ${remSecs}s of free waiting time remaining`}</Text>
+          </View>
+        </View>
+      );
+    }
+
+    return (
+      <View style={[styles.infoBanner, styles.feeBanner]}>
+        <Ionicons name="alert-circle-outline" size={18} color="#991b1b" />
+        <View style={styles.infoBannerBody}>
+          <Text style={styles.infoBannerTitleDanger}>Wait fee accruing</Text>
+          <Text style={styles.infoBannerTextDanger}>{`Current wait fee: ${formatCurrency(waitInfo.waitFee)}`}</Text>
+        </View>
+      </View>
+    );
+  };
+
+  const renderCancelAction = () => {
+    if (!canCancelRequest) return null;
+
+    return (
+      <View style={styles.inlineFooterActions}>
+        <Pressable style={styles.textDangerAction} onPress={() => setShowCancelModal(true)}>
+          <Text style={styles.textDangerActionLabel}>Cancel request</Text>
+        </Pressable>
+      </View>
+    );
+  };
+
+  const renderContent = ({ expanded = false }) => (
+    <>
+      <View style={styles.sheetHandleWrap} {...(!isLandscape ? panResponder.panHandlers : {})}>
+        <Pressable style={styles.sheetHandleButton} onPress={() => setIsExpanded((current) => !current)}>
+          <View style={styles.sheetHandle} />
+        </Pressable>
+      </View>
+
+      <View style={styles.sheetHeader}>
+        <View style={styles.sheetHeaderText}>
+          <Text style={styles.sheetTitle}>{statusMeta.label}</Text>
+          <Text style={styles.sheetSubtitle} numberOfLines={expanded ? 2 : 1}>
+            {request.statusDetail || statusMeta.detail}
+          </Text>
+        </View>
+        <View style={[styles.statusBadge, { backgroundColor: toneStyles.badgeBg }]}>
+          <Text style={[styles.statusBadgeText, { color: toneStyles.badgeText }]}>{statusMeta.label}</Text>
+        </View>
+      </View>
+
+      <View style={[styles.summaryCard, { backgroundColor: toneStyles.cardBg }]}>
+        <View style={styles.summaryTopRow}>
+          <View style={styles.summaryMeta}>
+            <Text style={styles.serviceName}>
+              {getCustomerServiceById(request.categoryId)?.name || request.subject || 'Service request'}
+            </Text>
+            <Text style={styles.summaryCaption}>Current estimate</Text>
+          </View>
+          <Text style={styles.priceText}>{formatCurrency(request.pricingSnapshot?.total)}</Text>
+        </View>
+        <View style={styles.summaryBottomRow}>
+          <Text style={styles.summaryPill}>{formatDistance(distance)}</Text>
+          {etaMinutes && ['driving', 'en_route'].includes(String(request.status || '').toLowerCase())
+            ? <Text style={styles.summaryPill}>{`${etaMinutes} min ETA`}</Text>
+            : null}
+        </View>
+      </View>
+
+      {request.helperAssignment ? (
+        <View style={styles.personCard}>
+          <View style={styles.avatarWrap}>
+            {request.helperAssignment.helperPhoto ? (
+              <Image source={{ uri: request.helperAssignment.helperPhoto }} style={styles.avatarImage} />
+            ) : (
+              <View style={styles.avatarFallback}>
+                <Text style={styles.avatarInitials}>{getInitials(request.helperAssignment.helperName)}</Text>
+              </View>
+            )}
+          </View>
+          <View style={styles.personMeta}>
+            <Text style={styles.personLabel}>Assigned helper</Text>
+            <Text style={styles.personName}>{request.helperAssignment.helperName || 'Helper'}</Text>
+          </View>
+          <Pressable style={styles.iconAction} onPress={handleCallHelper}>
+            <Ionicons name="call-outline" size={18} color={colors.brandDark} />
+          </Pressable>
+        </View>
+      ) : (
+        <View style={styles.waitingCard}>
+          <ActivityIndicator color={colors.brand} />
+          <Text style={styles.waitingCardText}>Waiting for a helper to accept the request.</Text>
+        </View>
+      )}
+
+      {renderWaitCard()}
+      {renderCancelAction()}
+
+      {expanded ? (
+        <>
+          <View style={styles.divider} />
+
+          <Text style={styles.sectionTitle}>Job details</Text>
+          <View style={styles.metaCard}>
+            <Text style={styles.metaLabel}>Service type</Text>
+            <Text style={styles.metaValue}>
+              {getCustomerServiceById(request.categoryId)?.name || request.subject || 'Standard service'}
+            </Text>
+          </View>
+
+          <View style={styles.metaCard}>
+            <Text style={styles.metaLabel}>Price summary</Text>
+            <View style={styles.pricingRow}>
+              <Text style={styles.pricingLabel}>Base quote</Text>
+              <Text style={styles.pricingValue}>{formatCurrency(request.pricingSnapshot?.total)}</Text>
+            </View>
+            {waitInfo.waitFee > 0 ? (
+              <View style={styles.pricingRow}>
+                <Text style={styles.pricingLabel}>Wait fee</Text>
+                <Text style={styles.pricingValue}>{formatCurrency(waitInfo.waitFee)}</Text>
+              </View>
+            ) : null}
+            <View style={[styles.pricingRow, styles.pricingTotalRow]}>
+              <Text style={styles.pricingTotalLabel}>Estimated total</Text>
+              <Text style={styles.pricingTotalValue}>
+                {formatCurrency((request.pricingSnapshot?.total || 0) + (waitInfo.waitFee || 0))}
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.metaCard}>
+            <Text style={styles.metaLabel}>Status detail</Text>
+            <Text style={styles.metaValue}>{request.statusDetail || statusMeta.detail}</Text>
+          </View>
+        </>
+      ) : null}
+    </>
+  );
+
+  return (
+    <View style={styles.container}>
+      <View style={styles.mapLayer}>
+        <MapPlaceholder
+          mode="route"
+          currentUserMarker={clientLocation ? {
+            latitude: clientLocation.latitude,
+            longitude: clientLocation.longitude,
+            initials: 'You',
+          } : null}
+          helperMarkers={helperMarkers}
+          floatingBottomInset={isLandscape ? 24 : collapsedHeight}
+          controlBottomInset={isLandscape ? 24 : collapsedHeight + 24}
+        />
+
+        <Pressable accessibilityRole="button" style={styles.topBackButton} onPress={() => goBack('CustomerHome')}>
+          <Ionicons name="chevron-back" size={24} color={colors.text} />
+        </Pressable>
+
+        <Pressable accessibilityRole="button" style={styles.topSafetyButton} onPress={() => setShowSafetyModal(true)}>
+          <Ionicons name="shield-checkmark" size={24} color={colors.brand} />
+        </Pressable>
+      </View>
+
+      {isLandscape ? (
+        <View style={styles.sidePanel}>
+          <ScrollView showsVerticalScrollIndicator={false}>
+            {renderContent({ expanded: true })}
+          </ScrollView>
+        </View>
+      ) : (
+        <Animated.View style={[styles.sheet, { height: sheetHeight }]}>
+          <ScrollView
+            showsVerticalScrollIndicator={canScrollExpandedSheet}
+            scrollEnabled={canScrollExpandedSheet}
+            contentContainerStyle={styles.sheetScrollContent}
+          >
+            <View
+              onLayout={({ nativeEvent }) => {
+                const measuredHeight = Math.ceil(nativeEvent.layout.height);
+                if (measuredHeight > 0 && measuredHeight !== sheetContentHeight) {
+                  setSheetContentHeight(measuredHeight);
+                }
+              }}
+            >
+              {renderContent({ expanded: isExpanded })}
+            </View>
+          </ScrollView>
+        </Animated.View>
+      )}
+
+      <Modal visible={showSafetyModal} transparent animationType="fade">
+        <View style={styles.modalBg}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Safety guidelines</Text>
+            <Text style={styles.modalText}>Verify the helper identity before opening and report unusual behavior immediately.</Text>
+            <Text style={styles.modalText}>This screen will keep updating the helper trip as they travel to your chosen location.</Text>
+            <Pressable style={styles.primaryAction} onPress={() => setShowSafetyModal(false)}>
+              <Text style={styles.primaryActionText}>Got it</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={showCancelModal} transparent animationType="fade">
+        <View style={styles.modalBg}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Cancel service request</Text>
+            <Text style={styles.modalText}>Please explain why you need to cancel this request.</Text>
+            <TextInput
+              style={styles.reasonInput}
+              placeholder="Cancellation reason"
+              placeholderTextColor={colors.muted}
+              value={cancelReason}
+              onChangeText={setCancelReason}
+              multiline
+            />
+            <View style={styles.modalButtonRow}>
+              <Pressable
+                style={styles.secondaryAction}
+                onPress={() => {
+                  setShowCancelModal(false);
+                  setCancelReason('');
+                }}
+              >
+                <Text style={styles.secondaryActionText}>Keep request</Text>
+              </Pressable>
+              <Pressable style={[styles.primaryAction, styles.dangerAction]} onPress={handleCancelSubmit}>
+                <Text style={styles.primaryActionText}>Confirm cancel</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#ffffff',
+  },
+  mapLayer: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  topBackButton: {
+    position: 'absolute',
+    top: 50,
+    left: 16,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#ffffff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.18,
+    shadowRadius: 6,
+    elevation: 5,
+    zIndex: 10,
+  },
+  topSafetyButton: {
+    position: 'absolute',
+    top: 50,
+    right: 16,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#ffffff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.18,
+    shadowRadius: 6,
+    elevation: 5,
+    zIndex: 10,
+  },
+  sheet: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(255,255,255,0.98)',
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    elevation: 10,
+  },
+  sheetScrollContent: {
+    paddingHorizontal: 20,
+    paddingBottom: 34,
+  },
+  sidePanel: {
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    bottom: 0,
+    width: 380,
+    backgroundColor: 'rgba(255,255,255,0.98)',
+    borderLeftWidth: 1,
+    borderLeftColor: colors.border,
+    paddingHorizontal: 20,
+    paddingTop: 40,
+    paddingBottom: 34,
+  },
+  sheetHandleWrap: {
+    alignItems: 'center',
+    paddingTop: 10,
+    paddingBottom: 12,
+  },
+  sheetHandleButton: {
+    width: '100%',
+    alignItems: 'center',
+    paddingVertical: 4,
+  },
+  sheetHandle: {
+    width: 42,
+    height: 5,
+    borderRadius: 999,
+    backgroundColor: '#cbd5e1',
+  },
+  sheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  sheetHeaderText: {
+    flex: 1,
+  },
+  sheetTitle: {
+    fontSize: 22,
+    fontWeight: '900',
+    color: colors.text,
+  },
+  sheetSubtitle: {
+    marginTop: 4,
+    fontSize: 13,
+    lineHeight: 19,
+    color: colors.muted,
+  },
+  statusBadge: {
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  statusBadgeText: {
+    fontSize: 11,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
+  summaryCard: {
+    marginTop: 16,
+    borderRadius: 20,
+    padding: 16,
+  },
+  summaryTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  summaryMeta: {
+    flex: 1,
+  },
+  serviceName: {
+    fontSize: 17,
+    fontWeight: '900',
+    color: colors.text,
+  },
+  summaryCaption: {
+    marginTop: 4,
+    fontSize: 12,
+    color: colors.muted,
+  },
+  priceText: {
+    fontSize: 20,
+    fontWeight: '900',
+    color: colors.text,
+  },
+  summaryBottomRow: {
+    flexDirection: 'row',
+    gap: 8,
+    flexWrap: 'wrap',
+    marginTop: 12,
+  },
+  summaryPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.72)',
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  personCard: {
+    marginTop: 16,
+    backgroundColor: '#f8fafc',
+    borderRadius: 18,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  avatarWrap: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    overflow: 'hidden',
+  },
+  avatarImage: {
+    width: '100%',
+    height: '100%',
+  },
+  avatarFallback: {
+    flex: 1,
+    backgroundColor: colors.brandSoft,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  avatarInitials: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: colors.brandDark,
+  },
+  personMeta: {
+    flex: 1,
+  },
+  personLabel: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: colors.muted,
+    textTransform: 'uppercase',
+  },
+  personName: {
+    marginTop: 4,
+    fontSize: 16,
+    fontWeight: '800',
+    color: colors.text,
+  },
+  iconAction: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.brandSoft,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  waitingCard: {
+    marginTop: 16,
+    backgroundColor: '#f8fafc',
+    borderRadius: 18,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  waitingCardText: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  divider: {
+    height: 1,
+    backgroundColor: colors.border,
+    marginVertical: 18,
+  },
+  sectionTitle: {
+    fontSize: 14,
+    fontWeight: '900',
+    color: colors.text,
+    marginBottom: 10,
+  },
+  metaCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 18,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginBottom: 10,
+  },
+  metaLabel: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: colors.muted,
+    textTransform: 'uppercase',
+  },
+  metaValue: {
+    marginTop: 6,
+    fontSize: 14,
+    lineHeight: 20,
+    color: colors.text,
+    fontWeight: '600',
+  },
+  inlineFooterActions: {
+    marginTop: 12,
+    alignItems: 'flex-end',
+  },
+  pricingRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 8,
+    gap: 12,
+  },
+  pricingLabel: {
+    fontSize: 13,
+    color: colors.muted,
+  },
+  pricingValue: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  pricingTotalRow: {
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    paddingTop: 8,
+    marginTop: 12,
+  },
+  pricingTotalLabel: {
+    fontSize: 14,
+    fontWeight: '900',
+    color: colors.text,
+  },
+  pricingTotalValue: {
+    fontSize: 14,
+    fontWeight: '900',
+    color: colors.brandDark,
+  },
+  footerActions: {
+    marginTop: 12,
+    alignItems: 'flex-end',
+  },
+  textDangerAction: {
+    paddingVertical: 8,
+  },
+  textDangerActionLabel: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: colors.danger,
+  },
+  infoBanner: {
+    marginTop: 14,
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 12,
+    flexDirection: 'row',
+    gap: 10,
+    alignItems: 'flex-start',
+  },
+  infoBannerBody: {
+    flex: 1,
+  },
+  infoBannerTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#1e40af',
+  },
+  infoBannerText: {
+    marginTop: 2,
+    fontSize: 12,
+    lineHeight: 18,
+    color: '#2563eb',
+  },
+  infoBannerTitleDanger: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#991b1b',
+  },
+  infoBannerTextDanger: {
+    marginTop: 2,
+    fontSize: 12,
+    lineHeight: 18,
+    color: '#b91c1c',
+  },
+  graceBanner: {
+    backgroundColor: '#eff6ff',
+    borderColor: '#bfdbfe',
+  },
+  feeBanner: {
+    backgroundColor: '#fef2f2',
+    borderColor: '#fecaca',
+  },
+  primaryAction: {
+    minHeight: 50,
+    borderRadius: 16,
+    backgroundColor: colors.brand,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+  },
+  primaryActionText: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  secondaryAction: {
+    minHeight: 50,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: '#ffffff',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    flex: 1,
+  },
+  secondaryActionText: {
+    color: colors.text,
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  modalBg: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  modalCard: {
+    width: '100%',
+    backgroundColor: '#ffffff',
+    borderRadius: 22,
+    padding: 24,
+    gap: 14,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: '900',
+    color: colors.text,
+    textAlign: 'center',
+  },
+  modalText: {
+    fontSize: 14,
+    lineHeight: 20,
+    color: colors.muted,
+    textAlign: 'center',
+  },
+  reasonInput: {
+    width: '100%',
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 14,
+    padding: 12,
+    minHeight: 92,
+    textAlignVertical: 'top',
+    fontSize: 14,
+    color: colors.text,
+  },
+  modalButtonRow: {
+    flexDirection: 'row',
+    gap: 12,
+    width: '100%',
+  },
+  dangerAction: {
+    backgroundColor: colors.danger,
+    flex: 1,
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+  },
+  loadingText: {
+    marginTop: 12,
+    fontSize: 14,
+    color: colors.muted,
+  },
+  emptyContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+    backgroundColor: '#ffffff',
+  },
+  emptyTitle: {
+    fontSize: 22,
+    fontWeight: '900',
+    color: colors.text,
+    marginTop: 16,
+  },
+  emptyCopy: {
+    fontSize: 14,
+    color: colors.muted,
+    textAlign: 'center',
+    marginTop: 8,
+    marginBottom: 24,
+  },
+});

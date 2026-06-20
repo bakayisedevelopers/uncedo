@@ -1,0 +1,34 @@
+{
+  "Mathematics": [
+    "algebra",
+    "calculus",
+    "trigonometry",
+    "geometry",
+    "statistics",
+    "probability"
+  ],
+  "Physics": [
+    "mechanics",
+    "electricity",
+    "magnetism",
+    "waves",
+    "optics",
+    "thermodynamics"
+  ],
+  "Chemistry": [
+    "stoichiometry",
+    "organic",
+    "inorganic",
+    "equilibrium",
+    "kinetics",
+    "electrochemistry"
+  ],
+  "Biology": [
+    "genetics",
+    "ecology",
+    "cells",
+    "evolution",
+    "physiology",
+    "anatomy"
+  ]
+}

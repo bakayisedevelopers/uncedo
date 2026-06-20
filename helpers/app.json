@@ -1,0 +1,39 @@
+{
+  "expo": {
+    "name": "Helpers",
+    "slug": "helpers",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "platforms": [
+      "android",
+      "ios",
+      "web"
+    ],
+    "android": {
+      "package": "com.bakayisedevelopers.helpers",
+      "permissions": [
+        "CAMERA",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ]
+    },
+    "ios": {
+      "bundleIdentifier": "com.bakayisedevelopers.helpers",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Helpers uses your location while you are online so nearby customers can find you on the map.",
+        "NSCameraUsageDescription": "Helpers uses the camera so you can capture a profile selfie for verification.",
+        "NSPhotoLibraryUsageDescription": "Helpers uses your photo library so you can upload work pictures for your helper skills."
+      }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "577bc9b1-d455-47e6-a086-160b633ee7ce"
+      }
+    },
+    "owner": "bakayisedevelopers",
+    "plugins": [
+      "expo-font",
+      "expo-image-picker"
+    ]
+  }
+}

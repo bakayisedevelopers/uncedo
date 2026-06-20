@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "subjects": {
+    "Mathematics": {
+      "token_counts": {
+        "algebra": 8,
+        "equation": 7,
+        "quadratic": 5,
+        "factorise": 4,
+        "geometry": 5,
+        "trigonometry": 4,
+        "calculus": 4
+      }
+    },
+    "Physical Sciences": {
+      "token_counts": {
+        "physics": 7,
+        "chemistry": 6,
+        "force": 5,
+        "newton": 5,
+        "mole": 4,
+        "reaction": 5,
+        "acid": 3,
+        "base": 3
+      }
+    },
+    "English": {
+      "token_counts": {
+        "essay": 6,
+        "grammar": 6,
+        "comprehension": 5,
+        "language": 4,
+        "poem": 3
+      }
+    }
+  },
+  "topics": {
+    "Mathematics": {
+      "Algebra": {
+        "token_counts": {
+          "algebra": 10,
+          "equation": 9,
+          "quadratic": 6,
+          "simultaneous": 4
+        },
+        "token_total": 29
+      },
+      "Geometry": {
+        "token_counts": {
+          "geometry": 8,
+          "triangle": 5,
+          "angle": 6,
+          "circle": 4
+        },
+        "token_total": 23
+      }
+    },
+    "Physical Sciences": {
+      "Mechanics": {
+        "token_counts": {
+          "force": 8,
+          "newton": 7,
+          "acceleration": 5,
+          "velocity": 5
+        },
+        "token_total": 25
+      },
+      "Chemistry": {
+        "token_counts": {
+          "reaction": 7,
+          "mole": 6,
+          "acid": 5,
+          "base": 4
+        },
+        "token_total": 22
+      }
+    }
+  },
+  "minutes": {
+    "bias": 12.0,
+    "word_weight": 0.03,
+    "question_weight": 3.8,
+    "marks_weight": 0.25
+  },
+  "token_totals": {
+    "subjects": {
+      "Mathematics": 37,
+      "Physical Sciences": 38,
+      "English": 24
+    },
+    "topics": {}
+  },
+  "vocabulary": [
+    "algebra",
+    "equation",
+    "quadratic",
+    "factorise",
+    "geometry",
+    "trigonometry",
+    "calculus",
+    "physics",
+    "chemistry",
+    "force",
+    "newton",
+    "mole",
+    "reaction",
+    "acid",
+    "base",
+    "essay",
+    "grammar",
+    "comprehension",
+    "language",
+    "poem"
+  ]
+}
