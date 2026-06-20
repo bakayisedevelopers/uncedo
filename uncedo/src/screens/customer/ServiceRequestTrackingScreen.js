@@ -165,7 +165,7 @@ function getToneStyles(tone) {
   };
 }
 
-export function ServiceRequestTrackingScreen({ route, goBack }) {
+export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} }) {
   const requestId = route?.params?.requestId || '';
   const [request, setRequest] = useState(null);
   const [helperLocation, setHelperLocation] = useState(null);
@@ -176,8 +176,11 @@ export function ServiceRequestTrackingScreen({ route, goBack }) {
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [cancelReason, setCancelReason] = useState('');
   const [nowTime, setNowTime] = useState(Date.now());
+  const scrollOffsetYRef = useRef(0);
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
+  const topInset = Math.max(0, Number(systemInsets?.top || 0));
+  const bottomInset = Math.max(0, Number(systemInsets?.bottom || 0));
 
   const collapsedHeight = useMemo(() => Math.min(Math.max(height * 0.32, 260), 330), [height]);
   const maxExpandedHeight = useMemo(() => Math.min(Math.max(height * 0.82, 500), height - 72), [height]);
@@ -199,7 +202,16 @@ export function ServiceRequestTrackingScreen({ route, goBack }) {
   }, [collapsedHeight, expandedHeight, isExpanded, sheetHeight]);
 
   const panResponder = useMemo(() => PanResponder.create({
-    onMoveShouldSetPanResponder: (_, gesture) => Math.abs(gesture.dy) > 12,
+    onMoveShouldSetPanResponder: (_, gesture) => {
+      const isVertical = Math.abs(gesture.dy) > Math.abs(gesture.dx) && Math.abs(gesture.dy) > 12;
+      if (!isVertical || isLandscape) return false;
+      if (!isExpanded || !canScrollExpandedSheet) return true;
+      return gesture.dy > 0 && scrollOffsetYRef.current <= 0;
+    },
+    onMoveShouldSetPanResponderCapture: (_, gesture) => {
+      const isVertical = Math.abs(gesture.dy) > Math.abs(gesture.dx) && Math.abs(gesture.dy) > 18;
+      return isVertical && isExpanded && canScrollExpandedSheet && gesture.dy > 0 && scrollOffsetYRef.current <= 0;
+    },
     onPanResponderRelease: (_, gesture) => {
       if (gesture.dy < -30) {
         setIsExpanded(true);
@@ -207,7 +219,7 @@ export function ServiceRequestTrackingScreen({ route, goBack }) {
         setIsExpanded(false);
       }
     },
-  }), []);
+  }), [canScrollExpandedSheet, isExpanded, isLandscape]);
 
   useEffect(() => {
     if (!requestId) {
@@ -334,6 +346,20 @@ export function ServiceRequestTrackingScreen({ route, goBack }) {
   const statusMeta = useMemo(() => getStatusMeta(request?.status), [request?.status]);
   const toneStyles = useMemo(() => getToneStyles(statusMeta.tone), [statusMeta.tone]);
   const canCancelRequest = !['completed', 'canceled'].includes(String(request?.status || '').toLowerCase());
+  const statusDetail = request?.statusDetail || statusMeta.detail;
+  const serviceName = useMemo(() => {
+    const serviceLabels = Array.isArray(request?.serviceIds)
+      ? request.serviceIds
+        .map((serviceId) => getCustomerServiceById(serviceId)?.label || '')
+        .filter(Boolean)
+      : [];
+
+    if (serviceLabels.length) {
+      return serviceLabels.join(', ');
+    }
+
+    return request?.subject || 'Standard service';
+  }, [request?.serviceIds, request?.subject]);
 
   const helperMarkers = helperLocation ? [{
     id: request?.helperAssignment?.helperId || 'helper',
@@ -375,7 +401,7 @@ export function ServiceRequestTrackingScreen({ route, goBack }) {
 
   if (loading) {
     return (
-      <View style={styles.loadingContainer}>
+      <View style={[styles.loadingContainer, { paddingBottom: bottomInset, paddingTop: topInset }]}>
         <ActivityIndicator color={colors.brand} size="large" />
         <Text style={styles.loadingText}>Connecting to live tracking...</Text>
       </View>
@@ -384,7 +410,7 @@ export function ServiceRequestTrackingScreen({ route, goBack }) {
 
   if (error || !request) {
     return (
-      <View style={styles.emptyContainer}>
+      <View style={[styles.emptyContainer, { paddingBottom: bottomInset, paddingTop: topInset }]}>
         <Ionicons name="alert-circle-outline" size={64} color={colors.danger} />
         <Text style={styles.emptyTitle}>Unable to load tracking</Text>
         <Text style={styles.emptyCopy}>{error || 'The requested service could not be found.'}</Text>
@@ -445,35 +471,26 @@ export function ServiceRequestTrackingScreen({ route, goBack }) {
         </Pressable>
       </View>
 
-      <View style={styles.sheetHeader}>
-        <View style={styles.sheetHeaderText}>
-          <Text style={styles.sheetTitle}>{statusMeta.label}</Text>
-          <Text style={styles.sheetSubtitle} numberOfLines={expanded ? 2 : 1}>
-            {request.statusDetail || statusMeta.detail}
+      <View style={styles.metricsRow}>
+        <View style={styles.metricPill}>
+          <Text style={styles.metricLabel}>Distance</Text>
+          <Text style={styles.metricValue}>{formatDistance(distance)}</Text>
+        </View>
+        <View style={styles.metricPill}>
+          <Text style={styles.metricLabel}>ETA</Text>
+          <Text style={styles.metricValue}>
+            {etaMinutes && ['driving', 'en_route', 'buying_resources'].includes(String(request.status || '').toLowerCase())
+              ? `${etaMinutes} min`
+              : 'Waiting'}
           </Text>
         </View>
         <View style={[styles.statusBadge, { backgroundColor: toneStyles.badgeBg }]}>
           <Text style={[styles.statusBadgeText, { color: toneStyles.badgeText }]}>{statusMeta.label}</Text>
         </View>
       </View>
-
-      <View style={[styles.summaryCard, { backgroundColor: toneStyles.cardBg }]}>
-        <View style={styles.summaryTopRow}>
-          <View style={styles.summaryMeta}>
-            <Text style={styles.serviceName}>
-              {getCustomerServiceById(request.categoryId)?.name || request.subject || 'Service request'}
-            </Text>
-            <Text style={styles.summaryCaption}>Current estimate</Text>
-          </View>
-          <Text style={styles.priceText}>{formatCurrency(request.pricingSnapshot?.total)}</Text>
-        </View>
-        <View style={styles.summaryBottomRow}>
-          <Text style={styles.summaryPill}>{formatDistance(distance)}</Text>
-          {etaMinutes && ['driving', 'en_route'].includes(String(request.status || '').toLowerCase())
-            ? <Text style={styles.summaryPill}>{`${etaMinutes} min ETA`}</Text>
-            : null}
-        </View>
-      </View>
+      <Text style={styles.sheetSubtitle} numberOfLines={expanded ? 3 : 2}>
+        {statusDetail}
+      </Text>
 
       {request.helperAssignment ? (
         <View style={styles.personCard}>
@@ -502,7 +519,6 @@ export function ServiceRequestTrackingScreen({ route, goBack }) {
       )}
 
       {renderWaitCard()}
-      {renderCancelAction()}
 
       {expanded ? (
         <>
@@ -511,9 +527,7 @@ export function ServiceRequestTrackingScreen({ route, goBack }) {
           <Text style={styles.sectionTitle}>Job details</Text>
           <View style={styles.metaCard}>
             <Text style={styles.metaLabel}>Service type</Text>
-            <Text style={styles.metaValue}>
-              {getCustomerServiceById(request.categoryId)?.name || request.subject || 'Standard service'}
-            </Text>
+            <Text style={styles.metaValue}>{serviceName}</Text>
           </View>
 
           <View style={styles.metaCard}>
@@ -536,12 +550,10 @@ export function ServiceRequestTrackingScreen({ route, goBack }) {
             </View>
           </View>
 
-          <View style={styles.metaCard}>
-            <Text style={styles.metaLabel}>Status detail</Text>
-            <Text style={styles.metaValue}>{request.statusDetail || statusMeta.detail}</Text>
-          </View>
         </>
       ) : null}
+
+      {renderCancelAction()}
     </>
   );
 
@@ -556,31 +568,43 @@ export function ServiceRequestTrackingScreen({ route, goBack }) {
             initials: 'You',
           } : null}
           helperMarkers={helperMarkers}
-          floatingBottomInset={isLandscape ? 24 : collapsedHeight}
-          controlBottomInset={isLandscape ? 24 : collapsedHeight + 24}
+          floatingBottomInset={isLandscape ? 24 : collapsedHeight + bottomInset}
+          controlBottomInset={isLandscape ? 24 : collapsedHeight + bottomInset + 24}
         />
 
-        <Pressable accessibilityRole="button" style={styles.topBackButton} onPress={() => goBack('CustomerHome')}>
+        <Pressable
+          accessibilityRole="button"
+          style={[styles.topBackButton, { top: topInset + 16 }]}
+          onPress={() => goBack('CustomerHome')}
+        >
           <Ionicons name="chevron-back" size={24} color={colors.text} />
         </Pressable>
 
-        <Pressable accessibilityRole="button" style={styles.topSafetyButton} onPress={() => setShowSafetyModal(true)}>
+        <Pressable
+          accessibilityRole="button"
+          style={[styles.topSafetyButton, { top: topInset + 16 }]}
+          onPress={() => setShowSafetyModal(true)}
+        >
           <Ionicons name="shield-checkmark" size={24} color={colors.brand} />
         </Pressable>
       </View>
 
       {isLandscape ? (
-        <View style={styles.sidePanel}>
+        <View style={[styles.sidePanel, { paddingBottom: bottomInset + 34, paddingTop: topInset + 40 }]}>
           <ScrollView showsVerticalScrollIndicator={false}>
             {renderContent({ expanded: true })}
           </ScrollView>
         </View>
       ) : (
-        <Animated.View style={[styles.sheet, { height: sheetHeight }]}>
+        <Animated.View style={[styles.sheet, { bottom: bottomInset, height: sheetHeight }]} {...panResponder.panHandlers}>
           <ScrollView
             showsVerticalScrollIndicator={canScrollExpandedSheet}
             scrollEnabled={canScrollExpandedSheet}
-            contentContainerStyle={styles.sheetScrollContent}
+            contentContainerStyle={[styles.sheetScrollContent, { paddingBottom: bottomInset + 34 }]}
+            onScroll={({ nativeEvent }) => {
+              scrollOffsetYRef.current = nativeEvent.contentOffset?.y || 0;
+            }}
+            scrollEventThrottle={16}
           >
             <View
               onLayout={({ nativeEvent }) => {
@@ -701,7 +725,6 @@ const styles = StyleSheet.create({
   },
   sheetScrollContent: {
     paddingHorizontal: 20,
-    paddingBottom: 34,
   },
   sidePanel: {
     position: 'absolute',
@@ -713,8 +736,6 @@ const styles = StyleSheet.create({
     borderLeftWidth: 1,
     borderLeftColor: colors.border,
     paddingHorizontal: 20,
-    paddingTop: 40,
-    paddingBottom: 34,
   },
   sheetHandleWrap: {
     alignItems: 'center',
@@ -732,22 +753,36 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     backgroundColor: '#cbd5e1',
   },
-  sheetHeader: {
+  metricsRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    justifyContent: 'space-between',
     gap: 12,
+    flexWrap: 'wrap',
   },
-  sheetHeaderText: {
+  metricPill: {
     flex: 1,
+    minWidth: 96,
+    borderRadius: 16,
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
   },
-  sheetTitle: {
-    fontSize: 22,
-    fontWeight: '900',
+  metricLabel: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: colors.muted,
+    textTransform: 'uppercase',
+  },
+  metricValue: {
+    marginTop: 4,
+    fontSize: 14,
+    fontWeight: '800',
     color: colors.text,
   },
   sheetSubtitle: {
-    marginTop: 4,
+    marginTop: 12,
     fontSize: 13,
     lineHeight: 19,
     color: colors.muted,

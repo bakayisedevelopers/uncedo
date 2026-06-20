@@ -45,3 +45,4 @@ npm run web
 - Read `../docs/skills/agent-codebase-guide.md` for the repo map.
 - Use `../docs/skills/agent-developer-workflow.md` when builds or release APKs are involved.
 - Keep this README in sync with helper workflow, screen, or service changes.
+- Navigation is implemented in `src/navigation/RootNavigator.js`, including the custom route history used for Android hardware back behavior and mobile system-bar insets.

@@ -22,7 +22,10 @@ const CUSTOMER_SYSTEM_INSTRUCTION = [
   'Do not invent categories, services, or question ids.',
   'Collect required details before optional details.',
   'Do not calculate prices yourself.',
-  'When the app sends a quote, explain it clearly and ask the customer to approve or decline.',
+  'You only collect request details.',
+  'You must never claim that you are searching for, sending, assigning, dispatching, or matching a helper.',
+  'Once the details are complete, the app handles pricing, confirmation, and helper matching.',
+  'When the app sends a quote, tell the customer to review the final price shown by the app and ask them to approve or decline.',
 ].join(' ');
 
 function clip(value, max = 6000) {
@@ -160,6 +163,105 @@ function parseAiPayload(text = '') {
   };
 }
 
+function parseJsonObject(text = '') {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(raw.slice(start, end + 1));
+      } catch {}
+    }
+  }
+
+  return null;
+}
+
+function getMimeFamily(mimeType = '') {
+  const normalized = String(mimeType || '').trim().toLowerCase();
+  if (normalized.startsWith('image/')) return 'image';
+  if (normalized.startsWith('video/')) return 'video';
+  if (normalized === 'application/pdf') return 'pdf';
+  return 'file';
+}
+
+function normalizeFileSummary(text = '', fallback = '') {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  return normalized || fallback;
+}
+
+async function generateCustomerServiceMediaSummary({
+  firebaseConfig = {},
+  fileName = '',
+  mimeType = '',
+  dataBase64 = '',
+} = {}) {
+  const safeMimeType = String(mimeType || 'application/octet-stream').trim() || 'application/octet-stream';
+  const safeBase64 = String(dataBase64 || '').trim();
+  const safeFileName = String(fileName || 'attachment').trim() || 'attachment';
+  if (!safeBase64) {
+    throw new Error('Attachment data is required to summarize customer media.');
+  }
+
+  const mimeFamily = getMimeFamily(safeMimeType);
+  const prompt = [
+    'You are summarizing a customer reference file for a home-services booking assistant.',
+    'Return valid JSON only.',
+    'Keep the summary short and practical.',
+    'Focus on what the file shows that could help with booking the service.',
+    'Do not mention AI, models, or technical analysis.',
+    'If the file is unclear, say that clearly.',
+    'JSON shape:',
+    '{"summary":"...","shortSummary":"...","fileType":"image|video|pdf|file"}',
+  ].join('\n');
+
+  const ai = getVertexAiClient({ firebaseConfig });
+  const result = await ai.models.generateContent({
+    model: firebaseConfig.GEMINI_MODEL || firebaseConfig.FIREBASE_AI_MODEL || DEFAULT_GEMINI_MODEL,
+    contents: [{
+      role: 'user',
+      parts: [
+        { text: `${prompt}\n\nFile name: ${clip(safeFileName, 160)}\nMime type: ${safeMimeType}\nLikely file family: ${mimeFamily}` },
+        {
+          inlineData: {
+            mimeType: safeMimeType,
+            data: safeBase64,
+          },
+        },
+      ],
+    }],
+    config: {
+      temperature: 0.1,
+      maxOutputTokens: 350,
+      responseMimeType: 'application/json',
+    },
+  });
+
+  const parsedObject = parseJsonObject(String(result?.text || '').trim());
+
+  const fallbackSummary = mimeFamily === 'video'
+    ? 'Reference video uploaded.'
+    : mimeFamily === 'image'
+      ? 'Reference image uploaded.'
+      : mimeFamily === 'pdf'
+        ? 'Reference document uploaded.'
+        : 'Reference file uploaded.';
+
+  return {
+    fileName: safeFileName,
+    mimeType: safeMimeType,
+    fileType: normalizeFileSummary(parsedObject?.fileType, mimeFamily),
+    summary: normalizeFileSummary(parsedObject?.summary, fallbackSummary),
+    shortSummary: normalizeFileSummary(parsedObject?.shortSummary, fallbackSummary),
+    usageSummary: computeUsageSummary(result?.usageMetadata || null),
+  };
+}
+
 let vertexAiClient = null;
 let vertexAiClientKey = '';
 
@@ -273,6 +375,7 @@ async function generateCustomerServiceAiTurn({
 
 module.exports = {
   generateCustomerServiceAiTurn,
+  generateCustomerServiceMediaSummary,
   parseAiPayload,
   buildGreetingPrompt,
   buildJsonTurnPrompt,

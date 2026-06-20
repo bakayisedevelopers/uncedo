@@ -71,7 +71,7 @@ function buildPickerHtml({ accept, capture, title }) {
   <body>
     <div class="card">
       <h1>${heading}</h1>
-      <p>Select image or PDF files. Large files can take longer to process on mobile.</p>
+      <p>Select image, video, or PDF files. Large files can take longer to process on mobile.</p>
       <input id="fileInput" type="file" accept="${acceptValue}" ${captureAttribute} multiple />
       <button class="primary" id="openPicker">Choose file</button>
       <button class="secondary" id="cancelPicker">Cancel</button>
@@ -122,13 +122,14 @@ function buildPickerHtml({ accept, capture, title }) {
 export function AttachmentPickerModal({
   visible,
   mode,
+  accept,
   onCancel,
   onError,
   onFilesSelected,
 }) {
   const isCamera = mode === 'camera';
   const html = buildPickerHtml({
-    accept: isCamera ? 'image/*' : 'image/*,application/pdf',
+    accept: accept || (isCamera ? 'image/*' : 'image/*,video/*,application/pdf'),
     capture: isCamera ? 'environment' : '',
     title: isCamera ? 'Take Picture' : 'Upload files',
   });

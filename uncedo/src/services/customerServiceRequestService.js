@@ -237,6 +237,11 @@ export async function appendCustomerServiceTranscript(requestId, turn) {
       createdAt: Date.now(),
       questionId: turn.questionId || '',
       textMode: turn.textMode || 'readonly',
+      isVoice: Boolean(turn.isVoice),
+      source: String(turn.source || ''),
+      attachment: turn.attachment || null,
+      attachmentType: String(turn.attachmentType || ''),
+      attachmentName: String(turn.attachmentName || ''),
     }),
     updatedAt: serverTimestamp(),
   });
@@ -253,6 +258,11 @@ export async function updateCustomerServiceTranscript(requestId, transcriptList)
       createdAt: Number(turn.createdAt || Date.now()),
       questionId: turn.questionId || '',
       textMode: turn.textMode || 'readonly',
+      isVoice: Boolean(turn.isVoice),
+      source: String(turn.source || ''),
+      attachment: turn.attachment || null,
+      attachmentType: String(turn.attachmentType || ''),
+      attachmentName: String(turn.attachmentName || ''),
     })),
     updatedAt: serverTimestamp(),
   });

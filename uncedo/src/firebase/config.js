@@ -50,6 +50,7 @@ export function getFirebaseClients() {
 export function getFunctionEndpoint(functionName) {
   const directFunctionNames = new Set([
     'customerServiceAiTurn',
+    'customerServiceMediaSummary',
   ]);
 
   const hostingRewriteMap = {

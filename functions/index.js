@@ -47,7 +47,7 @@ const {
   publishTutorAgreementVersion,
   makeVersionDocId,
 } = require('./legalAgreements');
-const { generateCustomerServiceAiTurn } = require('./customerServiceAi');
+const { generateCustomerServiceAiTurn, generateCustomerServiceMediaSummary } = require('./customerServiceAi');
 
 let aiSubjectExtractionModule = null;
 let geminiExtractionModule = null;
@@ -2994,15 +2994,6 @@ function getRequestMetadata(req = {}) {
   return { ipAddress, userAgent };
 }
 
-function escapeHtml(value = '') {
-  return String(value || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
 function normalizeExtractedText(rawText) {
   return String(rawText || '').replace(/\s+/g, ' ').trim();
 }
@@ -3706,6 +3697,78 @@ exports.customerServiceAiTurn = onRequest(
       res.status(500).json({
         success: false,
         message: safeMessage,
+      });
+    }
+  },
+);
+
+exports.customerServiceMediaSummary = onRequest(
+  {
+    cors: true,
+    secrets: [UNCEDO_AI_KEYS],
+    timeoutSeconds: 120,
+    memory: '512MiB',
+  },
+  async (req, res) => {
+    if (req.method !== 'POST') {
+      res.status(405).json({ success: false, message: 'Method not allowed' });
+      return;
+    }
+
+    const token = getBearerToken(req);
+    if (!token) {
+      res.status(401).json({ success: false, message: 'Unauthorized request.' });
+      return;
+    }
+
+    const decoded = await admin.auth().verifyIdToken(token).catch(() => null);
+    if (!decoded?.uid) {
+      res.status(401).json({ success: false, message: 'Unauthorized request.' });
+      return;
+    }
+
+    let aiConfig;
+    try {
+      aiConfig = getAiSecrets();
+    } catch (error) {
+      logger.error('customer_service_media_summary_missing_ai_config', {
+        uid: decoded.uid,
+        error: error.message,
+      });
+      res.status(500).json({
+        success: false,
+        message: 'Customer AI configuration is unavailable.',
+      });
+      return;
+    }
+
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const fileName = String(body.fileName || '').trim() || 'attachment';
+    const mimeType = String(body.mimeType || '').trim() || 'application/octet-stream';
+    const dataBase64 = String(body.dataBase64 || '').trim();
+
+    try {
+      const result = await generateCustomerServiceMediaSummary({
+        firebaseConfig: aiConfig,
+        fileName,
+        mimeType,
+        dataBase64,
+      });
+
+      res.status(200).json({
+        success: true,
+        ...result,
+      });
+    } catch (error) {
+      logger.error('customer_service_media_summary_failed', {
+        uid: decoded.uid,
+        fileName,
+        mimeType,
+        error: error.message,
+      });
+      res.status(500).json({
+        success: false,
+        message: 'Unable to summarize the uploaded file right now.',
       });
     }
   },

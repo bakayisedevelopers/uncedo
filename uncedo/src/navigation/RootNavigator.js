@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  BackHandler,
+  Dimensions,
   Linking,
   Platform,
   Pressable,
@@ -8,6 +10,7 @@ import {
   StatusBar,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -55,6 +58,55 @@ const bottomNavItems = [
 ];
 
 const BOTTOM_NAV_HEIGHT = 84;
+const DEFAULT_ROUTE = { key: 'CustomerHome', params: {} };
+
+function normalizeRoute(target) {
+  if (typeof target === 'string') {
+    return { key: target, params: {} };
+  }
+
+  if (target?.key) {
+    return { key: target.key, params: target.params || {} };
+  }
+
+  return DEFAULT_ROUTE;
+}
+
+function areRouteParamsEqual(left = {}, right = {}) {
+  const leftKeys = Object.keys(left || {});
+  const rightKeys = Object.keys(right || {});
+
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
+  }
+
+  return leftKeys.every((key) => left[key] === right[key]);
+}
+
+function areRoutesEqual(left, right) {
+  return left?.key === right?.key && areRouteParamsEqual(left?.params, right?.params);
+}
+
+function resolveBottomSystemInset(windowWidth, windowHeight) {
+  if (Platform.OS !== 'android') {
+    return 0;
+  }
+
+  const screen = Dimensions.get('screen');
+  const isPortrait = windowHeight >= windowWidth;
+  if (!screen || !isPortrait) {
+    return 0;
+  }
+
+  const rawVerticalInset = Math.max(0, Number(screen.height || 0) - Number(windowHeight || 0));
+  const statusInset = StatusBar.currentHeight || 0;
+
+  if (rawVerticalInset > statusInset + 24) {
+    return Math.max(0, rawVerticalInset - statusInset);
+  }
+
+  return rawVerticalInset;
+}
 
 function resolveDeepLink(url) {
   if (!url) {
@@ -147,7 +199,17 @@ function resolveNotificationRoute(notification = {}) {
 
 export function RootNavigator() {
   const { initializing, user } = useAuth();
-  const [activeRoute, setActiveRoute] = useState({ key: 'CustomerHome', params: {} });
+  const { height: windowHeight, width: windowWidth } = useWindowDimensions();
+  const androidTopInset = Platform.OS === 'android' ? (StatusBar.currentHeight || 0) : 0;
+  const bottomSystemInset = resolveBottomSystemInset(windowWidth, windowHeight);
+  const bottomNavInset = BOTTOM_NAV_HEIGHT + bottomSystemInset;
+  const systemInsets = useMemo(
+    () => ({ top: androidTopInset, bottom: bottomSystemInset }),
+    [androidTopInset, bottomSystemInset],
+  );
+
+  const [activeRoute, setActiveRoute] = useState(DEFAULT_ROUTE);
+  const [routeHistory, setRouteHistory] = useState([]);
   const [bottomNavVisible, setBottomNavVisible] = useState(true);
   const [notifications, setNotifications] = useState([]);
   const [notificationsLoading, setNotificationsLoading] = useState(true);
@@ -156,12 +218,71 @@ export function RootNavigator() {
   const [activeRequest, setActiveRequest] = useState(null);
   const [lastActiveRequestId, setLastActiveRequestId] = useState(null);
   const [handledRatingSessionIds, setHandledRatingSessionIds] = useState([]);
+  const activeRouteRef = useRef(DEFAULT_ROUTE);
+  const routeHistoryRef = useRef([]);
   const previousSessionStatusesRef = useRef(new Map());
   const ratingTarget = useMemo(() => {
     if (!ratingQueue.length) return null;
     const [nextSessionId] = ratingQueue;
     return sessions.find((session) => session.id === nextSessionId) || null;
   }, [ratingQueue, sessions]);
+
+  useEffect(() => {
+    activeRouteRef.current = activeRoute;
+  }, [activeRoute]);
+
+  useEffect(() => {
+    routeHistoryRef.current = routeHistory;
+  }, [routeHistory]);
+
+  const openRoute = useCallback((target, options = {}) => {
+    const nextRoute = normalizeRoute(target);
+    const currentRoute = activeRouteRef.current;
+
+    if (areRoutesEqual(currentRoute, nextRoute)) {
+      return false;
+    }
+
+    const nextHistory = options.resetHistory
+      ? []
+      : options.replace
+        ? routeHistoryRef.current
+        : [...routeHistoryRef.current, currentRoute];
+
+    routeHistoryRef.current = nextHistory;
+    activeRouteRef.current = nextRoute;
+    setRouteHistory(nextHistory);
+    setActiveRoute(nextRoute);
+    setBottomNavVisible(true);
+    return true;
+  }, []);
+
+  const goBack = useCallback((fallbackKey = 'CustomerHome') => {
+    const history = routeHistoryRef.current;
+
+    if (history.length) {
+      const previousRoute = history[history.length - 1];
+      const nextHistory = history.slice(0, -1);
+      routeHistoryRef.current = nextHistory;
+      activeRouteRef.current = previousRoute;
+      setRouteHistory(nextHistory);
+      setActiveRoute(previousRoute);
+      setBottomNavVisible(true);
+      return true;
+    }
+
+    const fallbackRoute = normalizeRoute(activeRouteRef.current?.params?.parentTab || fallbackKey);
+    if (!areRoutesEqual(activeRouteRef.current, fallbackRoute)) {
+      routeHistoryRef.current = [];
+      activeRouteRef.current = fallbackRoute;
+      setRouteHistory([]);
+      setActiveRoute(fallbackRoute);
+      setBottomNavVisible(true);
+      return true;
+    }
+
+    return false;
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -173,14 +294,14 @@ export function RootNavigator() {
 
       const route = resolveDeepLink(url);
       if (route) {
-        setActiveRoute(route);
+        openRoute(route, { replace: true, resetHistory: true });
       }
     });
 
     const subscription = Linking.addEventListener('url', ({ url }) => {
       const route = resolveDeepLink(url);
       if (route) {
-        setActiveRoute(route);
+        openRoute(route);
       }
     });
 
@@ -188,11 +309,23 @@ export function RootNavigator() {
       mounted = false;
       subscription.remove();
     };
-  }, []);
+  }, [openRoute]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !user) {
+      return () => {};
+    }
+
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => goBack('CustomerHome'));
+    return () => subscription.remove();
+  }, [goBack, user]);
 
   useEffect(() => {
     if (!user?.uid) {
-      setActiveRoute({ key: 'CustomerHome', params: {} });
+      routeHistoryRef.current = [];
+      activeRouteRef.current = DEFAULT_ROUTE;
+      setRouteHistory([]);
+      setActiveRoute(DEFAULT_ROUTE);
       setBottomNavVisible(true);
       setNotifications([]);
       setSessions([]);
@@ -272,7 +405,7 @@ export function RootNavigator() {
         openRoute({
           key: targetKey,
           params: { requestId: activeRequest.id, parentTab: 'CustomerHome' }
-        });
+        }, { replace: true });
       }
     } else {
       if (lastActiveRequestId) {
@@ -281,11 +414,11 @@ export function RootNavigator() {
           (activeRoute.key === 'ServiceRequestTracking' || activeRoute.key === 'CustomerServiceCall') &&
           activeRoute.params?.requestId === lastActiveRequestId
         ) {
-          openRoute('CustomerHome');
+          openRoute('CustomerHome', { replace: true });
         }
       }
     }
-  }, [activeRequest, activeRoute.key, activeRoute.params?.requestId, lastActiveRequestId]);
+  }, [activeRequest, activeRoute.key, activeRoute.params?.requestId, lastActiveRequestId, openRoute]);
 
   useEffect(() => {
     if (!user?.uid) return;
@@ -350,19 +483,6 @@ export function RootNavigator() {
     );
   }
 
-  const openRoute = (target) => {
-    setBottomNavVisible(true);
-    if (typeof target === 'string') {
-      setActiveRoute({ key: target, params: {} });
-    } else if (target?.key) {
-      setActiveRoute({ key: target.key, params: target.params || {} });
-    }
-  };
-
-  const goBack = (fallbackKey = 'CustomerHome') => {
-    openRoute(activeRoute?.params?.parentTab || fallbackKey);
-  };
-
   const activeTabKey = getParentTab(activeRoute.key, activeRoute.params);
   const ActiveScreen = (appScreenLoaders[activeRoute.key] || appScreenLoaders.CustomerHome)();
   const isFullscreenRoute = ['CustomerHome', 'CustomerServiceCall', 'ServiceRequestTracking', 'JobRequestThread', 'SessionRoom', 'ServiceRequestDetails'].includes(activeRoute.key);
@@ -374,7 +494,8 @@ export function RootNavigator() {
     bottomNavVisible,
     notifications,
     isLoading: notificationsLoading,
-    bottomInset: BOTTOM_NAV_HEIGHT,
+    bottomInset: bottomNavInset,
+    systemInsets,
     onBottomNavVisibilityChange: setBottomNavVisible,
     onMarkAllRead: () => markAllNotificationsRead(user?.uid).catch(() => null),
     onOpenNotification: async (notification) => {
@@ -392,7 +513,7 @@ export function RootNavigator() {
         {isScrollableRoute ? (
           <SafeAreaView style={styles.contentSafe}>
             <ScrollView
-              contentContainerStyle={[styles.content, showBottomNav && styles.contentWithBottomNav]}
+              contentContainerStyle={[styles.content, showBottomNav && { paddingBottom: bottomNavInset + 24 }]}
               showsVerticalScrollIndicator={false}
             >
               <ActiveScreen {...screenProps} />
@@ -404,7 +525,7 @@ export function RootNavigator() {
 
         {showBottomNav ? (
           <SafeAreaView pointerEvents="box-none" style={styles.bottomNavSafeArea}>
-            <View style={styles.bottomNav}>
+            <View style={[styles.bottomNav, { minHeight: bottomNavInset, paddingBottom: bottomSystemInset + 14 }]}>
               {bottomNavItems.map((item) => {
                 const isActive = activeTabKey === item.key;
                 return (
@@ -466,9 +587,6 @@ const styles = StyleSheet.create({
     paddingBottom: 32,
     paddingTop: 18,
   },
-  contentWithBottomNav: {
-    paddingBottom: BOTTOM_NAV_HEIGHT + 24,
-  },
   bottomNavSafeArea: {
     bottom: 0,
     left: 0,
@@ -484,9 +602,7 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     flexDirection: 'row',
     justifyContent: 'space-around',
-    minHeight: BOTTOM_NAV_HEIGHT,
     overflow: 'hidden',
-    paddingBottom: 14,
     paddingHorizontal: 18,
     paddingTop: 10,
     shadowColor: '#0f172a',

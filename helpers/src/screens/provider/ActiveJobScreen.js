@@ -148,7 +148,7 @@ function getToneStyles(tone) {
   };
 }
 
-export function ActiveJobScreen({ goBack }) {
+export function ActiveJobScreen({ goBack, systemInsets = {} }) {
   const { activeJob, actions, saving, saveError } = useHelpersApp();
   const [currentLocation, setCurrentLocation] = useState(null);
   const [isExpanded, setIsExpanded] = useState(false);
@@ -165,8 +165,11 @@ export function ActiveJobScreen({ goBack }) {
   const [ratingTarget, setRatingTarget] = useState(null);
   const [nowTime, setNowTime] = useState(Date.now());
   const locationSubscriptionRef = useRef(null);
+  const scrollOffsetYRef = useRef(0);
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
+  const topInset = Math.max(0, Number(systemInsets?.top || 0));
+  const bottomInset = Math.max(0, Number(systemInsets?.bottom || 0));
 
   const collapsedHeight = useMemo(() => Math.min(Math.max(height * 0.34, 280), 340), [height]);
   const maxExpandedHeight = useMemo(() => Math.min(Math.max(height * 0.84, 520), height - 72), [height]);
@@ -188,7 +191,16 @@ export function ActiveJobScreen({ goBack }) {
   }, [collapsedHeight, expandedHeight, isExpanded, sheetHeight]);
 
   const panResponder = useMemo(() => PanResponder.create({
-    onMoveShouldSetPanResponder: (_, gesture) => Math.abs(gesture.dy) > 12,
+    onMoveShouldSetPanResponder: (_, gesture) => {
+      const isVertical = Math.abs(gesture.dy) > Math.abs(gesture.dx) && Math.abs(gesture.dy) > 12;
+      if (!isVertical || isLandscape) return false;
+      if (!isExpanded || !canScrollExpandedSheet) return true;
+      return gesture.dy > 0 && scrollOffsetYRef.current <= 0;
+    },
+    onMoveShouldSetPanResponderCapture: (_, gesture) => {
+      const isVertical = Math.abs(gesture.dy) > Math.abs(gesture.dx) && Math.abs(gesture.dy) > 18;
+      return isVertical && isExpanded && canScrollExpandedSheet && gesture.dy > 0 && scrollOffsetYRef.current <= 0;
+    },
     onPanResponderRelease: (_, gesture) => {
       if (gesture.dy < -30) {
         setIsExpanded(true);
@@ -196,7 +208,7 @@ export function ActiveJobScreen({ goBack }) {
         setIsExpanded(false);
       }
     },
-  }), []);
+  }), [canScrollExpandedSheet, isExpanded, isLandscape]);
 
   useEffect(() => {
     let active = true;
@@ -300,6 +312,11 @@ export function ActiveJobScreen({ goBack }) {
   const statusMeta = useMemo(() => getStatusMeta(activeJob?.status), [activeJob?.status]);
   const toneStyles = useMemo(() => getToneStyles(statusMeta.tone), [statusMeta.tone]);
   const canCancelJob = String(activeJob?.status || '').toLowerCase() !== 'completed';
+  const serviceName = useMemo(
+    () => getServiceById(activeJob?.serviceId)?.name || 'Service request',
+    [activeJob?.serviceId],
+  );
+  const statusDetail = activeJob?.statusDetail || statusMeta.detail;
 
   const customerMarkers = activeJob?.location
     ? [{
@@ -435,7 +452,7 @@ export function ActiveJobScreen({ goBack }) {
 
   if (!activeJob) {
     return (
-      <View style={styles.emptyContainer}>
+      <View style={[styles.emptyContainer, { paddingBottom: bottomInset, paddingTop: topInset }]}>
         <Ionicons name="checkmark-circle-outline" size={64} color={colors.success} />
         <Text style={styles.emptyTitle}>Job completed</Text>
         <Text style={styles.emptyCopy}>This active job has already been closed.</Text>
@@ -578,10 +595,14 @@ export function ActiveJobScreen({ goBack }) {
         </Pressable>
       </View>
 
-      <View style={styles.sheetHeader}>
-        <View style={styles.sheetHeaderText}>
-          <Text style={styles.sheetTitle}>{statusMeta.label}</Text>
-          <Text style={styles.sheetSubtitle} numberOfLines={expanded ? 2 : 1}>{statusMeta.detail}</Text>
+      <View style={styles.metricsRow}>
+        <View style={styles.metricPill}>
+          <Text style={styles.metricLabel}>Distance</Text>
+          <Text style={styles.metricValue}>{formatDistance(distance)}</Text>
+        </View>
+        <View style={styles.metricPill}>
+          <Text style={styles.metricLabel}>ETA</Text>
+          <Text style={styles.metricValue}>{etaMinutes ? `${etaMinutes} min` : 'Waiting'}</Text>
         </View>
         <View style={[styles.statusBadge, { backgroundColor: toneStyles.badgeBg }]}>
           <Text style={[styles.statusBadgeText, { color: toneStyles.badgeText }]}>
@@ -589,20 +610,7 @@ export function ActiveJobScreen({ goBack }) {
           </Text>
         </View>
       </View>
-
-      <View style={[styles.summaryCard, { backgroundColor: toneStyles.cardBg }]}>
-        <View style={styles.summaryTopRow}>
-          <View style={styles.summaryMeta}>
-            <Text style={styles.serviceName}>{getServiceById(activeJob.serviceId)?.name || 'Service request'}</Text>
-            <Text style={styles.summaryCaption}>Quoted total</Text>
-          </View>
-          <Text style={styles.priceText}>{formatCurrency(activeJob.totalAmount)}</Text>
-        </View>
-        <View style={styles.summaryBottomRow}>
-          <Text style={styles.summaryPill}>{formatDistance(distance)}</Text>
-          {etaMinutes ? <Text style={styles.summaryPill}>{`${etaMinutes} min ETA`}</Text> : null}
-        </View>
-      </View>
+      <Text style={styles.sheetSubtitle} numberOfLines={expanded ? 3 : 2}>{statusDetail}</Text>
 
       <View style={styles.personCard}>
         <View style={styles.avatarWrap}>
@@ -624,7 +632,6 @@ export function ActiveJobScreen({ goBack }) {
       </View>
 
       {renderActions()}
-      {renderCancelAction()}
 
       {expanded ? (
         <>
@@ -654,14 +661,16 @@ export function ActiveJobScreen({ goBack }) {
               </Text>
             </View>
             <View style={styles.metaCard}>
-              <Text style={styles.metaLabel}>Status detail</Text>
+              <Text style={styles.metaLabel}>Price details</Text>
               <Text style={styles.metaValue}>
-                {activeJob.statusDetail || statusMeta.detail}
+                {`${serviceName}\nQuoted total: ${formatCurrency(activeJob.totalAmount)}`}
               </Text>
             </View>
           </View>
         </>
       ) : null}
+
+      {renderCancelAction()}
     </>
   );
 
@@ -670,6 +679,7 @@ export function ActiveJobScreen({ goBack }) {
       <View style={styles.mapLayer}>
         <HelperMapPlaceholder
           mode="route"
+          routeView="navigation"
           currentUserMarker={currentLocation ? {
             latitude: currentLocation.latitude,
             longitude: currentLocation.longitude,
@@ -677,31 +687,43 @@ export function ActiveJobScreen({ goBack }) {
             initials: 'You',
           } : null}
           customerMarkers={customerMarkers}
-          floatingBottomInset={isLandscape ? 24 : collapsedHeight}
-          controlBottomInset={isLandscape ? 24 : collapsedHeight + 24}
+          floatingBottomInset={isLandscape ? 24 : collapsedHeight + bottomInset}
+          controlBottomInset={isLandscape ? 24 : collapsedHeight + bottomInset + 24}
         />
 
-        <Pressable accessibilityRole="button" style={styles.topBackButton} onPress={() => goBack('Home')}>
+        <Pressable
+          accessibilityRole="button"
+          style={[styles.topBackButton, { top: topInset + 16 }]}
+          onPress={() => goBack('Home')}
+        >
           <Ionicons name="chevron-back" size={24} color={colors.text} />
         </Pressable>
 
-        <Pressable accessibilityRole="button" style={styles.topSafetyButton} onPress={() => setShowSafetyModal(true)}>
+        <Pressable
+          accessibilityRole="button"
+          style={[styles.topSafetyButton, { top: topInset + 16 }]}
+          onPress={() => setShowSafetyModal(true)}
+        >
           <Ionicons name="shield-checkmark" size={24} color={colors.brand} />
         </Pressable>
       </View>
 
       {isLandscape ? (
-        <View style={styles.sidePanel}>
+        <View style={[styles.sidePanel, { paddingBottom: bottomInset + 34, paddingTop: topInset + 40 }]}>
           <ScrollView showsVerticalScrollIndicator={false}>
             {renderContent({ expanded: true })}
           </ScrollView>
         </View>
       ) : (
-        <Animated.View style={[styles.sheet, { height: sheetHeight }]}>
+        <Animated.View style={[styles.sheet, { bottom: bottomInset, height: sheetHeight }]} {...panResponder.panHandlers}>
           <ScrollView
             showsVerticalScrollIndicator={canScrollExpandedSheet}
             scrollEnabled={canScrollExpandedSheet}
-            contentContainerStyle={styles.sheetScrollContent}
+            contentContainerStyle={[styles.sheetScrollContent, { paddingBottom: bottomInset + 34 }]}
+            onScroll={({ nativeEvent }) => {
+              scrollOffsetYRef.current = nativeEvent.contentOffset?.y || 0;
+            }}
+            scrollEventThrottle={16}
           >
             <View
               onLayout={({ nativeEvent }) => {
@@ -929,7 +951,6 @@ const styles = StyleSheet.create({
   },
   sheetScrollContent: {
     paddingHorizontal: 20,
-    paddingBottom: 34,
   },
   sidePanel: {
     position: 'absolute',
@@ -941,8 +962,6 @@ const styles = StyleSheet.create({
     borderLeftWidth: 1,
     borderLeftColor: colors.border,
     paddingHorizontal: 20,
-    paddingTop: 40,
-    paddingBottom: 34,
   },
   sheetHandleWrap: {
     alignItems: 'center',
@@ -960,22 +979,36 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     backgroundColor: '#cbd5e1',
   },
-  sheetHeader: {
+  metricsRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    justifyContent: 'space-between',
     gap: 12,
+    flexWrap: 'wrap',
   },
-  sheetHeaderText: {
+  metricPill: {
     flex: 1,
+    minWidth: 96,
+    borderRadius: 16,
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
   },
-  sheetTitle: {
-    fontSize: 22,
-    fontWeight: '900',
+  metricLabel: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: colors.muted,
+    textTransform: 'uppercase',
+  },
+  metricValue: {
+    marginTop: 4,
+    fontSize: 14,
+    fontWeight: '800',
     color: colors.text,
   },
   sheetSubtitle: {
-    marginTop: 4,
+    marginTop: 12,
     fontSize: 13,
     lineHeight: 19,
     color: colors.muted,

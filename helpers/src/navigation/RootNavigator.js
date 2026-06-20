@@ -1,5 +1,17 @@
-import { useEffect, useState } from 'react';
-import { Platform, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  BackHandler,
+  Dimensions,
+  Platform,
+  Pressable,
+  SafeAreaView,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  useWindowDimensions,
+  View,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { ProviderLoginScreen } from '../screens/auth/ProviderLoginScreen';
 import { ActiveJobScreen } from '../screens/provider/ActiveJobScreen';
@@ -54,6 +66,55 @@ const secondaryScreens = {
 const FULLSCREEN_ROUTES = ['Home', 'ActiveJob'];
 const HIDE_BOTTOM_NAV_ROUTES = ['ActiveJob'];
 const BOTTOM_NAV_HEIGHT = 84;
+const DEFAULT_ROUTE = { key: 'Home', params: {} };
+
+function normalizeRoute(target) {
+  if (typeof target === 'string') {
+    return { key: target, params: {} };
+  }
+
+  if (target?.key) {
+    return { key: target.key, params: target.params || {} };
+  }
+
+  return DEFAULT_ROUTE;
+}
+
+function areRouteParamsEqual(left = {}, right = {}) {
+  const leftKeys = Object.keys(left || {});
+  const rightKeys = Object.keys(right || {});
+
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
+  }
+
+  return leftKeys.every((key) => left[key] === right[key]);
+}
+
+function areRoutesEqual(left, right) {
+  return left?.key === right?.key && areRouteParamsEqual(left?.params, right?.params);
+}
+
+function resolveBottomSystemInset(windowWidth, windowHeight) {
+  if (Platform.OS !== 'android') {
+    return 0;
+  }
+
+  const screen = Dimensions.get('screen');
+  const isPortrait = windowHeight >= windowWidth;
+  if (!screen || !isPortrait) {
+    return 0;
+  }
+
+  const rawVerticalInset = Math.max(0, Number(screen.height || 0) - Number(windowHeight || 0));
+  const statusInset = StatusBar.currentHeight || 0;
+
+  if (rawVerticalInset > statusInset + 24) {
+    return Math.max(0, rawVerticalInset - statusInset);
+  }
+
+  return rawVerticalInset;
+}
 
 function LoadingScreen() {
   return (
@@ -67,25 +128,117 @@ function LoadingScreen() {
 export function RootNavigator() {
   const { initializing, user } = useAuth();
   const { activeJob } = useHelpersApp();
-  const [activeRoute, setActiveRoute] = useState({ key: 'Home', params: {} });
+  const { height: windowHeight, width: windowWidth } = useWindowDimensions();
+  const androidTopInset = Platform.OS === 'android' ? (StatusBar.currentHeight || 0) : 0;
+  const bottomSystemInset = resolveBottomSystemInset(windowWidth, windowHeight);
+  const bottomNavInset = BOTTOM_NAV_HEIGHT + bottomSystemInset;
+  const systemInsets = useMemo(
+    () => ({ top: androidTopInset, bottom: bottomSystemInset }),
+    [androidTopInset, bottomSystemInset],
+  );
+
+  const [activeRoute, setActiveRoute] = useState(DEFAULT_ROUTE);
+  const [routeHistory, setRouteHistory] = useState([]);
   const [bottomNavVisible, setBottomNavVisible] = useState(true);
   const [lastActiveJobId, setLastActiveJobId] = useState(null);
+  const activeRouteRef = useRef(DEFAULT_ROUTE);
+  const routeHistoryRef = useRef([]);
+
+  useEffect(() => {
+    activeRouteRef.current = activeRoute;
+  }, [activeRoute]);
+
+  useEffect(() => {
+    routeHistoryRef.current = routeHistory;
+  }, [routeHistory]);
+
+  const openRoute = useCallback((target, options = {}) => {
+    const nextRoute = normalizeRoute(target);
+    const currentRoute = activeRouteRef.current;
+
+    if (areRoutesEqual(currentRoute, nextRoute)) {
+      return false;
+    }
+
+    const nextHistory = options.resetHistory
+      ? []
+      : options.replace
+        ? routeHistoryRef.current
+        : [...routeHistoryRef.current, currentRoute];
+
+    routeHistoryRef.current = nextHistory;
+    activeRouteRef.current = nextRoute;
+    setRouteHistory(nextHistory);
+    setActiveRoute(nextRoute);
+    setBottomNavVisible(true);
+    return true;
+  }, []);
+
+  const goBack = useCallback((fallbackKey = 'Profile') => {
+    const history = routeHistoryRef.current;
+
+    if (history.length) {
+      const previousRoute = history[history.length - 1];
+      const nextHistory = history.slice(0, -1);
+      routeHistoryRef.current = nextHistory;
+      activeRouteRef.current = previousRoute;
+      setRouteHistory(nextHistory);
+      setActiveRoute(previousRoute);
+      setBottomNavVisible(true);
+      return true;
+    }
+
+    const parent = activeRouteRef.current?.params?.parentTab;
+    const fallbackRoute = normalizeRoute(parent || fallbackKey);
+    if (!areRoutesEqual(activeRouteRef.current, fallbackRoute)) {
+      routeHistoryRef.current = [];
+      activeRouteRef.current = fallbackRoute;
+      setRouteHistory([]);
+      setActiveRoute(fallbackRoute);
+      setBottomNavVisible(true);
+      return true;
+    }
+
+    return false;
+  }, []);
 
   useEffect(() => {
     if (activeJob) {
       setLastActiveJobId(activeJob.id);
       if (activeRoute.key !== 'ActiveJob') {
-        openRoute({ key: 'ActiveJob', params: { requestId: activeJob.requestId } });
+        openRoute({ key: 'ActiveJob', params: { requestId: activeJob.requestId } }, { replace: true });
       }
     } else {
       if (lastActiveJobId) {
         setLastActiveJobId(null);
         if (activeRoute.key === 'ActiveJob') {
-          openRoute('Home');
+          openRoute('Home', { replace: true });
         }
       }
     }
-  }, [activeJob, activeRoute.key, lastActiveJobId]);
+  }, [activeJob, activeRoute.key, lastActiveJobId, openRoute]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !user?.uid) {
+      return () => {};
+    }
+
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => goBack('Home'));
+    return () => subscription.remove();
+  }, [goBack, user?.uid]);
+
+  useEffect(() => {
+    if (user?.uid) {
+      return;
+    }
+
+    routeHistoryRef.current = [];
+    activeRouteRef.current = DEFAULT_ROUTE;
+    setRouteHistory([]);
+    setActiveRoute(DEFAULT_ROUTE);
+    setBottomNavVisible(true);
+    setLastActiveJobId(null);
+  }, [user?.uid]);
 
   if (initializing) {
     return <LoadingScreen />;
@@ -94,20 +247,6 @@ export function RootNavigator() {
   if (!user?.uid) {
     return <ProviderLoginScreen />;
   }
-
-  const openRoute = (target) => {
-    setBottomNavVisible(true);
-    if (typeof target === 'string') {
-      setActiveRoute({ key: target, params: {} });
-    } else if (target?.key) {
-      setActiveRoute({ key: target.key, params: target.params || {} });
-    }
-  };
-
-  const goBack = (fallbackKey = 'Profile') => {
-    const parent = activeRoute?.params?.parentTab;
-    openRoute(parent || fallbackKey);
-  };
 
   const ActiveScreen = rootScreens[activeRoute.key] || secondaryScreens[activeRoute.key] || ProviderDashboardScreen;
   const activeTabKey = rootScreens[activeRoute.key] ? activeRoute.key : (activeRoute.params?.parentTab || 'Home');
@@ -118,8 +257,9 @@ export function RootNavigator() {
     navigate: openRoute,
     goBack,
     route: activeRoute,
-    bottomInset: BOTTOM_NAV_HEIGHT,
+    bottomInset: bottomNavInset,
     bottomNavVisible,
+    systemInsets,
     onBottomNavVisibilityChange: setBottomNavVisible,
   };
 
@@ -129,7 +269,7 @@ export function RootNavigator() {
         {isScrollableRoute ? (
           <SafeAreaView style={styles.contentSafe}>
             <ScrollView
-              contentContainerStyle={[styles.content, showBottomNav && styles.contentWithBottomNav]}
+              contentContainerStyle={[styles.content, showBottomNav && { paddingBottom: bottomNavInset + 24 }]}
               showsVerticalScrollIndicator={false}
             >
               <ActiveScreen {...screenProps} />
@@ -141,7 +281,7 @@ export function RootNavigator() {
 
         {showBottomNav ? (
           <SafeAreaView pointerEvents="box-none" style={styles.bottomNavSafeArea}>
-            <View style={styles.bottomNav}>
+            <View style={[styles.bottomNav, { minHeight: bottomNavInset, paddingBottom: bottomSystemInset + 14 }]}>
               {rootTabs.map((item) => {
                 const isActive = activeTabKey === item.key;
                 return (
@@ -193,9 +333,6 @@ const styles = StyleSheet.create({
     paddingBottom: 32,
     paddingTop: 18,
   },
-  contentWithBottomNav: {
-    paddingBottom: BOTTOM_NAV_HEIGHT + 24,
-  },
   bottomNavSafeArea: {
     bottom: 0,
     left: 0,
@@ -211,9 +348,7 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     flexDirection: 'row',
     justifyContent: 'space-around',
-    minHeight: BOTTOM_NAV_HEIGHT,
     overflow: 'hidden',
-    paddingBottom: 14,
     paddingHorizontal: 18,
     paddingTop: 10,
     shadowColor: '#0f172a',

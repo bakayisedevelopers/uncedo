@@ -69,6 +69,17 @@ export function CustomerServiceRequestsScreen({ navigate }) {
       {requests.map((request) => {
         const statusMeta = getServiceRequestStatusMeta(request.status);
         const toneStyle = getServiceRequestToneStyle(request.status);
+        const openHistory = () => {
+          navigate({
+            key: 'CustomerServiceCall',
+            params: {
+              requestId: request.id,
+              parentTab: 'Requests',
+              historyOnly: true,
+              location: request.location || null,
+            },
+          });
+        };
 
         return (
           <Pressable
@@ -143,8 +154,20 @@ export function CustomerServiceRequestsScreen({ navigate }) {
               </View>
             </View>
 
-            {/* Chevron */}
-            <Ionicons color={colors.muted} name="chevron-forward" size={18} />
+            <View style={styles.cardActions}>
+              <Pressable
+                accessibilityRole="button"
+                hitSlop={8}
+                onPress={(event) => {
+                  event?.stopPropagation?.();
+                  openHistory();
+                }}
+                style={styles.historyButton}
+              >
+                <Ionicons color={colors.brandDark} name="time-outline" size={18} />
+              </Pressable>
+              <Ionicons color={colors.muted} name="chevron-forward" size={18} />
+            </View>
           </Pressable>
         );
       })}
@@ -221,6 +244,11 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 4,
   },
+  cardActions: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+  },
   cardTitle: {
     color: colors.text,
     fontSize: 15,
@@ -257,5 +285,13 @@ const styles = StyleSheet.create({
     color: colors.muted,
     fontSize: 11,
     fontWeight: '700',
+  },
+  historyButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(217,70,239,0.08)',
+    borderRadius: 999,
+    height: 34,
+    justifyContent: 'center',
+    width: 34,
   },
 });

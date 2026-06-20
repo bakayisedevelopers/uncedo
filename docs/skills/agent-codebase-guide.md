@@ -33,6 +33,7 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
 * **Key Client Services (`/uncedo/src/services/`)**:
   * [nearbyHelpersMapService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/services/nearbyHelpersMapService.js): Interfaces helper geolocation mapping.
   * [paystackService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/services/paystackService.js): Connects client to custom `/verify-paystack` functions.
+  * [customerServiceMediaService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/services/customerServiceMediaService.js): Summarizes uploaded customer reference media for the AI intake chat so images or videos can influence the structured service request flow.
 
 ---
 

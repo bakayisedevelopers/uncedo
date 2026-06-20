@@ -82,6 +82,11 @@ function buildRouteKey(origin, destination) {
   ].join(':');
 }
 
+function getCoordinateDistanceScore(from, to) {
+  if (!from || !to) return Number.POSITIVE_INFINITY;
+  return Math.abs(from.latitude - to.latitude) + Math.abs(from.longitude - to.longitude);
+}
+
 function decodePolyline(encoded = '') {
   const points = [];
   let index = 0;
@@ -155,24 +160,69 @@ function extractRouteCoordinates(route = null) {
 }
 
 async function fetchRouteCoordinates(origin, destination) {
-  if (!GOOGLE_MAPS_API_KEY || !origin || !destination) {
+  if (!origin || !destination) {
     return [];
   }
 
-  const params = new URLSearchParams({
-    origin: `${origin.latitude},${origin.longitude}`,
-    destination: `${destination.latitude},${destination.longitude}`,
-    key: GOOGLE_MAPS_API_KEY,
-  });
+  if (GOOGLE_MAPS_API_KEY) {
+    const params = new URLSearchParams({
+      origin: `${origin.latitude},${origin.longitude}`,
+      destination: `${destination.latitude},${destination.longitude}`,
+      key: GOOGLE_MAPS_API_KEY,
+    });
 
-  const response = await fetch(`https://maps.googleapis.com/maps/api/directions/json?${params.toString()}`);
-  const payload = await response.json().catch(() => ({}));
+    const response = await fetch(`https://maps.googleapis.com/maps/api/directions/json?${params.toString()}`);
+    const payload = await response.json().catch(() => ({}));
 
-  if (!response.ok || payload?.status !== 'OK') {
-    throw new Error(payload?.error_message || 'Unable to load route directions.');
+    if (response.ok && payload?.status === 'OK') {
+      const googleCoordinates = extractRouteCoordinates(payload?.routes?.[0] || null);
+      if (googleCoordinates.length > 1) {
+        return googleCoordinates;
+      }
+    }
   }
 
-  return extractRouteCoordinates(payload?.routes?.[0] || null);
+  const osrmResponse = await fetch(
+    `https://router.project-osrm.org/route/v1/driving/${origin.longitude},${origin.latitude};${destination.longitude},${destination.latitude}?overview=full&geometries=polyline`,
+  );
+  const osrmPayload = await osrmResponse.json().catch(() => ({}));
+  const encodedPolyline = osrmPayload?.routes?.[0]?.geometry || '';
+  const osrmCoordinates = decodePolyline(encodedPolyline);
+
+  if (!osrmResponse.ok || osrmCoordinates.length <= 1) {
+    throw new Error('Unable to load route directions.');
+  }
+
+  return osrmCoordinates;
+}
+
+function getNavigationFocusCoordinates(routeCoordinates, currentCoordinate, destinationCoordinate) {
+  if (!routeCoordinates.length) {
+    return [currentCoordinate, destinationCoordinate].filter(Boolean);
+  }
+
+  const nearestIndex = routeCoordinates.reduce((bestIndex, coordinate, index, coordinates) => (
+    getCoordinateDistanceScore(coordinate, currentCoordinate) < getCoordinateDistanceScore(coordinates[bestIndex], currentCoordinate)
+      ? index
+      : bestIndex
+  ), 0);
+  const startIndex = Math.max(0, nearestIndex - 2);
+  const endIndex = Math.min(routeCoordinates.length, nearestIndex + 20);
+  const focusCoordinates = [];
+
+  if (currentCoordinate) {
+    appendCoordinateIfNeeded(focusCoordinates, currentCoordinate);
+  }
+
+  routeCoordinates.slice(startIndex, endIndex).forEach((coordinate) => {
+    appendCoordinateIfNeeded(focusCoordinates, coordinate);
+  });
+
+  if (focusCoordinates.length < 2 && destinationCoordinate) {
+    appendCoordinateIfNeeded(focusCoordinates, destinationCoordinate);
+  }
+
+  return focusCoordinates;
 }
 
 function AvatarMarker({ initials, photoUri, isCurrentUser = false, heading = null }) {
@@ -206,6 +256,7 @@ export function HelperMapPlaceholder({
   isLoading = false,
   errorMessage = '',
   mode = 'nearby',
+  routeView = 'overview',
 }) {
   const currentCoordinate = useMemo(() => normalizeCoordinate(currentUserMarker), [currentUserMarker]);
   const firstCustomer = customerMarkers[0] || null;
@@ -252,6 +303,7 @@ export function HelperMapPlaceholder({
     }
 
     lastRouteKeyRef.current = routeKey;
+    didInitialFitRef.current = false;
 
     fetchRouteCoordinates(currentCoordinate, destinationCoordinate)
       .then((coordinates) => {
@@ -302,7 +354,11 @@ export function HelperMapPlaceholder({
     if (didInitialFitRef.current) return;
 
     const coords = routeCoordinates.length > 1
-      ? routeCoordinates
+      ? (
+        routeView === 'navigation'
+          ? getNavigationFocusCoordinates(routeCoordinates, currentCoordinate, destinationCoordinate)
+          : routeCoordinates
+      )
       : [currentCoordinate, destinationCoordinate].filter(Boolean);
 
     if (!coords.length) return;
@@ -317,17 +373,23 @@ export function HelperMapPlaceholder({
 
     const timer = setTimeout(() => {
       mapRef.current?.fitToCoordinates?.(coords, {
-        edgePadding: { top: 120, right: 80, bottom: floatingBottomInset + 120, left: 80 },
+        edgePadding: routeView === 'navigation'
+          ? { top: 140, right: 72, bottom: floatingBottomInset + 170, left: 72 }
+          : { top: 120, right: 80, bottom: floatingBottomInset + 120, left: 80 },
         animated: true,
       });
     }, 250);
 
     return () => clearTimeout(timer);
-  }, [currentCoordinate, destinationCoordinate, floatingBottomInset, mode, radiusKm, routeCoordinates]);
+  }, [currentCoordinate, destinationCoordinate, floatingBottomInset, mode, radiusKm, routeCoordinates, routeView]);
 
   const recenter = () => {
     const coords = mode === 'route' && routeCoordinates.length > 1
-      ? routeCoordinates
+      ? (
+        routeView === 'navigation'
+          ? getNavigationFocusCoordinates(routeCoordinates, currentCoordinate, destinationCoordinate)
+          : routeCoordinates
+      )
       : [currentCoordinate, destinationCoordinate].filter(Boolean);
 
     if (!coords.length) {
@@ -345,7 +407,9 @@ export function HelperMapPlaceholder({
     }
 
     mapRef.current?.fitToCoordinates?.(coords, {
-      edgePadding: { top: 120, right: 80, bottom: floatingBottomInset + 120, left: 80 },
+      edgePadding: routeView === 'navigation'
+        ? { top: 140, right: 72, bottom: floatingBottomInset + 170, left: 72 }
+        : { top: 120, right: 80, bottom: floatingBottomInset + 120, left: 80 },
       animated: true,
     });
   };
@@ -361,10 +425,6 @@ export function HelperMapPlaceholder({
       return next;
     });
   };
-
-  const fallbackLine = currentCoordinate && destinationCoordinate
-    ? [currentCoordinate, destinationCoordinate]
-    : [];
 
   const legendCopy = errorMessage
     || routeError
@@ -456,13 +516,6 @@ export function HelperMapPlaceholder({
           />
         ) : null}
 
-        {mode === 'route' && NativePolyline && routeCoordinates.length <= 1 && fallbackLine.length === 2 ? (
-          <NativePolyline
-            coordinates={fallbackLine}
-            strokeColor={colors.brand}
-            strokeWidth={4}
-          />
-        ) : null}
       </NativeMapView>
 
       <View style={[styles.controls, { bottom: controlBottomInset ?? floatingBottomInset, top: 'auto' }]}>

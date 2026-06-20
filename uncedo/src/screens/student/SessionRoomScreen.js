@@ -37,10 +37,12 @@ function useBillableSeconds(session, isBillableActive) {
   return accumulatedSeconds + Math.max(0, Math.floor((now - activeStartedAt) / 1000));
 }
 
-export function SessionRoomScreen({ route, navigate, goBack }) {
+export function SessionRoomScreen({ route, navigate, goBack, systemInsets = {} }) {
   const { user } = useAuth();
   const { height, width } = useWindowDimensions();
   const isPortraitMobile = height > width;
+  const topInset = Math.max(0, Number(systemInsets?.top || 0));
+  const bottomInset = Math.max(0, Number(systemInsets?.bottom || 0));
 
   const bridgeRef = useRef(null);
   const joinAttemptedRef = useRef(false);
@@ -328,7 +330,7 @@ export function SessionRoomScreen({ route, navigate, goBack }) {
   if (!session) return <ErrorState title="Job not found" message="Job not found or no access." />;
 
   return (
-    <View style={styles.safe}>
+    <View style={[styles.safe, { paddingBottom: bottomInset, paddingTop: topInset }]}>
       <View style={styles.root}>
         {isPortraitMobile ? (
           <View style={styles.rotateOverlay}>

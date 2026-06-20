@@ -20,9 +20,11 @@ function MessageBubble({ item }) {
   );
 }
 
-export function JobRequestThreadScreen({ goBack, route }) {
+export function JobRequestThreadScreen({ goBack, route, systemInsets = {} }) {
   const draftText = String(route?.params?.draftText || 'I need help with dishes.').trim();
   const draftAttachments = Array.isArray(route?.params?.draftAttachments) ? route.params.draftAttachments : [];
+  const topInset = Math.max(0, Number(systemInsets?.top || 0));
+  const bottomInset = Math.max(0, Number(systemInsets?.bottom || 0));
   const [composerText, setComposerText] = useState('');
   const [messages, setMessages] = useState([
     { id: 'm1', role: 'customer', text: draftText || 'I need help with dishes.' },
@@ -48,7 +50,7 @@ export function JobRequestThreadScreen({ goBack, route }) {
   };
 
   return (
-    <View style={styles.screen}>
+    <View style={[styles.screen, { paddingTop: topInset }]}>
       <View style={styles.header}>
         <Pressable accessibilityRole="button" onPress={() => goBack('CustomerHome')} style={styles.backButton}>
           <Ionicons color={colors.text} name="arrow-back" size={20} />
@@ -59,7 +61,7 @@ export function JobRequestThreadScreen({ goBack, route }) {
         </View>
       </View>
 
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView contentContainerStyle={[styles.content, { paddingBottom: bottomInset + 118 }]}>
         {draftAttachments.length ? (
           <Card style={styles.attachmentCard}>
             <Text style={styles.sectionTitle}>Photos you added</Text>
@@ -114,7 +116,7 @@ export function JobRequestThreadScreen({ goBack, route }) {
         </Card>
       </ScrollView>
 
-      <View style={styles.composer}>
+      <View style={[styles.composer, { bottom: bottomInset }]}>
         <TextInput
           onChangeText={setComposerText}
           placeholder="Reply in this request thread"
@@ -176,7 +178,6 @@ const styles = StyleSheet.create({
   content: {
     gap: 14,
     padding: 16,
-    paddingBottom: 118,
   },
   attachmentCard: {
     gap: 10,

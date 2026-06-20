@@ -1,10 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Animated,
   Image,
   KeyboardAvoidingView,
-  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -17,22 +15,27 @@ import { Ionicons } from '@expo/vector-icons';
 import { doc, getDoc } from 'firebase/firestore';
 import { getFirebaseClients } from '../../firebase/config';
 import { AttachmentPickerModal } from '../../components/customer/AttachmentPickerModal';
-import { Button } from '../../components/ui/Button';
-import { Card } from '../../components/ui/Card';
+import { CustomerAiCallBridge } from '../../components/customer/CustomerAiCallBridge';
 import { ErrorState, LoadingState } from '../../components/ui/States';
 import {
   buildCustomerIntakePromptCatalog,
   buildCustomerIntakeQuestionPlan,
   buildMissingRequiredFields,
-  getSelectedServiceMetadata,
+  formatCustomerIntakeOptionLabel,
+  getNextCustomerIntakeQuestion,
+  getQuestionIdsForSelection,
 } from '../../constants/customerIntakeQuestions';
 import { createServiceRequestDraft } from '../../constants/requestPayload';
-import { getCustomerServiceById, getCustomerServicesForCategory, getCustomerServiceCategoryById, CUSTOMER_SERVICE_CATEGORY_OPTIONS } from '../../constants/serviceCatalog';
+import {
+  CUSTOMER_SERVICE_CATEGORY_OPTIONS,
+  getCustomerServiceById,
+  getCustomerServiceCategoryById,
+  getCustomerServicesForCategory,
+} from '../../constants/serviceCatalog';
 import { useAuth } from '../../context/AuthContext';
 import {
   appendCustomerServiceTranscript,
   buildServicePricingSnapshot,
-  cancelCustomerServiceCall,
   createCustomerServiceRequest,
   deriveTimingDetails,
   finalizeCustomerServiceRequest,
@@ -43,14 +46,9 @@ import {
   uploadCustomerServiceReference,
 } from '../../services/customerServiceRequestService';
 import { streamCustomerAssistantTurn } from '../../services/customerDirectAiService';
+import { extractSingleAttachment } from '../../services/attachmentExtractionService';
+import { describeCustomerServiceMediaAttachment } from '../../services/customerServiceMediaService';
 import { colors } from '../../theme/colors';
-
-function formatElapsed(seconds) {
-  const total = Math.max(0, Number(seconds || 0));
-  const minutes = String(Math.floor(total / 60)).padStart(2, '0');
-  const remainingSeconds = String(total % 60).padStart(2, '0');
-  return `${minutes}:${remainingSeconds}`;
-}
 
 function formatCurrency(value) {
   const amount = Number(value || 0);
@@ -80,12 +78,85 @@ function isLikelyDeclineText(value = '') {
     .some((phrase) => normalized.includes(phrase));
 }
 
-export function CustomerServiceCallScreen({ route, navigate, goBack }) {
+function normalizeTranscriptTurn(turn = {}, index = 0) {
+  return {
+    id: String(turn.id || `${turn.role || 'turn'}-${turn.createdAt || Date.now()}-${index}`),
+    role: String(turn.role || 'assistant'),
+    text: String(turn.text || '').trim(),
+    questionId: String(turn.questionId || ''),
+    createdAt: Number(turn.createdAt || Date.now()),
+    isVoice: Boolean(turn.isVoice),
+    source: String(turn.source || ''),
+    attachment: turn.attachment || null,
+    attachmentType: String(turn.attachmentType || ''),
+    attachmentName: String(turn.attachmentName || ''),
+  };
+}
+
+function isTerminalRequestStatus(status = '') {
+  return ['completed', 'canceled', 'cancelled', 'expired'].includes(String(status || '').trim().toLowerCase());
+}
+
+function buildMediaTurnSummary({ uploaded = [], mediaSummaries = [], extractionResults = [] } = {}) {
+  const count = uploaded.length;
+  if (!count) return 'I uploaded a reference file for this request.';
+
+  const details = [];
+  mediaSummaries.forEach((entry) => {
+    const summary = String(entry?.shortSummary || entry?.summary || '').trim();
+    if (summary) details.push(summary);
+  });
+  extractionResults.forEach((entry) => {
+    const text = String(entry?.extractedText || '').trim();
+    if (text) {
+      details.push(`Detected details: ${text.slice(0, 220)}`);
+    }
+  });
+
+  if (!details.length) {
+    return `I uploaded ${count} reference file${count === 1 ? '' : 's'} for this request.`;
+  }
+
+  return `I uploaded ${count} reference file${count === 1 ? '' : 's'} for this request. ${details.join(' ')}`;
+}
+
+function getServiceSelectionLabel(serviceIds = []) {
+  return (serviceIds || [])
+    .map((serviceId) => getCustomerServiceById(serviceId)?.label || '')
+    .filter(Boolean)
+    .join(', ');
+}
+
+function getQuoteDisplayData(structuredRequest, quotePreview) {
+  const categoryLabel = getCustomerServiceCategoryById(structuredRequest?.categoryId)?.label || 'Service';
+  const serviceLabel = getServiceSelectionLabel(structuredRequest?.serviceIds) || 'Not selected';
+  return {
+    categoryLabel,
+    serviceLabel,
+    totalLabel: formatCurrency(quotePreview?.pricingSnapshot?.total || 0),
+  };
+}
+
+function pruneStructuredAnswers({ currentAnswers = {}, nextCategoryId = '', nextServiceIds = [] } = {}) {
+  const allowedQuestionIds = new Set(getQuestionIdsForSelection({
+    categoryId: nextCategoryId,
+    serviceIds: nextServiceIds,
+  }));
+
+  return Object.entries(currentAnswers || {}).reduce((acc, [key, value]) => {
+    if (allowedQuestionIds.has(key)) {
+      acc[key] = value;
+    }
+    return acc;
+  }, {});
+}
+
+export function CustomerServiceCallScreen({ route, navigate, goBack, systemInsets = {} }) {
   const { user } = useAuth();
   const scrollViewRef = useRef(null);
+  const voiceBridgeRef = useRef(null);
   const initSentRef = useRef(false);
   const finalizingRef = useRef(false);
-  const callClosedRef = useRef(false);
   const quotePresentedRef = useRef(false);
   const quoteDecisionPendingRef = useRef(false);
   const activeAiRequestRef = useRef(null);
@@ -94,79 +165,182 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
   const conversationRef = useRef([]);
 
   const [requestId, setRequestId] = useState('');
+  const [requestRecord, setRequestRecord] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [isTyping, setIsTyping] = useState(false);
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [conversation, setConversation] = useState([]);
-  const [selectionRequest, setSelectionRequest] = useState(null);
   const [uploadPickerVisible, setUploadPickerVisible] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [quoteAwaitingApproval, setQuoteAwaitingApproval] = useState(false);
   const [quotePreview, setQuotePreview] = useState(null);
   const [uploadedReferences, setUploadedReferences] = useState([]);
+  const [uploadedReferenceSummaries, setUploadedReferenceSummaries] = useState([]);
   const [aiUsageSnapshot, setAiUsageSnapshot] = useState(null);
-  
-  // Chat Input state
   const [inputText, setInputText] = useState('');
-
+  const [voiceState, setVoiceState] = useState({
+    listening: false,
+    processing: false,
+    supported: true,
+  });
   const [structuredRequest, setStructuredRequest] = useState(() => ({
     ...createServiceRequestDraft(),
     structuredAnswers: {},
     missingRequired: ['category', 'service'],
   }));
 
-  const selectedServiceMetadata = useMemo(
-    () => getSelectedServiceMetadata(structuredRequest.serviceIds),
-    [structuredRequest.serviceIds],
+  const topInset = Math.max(0, Number(systemInsets?.top || 0));
+  const bottomInset = Math.max(0, Number(systemInsets?.bottom || 0));
+  const headerTopInset = Platform.OS === 'ios' ? 48 : Math.max(topInset + 10, 34);
+  const chatBottomInset = Math.max(bottomInset + 12, 24);
+
+  const readOnlyHistory = Boolean(route?.params?.historyOnly) || isTerminalRequestStatus(requestRecord?.status);
+  const currentQuestion = useMemo(
+    () => getNextCustomerIntakeQuestion({
+      categoryId: structuredRequest.categoryId,
+      serviceIds: structuredRequest.serviceIds,
+      structuredAnswers: structuredRequest.structuredAnswers,
+    }),
+    [structuredRequest.categoryId, structuredRequest.serviceIds, structuredRequest.structuredAnswers],
   );
-  
   const selectedCategoryServices = useMemo(
     () => getCustomerServicesForCategory(structuredRequest.categoryId),
     [structuredRequest.categoryId],
   );
-  
-  const canUploadReference = selectedServiceMetadata.some((service) => service.requiresPortfolioSelection);
-  const pricingLines = Array.isArray(quotePreview?.pricingSnapshot?.lines) ? quotePreview.pricingSnapshot.lines : [];
+  const quoteDisplay = useMemo(
+    () => getQuoteDisplayData(structuredRequest, quotePreview),
+    [structuredRequest, quotePreview],
+  );
 
-  const traceCall = (stage, detail = {}) => {
-    const safeDetail = {};
-    Object.entries(detail || {}).forEach(([key, value]) => {
-      if (value === undefined) return;
-      safeDetail[key] = value;
+  const inlineOptions = useMemo(() => {
+    if (quotePreview?.pricingSnapshot) return [];
+    if (!structuredRequest.categoryId) {
+      return CUSTOMER_SERVICE_CATEGORY_OPTIONS.map((item) => ({
+        id: item.id,
+        label: item.label,
+        type: 'category',
+      }));
+    }
+    if (!structuredRequest.serviceIds?.length) {
+      return selectedCategoryServices.map((service) => ({
+        id: service.id,
+        label: service.label,
+        type: 'service',
+      }));
+    }
+    if (currentQuestion?.answerType === 'enum' && Array.isArray(currentQuestion.options) && currentQuestion.options.length) {
+      return currentQuestion.options.map((option) => ({
+        id: `${currentQuestion.id}-${option}`,
+        value: option,
+        label: formatCustomerIntakeOptionLabel(option),
+        type: 'answer',
+      }));
+    }
+    return [];
+  }, [currentQuestion, quotePreview?.pricingSnapshot, selectedCategoryServices, structuredRequest.categoryId, structuredRequest.serviceIds]);
+
+  const resetQuoteState = () => {
+    quotePresentedRef.current = false;
+    quoteDecisionPendingRef.current = false;
+    setQuoteAwaitingApproval(false);
+    setQuotePreview(null);
+  };
+
+  const persistStructuredState = async (nextStructuredState, overrides = {}) => {
+    if (!requestIdRef.current) return;
+    const nextTiming = deriveTimingDetails(nextStructuredState.structuredAnswers);
+    const requestLocation = requestRecord?.requestPayload?.location || requestRecord?.location || route?.params?.location || null;
+    await updateCustomerServiceRequest(requestIdRef.current, {
+      categoryId: nextStructuredState.categoryId || '',
+      serviceIds: nextStructuredState.serviceIds || [],
+      structuredAnswers: nextStructuredState.structuredAnswers || {},
+      referenceAttachmentSummaries: overrides.mediaSummariesInput || uploadedReferenceSummaries,
+      requestPayload: {
+        categoryId: nextStructuredState.categoryId || '',
+        serviceIds: nextStructuredState.serviceIds || [],
+        structuredAnswers: nextStructuredState.structuredAnswers || {},
+        selectedPortfolioReferences: nextStructuredState.selectedPortfolioReferences || [],
+        safetyFlags: nextStructuredState.safetyFlags || [],
+        serviceAddress: nextStructuredState.serviceAddress || structuredRequestRef.current?.serviceAddress || '',
+        timingPreference: nextTiming.timingPreference,
+        scheduledForText: nextTiming.scheduledForText,
+        location: requestLocation,
+        attachments: overrides.attachmentsInput || uploadedReferences,
+        mediaSummaries: overrides.mediaSummariesInput || uploadedReferenceSummaries,
+      },
     });
-    // eslint-disable-next-line no-console
-    console.log(JSON.stringify({
-      event: 'customer_chat_trace',
-      stage,
-      requestId: requestIdRef.current || '',
-      ...safeDetail,
-    }));
+  };
+
+  const appendAssistantTurn = (text = '', metadata = {}) => {
+    const nextEvent = {
+      id: `assistant-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+      role: 'assistant',
+      text: String(text || '').trim(),
+      questionId: metadata?.questionId || '',
+      createdAt: Date.now(),
+      source: String(metadata?.source || 'assistant'),
+    };
+    setConversation((current) => {
+      const nextConversation = [...current, nextEvent];
+      conversationRef.current = nextConversation;
+      return nextConversation;
+    });
+    appendCustomerServiceTranscript(requestIdRef.current, nextEvent).catch(() => null);
+    return nextEvent;
+  };
+
+  const mergeStructuredDraft = (current, nextDraft = {}) => {
+    const requestedCategoryId = String(nextDraft.categoryId || '').trim();
+    const requestedServiceIds = Array.isArray(nextDraft.serviceIds)
+      ? [...new Set(nextDraft.serviceIds.filter(Boolean))]
+      : [];
+    const nextCategoryId = requestedCategoryId || current.categoryId;
+    const nextServiceIds = requestedServiceIds.length ? requestedServiceIds : current.serviceIds;
+    const categoryChanged = Boolean(requestedCategoryId) && requestedCategoryId !== current.categoryId;
+    const serviceChanged = requestedServiceIds.length > 0 && JSON.stringify(requestedServiceIds) !== JSON.stringify(current.serviceIds || []);
+
+    const baseAnswers = categoryChanged || serviceChanged
+      ? pruneStructuredAnswers({
+        currentAnswers: current.structuredAnswers || {},
+        nextCategoryId,
+        nextServiceIds,
+      })
+      : (current.structuredAnswers || {});
+
+    const nextStructuredAnswers = {
+      ...baseAnswers,
+      ...(nextDraft.structuredAnswers || {}),
+      ...(nextDraft.requiredAnswers || {}),
+      ...(nextDraft.optionalAnswers || {}),
+    };
+
+    return {
+      nextState: {
+        ...current,
+        categoryId: nextCategoryId,
+        serviceIds: nextServiceIds,
+        structuredAnswers: nextStructuredAnswers,
+        selectedPortfolioReferences: Array.isArray(nextDraft.selectedPortfolioReferences)
+          ? nextDraft.selectedPortfolioReferences
+          : (categoryChanged || serviceChanged ? [] : current.selectedPortfolioReferences),
+        safetyFlags: Array.isArray(nextDraft.safetyFlags)
+          ? nextDraft.safetyFlags
+          : (categoryChanged || serviceChanged ? [] : current.safetyFlags),
+        missingRequired: buildMissingRequiredFields({
+          categoryId: nextCategoryId,
+          serviceIds: nextServiceIds,
+          structuredAnswers: nextStructuredAnswers,
+        }),
+      },
+      categoryChanged,
+      serviceChanged,
+    };
   };
 
   useEffect(() => {
     requestIdRef.current = requestId;
   }, [requestId]);
-
-  useEffect(() => {
-    if (!requestId || loading || initSentRef.current) {
-      return;
-    }
-    initSentRef.current = true;
-
-    const isResuming = conversationRef.current.length > 0;
-    const turnParams = {
-      initialStatus: 'dialing',
-    };
-    if (isResuming) {
-      turnParams.appInstruction = 'The customer has reconnected to the call. Acknowledge their return and ask how you can help them complete their request details.';
-    }
-
-    runAssistantTurn(turnParams).catch((nextError) => {
-      setError(nextError.message || 'Unable to start the AI call.');
-    });
-  }, [loading, requestId]);
 
   useEffect(() => {
     structuredRequestRef.current = structuredRequest;
@@ -182,25 +356,33 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
     async function bootstrap() {
       try {
         const existingRequestId = route?.params?.requestId;
-        let nextRequestId;
+        let nextRequestId = '';
 
         if (existingRequestId) {
           nextRequestId = existingRequestId;
           const { db } = getFirebaseClients();
           const docSnap = await getDoc(doc(db, 'serviceRequests', existingRequestId));
           if (docSnap.exists() && active) {
-            const data = docSnap.data();
-            if (Array.isArray(data.transcript) && data.transcript.length > 0) {
-              setConversation(data.transcript);
-              conversationRef.current = data.transcript;
+            const data = docSnap.data() || {};
+            setRequestRecord({ id: existingRequestId, ...data });
+            if (Array.isArray(data.transcript)) {
+              const normalizedTranscript = data.transcript.map((turn, index) => normalizeTranscriptTurn(turn, index));
+              setConversation(normalizedTranscript);
+              conversationRef.current = normalizedTranscript;
             }
+            setUploadedReferences(Array.isArray(data.referenceAttachments) ? data.referenceAttachments : []);
+            setUploadedReferenceSummaries(Array.isArray(data.referenceAttachmentSummaries) ? data.referenceAttachmentSummaries : []);
             if (data.structuredAnswers || data.categoryId || data.serviceIds) {
               setStructuredRequest({
                 ...createServiceRequestDraft(),
                 categoryId: data.categoryId || '',
                 serviceIds: data.serviceIds || [],
                 structuredAnswers: data.structuredAnswers || {},
-                missingRequired: data.requestPayload?.missingRequired || ['category', 'service'],
+                missingRequired: buildMissingRequiredFields({
+                  categoryId: data.categoryId || '',
+                  serviceIds: data.serviceIds || [],
+                  structuredAnswers: data.structuredAnswers || {},
+                }),
                 serviceAddress: data.requestPayload?.serviceAddress || '',
                 selectedPortfolioReferences: data.requestPayload?.selectedPortfolioReferences || [],
                 safetyFlags: data.requestPayload?.safetyFlags || [],
@@ -216,7 +398,6 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
 
         if (!active) return;
         setRequestId(nextRequestId);
-        setElapsedSeconds(0);
         if (!existingRequestId) {
           setStructuredRequest((current) => ({
             ...current,
@@ -235,7 +416,24 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
     return () => {
       active = false;
     };
-  }, [user, route?.params?.location, route?.params?.requestId]);
+  }, [route?.params?.location, route?.params?.requestId, user]);
+
+  useEffect(() => {
+    if (!requestId || readOnlyHistory || loading || initSentRef.current) {
+      return;
+    }
+    initSentRef.current = true;
+
+    const isResuming = conversationRef.current.length > 0;
+    const turnParams = { initialStatus: 'dialing' };
+    if (isResuming) {
+      turnParams.appInstruction = 'The customer has reconnected to the chat. Welcome them back and continue collecting the missing request details.';
+    }
+
+    runAssistantTurn(turnParams).catch((nextError) => {
+      setError(nextError.message || 'Unable to start the AI chat.');
+    });
+  }, [loading, readOnlyHistory, requestId]);
 
   useEffect(() => {
     if (!requestId) return () => {};
@@ -243,8 +441,12 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
       requestId,
       (request) => {
         if (!request) return;
+        setRequestRecord(request);
         if (request.referenceAttachments) {
           setUploadedReferences(Array.isArray(request.referenceAttachments) ? request.referenceAttachments : []);
+        }
+        if (request.referenceAttachmentSummaries) {
+          setUploadedReferenceSummaries(Array.isArray(request.referenceAttachmentSummaries) ? request.referenceAttachmentSummaries : []);
         }
         if (
           request.pricingSnapshot
@@ -253,7 +455,6 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
         ) {
           setQuotePreview({
             pricingSnapshot: request.pricingSnapshot,
-            summary: request.serviceSummary || '',
             timingPreference: request.requestPayload?.timingPreference || 'now',
             scheduledForText: request.requestPayload?.scheduledForText || '',
           });
@@ -265,119 +466,11 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
     );
   }, [requestId]);
 
-  // Handle call timer count
-  useEffect(() => {
-    const timer = setInterval(() => setElapsedSeconds((current) => current + 1), 1000);
-    return () => clearInterval(timer);
+  useEffect(() => () => {
+    try {
+      activeAiRequestRef.current?.abort?.();
+    } catch {}
   }, []);
-
-  useEffect(() => {
-    return () => {
-      try {
-        activeAiRequestRef.current?.abort?.();
-      } catch {}
-    };
-  }, []);
-
-  const appendAssistantTurn = (text = '', metadata = {}) => {
-    const nextEvent = {
-      id: `assistant-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
-      role: 'assistant',
-      text: String(text || '').trim(),
-      questionId: metadata?.questionId || '',
-      createdAt: Date.now(),
-    };
-    setConversation((current) => {
-      const nextConversation = [...current, nextEvent];
-      conversationRef.current = nextConversation;
-      return nextConversation;
-    });
-    traceCall('assistant_turn_appended', {
-      questionId: nextEvent.questionId || '',
-      textLength: nextEvent.text.length,
-    });
-    appendCustomerServiceTranscript(requestIdRef.current, nextEvent).catch(() => null);
-
-    return nextEvent;
-  };
-
-  const applyAssistantResult = async (result = {}, options = {}) => {
-    const finalText = String(result?.speak || '').trim();
-    traceCall('assistant_result_received', {
-      questionId: options.questionId || '',
-      hasText: Boolean(finalText),
-      status: String(result?.status || ''),
-    });
-
-    const correctedText = String(result?.correctedCustomerText || '').trim();
-    let updatedConversation = conversationRef.current || conversation;
-    let transcriptUpdated = false;
-
-    if (correctedText && options.customerTurnId) {
-      updatedConversation = updatedConversation.map((turn) => {
-        if (turn.id === options.customerTurnId && turn.role === 'customer') {
-          transcriptUpdated = true;
-          return { ...turn, text: correctedText };
-        }
-        return turn;
-      });
-      if (transcriptUpdated) {
-        setConversation(updatedConversation);
-        conversationRef.current = updatedConversation;
-        await updateCustomerServiceTranscript(requestIdRef.current, updatedConversation).catch(() => null);
-      }
-    }
-
-    if (finalText) {
-      appendAssistantTurn(finalText, {
-        questionId: options.questionId || '',
-      });
-    }
-
-    if (result?.usageSummary) {
-      setAiUsageSnapshot(result.usageSummary);
-    }
-
-    const nextDraft = result?.requestDraft || {};
-    const nextSelectionRequest = result?.selectionRequest || null;
-    const nextStructuredState = mergeStructuredDraft(structuredRequestRef.current || structuredRequest, nextDraft);
-    setStructuredRequest(nextStructuredState);
-    setSelectionRequest(nextSelectionRequest);
-    persistStructuredState(nextStructuredState).catch(() => null);
-
-    if (!nextStructuredState.missingRequired?.length) {
-      presentQuoteForApproval(nextStructuredState);
-    }
-  };
-
-  const mergeStructuredDraft = (current, nextDraft = {}) => {
-    const nextCategoryId = nextDraft.categoryId || current.categoryId;
-    const nextServiceIds = Array.isArray(nextDraft.serviceIds) && nextDraft.serviceIds.length
-      ? nextDraft.serviceIds
-      : current.serviceIds;
-    const nextStructuredAnswers = {
-      ...(current.structuredAnswers || {}),
-      ...(nextDraft.structuredAnswers || {}),
-      ...(nextDraft.requiredAnswers || {}),
-      ...(nextDraft.optionalAnswers || {}),
-    };
-
-    return {
-      ...current,
-      categoryId: nextCategoryId,
-      serviceIds: nextServiceIds,
-      structuredAnswers: nextStructuredAnswers,
-      selectedPortfolioReferences: Array.isArray(nextDraft.selectedPortfolioReferences)
-        ? nextDraft.selectedPortfolioReferences
-        : current.selectedPortfolioReferences,
-      safetyFlags: Array.isArray(nextDraft.safetyFlags) ? nextDraft.safetyFlags : current.safetyFlags,
-      missingRequired: buildMissingRequiredFields({
-        categoryId: nextCategoryId,
-        serviceIds: nextServiceIds,
-        structuredAnswers: nextStructuredAnswers,
-      }),
-    };
-  };
 
   const runAssistantTurn = async ({
     customerText = '',
@@ -386,12 +479,6 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
     questionId = '',
     initialStatus = 'processing',
   } = {}) => {
-    traceCall('assistant_turn_start', {
-      initialStatus,
-      hasCustomerText: Boolean(String(customerText || '').trim()),
-      hasAppInstruction: Boolean(String(appInstruction || '').trim()),
-      questionId,
-    });
     try {
       activeAiRequestRef.current?.abort?.();
     } catch {}
@@ -404,38 +491,64 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
     try {
       const result = await streamCustomerAssistantTurn({
         customerName: String(user?.fullName || user?.displayName || 'there').trim().split(' ')[0] || 'there',
-        requestState: structuredRequestRef.current || structuredRequest,
+        requestState: {
+          ...(structuredRequestRef.current || structuredRequest),
+          referenceAttachments: uploadedReferences,
+          mediaSummaries: uploadedReferenceSummaries,
+        },
         serviceCatalog: buildCustomerIntakePromptCatalog(),
         questionPlan: buildCustomerIntakeQuestionPlan(),
         conversation: conversationRef.current,
         customerText,
         appInstruction,
         signal: controller?.signal,
-        onUsage: (usageSummary) => {
-          setAiUsageSnapshot(usageSummary);
-        },
+        onUsage: (usageSummary) => setAiUsageSnapshot(usageSummary),
       });
 
       if (activeAiRequestRef.current !== controller) {
-        traceCall('assistant_turn_aborted_after_response', { questionId });
         return;
       }
 
-      await applyAssistantResult(result, { questionId, customerTurnId });
-      traceCall('assistant_turn_complete', {
-        questionId,
-        status: String(result?.status || ''),
-      });
-    } catch (nextError) {
-      if (nextError?.name === 'AbortError') {
-        traceCall('assistant_turn_abort_error', { questionId });
-        return;
+      const finalText = String(result?.speak || '').trim();
+      const correctedText = String(result?.correctedCustomerText || '').trim();
+      let updatedConversation = conversationRef.current || conversation;
+
+      if (correctedText && customerTurnId) {
+        updatedConversation = updatedConversation.map((turn) => (
+          turn.id === customerTurnId && turn.role === 'customer'
+            ? { ...turn, text: correctedText }
+            : turn
+        ));
+        setConversation(updatedConversation);
+        conversationRef.current = updatedConversation;
+        await updateCustomerServiceTranscript(requestIdRef.current, updatedConversation).catch(() => null);
       }
-      traceCall('assistant_turn_failed', {
-        questionId,
-        error: nextError?.message || 'Unknown assistant turn error',
-      });
-      setError(nextError.message || 'Unable to process the AI message.');
+
+      if (finalText) {
+        appendAssistantTurn(finalText, { questionId });
+      }
+
+      if (result?.usageSummary) {
+        setAiUsageSnapshot(result.usageSummary);
+      }
+
+      const { nextState, categoryChanged, serviceChanged } = mergeStructuredDraft(
+        structuredRequestRef.current || structuredRequest,
+        result?.requestDraft || {},
+      );
+      if (categoryChanged || serviceChanged) {
+        resetQuoteState();
+      }
+      setStructuredRequest(nextState);
+      await persistStructuredState(nextState).catch(() => null);
+
+      if (!nextState.missingRequired?.length) {
+        presentQuoteForApproval(nextState);
+      }
+    } catch (nextError) {
+      if (nextError?.name !== 'AbortError') {
+        setError(nextError.message || 'Unable to process the AI message.');
+      }
     } finally {
       if (activeAiRequestRef.current === controller) {
         activeAiRequestRef.current = null;
@@ -452,30 +565,24 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
       questionId: metadata?.questionId || '',
       createdAt: Date.now(),
       isVoice: metadata?.source === 'voice_note',
+      source: String(metadata?.source || ''),
       attachment: metadata?.attachment || null,
+      attachmentType: String(metadata?.attachmentType || ''),
+      attachmentName: String(metadata?.attachmentName || ''),
     };
     setConversation((current) => {
       const nextConversation = [...current, nextEvent];
       conversationRef.current = nextConversation;
       return nextConversation;
     });
-    traceCall('customer_turn_appended', {
-      questionId: nextEvent.questionId || '',
-      textLength: nextEvent.text.length,
-    });
     appendCustomerServiceTranscript(requestIdRef.current, nextEvent).catch(() => null);
     return nextEvent;
   };
 
   const submitCustomerTurn = async (text = '', metadata = {}) => {
+    if (readOnlyHistory) return;
     const finalText = String(text || '').trim();
     if (!finalText) return;
-
-    traceCall('customer_turn_submit', {
-      questionId: metadata?.questionId || '',
-      textLength: finalText.length,
-      quoteAwaitingApproval,
-    });
 
     const nextEvent = appendCustomerTurn(finalText, metadata);
 
@@ -488,6 +595,12 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
         handleDeclineQuote({ skipAppendCustomerTurn: true });
         return;
       }
+
+      resetQuoteState();
+      await updateCustomerServiceRequest(requestIdRef.current, {
+        status: 'collecting_details',
+        statusDetail: 'Continuing the chat to review service details.',
+      }).catch(() => null);
     }
 
     setTimeout(() => {
@@ -502,82 +615,15 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
 
   const submitAppInstruction = async (text = '') => {
     const finalText = String(text || '').trim();
-    if (!finalText) return;
-    traceCall('app_instruction_submit', {
-      textLength: finalText.length,
-    });
+    if (!finalText || readOnlyHistory) return;
     await runAssistantTurn({
       appInstruction: finalText,
       initialStatus: 'processing',
     });
   };
 
-  const persistStructuredState = async (nextStructuredState) => {
-    if (!requestId) return;
-    const nextTiming = deriveTimingDetails(nextStructuredState.structuredAnswers);
-    await updateCustomerServiceRequest(requestId, {
-      categoryId: nextStructuredState.categoryId || '',
-      serviceIds: nextStructuredState.serviceIds || [],
-      structuredAnswers: nextStructuredState.structuredAnswers || {},
-      requestPayload: {
-        categoryId: nextStructuredState.categoryId || '',
-        serviceIds: nextStructuredState.serviceIds || [],
-        structuredAnswers: nextStructuredState.structuredAnswers || {},
-        selectedPortfolioReferences: nextStructuredState.selectedPortfolioReferences || [],
-        safetyFlags: nextStructuredState.safetyFlags || [],
-        serviceAddress: nextStructuredState.serviceAddress || structuredRequest.serviceAddress || '',
-        timingPreference: nextTiming.timingPreference,
-        scheduledForText: nextTiming.scheduledForText,
-      },
-    });
-  };
-
-  const finalizeAndRoute = async (nextStructuredState) => {
-    if (!requestId || finalizingRef.current) return;
-    if (!nextStructuredState.categoryId || !(nextStructuredState.serviceIds || []).length) return;
-    finalizingRef.current = true;
-
-    try {
-      const pricingSnapshot = await finalizeCustomerServiceRequest({
-        requestId,
-        callId: '',
-        categoryId: nextStructuredState.categoryId,
-        serviceIds: nextStructuredState.serviceIds,
-        structuredAnswers: nextStructuredState.structuredAnswers,
-        selectedPortfolioReferences: nextStructuredState.selectedPortfolioReferences || [],
-        referenceAttachments: uploadedReferences,
-        aiUsageSnapshot,
-      });
-
-      callClosedRef.current = true;
-      setConversation((current) => ([
-        ...current,
-        {
-          id: `system-${Date.now()}`,
-          role: 'assistant',
-          text: quotePreview?.timingPreference === 'later'
-            ? `Your request is approved and scheduled. Current estimate: ${formatCurrency(pricingSnapshot?.total)}.`
-            : `Your request is approved. I am now searching for a helper. Current estimate: ${formatCurrency(pricingSnapshot?.total)}.`,
-        },
-      ]));
-
-      setTimeout(() => {
-        navigate({
-          key: 'ServiceRequestTracking',
-          params: {
-            requestId,
-            parentTab: 'Requests',
-          },
-        });
-      }, 1500);
-    } catch (nextError) {
-      setError(nextError.message || 'Unable to complete the service request.');
-      finalizingRef.current = false;
-    }
-  };
-
   const presentQuoteForApproval = async (nextStructuredState) => {
-    if (!requestId || quotePresentedRef.current) return;
+    if (!requestIdRef.current || quotePresentedRef.current || readOnlyHistory) return;
     if (nextStructuredState.missingRequired?.length) return;
     if (!nextStructuredState.categoryId || !(nextStructuredState.serviceIds || []).length) return;
 
@@ -590,7 +636,7 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
         aiUsageSnapshot,
       });
       const nextQuotePreview = await saveCustomerServiceQuotePreview({
-        requestId,
+        requestId: requestIdRef.current,
         categoryId: nextStructuredState.categoryId,
         serviceIds: nextStructuredState.serviceIds,
         structuredAnswers: nextStructuredState.structuredAnswers,
@@ -600,24 +646,56 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
       });
 
       quotePresentedRef.current = true;
-      setQuotePreview(nextQuotePreview || { pricingSnapshot: fallbackPricingSnapshot, summary: '' });
+      setQuotePreview(nextQuotePreview || { pricingSnapshot: fallbackPricingSnapshot });
       setQuoteAwaitingApproval(true);
-      
-      const promptText = [
-        'The app pricing engine finished calculating the quote.',
-        `Quote total: ${formatCurrency((nextQuotePreview || { pricingSnapshot: fallbackPricingSnapshot }).pricingSnapshot?.total)}.`,
-        `Request summary: ${(nextQuotePreview || { summary: '' }).summary || 'Service request ready for review.'}`,
-        `Timing: ${nextQuotePreview?.timingPreference === 'later' ? `Scheduled for ${nextQuotePreview?.scheduledForText || 'later'}` : 'As soon as possible'}.`,
-        'Tell the customer this is the final quote from the app, summarize the request, and ask them to approve or decline.',
-        'Do not calculate a new price.',
-      ].join(' ');
 
-      submitAppInstruction(promptText).catch(() => null);
+      submitAppInstruction([
+        'The app has finished collecting the request details.',
+        'Do not say that you are searching for, sending, or assigning a helper.',
+        'Do not say or repeat the price in your message.',
+        'Tell the customer that their details are ready and ask them to review the final price shown in the app card below, then confirm or decline.',
+      ].join(' ')).catch(() => null);
     } catch (nextError) {
-      setError(nextError.message || 'Unable to prepare the service quote.');
+      setError(nextError.message || 'Unable to prepare the final price.');
       quotePresentedRef.current = false;
     } finally {
       setQuoteLoading(false);
+    }
+  };
+
+  const finalizeAndRoute = async (nextStructuredState) => {
+    if (!requestIdRef.current || finalizingRef.current) return;
+    if (!nextStructuredState.categoryId || !(nextStructuredState.serviceIds || []).length) return;
+    finalizingRef.current = true;
+
+    try {
+      await finalizeCustomerServiceRequest({
+        requestId: requestIdRef.current,
+        callId: '',
+        categoryId: nextStructuredState.categoryId,
+        serviceIds: nextStructuredState.serviceIds,
+        structuredAnswers: nextStructuredState.structuredAnswers,
+        selectedPortfolioReferences: nextStructuredState.selectedPortfolioReferences || [],
+        referenceAttachments: uploadedReferences,
+        aiUsageSnapshot,
+      });
+
+      appendAssistantTurn('Your details are confirmed. Uncedo will continue with the next step from here.', {
+        source: 'system_confirmation',
+      });
+
+      setTimeout(() => {
+        navigate({
+          key: 'ServiceRequestTracking',
+          params: {
+            requestId: requestIdRef.current,
+            parentTab: route?.params?.parentTab || 'Requests',
+          },
+        });
+      }, 1200);
+    } catch (nextError) {
+      setError(nextError.message || 'Unable to complete the service request.');
+      finalizingRef.current = false;
     }
   };
 
@@ -628,11 +706,11 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
     setQuoteLoading(true);
     try {
       if (!options.skipAppendCustomerTurn) {
-        appendCustomerTurn('Yes, I approve this price. Please continue.', {
+        appendCustomerTurn('Yes, I confirm this price. Please continue.', {
           source: 'quote_approval',
         });
       }
-      await finalizeAndRoute(structuredRequest);
+      await finalizeAndRoute(structuredRequestRef.current || structuredRequest);
     } finally {
       quoteDecisionPendingRef.current = false;
       setQuoteLoading(false);
@@ -640,15 +718,13 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
   };
 
   const handleDeclineQuote = (options = {}) => {
-    quoteDecisionPendingRef.current = false;
-    quotePresentedRef.current = false;
-    setQuoteAwaitingApproval(false);
-    setQuotePreview(null);
-    updateCustomerServiceRequest(requestId, {
+    resetQuoteState();
+    updateCustomerServiceRequest(requestIdRef.current, {
       status: 'collecting_details',
-      statusDetail: 'Continuing the call to review service details.',
+      statusDetail: 'Continuing the chat to review service details.',
     }).catch(() => null);
-    const declineText = 'No, I do not want to proceed with this price. Please help me review or adjust the details.';
+
+    const declineText = 'No, I do not want to continue with this. Please help me review or change the service details.';
     if (options.skipAppendCustomerTurn) {
       runAssistantTurn({
         customerText: declineText,
@@ -659,109 +735,227 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
     submitCustomerTurn(declineText, { source: 'quote_decline' }).catch(() => null);
   };
 
-  const handleManualServiceSelection = (serviceId) => {
-    const selectedService = getCustomerServiceById(serviceId);
-    if (!selectedService) return;
-
-    const nextStructuredState = {
-      ...structuredRequest,
-      categoryId: selectedService.categoryId,
-      serviceIds: structuredRequest.serviceIds.includes(serviceId)
-        ? structuredRequest.serviceIds
-        : [...structuredRequest.serviceIds, serviceId],
-    };
-    nextStructuredState.missingRequired = buildMissingRequiredFields({
-      categoryId: nextStructuredState.categoryId,
-      serviceIds: nextStructuredState.serviceIds,
-      structuredAnswers: nextStructuredState.structuredAnswers,
-    });
-    setStructuredRequest(nextStructuredState);
-    setSelectionRequest(null);
-    persistStructuredState(nextStructuredState).catch(() => null);
-    submitCustomerTurn(`I choose the ${selectedService.label} service.`, {
-      source: 'service_chip',
-      serviceId,
-      categoryId: selectedService.categoryId,
-    }).catch(() => null);
-  };
-
-  const handleManualCategorySelection = (categoryId) => {
+  const handleCategorySelection = async (categoryId) => {
+    if (readOnlyHistory) return;
     const category = getCustomerServiceCategoryById(categoryId);
     if (!category) return;
 
+    resetQuoteState();
     const nextStructuredState = {
-      ...structuredRequest,
-      categoryId: categoryId,
+      ...createServiceRequestDraft(),
+      categoryId,
+      serviceIds: [],
+      structuredAnswers: {},
+      serviceAddress: structuredRequestRef.current?.serviceAddress || String(user?.customerProfile?.serviceAddress || '').trim(),
+      missingRequired: ['service'],
     };
-    nextStructuredState.missingRequired = buildMissingRequiredFields({
-      categoryId: nextStructuredState.categoryId,
-      serviceIds: nextStructuredState.serviceIds,
-      structuredAnswers: nextStructuredState.structuredAnswers,
-    });
     setStructuredRequest(nextStructuredState);
-    persistStructuredState(nextStructuredState).catch(() => null);
+    await persistStructuredState(nextStructuredState).catch(() => null);
     submitCustomerTurn(`I need help with ${category.label}.`, {
       source: 'category_chip',
-      categoryId,
     }).catch(() => null);
   };
 
+  const handleServiceSelection = async (serviceId) => {
+    if (readOnlyHistory) return;
+    const selectedService = getCustomerServiceById(serviceId);
+    if (!selectedService) return;
+
+    resetQuoteState();
+    const nextStructuredAnswers = pruneStructuredAnswers({
+      currentAnswers: structuredRequestRef.current?.structuredAnswers || {},
+      nextCategoryId: selectedService.categoryId,
+      nextServiceIds: [serviceId],
+    });
+    const nextStructuredState = {
+      ...(structuredRequestRef.current || structuredRequest),
+      categoryId: selectedService.categoryId,
+      serviceIds: [serviceId],
+      structuredAnswers: nextStructuredAnswers,
+      selectedPortfolioReferences: [],
+      safetyFlags: [],
+      missingRequired: buildMissingRequiredFields({
+        categoryId: selectedService.categoryId,
+        serviceIds: [serviceId],
+        structuredAnswers: nextStructuredAnswers,
+      }),
+    };
+    setStructuredRequest(nextStructuredState);
+    await persistStructuredState(nextStructuredState).catch(() => null);
+    submitCustomerTurn(`I want ${selectedService.label} instead.`, {
+      source: 'service_chip',
+    }).catch(() => null);
+  };
+
+  const handleAnswerSelection = (optionValue) => {
+    if (!currentQuestion || readOnlyHistory) return;
+    submitCustomerTurn(formatCustomerIntakeOptionLabel(optionValue), {
+      source: 'answer_chip',
+      questionId: currentQuestion.id,
+    }).catch(() => null);
+  };
+
+  const handleChoicePress = (option) => {
+    if (option.type === 'category') {
+      handleCategorySelection(option.id).catch(() => null);
+      return;
+    }
+    if (option.type === 'service') {
+      handleServiceSelection(option.id).catch(() => null);
+      return;
+    }
+    if (option.type === 'answer') {
+      handleAnswerSelection(option.value);
+    }
+  };
+
   const handleUploadReferences = async (files) => {
-    if (!requestId || !user?.uid) return;
+    if (!requestIdRef.current || !user?.uid || readOnlyHistory) return;
     setUploading(true);
     setUploadPickerVisible(false);
     try {
       const uploaded = [];
+      const mediaSummaries = [];
+      const extractionResults = [];
+
       for (const file of files || []) {
-        const result = await uploadCustomerServiceReference({
+        const uploadedFile = await uploadCustomerServiceReference({
           userId: user.uid,
-          requestId,
+          requestId: requestIdRef.current,
           attachment: file,
         });
-        uploaded.push(result);
+        uploaded.push(uploadedFile);
+
+        const mediaSummary = await describeCustomerServiceMediaAttachment(file);
+        mediaSummaries.push({
+          ...mediaSummary,
+          downloadUrl: uploadedFile.downloadUrl,
+          uploadedAt: uploadedFile.uploadedAt,
+        });
+
+        const lowerMimeType = String(file?.type || '').toLowerCase();
+        if (lowerMimeType.startsWith('image/') || lowerMimeType === 'application/pdf') {
+          const extraction = await extractSingleAttachment(file).catch(() => null);
+          if (extraction) {
+            extractionResults.push(extraction);
+          }
+        }
       }
-      setUploadedReferences((current) => [...current, ...uploaded]);
-      
+
+      const nextUploadedReferences = [...uploadedReferences, ...uploaded];
+      const nextUploadedSummaries = [...uploadedReferenceSummaries, ...mediaSummaries];
+      setUploadedReferences(nextUploadedReferences);
+      setUploadedReferenceSummaries(nextUploadedSummaries);
+      await updateCustomerServiceRequest(requestIdRef.current, {
+        referenceAttachmentSummaries: nextUploadedSummaries,
+      }).catch(() => null);
+      await persistStructuredState(structuredRequestRef.current || structuredRequest, {
+        attachmentsInput: nextUploadedReferences,
+        mediaSummariesInput: nextUploadedSummaries,
+      }).catch(() => null);
+
       const lastFile = uploaded[uploaded.length - 1];
       submitCustomerTurn(
-        `I uploaded ${uploaded.length} reference image${uploaded.length === 1 ? '' : 's'} for this service.`,
+        buildMediaTurnSummary({ uploaded, mediaSummaries, extractionResults }),
         {
           source: 'reference_upload',
-          count: uploaded.length,
-          attachment: lastFile?.dataUrl || null,
+          attachment: lastFile?.downloadUrl || null,
+          attachmentType: lastFile?.fileType || '',
+          attachmentName: lastFile?.fileName || '',
         },
       ).catch(() => null);
     } catch (nextError) {
-      setError(nextError.message || 'Unable to upload reference images.');
+      setError(nextError.message || 'Unable to upload the selected file.');
     } finally {
       setUploading(false);
     }
   };
 
   const handleSendMessage = () => {
+    if (readOnlyHistory) return;
     const text = inputText.trim();
     if (!text) return;
     setInputText('');
-    submitCustomerTurn(text);
+    submitCustomerTurn(text, {
+      source: 'typed_message',
+      questionId: currentQuestion?.id || '',
+    }).catch(() => null);
   };
 
-  const handleEndCall = async () => {
-    traceCall('chat_exit_requested', {});
+  const handleVoiceBridgeMessage = (event) => {
+    let payload = {};
+    try {
+      payload = JSON.parse(event?.nativeEvent?.data || '{}');
+    } catch {
+      return;
+    }
+
+    if (payload.type === 'error') {
+      setVoiceState((current) => ({
+        ...current,
+        listening: false,
+        processing: false,
+        supported: false,
+      }));
+      setError(payload.message || 'Voice transcription is unavailable on this device.');
+      return;
+    }
+
+    if (payload.type === 'status') {
+      const status = String(payload?.payload?.status || '').toLowerCase();
+      setVoiceState((current) => ({
+        ...current,
+        listening: status === 'listening',
+        processing: status === 'processing',
+      }));
+      return;
+    }
+
+    if (payload.type === 'customer_text_final') {
+      const transcriptText = String(payload?.payload?.text || '').trim();
+      setVoiceState((current) => ({
+        ...current,
+        listening: false,
+        processing: false,
+      }));
+      if (transcriptText) {
+        submitCustomerTurn(transcriptText, {
+          source: 'voice_note',
+          questionId: currentQuestion?.id || '',
+        }).catch(() => null);
+      }
+    }
+  };
+
+  const toggleVoiceInput = () => {
+    if (readOnlyHistory) return;
+    if (voiceState.listening) {
+      voiceBridgeRef.current?.pauseListening?.();
+      setVoiceState((current) => ({ ...current, listening: false }));
+      return;
+    }
+    setError('');
+    voiceBridgeRef.current?.resumeListening?.();
+    setVoiceState((current) => ({ ...current, listening: true, processing: false }));
+  };
+
+  const handleExit = async () => {
+    if (readOnlyHistory) {
+      goBack(route?.params?.parentTab || 'Requests');
+      return;
+    }
     try {
       activeAiRequestRef.current?.abort?.();
     } catch {}
-    activeAiRequestRef.current = null;
-    if (requestId) {
-      await updateCustomerServiceRequest(requestId, {
-        status: 'canceled',
-        statusDetail: 'Customer cancelled the chat.',
-      }).catch(() => null);
-    }
-    goBack('CustomerHome');
+    await updateCustomerServiceRequest(requestIdRef.current, {
+      status: 'canceled',
+      statusDetail: 'Customer cancelled the chat.',
+    }).catch(() => null);
+    goBack(route?.params?.parentTab || 'CustomerHome');
   };
 
   if (loading) {
-    return <LoadingState label="Starting your service chat" />;
+    return <LoadingState label={readOnlyHistory ? 'Loading chat history' : 'Starting your service chat'} />;
   }
 
   if (error && !requestId) {
@@ -771,43 +965,42 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
   return (
     <KeyboardAvoidingView
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'android' ? topInset : 0}
       style={styles.screen}
     >
-      {/* ── WhatsApp Style Header ── */}
-      <View style={styles.header}>
-        <Pressable accessibilityRole="button" onPress={() => navigate('CustomerHome')} style={styles.backButton}>
+      {!readOnlyHistory ? (
+        <CustomerAiCallBridge onBridgeMessage={handleVoiceBridgeMessage} ref={voiceBridgeRef} />
+      ) : null}
+
+      <View style={[styles.header, { paddingTop: headerTopInset }]}>
+        <Pressable accessibilityRole="button" onPress={() => goBack(route?.params?.parentTab || 'CustomerHome')} style={styles.backButton}>
           <Ionicons color="#ffffff" name="arrow-back" size={24} />
         </Pressable>
         <View style={styles.avatarContainer}>
           <View style={styles.avatar}>
             <Ionicons color="#ffffff" name="chatbubble-ellipses" size={20} />
           </View>
-          <View style={styles.statusDot} />
+          {!readOnlyHistory ? <View style={styles.statusDot} /> : null}
         </View>
         <View style={styles.headerInfo}>
-          <Text style={styles.headerTitle}>Uncedo AI Assistant</Text>
+          <Text style={styles.headerTitle}>Uncedo</Text>
           <Text style={styles.headerSubtitle}>
-            {isTyping ? 'typing...' : 'Online'}
+            {readOnlyHistory ? 'Chat history' : isTyping ? 'typing...' : voiceState.listening ? 'Listening...' : 'Online'}
           </Text>
         </View>
-        <View style={styles.headerActions}>
-          <Pressable accessibilityRole="button" onPress={handleEndCall} style={[styles.headerActionBtn, styles.exitBtn]}>
-            <Ionicons color="#ffffff" name="close-circle-outline" size={22} />
-          </Pressable>
-        </View>
+        <Pressable accessibilityRole="button" onPress={handleExit} style={styles.headerActionBtn}>
+          <Ionicons color="#ffffff" name={readOnlyHistory ? 'close-outline' : 'close-circle-outline'} size={22} />
+        </Pressable>
       </View>
 
-      {/* ── Messages List ScrollView ── */}
       <ScrollView
         ref={scrollViewRef}
-        contentContainerStyle={styles.chatScroll}
+        contentContainerStyle={[styles.chatScroll, { paddingBottom: chatBottomInset }]}
         onContentSizeChange={() => scrollViewRef.current?.scrollToEnd({ animated: true })}
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.infoBanner}>
-          <Text style={styles.infoBannerText}>
-            🔒 Messages are encrypted and saved to your request history.
-          </Text>
+          <Text style={styles.infoBannerText}>Messages are encrypted and saved to your request history.</Text>
         </View>
 
         {conversation.map((item) => {
@@ -826,15 +1019,24 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
                   isCustomer ? styles.customerBubble : styles.assistantBubble,
                 ]}
               >
-                {/* Inline image reference */}
-                {item.attachment && (
+                {item.attachment && (!item.attachmentType || item.attachmentType.startsWith('image/')) ? (
                   <Image source={{ uri: item.attachment }} style={styles.bubbleImage} />
-                )}
-
+                ) : null}
+                {item.attachment && item.attachmentType && !item.attachmentType.startsWith('image/') ? (
+                  <View style={styles.attachmentTag}>
+                    <Ionicons color={colors.brandDark} name="attach" size={12} />
+                    <Text style={styles.attachmentTagText}>{item.attachmentName || 'Reference file'}</Text>
+                  </View>
+                ) : null}
+                {item.isVoice ? (
+                  <View style={styles.voiceTag}>
+                    <Ionicons color={colors.brandDark} name="mic" size={12} />
+                    <Text style={styles.voiceTagText}>Voice note</Text>
+                  </View>
+                ) : null}
                 <Text style={[styles.messageText, isCustomer ? styles.customerText : null]}>
                   {item.text}
                 </Text>
-                
                 <Text style={[styles.messageTime, isCustomer ? styles.customerTime : null]}>
                   {formatTimestamp(item.createdAt)}
                 </Text>
@@ -843,41 +1045,49 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
           );
         })}
 
-        {/* ── In-Chat Quote Card ── */}
-        {quotePreview?.pricingSnapshot && (
+        {inlineOptions.length ? (
+          <View style={styles.choiceWrap}>
+            {currentQuestion?.prompt ? (
+              <Text style={styles.choiceTitle}>{currentQuestion.prompt}</Text>
+            ) : !structuredRequest.categoryId ? (
+              <Text style={styles.choiceTitle}>Choose a category to get started.</Text>
+            ) : !structuredRequest.serviceIds?.length ? (
+              <Text style={styles.choiceTitle}>Choose the service you want.</Text>
+            ) : null}
+            <View style={styles.choiceList}>
+              {inlineOptions.map((option) => (
+                <Pressable
+                  accessibilityRole="button"
+                  key={option.id}
+                  onPress={() => handleChoicePress(option)}
+                  style={styles.choiceChip}
+                >
+                  <Text style={styles.choiceChipText}>{option.label}</Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        ) : null}
+
+        {quotePreview?.pricingSnapshot ? (
           <View style={styles.quoteCardContainer}>
             <View style={styles.quoteCard}>
               <View style={styles.quoteCardHeader}>
-                <Ionicons name="receipt" size={20} color={colors.brand} />
-                <Text style={styles.quoteCardTitle}>Service Estimate</Text>
-              </View>
-              
-              <Text style={styles.quoteCardSummary}>
-                {quotePreview.summary || 'Summary of selected services.'}
-              </Text>
-
-              <View style={styles.quoteCardMeta}>
-                <Text style={styles.quoteCardMetaText}>
-                  📅 Scheduled: {quotePreview.timingPreference === 'later' ? (quotePreview.scheduledForText || 'Later') : 'As soon as possible'}
-                </Text>
+                <Ionicons color={colors.brand} name="pricetag" size={20} />
+                <Text style={styles.quoteCardTitle}>Service Price</Text>
               </View>
 
-              <View style={styles.quoteCardDivider} />
-              
-              <View style={styles.quoteCardBreakdown}>
-                {pricingLines.map((line, index) => (
-                  <View key={`${line.label}-${index}`} style={styles.quoteCardRow}>
-                    <Text style={styles.quoteCardLabel}>{line.label}</Text>
-                    <Text style={styles.quoteCardVal}>{formatCurrency(line.amount)}</Text>
-                  </View>
-                ))}
+              <View style={styles.quoteInfoRow}>
+                <Text style={styles.quoteInfoLabel}>Category</Text>
+                <Text style={styles.quoteInfoValue}>{quoteDisplay.categoryLabel}</Text>
               </View>
-
-              <View style={styles.quoteCardDivider} />
-
-              <View style={styles.quoteCardTotalRow}>
-                <Text style={styles.quoteCardTotalLabel}>Total Estimate</Text>
-                <Text style={styles.quoteCardTotalVal}>{formatCurrency(quotePreview.pricingSnapshot.total)}</Text>
+              <View style={styles.quoteInfoRow}>
+                <Text style={styles.quoteInfoLabel}>Service</Text>
+                <Text style={styles.quoteInfoValue}>{quoteDisplay.serviceLabel}</Text>
+              </View>
+              <View style={styles.quoteInfoRow}>
+                <Text style={styles.quoteInfoLabel}>Price</Text>
+                <Text style={styles.quotePriceValue}>{quoteDisplay.totalLabel}</Text>
               </View>
 
               {quoteAwaitingApproval ? (
@@ -891,7 +1101,7 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
                     {quoteLoading ? (
                       <ActivityIndicator color="#ffffff" size="small" />
                     ) : (
-                      <Text style={styles.quoteBtnText}>Confirm & Continue</Text>
+                      <Text style={styles.quoteBtnText}>Confirm</Text>
                     )}
                   </Pressable>
                   <Pressable
@@ -900,18 +1110,13 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
                     onPress={() => handleDeclineQuote()}
                     style={[styles.quoteBtn, styles.quoteBtnDecline]}
                   >
-                    <Text style={styles.quoteBtnTextDecline}>Decline & Review</Text>
+                    <Text style={styles.quoteBtnTextDecline}>Decline</Text>
                   </Pressable>
                 </View>
-              ) : (
-                <View style={styles.quoteStatusContainer}>
-                  <Ionicons name="checkmark-circle" size={18} color="#059669" />
-                  <Text style={styles.quoteStatusText}>Estimate Approved</Text>
-                </View>
-              )}
+              ) : null}
             </View>
           </View>
-        )}
+        ) : null}
 
         {error ? (
           <View style={styles.chatError}>
@@ -919,99 +1124,67 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
           </View>
         ) : null}
 
-        {isTyping && (
+        {isTyping ? (
           <View style={styles.typingBubble}>
-            <ActivityIndicator color={colors.brand} size="small" style={{ marginRight: 6 }} />
+            <ActivityIndicator color={colors.brand} size="small" style={styles.typingSpinner} />
             <Text style={styles.typingText}>Uncedo is writing...</Text>
           </View>
-        )}
+        ) : null}
       </ScrollView>
 
-      {/* ── Selection Chips & Presets ── */}
-      {(selectedCategoryServices.length > 0 || !structuredRequest.categoryId) && !quotePreview?.pricingSnapshot && (
-        <View style={styles.selectorContainer}>
-          <Text style={styles.selectorTitle}>
-            {!structuredRequest.categoryId ? 'Select Category:' : 'Select Services:'}
-          </Text>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.selectorScroll}
+      {readOnlyHistory ? (
+        <View style={styles.readOnlyComposer}>
+          <Ionicons color={colors.brandDark} name="time-outline" size={16} />
+          <Text style={styles.readOnlyComposerText}>This chat is read-only.</Text>
+        </View>
+      ) : (
+        <View style={styles.inputBar}>
+          <View style={styles.mainInputContainer}>
+            <Pressable
+              accessibilityRole="button"
+              disabled={uploading}
+              onPress={() => setUploadPickerVisible(true)}
+              style={styles.inputIconBtn}
+            >
+              {uploading ? (
+                <ActivityIndicator color={colors.brand} size="small" />
+              ) : (
+                <Ionicons color={colors.muted} name="add" size={22} />
+              )}
+            </Pressable>
+            <TextInput
+              multiline
+              onChangeText={setInputText}
+              placeholder="Type a message..."
+              placeholderTextColor={colors.muted}
+              style={styles.textInput}
+              value={inputText}
+            />
+            <Pressable
+              accessibilityRole="button"
+              onPress={toggleVoiceInput}
+              style={[styles.inputIconBtn, voiceState.listening && styles.inputIconBtnActive]}
+            >
+              <Ionicons color={voiceState.listening ? colors.brandDark : colors.muted} name="mic" size={20} />
+            </Pressable>
+          </View>
+
+          <Pressable
+            accessibilityRole="button"
+            disabled={!inputText.trim()}
+            onPress={handleSendMessage}
+            style={[
+              styles.roundActionBtn,
+              !inputText.trim() && styles.roundActionBtnDisabled,
+            ]}
           >
-            {!structuredRequest.categoryId ? (
-              // Category chips
-              CUSTOMER_SERVICE_CATEGORY_OPTIONS.map((cat) => (
-                <Pressable
-                  key={cat.id}
-                  accessibilityRole="button"
-                  onPress={() => handleManualCategorySelection(cat.id)}
-                  style={styles.selectorChip}
-                >
-                  <Text style={styles.selectorChipText}>{cat.label}</Text>
-                </Pressable>
-              ))
-            ) : (
-              // Service chips
-              selectedCategoryServices.map((service) => {
-                const isActive = structuredRequest.serviceIds.includes(service.id);
-                return (
-                  <Pressable
-                    key={service.id}
-                    accessibilityRole="button"
-                    onPress={() => handleManualServiceSelection(service.id)}
-                    style={[styles.selectorChip, isActive && styles.selectorChipActive]}
-                  >
-                    <Text style={[styles.selectorChipText, isActive && styles.selectorChipTextActive]}>
-                      {service.label}
-                    </Text>
-                  </Pressable>
-                );
-              })
-            )}
-          </ScrollView>
+            <Ionicons color="#ffffff" name="send" size={18} style={styles.sendIcon} />
+          </Pressable>
         </View>
       )}
 
-      {/* ── WhatsApp Bottom Input Bar ── */}
-      <View style={styles.inputBar}>
-        <View style={styles.mainInputContainer}>
-          <Pressable
-            accessibilityRole="button"
-            disabled={uploading}
-            onPress={() => setUploadPickerVisible(true)}
-            style={styles.inputIconBtn}
-          >
-            {uploading ? (
-              <ActivityIndicator color={colors.brand} size="small" />
-            ) : (
-              <Ionicons color={colors.muted} name="add" size={24} />
-            )}
-          </Pressable>
-          <TextInput
-            multiline
-            onChangeText={setInputText}
-            placeholder="Type a message..."
-            placeholderTextColor={colors.muted}
-            style={styles.textInput}
-            value={inputText}
-          />
-        </View>
-
-        {/* Send Circular Button */}
-        <Pressable
-          accessibilityRole="button"
-          disabled={!inputText.trim()}
-          onPress={handleSendMessage}
-          style={[
-            styles.roundActionBtn,
-            !inputText.trim() && styles.roundActionBtnDisabled
-          ]}
-        >
-          <Ionicons color="#ffffff" name="send" size={18} style={{ marginLeft: 2 }} />
-        </Pressable>
-      </View>
-
       <AttachmentPickerModal
+        accept="image/*,video/*,application/pdf"
         mode="library"
         onCancel={() => setUploadPickerVisible(false)}
         onError={(msg) => {
@@ -1027,22 +1200,19 @@ export function CustomerServiceCallScreen({ route, navigate, goBack }) {
 
 const styles = StyleSheet.create({
   screen: {
-    backgroundColor: '#efeae2', // WhatsApp chat background color
+    backgroundColor: '#fdf2f8',
     flex: 1,
   },
-  
-  // ── Header ────────────────────────────────────────────────────────────────
   header: {
     alignItems: 'center',
-    backgroundColor: '#075e54', // WhatsApp classic green header
+    backgroundColor: colors.brand,
     flexDirection: 'row',
-    paddingHorizontal: 12,
-    paddingTop: Platform.OS === 'ios' ? 48 : 34,
     paddingBottom: 12,
-    shadowColor: '#000',
+    paddingHorizontal: 12,
+    shadowColor: '#831843',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 3,
+    shadowOpacity: 0.18,
+    shadowRadius: 4,
     elevation: 4,
   },
   backButton: {
@@ -1054,15 +1224,15 @@ const styles = StyleSheet.create({
   },
   avatar: {
     alignItems: 'center',
-    backgroundColor: '#128c7e',
+    backgroundColor: colors.brandDark,
     borderRadius: 20,
     height: 40,
     justifyContent: 'center',
     width: 40,
   },
   statusDot: {
-    backgroundColor: '#4ade80',
-    borderColor: '#075e54',
+    backgroundColor: '#f9a8d4',
+    borderColor: colors.brand,
     borderRadius: 6,
     borderWidth: 1.5,
     bottom: 0,
@@ -1081,42 +1251,26 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   headerSubtitle: {
-    color: 'rgba(255,255,255,0.8)',
+    color: 'rgba(255,255,255,0.84)',
     fontSize: 12,
-  },
-  headerActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
   },
   headerActionBtn: {
     padding: 4,
   },
-  exitBtn: {
-    marginLeft: 4,
-  },
-
-  // ── Chat List ──────────────────────────────────────────────────────────────
   chatScroll: {
     paddingHorizontal: 12,
     paddingTop: 10,
-    paddingBottom: 24,
   },
   infoBanner: {
     alignSelf: 'center',
-    backgroundColor: 'rgba(255,255,255,0.85)',
-    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    borderRadius: 12,
     marginBottom: 16,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 1,
-    elevation: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
   },
   infoBannerText: {
-    color: '#475569',
+    color: '#6b7280',
     fontSize: 11,
     textAlign: 'center',
   },
@@ -1132,78 +1286,184 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
   },
   messageBubble: {
-    borderRadius: 12,
-    maxWidth: '82%',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    shadowColor: '#000',
+    borderRadius: 14,
+    maxWidth: '84%',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    shadowColor: '#701a75',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.08,
-    shadowRadius: 1.5,
-    elevation: 1.5,
+    shadowRadius: 2,
+    elevation: 1,
   },
   assistantBubble: {
     backgroundColor: '#ffffff',
-    borderTopLeftRadius: 2,
+    borderTopLeftRadius: 4,
   },
   customerBubble: {
-    backgroundColor: '#e7ffdb', // WhatsApp self message bubble color
-    borderTopRightRadius: 2,
+    backgroundColor: 'rgba(236,72,153,0.12)',
+    borderColor: 'rgba(217,70,239,0.15)',
+    borderTopRightRadius: 4,
+    borderWidth: 1,
   },
-  voiceNoteRow: {
+  bubbleImage: {
+    borderRadius: 10,
+    height: 160,
+    marginBottom: 8,
+    width: 220,
+  },
+  voiceTag: {
     alignItems: 'center',
     flexDirection: 'row',
+    gap: 4,
     marginBottom: 4,
   },
-  voiceNoteLabel: {
+  attachmentTag: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(217,70,239,0.08)',
+    borderRadius: 999,
+    flexDirection: 'row',
+    gap: 4,
+    marginBottom: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    alignSelf: 'flex-start',
+  },
+  attachmentTagText: {
+    color: colors.brandDark,
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  voiceTagText: {
     color: colors.brandDark,
     fontSize: 10,
     fontWeight: '800',
     textTransform: 'uppercase',
   },
-  bubbleImage: {
-    borderRadius: 8,
-    height: 160,
-    marginBottom: 6,
-    width: 220,
-  },
-  bubbleTextRow: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
   messageText: {
     color: '#0f172a',
-    flex: 1,
     fontSize: 14.5,
     lineHeight: 20,
-    paddingRight: 8,
   },
   customerText: {
     color: '#0f172a',
   },
-  playButton: {
-    padding: 2,
-  },
   messageTime: {
-    color: '#64748b',
+    color: '#6b7280',
     fontSize: 10,
-    marginTop: 3,
+    marginTop: 4,
     textAlign: 'right',
   },
   customerTime: {
-    color: '#64748b',
+    color: '#6b7280',
   },
-  typingBubble: {
+  choiceWrap: {
+    backgroundColor: 'rgba(255,255,255,0.88)',
+    borderColor: 'rgba(217,70,239,0.18)',
+    borderRadius: 18,
+    borderWidth: 1,
+    marginBottom: 14,
+    padding: 12,
+  },
+  choiceTitle: {
+    color: colors.brandDark,
+    fontSize: 12,
+    fontWeight: '800',
+    marginBottom: 10,
+    textTransform: 'uppercase',
+  },
+  choiceList: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  choiceChip: {
+    backgroundColor: '#ffffff',
+    borderColor: 'rgba(217,70,239,0.25)',
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  choiceChipText: {
+    color: colors.brandDark,
+    fontSize: 12.5,
+    fontWeight: '700',
+  },
+  quoteCardContainer: {
+    marginBottom: 14,
+  },
+  quoteCard: {
+    backgroundColor: '#ffffff',
+    borderColor: 'rgba(217,70,239,0.18)',
+    borderRadius: 22,
+    borderWidth: 1.5,
+    padding: 16,
+  },
+  quoteCardHeader: {
     alignItems: 'center',
     flexDirection: 'row',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    gap: 8,
+    marginBottom: 12,
   },
-  typingText: {
-    color: '#64748b',
-    fontSize: 12,
-    fontStyle: 'italic',
+  quoteCardTitle: {
+    color: colors.text,
+    fontSize: 17,
+    fontWeight: '900',
+  },
+  quoteInfoRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  quoteInfoLabel: {
+    color: colors.muted,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  quoteInfoValue: {
+    color: colors.text,
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '700',
+    marginLeft: 10,
+    textAlign: 'right',
+  },
+  quotePriceValue: {
+    color: colors.brandDark,
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  quoteActions: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 12,
+  },
+  quoteBtn: {
+    alignItems: 'center',
+    borderRadius: 12,
+    flex: 1,
+    height: 44,
+    justifyContent: 'center',
+  },
+  quoteBtnApprove: {
+    backgroundColor: colors.brand,
+  },
+  quoteBtnDecline: {
+    backgroundColor: '#ffffff',
+    borderColor: '#fecdd3',
+    borderWidth: 1,
+  },
+  quoteBtnText: {
+    color: '#ffffff',
+    fontSize: 13.5,
+    fontWeight: '800',
+  },
+  quoteBtnTextDecline: {
+    color: '#be123c',
+    fontSize: 13.5,
+    fontWeight: '800',
   },
   chatError: {
     alignSelf: 'center',
@@ -1220,56 +1480,44 @@ const styles = StyleSheet.create({
     fontSize: 13.5,
     textAlign: 'center',
   },
-
-  // ── Selector Presets ────────────────────────────────────────────────────────
-  selectorContainer: {
-    backgroundColor: '#f8fafc',
-    borderTopColor: '#e2e8f0',
-    borderTopWidth: 1,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+  typingBubble: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
   },
-  selectorTitle: {
-    color: '#475569',
+  typingSpinner: {
+    marginRight: 6,
+  },
+  typingText: {
+    color: '#6b7280',
     fontSize: 12,
-    fontWeight: '800',
-    marginBottom: 6,
-    textTransform: 'uppercase',
+    fontStyle: 'italic',
   },
-  selectorScroll: {
-    gap: 8,
-    paddingRight: 12,
-  },
-  selectorChip: {
+  readOnlyComposer: {
+    alignItems: 'center',
     backgroundColor: '#ffffff',
-    borderColor: '#cbd5e1',
-    borderRadius: 16,
-    borderWidth: 1,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
+    borderTopColor: '#f5d0fe',
+    borderTopWidth: 1,
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 14,
   },
-  selectorChipActive: {
-    backgroundColor: '#059669',
-    borderColor: '#059669',
-  },
-  selectorChipText: {
-    color: '#0f172a',
-    fontSize: 12.5,
+  readOnlyComposerText: {
+    color: colors.brandDark,
+    fontSize: 13,
     fontWeight: '700',
   },
-  selectorChipTextActive: {
-    color: '#ffffff',
-  },
-
-  // ── WhatsApp Input Bar ──────────────────────────────────────────────────────
   inputBar: {
     alignItems: 'center',
     backgroundColor: 'transparent',
     flexDirection: 'row',
     gap: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
     paddingBottom: Platform.OS === 'ios' ? 24 : 10,
+    paddingHorizontal: 8,
+    paddingTop: 6,
   },
   mainInputContainer: {
     alignItems: 'center',
@@ -1279,11 +1527,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     minHeight: 48,
     paddingHorizontal: 8,
-    shadowColor: '#000',
+    shadowColor: '#701a75',
     shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 1.5,
+    shadowOpacity: 0.08,
+    shadowRadius: 2,
     elevation: 2,
+  },
+  inputIconBtn: {
+    padding: 6,
+  },
+  inputIconBtnActive: {
+    backgroundColor: 'rgba(217,70,239,0.08)',
+    borderRadius: 999,
   },
   textInput: {
     color: '#0f172a',
@@ -1293,151 +1548,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 8,
   },
-  inputIconBtn: {
-    padding: 6,
-  },
   roundActionBtn: {
     alignItems: 'center',
-    backgroundColor: '#075e54', // WhatsApp classic green button
+    backgroundColor: colors.brand,
     borderRadius: 24,
     height: 48,
     justifyContent: 'center',
     width: 48,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.15,
-    shadowRadius: 2,
-    elevation: 3,
   },
   roundActionBtnDisabled: {
     backgroundColor: '#cbd5e1',
   },
-
-  // ── Quote Card ─────────────────────────────────────────────────────────────
-  quoteCardContainer: {
-    marginVertical: 14,
-    width: '100%',
-  },
-  quoteCard: {
-    backgroundColor: '#ffffff',
-    borderRadius: 22,
-    borderColor: '#e2e8f0',
-    borderWidth: 1.5,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 10,
-    elevation: 4,
-  },
-  quoteCardHeader: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 10,
-  },
-  quoteCardTitle: {
-    color: colors.text,
-    fontSize: 17,
-    fontWeight: '900',
-  },
-  quoteCardSummary: {
-    color: '#334155',
-    fontSize: 14.5,
-    lineHeight: 21,
-    marginBottom: 8,
-  },
-  quoteCardMeta: {
-    backgroundColor: '#f8fafc',
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    alignSelf: 'flex-start',
-    marginBottom: 12,
-  },
-  quoteCardMetaText: {
-    color: colors.brandDark,
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  quoteCardDivider: {
-    backgroundColor: '#e2e8f0',
-    height: 1,
-    marginVertical: 10,
-  },
-  quoteCardBreakdown: {
-    gap: 8,
-  },
-  quoteCardRow: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  quoteCardLabel: {
-    color: '#64748b',
-    fontSize: 14,
-  },
-  quoteCardVal: {
-    color: '#0f172a',
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  quoteCardTotalRow: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingTop: 4,
-  },
-  quoteCardTotalLabel: {
-    color: '#0f172a',
-    fontSize: 15.5,
-    fontWeight: '900',
-  },
-  quoteCardTotalVal: {
-    color: '#075e54',
-    fontSize: 18,
-    fontWeight: '900',
-  },
-  quoteActions: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 16,
-  },
-  quoteBtn: {
-    alignItems: 'center',
-    borderRadius: 12,
-    flex: 1,
-    height: 44,
-    justifyContent: 'center',
-  },
-  quoteBtnApprove: {
-    backgroundColor: '#075e54',
-  },
-  quoteBtnDecline: {
-    backgroundColor: '#ffffff',
-    borderColor: '#cbd5e1',
-    borderWidth: 1,
-  },
-  quoteBtnText: {
-    color: '#ffffff',
-    fontSize: 13.5,
-    fontWeight: '800',
-  },
-  quoteBtnTextDecline: {
-    color: '#b91c1c',
-    fontSize: 13.5,
-    fontWeight: '800',
-  },
-  quoteStatusContainer: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 6,
-    justifyContent: 'center',
-    marginTop: 14,
-  },
-  quoteStatusText: {
-    color: '#059669',
-    fontSize: 13.5,
-    fontWeight: '800',
+  sendIcon: {
+    marginLeft: 2,
   },
 });

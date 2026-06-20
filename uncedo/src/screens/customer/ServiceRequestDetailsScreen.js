@@ -228,7 +228,7 @@ function PricingBreakdown({ lines, total }) {
 
 // ─── Main screen ─────────────────────────────────────────────────────────────
 
-export function ServiceRequestDetailsScreen({ route, goBack }) {
+export function ServiceRequestDetailsScreen({ route, goBack, navigate }) {
   const requestId = route?.params?.requestId || '';
   const parentTab = route?.params?.parentTab || 'Requests';
   const [request, setRequest] = useState(null);
@@ -271,7 +271,7 @@ export function ServiceRequestDetailsScreen({ route, goBack }) {
         value: request.requestPayload?.serviceAddress || request.serviceAddress || 'Not saved yet',
       },
       {
-        label: 'Estimate',
+        label: 'Price',
         value: formatCurrency(request.pricingSnapshot?.total || request.totalAmount),
       },
     ];
@@ -336,6 +336,23 @@ export function ServiceRequestDetailsScreen({ route, goBack }) {
 
         {/* ── Hero banner ── */}
         <HeroBanner request={request} statusMeta={statusMeta} toneStyle={toneStyle} />
+
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => navigate({
+            key: 'CustomerServiceCall',
+            params: {
+              requestId,
+              parentTab,
+              historyOnly: true,
+              location: request.location || null,
+            },
+          })}
+          style={({ pressed }) => [styles.historyButton, pressed && styles.historyButtonPressed]}
+        >
+          <Ionicons color={colors.brandDark} name="time-outline" size={18} />
+          <Text style={styles.historyButtonText}>Open chat history</Text>
+        </Pressable>
 
         {/* ── Progress stepper ── */}
         <View style={styles.sectionCard}>
@@ -483,6 +500,27 @@ const styles = StyleSheet.create({
     transform: [{ scale: 0.97 }],
   },
   backText: {
+    color: colors.brandDark,
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  historyButton: {
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(217,70,239,0.08)',
+    borderColor: colors.border,
+    borderRadius: 999,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  historyButtonPressed: {
+    opacity: 0.7,
+    transform: [{ scale: 0.97 }],
+  },
+  historyButtonText: {
     color: colors.brandDark,
     fontSize: 13,
     fontWeight: '800',

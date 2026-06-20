@@ -819,6 +819,105 @@ export function getRequiredQuestionDefinitions({ categoryId = '', serviceIds = [
   return allRequired;
 }
 
+export function getOptionalQuestionDefinitions({ categoryId = '', serviceIds = [] } = {}) {
+  const categoryOptional = getCategoryQuestionPlan(categoryId).optional;
+  const seen = new Set(categoryOptional.map((question) => question.id));
+  const allOptional = [...categoryOptional];
+
+  (serviceIds || []).forEach((serviceId) => {
+    getServiceQuestionPlan(serviceId).optional.forEach((question) => {
+      if (!seen.has(question.id)) {
+        seen.add(question.id);
+        allOptional.push(question);
+      }
+    });
+  });
+
+  return allOptional;
+}
+
+export function getQuestionDefinitionById({ categoryId = '', serviceIds = [], questionId = '' } = {}) {
+  const targetId = String(questionId || '').trim();
+  if (!targetId) return null;
+  return [
+    ...getRequiredQuestionDefinitions({ categoryId, serviceIds }),
+    ...getOptionalQuestionDefinitions({ categoryId, serviceIds }),
+  ].find((question) => question.id === targetId) || null;
+}
+
+export function getNextCustomerIntakeQuestion({ categoryId = '', serviceIds = [], structuredAnswers = {} } = {}) {
+  const missingRequired = buildMissingRequiredFields({ categoryId, serviceIds, structuredAnswers });
+  const nextQuestionId = missingRequired.find((item) => !['category', 'service'].includes(String(item || '').trim()));
+  if (!nextQuestionId) return null;
+  return getQuestionDefinitionById({ categoryId, serviceIds, questionId: nextQuestionId });
+}
+
+export function getQuestionIdsForSelection({ categoryId = '', serviceIds = [] } = {}) {
+  return [
+    ...getRequiredQuestionDefinitions({ categoryId, serviceIds }),
+    ...getOptionalQuestionDefinitions({ categoryId, serviceIds }),
+  ].map((question) => question.id);
+}
+
+export function formatCustomerIntakeOptionLabel(value = '') {
+  const normalized = String(value || '').trim();
+  const friendlyMap = {
+    now: 'Now',
+    later: 'Later',
+    current_location: 'My current location',
+    saved_home_address: 'My saved address',
+    another_address: 'Another address',
+    helper_location: 'Helper location',
+    yes: 'Yes',
+    no: 'No',
+    self: 'For me',
+    someone_else: 'Someone else',
+    bring_all: 'Bring everything',
+    bring_some: 'Bring some',
+    use_mine: 'Use mine',
+    bring_equipment: 'Bring equipment',
+    use_my_equipment: 'Use my equipment',
+    mixed: 'Mixed',
+    bring_lawnmower: 'Bring a lawnmower',
+    use_my_lawnmower: 'Use my lawnmower',
+    choose_now: 'Choose now',
+    choose_on_arrival: 'Choose on arrival',
+    bring_everything: 'Bring everything',
+    bring_some_items: 'Bring some items',
+    household: 'Household',
+    after_event: 'After an event',
+    deep_clean: 'Deep clean',
+    standard: 'Standard',
+    basic: 'Basic',
+    clean_only: 'Clean only',
+    clean_and_polish: 'Clean and polish',
+    once_off: 'Once off',
+    recurring: 'Recurring',
+    outside_only: 'Outside only',
+    inside_only: 'Inside only',
+    inside_and_outside: 'Inside and outside',
+    interior_only: 'Interior only',
+    exterior_only: 'Exterior only',
+    interior_and_exterior: 'Interior and exterior',
+    hairline_only: 'Hairline only',
+    hairline_and_beard: 'Hairline and beard',
+    full_shave: 'Full shave',
+    clean_up_shave: 'Clean-up shave',
+    shape_up: 'Shape-up',
+    full_trim: 'Full trim',
+  };
+
+  if (friendlyMap[normalized]) {
+    return friendlyMap[normalized];
+  }
+
+  return normalized
+    .split('_')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
 export function buildMissingRequiredFields({ categoryId = '', serviceIds = [], structuredAnswers = {} } = {}) {
   const missing = [];
   if (!categoryId) missing.push('category');
