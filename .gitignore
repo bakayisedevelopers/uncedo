@@ -19,6 +19,7 @@ helpers/dist/
 helpers/build/
 helpers/.expo/
 helpers/.expo-shared/
+.android-sdk/
 
 # Python
 __pycache__/

@@ -82,6 +82,7 @@ export function mapServiceRequestToOffer(request) {
   return {
     id: request.id,
     requestId: request.id,
+    customerId: request.customerId || '',
     title: request.topic || request.subject || 'Service request',
     description: request.description || request.serviceSummary || 'A customer is requesting help.',
     customerName: request.customerName || 'Customer',
@@ -107,6 +108,7 @@ export function mapServiceRequestToActiveJob(request) {
   return {
     id: request.id,
     requestId: request.id,
+    customerId: request.customerId || '',
     title: request.topic || request.subject || 'Service request',
     description: request.description || request.serviceSummary || '',
     customerName: request.customerName || 'Customer',

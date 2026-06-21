@@ -3,6 +3,7 @@ import { AuthProvider } from './src/context/AuthContext';
 import { RootNavigator } from './src/navigation/RootNavigator';
 import { HelpersAppProvider } from './src/context/HelpersAppContext';
 import { colors } from './src/theme/colors';
+import './src/services/activeJobTrackingService';
 
 export default function App() {
   return (

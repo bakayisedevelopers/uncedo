@@ -11,6 +11,12 @@ import {
   watchAndSyncHelperLocation,
 } from '../services/helperLocationService';
 import {
+  isTrackableActiveJobStatus,
+  startActiveJobTracking,
+  stopActiveJobTracking,
+  syncActiveTrackingSession,
+} from '../services/activeJobTrackingService';
+import {
   acceptServiceRequestOffer,
   declineServiceRequestOffer,
   mapServiceRequestToActiveJob,
@@ -288,6 +294,7 @@ export function HelpersAppProvider({ children }) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
   const helperLocationWatchRef = useRef(null);
+  const activeTrackingRequestIdRef = useRef('');
 
   useEffect(() => {
     setProfile(normalizeProfile(user));
@@ -389,6 +396,84 @@ export function HelpersAppProvider({ children }) {
       stopWatchingLocation();
     };
   }, [profile.onlineStatus, user?.uid]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const syncActiveTracking = async () => {
+      if (!user?.uid) {
+        activeTrackingRequestIdRef.current = '';
+        await stopActiveJobTracking({
+          finalStatus: 'signed_out',
+          keepLocationSharingEnabled: profile.onlineStatus === 'online',
+        }).catch((error) => logError('HelpersAppContext.stopTrackingForUser', error));
+        return;
+      }
+
+      if (
+        !activeJob?.requestId
+        || !activeJob?.location
+        || !isTrackableActiveJobStatus(activeJob.status)
+      ) {
+        if (activeTrackingRequestIdRef.current) {
+          const finalStatus = activeJob?.status || 'inactive';
+          activeTrackingRequestIdRef.current = '';
+          await stopActiveJobTracking({
+            finalStatus,
+            keepLocationSharingEnabled: profile.onlineStatus === 'online',
+          }).catch((error) => logError('HelpersAppContext.stopTrackingForJob', error));
+        }
+        return;
+      }
+
+      const destination = {
+        latitude: activeJob.location.latitude,
+        longitude: activeJob.location.longitude,
+        address: activeJob.address || '',
+      };
+
+      if (activeTrackingRequestIdRef.current !== activeJob.requestId) {
+        await startActiveJobTracking({
+          requestId: activeJob.requestId,
+          helperId: user.uid,
+          customerId: activeJob.customerId || '',
+          destination,
+          status: activeJob.status,
+        }).catch((error) => {
+          if (!cancelled) {
+            logError('HelpersAppContext.startTracking', error);
+            setSaveError(error.message || 'Unable to start active job background tracking.');
+          }
+        });
+        if (!cancelled) {
+          activeTrackingRequestIdRef.current = activeJob.requestId;
+        }
+        return;
+      }
+
+      await syncActiveTrackingSession({
+        requestId: activeJob.requestId,
+        helperId: user.uid,
+        customerId: activeJob.customerId || '',
+        destination,
+        status: activeJob.status,
+      }).catch((error) => logError('HelpersAppContext.syncTracking', error));
+    };
+
+    syncActiveTracking();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeJob?.address,
+    activeJob?.customerId,
+    activeJob?.location,
+    activeJob?.requestId,
+    activeJob?.status,
+    profile.onlineStatus,
+    user?.uid,
+  ]);
 
   const persistProfileUpdate = async (updates) => {
     if (!user?.uid) {
@@ -507,6 +592,7 @@ export function HelpersAppProvider({ children }) {
         helperId: user.uid,
         status: nextStatus,
       });
+      await syncActiveTrackingSession({ status: nextStatus });
       return true;
     } catch (error) {
       logError('HelpersAppContext.updateActiveJobStatus', error);
@@ -553,6 +639,11 @@ export function HelpersAppProvider({ children }) {
         helperId: user.uid,
         reason,
       });
+      await stopActiveJobTracking({
+        finalStatus: 'canceled',
+        keepLocationSharingEnabled: profile.onlineStatus === 'online',
+      });
+      activeTrackingRequestIdRef.current = '';
       return true;
     } catch (error) {
       logError('HelpersAppContext.cancelActiveJob', error);

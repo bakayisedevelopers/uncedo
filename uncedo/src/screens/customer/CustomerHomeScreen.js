@@ -4,7 +4,6 @@ import { CustomerCallToActionSheet } from '../../components/customer/CustomerCal
 import { MapPlaceholder } from '../../components/customer/MapPlaceholder';
 import { useAuth } from '../../context/AuthContext';
 import {
-  fetchNearbyHelpersMapData,
   getCurrentCustomerLocation,
   requestCustomerLocationPermission,
   watchCustomerLocation,
@@ -22,14 +21,11 @@ export function CustomerHomeScreen({
   const { height: windowHeight } = useWindowDimensions();
   const onboardingStatus = getCustomerOnboardingStatus(user);
   const [composerHeight, setComposerHeight] = useState(0);
-  const [helperMarkers, setHelperMarkers] = useState([]);
   const [currentLocation, setCurrentLocation] = useState(null);
   const [mapError, setMapError] = useState('');
   const [mapLoading, setMapLoading] = useState(true);
   const composerSheetRef = useRef(null);
   const locationSubscriptionRef = useRef(null);
-  const latestLocationRef = useRef(null);
-  const refreshInFlightRef = useRef(false);
   const ctaGap = 14;
 
   const androidStatusBarInset = Platform.OS === 'android' ? (StatusBar.currentHeight || 0) : 0;
@@ -60,57 +56,12 @@ export function CustomerHomeScreen({
     }
 
     let active = true;
-    let refreshTimer = null;
-
-    const refreshNearbyHelpers = async (location) => {
-      if (!location || refreshInFlightRef.current) {
-        return;
-      }
-
-      refreshInFlightRef.current = true;
-
-      try {
-        const payload = await fetchNearbyHelpersMapData({
-          latitude: location.latitude,
-          longitude: location.longitude,
-          radiusKm: 20,
-          limit: 24,
-        });
-
-        if (!active) return;
-
-        setHelperMarkers(
-          (payload.helpers || [])
-            .map((helper) => ({
-              ...helper,
-              coordinate: {
-                latitude: helper.liveLocation?.latitude,
-                longitude: helper.liveLocation?.longitude,
-              },
-            }))
-            .filter((helper) => (
-              Number.isFinite(Number(helper.coordinate?.latitude))
-              && Number.isFinite(Number(helper.coordinate?.longitude))
-            )),
-        );
-        setMapError('');
-      } catch (error) {
-        if (active) {
-          setMapError(error.message || 'Unable to load nearby helpers right now.');
-        }
-      } finally {
-        if (active) {
-          setMapLoading(false);
-        }
-        refreshInFlightRef.current = false;
-      }
-    };
 
     const handleLocation = async (location) => {
-      latestLocationRef.current = location;
       if (!active) return;
       setCurrentLocation(location);
-      await refreshNearbyHelpers(location);
+      setMapError('');
+      setMapLoading(false);
     };
 
     const start = async () => {
@@ -120,7 +71,7 @@ export function CustomerHomeScreen({
 
         if (!granted) {
           setMapLoading(false);
-          setMapError('Location access is required to show your position and nearby helpers.');
+          setMapError('Location access is required to show your current position.');
           return;
         }
 
@@ -130,11 +81,6 @@ export function CustomerHomeScreen({
         }
 
         locationSubscriptionRef.current = await watchCustomerLocation(handleLocation);
-        refreshTimer = setInterval(() => {
-          if (latestLocationRef.current) {
-            refreshNearbyHelpers(latestLocationRef.current);
-          }
-        }, 60000);
       } catch (error) {
         if (active) {
           setMapLoading(false);
@@ -147,7 +93,6 @@ export function CustomerHomeScreen({
 
     return () => {
       active = false;
-      refreshTimer && clearInterval(refreshTimer);
       locationSubscriptionRef.current?.remove?.();
       locationSubscriptionRef.current = null;
     };
@@ -183,7 +128,7 @@ export function CustomerHomeScreen({
         floatingBottomInset={mapUiBottomInset}
         controlBottomInset={controlBottomInset}
         mapPadding={mapPadding}
-        helperMarkers={helperMarkers}
+        helperMarkers={[]}
         errorMessage={mapError}
         radiusKm={20}
       />

@@ -8,6 +8,7 @@ import {
 } from 'firebase/auth';
 import { getFirebaseClients } from '../firebase/config';
 import { deleteUserProfile, getUserProfile, upsertHelperProfile } from './userService';
+import { stopActiveJobTrackingForSignOut } from './activeJobTrackingService';
 
 export const HELPER_LOGIN_BLOCKED_CODE = 'HELPER_LOGIN_BLOCKED';
 
@@ -97,6 +98,7 @@ export async function signupWithEmail({ name, email, password }) {
 }
 
 export async function logoutUser() {
+  await stopActiveJobTrackingForSignOut().catch(() => null);
   const { auth } = getFirebaseClients();
   await signOut(auth);
 }

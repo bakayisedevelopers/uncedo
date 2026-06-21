@@ -19,10 +19,14 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import { doc, onSnapshot } from 'firebase/firestore';
 import { HelperMapPlaceholder } from '../../components/app/HelperMapPlaceholder';
 import { useHelpersApp } from '../../context/HelpersAppContext';
 import { getServiceById } from '../../constants/serviceCatalog';
-import { watchAndSyncHelperLocation } from '../../services/helperLocationService';
+import { getFirebaseClients } from '../../firebase/config';
+import { processForegroundActiveTrackingLocation } from '../../services/activeJobTrackingService';
+import { watchHelperLocation } from '../../services/helperLocationService';
+import { decodePolyline } from '../../services/routingService';
 import { colors } from '../../theme/colors';
 import { formatCurrency } from '../../utils/payouts';
 
@@ -58,9 +62,9 @@ function formatDistance(distance) {
   return `${(distance / 1000).toFixed(1)} km away`;
 }
 
-function formatEta(distance) {
-  if (!Number.isFinite(distance)) return null;
-  return Math.max(1, Math.round(distance / 11 / 60));
+function formatEta(durationSeconds) {
+  if (!Number.isFinite(durationSeconds)) return null;
+  return Math.max(1, Math.round(durationSeconds / 60));
 }
 
 function getInitials(name = '') {
@@ -151,6 +155,10 @@ function getToneStyles(tone) {
 export function ActiveJobScreen({ goBack, systemInsets = {} }) {
   const { activeJob, actions, saving, saveError } = useHelpersApp();
   const [currentLocation, setCurrentLocation] = useState(null);
+  const [routeCoordinates, setRouteCoordinates] = useState([]);
+  const [routeDistanceMeters, setRouteDistanceMeters] = useState(null);
+  const [routeDurationSeconds, setRouteDurationSeconds] = useState(null);
+  const [routeError, setRouteError] = useState('');
   const [isExpanded, setIsExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
   const [showSafetyModal, setShowSafetyModal] = useState(false);
@@ -215,9 +223,32 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
 
     const startWatchingLocation = async () => {
       try {
-        locationSubscriptionRef.current = await watchAndSyncHelperLocation((location) => {
+        locationSubscriptionRef.current = await watchHelperLocation(async (location) => {
           if (active) {
             setCurrentLocation(location);
+          }
+
+          try {
+            const trackingUpdate = await processForegroundActiveTrackingLocation(location);
+            const nextRouteCoordinates = trackingUpdate?.routeSnapshot?.routeCoordinates || [];
+            if (active && nextRouteCoordinates.length > 1) {
+              setRouteCoordinates(nextRouteCoordinates);
+              setRouteDistanceMeters(Number.isFinite(Number(trackingUpdate?.routeSnapshot?.distanceMeters)) ? Number(trackingUpdate.routeSnapshot.distanceMeters) : null);
+              setRouteDurationSeconds(Number.isFinite(Number(trackingUpdate?.routeSnapshot?.durationSeconds)) ? Number(trackingUpdate.routeSnapshot.durationSeconds) : null);
+              setRouteError('');
+            } else if (active && activeJob?.location) {
+              setRouteCoordinates([]);
+              setRouteDistanceMeters(null);
+              setRouteDurationSeconds(null);
+              setRouteError('Route unavailable right now.');
+            }
+          } catch (error) {
+            if (active && activeJob?.location) {
+              setRouteCoordinates([]);
+              setRouteDistanceMeters(null);
+              setRouteDurationSeconds(null);
+              setRouteError(error?.message || 'Route unavailable right now.');
+            }
           }
         });
       } catch (error) {
@@ -256,7 +287,54 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
     }
   }, [activeJob]);
 
-  const distance = useMemo(() => {
+  useEffect(() => {
+    if (!activeJob?.id) {
+      setRouteCoordinates([]);
+      setRouteDistanceMeters(null);
+      setRouteDurationSeconds(null);
+      setRouteError('');
+      return () => {};
+    }
+
+    setRouteCoordinates([]);
+    setRouteDistanceMeters(null);
+    setRouteDurationSeconds(null);
+    setRouteError('');
+
+    try {
+      const { db } = getFirebaseClients();
+      return onSnapshot(doc(db, 'serviceRequests', activeJob.id, 'tracking', 'live'), (snapshot) => {
+        if (!snapshot.exists()) {
+          return;
+        }
+
+        const data = snapshot.data() || {};
+        const encodedPolyline = String(data.routePolylineEncoded || '').trim();
+        const nextRouteCoordinates = encodedPolyline ? decodePolyline(encodedPolyline) : [];
+        const nextDistance = Number.isFinite(Number(data.distanceMeters)) ? Number(data.distanceMeters) : null;
+        const nextDuration = Number.isFinite(Number(data.durationSeconds)) ? Number(data.durationSeconds) : null;
+        const nextHelperLocation = data.helperLocation || null;
+
+        if (nextHelperLocation?.latitude && nextHelperLocation?.longitude) {
+          setCurrentLocation(nextHelperLocation);
+        }
+
+        setRouteCoordinates(nextRouteCoordinates);
+        setRouteDistanceMeters(nextDistance);
+        setRouteDurationSeconds(nextDuration);
+        if (!nextRouteCoordinates.length && nextHelperLocation?.latitude && nextHelperLocation?.longitude && activeJob?.location) {
+          setRouteError('Route unavailable right now.');
+        } else {
+          setRouteError('');
+        }
+      });
+    } catch (error) {
+      console.warn('[helpers:active-job-tracking]', error?.message || error);
+      return () => {};
+    }
+  }, [activeJob?.id, activeJob?.location]);
+
+  const arrivalDistance = useMemo(() => {
     if (!currentLocation || !activeJob?.location) return null;
     return getDistanceInMeters(
       currentLocation.latitude,
@@ -270,12 +348,12 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
     if (
       activeJob
       && ['driving', 'en_route', 'buying_resources'].includes(String(activeJob.status || '').toLowerCase())
-      && Number.isFinite(distance)
-      && distance <= ARRIVAL_THRESHOLD_METERS
+      && Number.isFinite(arrivalDistance)
+      && arrivalDistance <= ARRIVAL_THRESHOLD_METERS
     ) {
       actions.updateActiveJobStatus('arrived');
     }
-  }, [actions, activeJob, distance]);
+  }, [actions, activeJob, arrivalDistance]);
 
   const waitInfo = useMemo(() => {
     if (activeJob?.status !== 'arrived' || !activeJob?.raw?.arrivedAt) {
@@ -308,7 +386,11 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
     };
   }, [activeJob, nowTime]);
 
-  const etaMinutes = useMemo(() => formatEta(distance), [distance]);
+  const distance = useMemo(
+    () => (Number.isFinite(routeDistanceMeters) ? routeDistanceMeters : null),
+    [routeDistanceMeters],
+  );
+  const etaMinutes = useMemo(() => formatEta(routeDurationSeconds), [routeDurationSeconds]);
   const statusMeta = useMemo(() => getStatusMeta(activeJob?.status), [activeJob?.status]);
   const toneStyles = useMemo(() => getToneStyles(statusMeta.tone), [statusMeta.tone]);
   const canCancelJob = String(activeJob?.status || '').toLowerCase() !== 'completed';
@@ -687,6 +769,8 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
             initials: 'You',
           } : null}
           customerMarkers={customerMarkers}
+          routeCoordinates={routeCoordinates}
+          routeError={routeError}
           floatingBottomInset={isLandscape ? 24 : collapsedHeight + bottomInset}
           controlBottomInset={isLandscape ? 24 : collapsedHeight + bottomInset + 24}
         />

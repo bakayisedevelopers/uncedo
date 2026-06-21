@@ -24,9 +24,18 @@ import {
   cancelServiceRequestByCustomer,
   subscribeToServiceRequestById,
 } from '../../services/customerServiceRequestService';
+import {
+  buildRouteSnapshot,
+  decodePolyline,
+  fetchRouteData,
+  getRerouteReason,
+} from '../../services/routingService';
+import { logInfo } from '../../services/logger';
 import { colors } from '../../theme/colors';
 
 const FREE_WAIT_SECONDS = 120;
+const TRACKING_STALE_MS = 60000;
+const TRACKING_INACTIVE_MS = 300000;
 
 function getDistanceInMeters(lat1, lon1, lat2, lon2) {
   if (
@@ -57,9 +66,9 @@ function formatDistance(distance) {
   return `${(distance / 1000).toFixed(1)} km away`;
 }
 
-function formatEta(distance) {
-  if (!Number.isFinite(distance)) return null;
-  return Math.max(1, Math.round(distance / 11 / 60));
+function formatEta(durationSeconds) {
+  if (!Number.isFinite(durationSeconds)) return null;
+  return Math.max(1, Math.round(durationSeconds / 60));
 }
 
 function formatCurrency(value) {
@@ -169,6 +178,12 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
   const requestId = route?.params?.requestId || '';
   const [request, setRequest] = useState(null);
   const [helperLocation, setHelperLocation] = useState(null);
+  const [fallbackHelperLocation, setFallbackHelperLocation] = useState(null);
+  const [routeCoordinates, setRouteCoordinates] = useState([]);
+  const [routeDistanceMeters, setRouteDistanceMeters] = useState(null);
+  const [routeDurationSeconds, setRouteDurationSeconds] = useState(null);
+  const [routeError, setRouteError] = useState('');
+  const [trackingDocument, setTrackingDocument] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [isExpanded, setIsExpanded] = useState(false);
@@ -176,7 +191,18 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [cancelReason, setCancelReason] = useState('');
   const [nowTime, setNowTime] = useState(Date.now());
+  const [trackingClockMs, setTrackingClockMs] = useState(Date.now());
   const scrollOffsetYRef = useRef(0);
+  const localRouteSnapshotRef = useRef({
+    routeCoordinates: [],
+    encodedPolyline: '',
+    distanceMeters: null,
+    durationSeconds: null,
+    routeProvider: '',
+    lastRouteOrigin: null,
+    lastDestination: null,
+    lastSuccessfulRouteFetchAtMs: 0,
+  });
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
   const topInset = Math.max(0, Number(systemInsets?.top || 0));
@@ -222,6 +248,14 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
   }), [canScrollExpandedSheet, isExpanded, isLandscape]);
 
   useEffect(() => {
+    const interval = setInterval(() => {
+      setTrackingClockMs(Date.now());
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
     if (!requestId) {
       setLoading(false);
       setError('Missing service request ID.');
@@ -242,9 +276,26 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
   }, [requestId]);
 
   useEffect(() => {
+    if (!requestId) {
+      setTrackingDocument(null);
+      return () => {};
+    }
+
+    try {
+      const { db } = getFirebaseClients();
+      return onSnapshot(doc(db, 'serviceRequests', requestId, 'tracking', 'live'), (snapshot) => {
+        setTrackingDocument(snapshot.exists() ? (snapshot.data() || {}) : null);
+      });
+    } catch (nextError) {
+      console.warn('[uncedo:request-tracking]', nextError?.message || nextError);
+      return () => {};
+    }
+  }, [requestId]);
+
+  useEffect(() => {
     const helperId = request?.helperAssignment?.helperId;
     if (!helperId) {
-      setHelperLocation(null);
+      setFallbackHelperLocation(null);
       return () => {};
     }
 
@@ -254,7 +305,7 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
         if (!snapshot.exists()) return;
         const data = snapshot.data() || {};
         if (data.liveLocation) {
-          setHelperLocation(data.liveLocation);
+          setFallbackHelperLocation(data.liveLocation);
         }
       });
       return unsubscribe;
@@ -263,6 +314,46 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
       return () => {};
     }
   }, [request?.helperAssignment?.helperId]);
+
+  const trackingDocHasData = Boolean(
+    trackingDocument
+    && (
+      trackingDocument.helperLocation
+      || trackingDocument.routePolylineEncoded
+      || trackingDocument.updatedAtMs
+    ),
+  );
+  const trackingUpdatedAtMs = Number(
+    trackingDocument?.updatedAtMs
+    || trackingDocument?.helperLocation?.updatedAtMs
+    || 0,
+  ) || 0;
+  const isTrackingStale = trackingUpdatedAtMs > 0 && (trackingClockMs - trackingUpdatedAtMs) > TRACKING_STALE_MS;
+  const isTrackingInactive = trackingUpdatedAtMs > 0 && (trackingClockMs - trackingUpdatedAtMs) > TRACKING_INACTIVE_MS;
+
+  useEffect(() => {
+    if (isTrackingStale) {
+      logInfo('customer-tracking', 'Stale tracking data', {
+        requestId,
+        updatedAtMs: trackingUpdatedAtMs,
+        ageMs: trackingClockMs - trackingUpdatedAtMs,
+      });
+    }
+  }, [isTrackingStale, requestId, trackingClockMs, trackingUpdatedAtMs]);
+
+  useEffect(() => {
+    if (trackingDocHasData) {
+      if (isTrackingInactive) {
+        setHelperLocation(null);
+        return;
+      }
+
+      setHelperLocation(trackingDocument?.helperLocation || null);
+      return;
+    }
+
+    setHelperLocation(fallbackHelperLocation || null);
+  }, [fallbackHelperLocation, isTrackingInactive, trackingDocHasData, trackingDocument]);
 
   useEffect(() => {
     let interval = null;
@@ -278,18 +369,106 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
   }, [request?.status]);
 
   const clientLocation = request?.location || request?.requestPayload?.location || null;
+  const travelStatus = ['accepted', 'driving', 'en_route', 'buying_resources'].includes(String(request?.status || '').toLowerCase());
 
-  const distance = useMemo(() => {
-    if (!clientLocation || !helperLocation) return null;
-    return getDistanceInMeters(
-      clientLocation.latitude,
-      clientLocation.longitude,
-      helperLocation.latitude,
-      helperLocation.longitude,
-    );
-  }, [clientLocation, helperLocation]);
+  useEffect(() => {
+    const encodedPolyline = String(trackingDocument?.routePolylineEncoded || '').trim();
+    const trackingDistance = Number.isFinite(Number(trackingDocument?.distanceMeters))
+      ? Number(trackingDocument.distanceMeters)
+      : null;
+    const trackingDuration = Number.isFinite(Number(trackingDocument?.durationSeconds))
+      ? Number(trackingDocument.durationSeconds)
+      : null;
 
-  const etaMinutes = useMemo(() => formatEta(distance), [distance]);
+    if (encodedPolyline) {
+      const decodedCoordinates = decodePolyline(encodedPolyline);
+      setRouteCoordinates(decodedCoordinates);
+      setRouteDistanceMeters(trackingDistance);
+      setRouteDurationSeconds(trackingDuration);
+      setRouteError('');
+      localRouteSnapshotRef.current = buildRouteSnapshot({
+        routeCoordinates: decodedCoordinates,
+        encodedPolyline,
+        distanceMeters: trackingDistance,
+        durationSeconds: trackingDuration,
+        routeProvider: trackingDocument?.routeProvider || '',
+      }, helperLocation, clientLocation);
+      return;
+    }
+
+    if (!travelStatus || !helperLocation || !clientLocation || isTrackingInactive) {
+      setRouteCoordinates([]);
+      setRouteDistanceMeters(null);
+      setRouteDurationSeconds(null);
+      setRouteError(isTrackingInactive ? 'Helper location is inactive.' : '');
+      return;
+    }
+
+    let cancelled = false;
+    const rerouteReason = getRerouteReason({
+      currentLocation: helperLocation,
+      destination: clientLocation,
+      routeCoordinates: localRouteSnapshotRef.current.routeCoordinates,
+      lastRouteOrigin: localRouteSnapshotRef.current.lastRouteOrigin,
+      lastDestination: localRouteSnapshotRef.current.lastDestination,
+      lastSuccessfulRouteFetchAtMs: localRouteSnapshotRef.current.lastSuccessfulRouteFetchAtMs,
+    });
+
+    if (!rerouteReason) {
+      return;
+    }
+
+    logInfo('customer-tracking', 'Reroute triggered', {
+      requestId,
+      reason: rerouteReason,
+    });
+
+    fetchRouteData(helperLocation, clientLocation)
+      .then((routeData) => {
+        if (cancelled) return;
+        if (routeData.routeCoordinates.length > 1) {
+          setRouteCoordinates(routeData.routeCoordinates);
+          setRouteDistanceMeters(routeData.distanceMeters);
+          setRouteDurationSeconds(routeData.durationSeconds);
+          setRouteError('');
+          localRouteSnapshotRef.current = buildRouteSnapshot(routeData, helperLocation, clientLocation);
+          logInfo('customer-tracking', 'Route updated locally', {
+            requestId,
+            routeProvider: routeData.routeProvider,
+            distanceMeters: routeData.distanceMeters,
+            durationSeconds: routeData.durationSeconds,
+            coordinateCount: routeData.routeCoordinates.length,
+          });
+          return;
+        }
+
+        setRouteCoordinates([]);
+        setRouteDistanceMeters(null);
+        setRouteDurationSeconds(null);
+        setRouteError(routeData.error || 'Route unavailable right now.');
+        logInfo('customer-tracking', 'Route unavailable state', {
+          requestId,
+          error: routeData.error || 'Route unavailable right now.',
+        });
+      })
+      .catch((nextError) => {
+        if (cancelled) return;
+        setRouteCoordinates([]);
+        setRouteDistanceMeters(null);
+        setRouteDurationSeconds(null);
+        setRouteError(nextError?.message || 'Route unavailable right now.');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [clientLocation, helperLocation, isTrackingInactive, requestId, trackingDocument, travelStatus]);
+
+  const distance = useMemo(
+    () => (Number.isFinite(routeDistanceMeters) ? routeDistanceMeters : null),
+    [routeDistanceMeters],
+  );
+  const etaMinutes = useMemo(() => formatEta(routeDurationSeconds), [routeDurationSeconds]);
 
   const waitInfo = useMemo(() => {
     const arrivedAt = request?.arrivedAt || request?.helperAssignment?.arrivedAt;
@@ -568,6 +747,8 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
             initials: 'You',
           } : null}
           helperMarkers={helperMarkers}
+          routeCoordinates={routeCoordinates}
+          routeError={routeError || (isTrackingStale ? 'Tracking data is delayed.' : '')}
           floatingBottomInset={isLandscape ? 24 : collapsedHeight + bottomInset}
           controlBottomInset={isLandscape ? 24 : collapsedHeight + bottomInset + 24}
         />

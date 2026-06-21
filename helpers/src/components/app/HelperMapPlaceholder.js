@@ -1,7 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Image, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { GOOGLE_MAPS_API_KEY } from '../../constants/runtimeConfig';
 import { colors } from '../../theme/colors';
 
 let NativeMapView = null;
@@ -55,6 +54,22 @@ function normalizeCoordinate(coordinate = null) {
   return { latitude, longitude };
 }
 
+function appendCoordinateIfNeeded(target, coordinate) {
+  const next = normalizeCoordinate(coordinate);
+  if (!next) return;
+
+  const last = target[target.length - 1];
+  if (
+    last
+    && Math.abs(last.latitude - next.latitude) < 0.00001
+    && Math.abs(last.longitude - next.longitude) < 0.00001
+  ) {
+    return;
+  }
+
+  target.push(next);
+}
+
 function buildRegion(center = DEFAULT_REGION, radiusKm = 50) {
   const latitude = Number(center?.latitude || DEFAULT_REGION.latitude);
   const longitude = Number(center?.longitude || DEFAULT_REGION.longitude);
@@ -72,128 +87,9 @@ function buildRegion(center = DEFAULT_REGION, radiusKm = 50) {
   };
 }
 
-function buildRouteKey(origin, destination) {
-  if (!origin || !destination) return '';
-  return [
-    origin.latitude.toFixed(5),
-    origin.longitude.toFixed(5),
-    destination.latitude.toFixed(5),
-    destination.longitude.toFixed(5),
-  ].join(':');
-}
-
 function getCoordinateDistanceScore(from, to) {
   if (!from || !to) return Number.POSITIVE_INFINITY;
   return Math.abs(from.latitude - to.latitude) + Math.abs(from.longitude - to.longitude);
-}
-
-function decodePolyline(encoded = '') {
-  const points = [];
-  let index = 0;
-  let latitude = 0;
-  let longitude = 0;
-
-  while (index < encoded.length) {
-    let result = 0;
-    let shift = 0;
-    let byte = null;
-
-    do {
-      byte = encoded.charCodeAt(index++) - 63;
-      result |= (byte & 0x1f) << shift;
-      shift += 5;
-    } while (byte >= 0x20);
-
-    const deltaLat = (result & 1) ? ~(result >> 1) : (result >> 1);
-    latitude += deltaLat;
-
-    result = 0;
-    shift = 0;
-
-    do {
-      byte = encoded.charCodeAt(index++) - 63;
-      result |= (byte & 0x1f) << shift;
-      shift += 5;
-    } while (byte >= 0x20);
-
-    const deltaLng = (result & 1) ? ~(result >> 1) : (result >> 1);
-    longitude += deltaLng;
-
-    points.push({
-      latitude: latitude / 1e5,
-      longitude: longitude / 1e5,
-    });
-  }
-
-  return points;
-}
-
-function appendCoordinateIfNeeded(target, coordinate) {
-  const last = target[target.length - 1];
-  if (
-    last
-    && Math.abs(last.latitude - coordinate.latitude) < 0.00001
-    && Math.abs(last.longitude - coordinate.longitude) < 0.00001
-  ) {
-    return;
-  }
-
-  target.push(coordinate);
-}
-
-function extractRouteCoordinates(route = null) {
-  const detailedCoordinates = [];
-  const steps = route?.legs?.flatMap((leg) => leg?.steps || []) || [];
-
-  steps.forEach((step) => {
-    const encodedStepPolyline = step?.polyline?.points || '';
-    const decodedPoints = decodePolyline(encodedStepPolyline);
-    decodedPoints.forEach((coordinate) => appendCoordinateIfNeeded(detailedCoordinates, coordinate));
-  });
-
-  if (detailedCoordinates.length > 1) {
-    return detailedCoordinates;
-  }
-
-  const overviewPolyline = route?.overview_polyline?.points || '';
-  return decodePolyline(overviewPolyline);
-}
-
-async function fetchRouteCoordinates(origin, destination) {
-  if (!origin || !destination) {
-    return [];
-  }
-
-  if (GOOGLE_MAPS_API_KEY) {
-    const params = new URLSearchParams({
-      origin: `${origin.latitude},${origin.longitude}`,
-      destination: `${destination.latitude},${destination.longitude}`,
-      key: GOOGLE_MAPS_API_KEY,
-    });
-
-    const response = await fetch(`https://maps.googleapis.com/maps/api/directions/json?${params.toString()}`);
-    const payload = await response.json().catch(() => ({}));
-
-    if (response.ok && payload?.status === 'OK') {
-      const googleCoordinates = extractRouteCoordinates(payload?.routes?.[0] || null);
-      if (googleCoordinates.length > 1) {
-        return googleCoordinates;
-      }
-    }
-  }
-
-  const osrmResponse = await fetch(
-    `https://router.project-osrm.org/route/v1/driving/${origin.longitude},${origin.latitude};${destination.longitude},${destination.latitude}?overview=full&geometries=polyline`,
-  );
-  const osrmPayload = await osrmResponse.json().catch(() => ({}));
-  const encodedPolyline = osrmPayload?.routes?.[0]?.geometry || '';
-  const osrmCoordinates = decodePolyline(encodedPolyline);
-
-  if (!osrmResponse.ok || osrmCoordinates.length <= 1) {
-    throw new Error('Unable to load route directions.');
-  }
-
-  return osrmCoordinates;
 }
 
 function getNavigationFocusCoordinates(routeCoordinates, currentCoordinate, destinationCoordinate) {
@@ -249,12 +145,14 @@ function AvatarMarker({ initials, photoUri, isCurrentUser = false, heading = nul
 export function HelperMapPlaceholder({
   currentUserMarker = null,
   customerMarkers = [],
+  routeCoordinates = [],
   floatingBottomInset = 228,
   controlBottomInset = null,
   mapPadding = null,
   radiusKm = 50,
   isLoading = false,
   errorMessage = '',
+  routeError = '',
   mode = 'nearby',
   routeView = 'overview',
 }) {
@@ -264,63 +162,35 @@ export function HelperMapPlaceholder({
     () => normalizeCoordinate(firstCustomer?.coordinate),
     [firstCustomer?.coordinate],
   );
+  const normalizedRouteCoordinates = useMemo(
+    () => (Array.isArray(routeCoordinates) ? routeCoordinates.map((item) => normalizeCoordinate(item)).filter(Boolean) : []),
+    [routeCoordinates],
+  );
+  const routeSignature = useMemo(() => {
+    if (!normalizedRouteCoordinates.length) return '';
+    const first = normalizedRouteCoordinates[0];
+    const last = normalizedRouteCoordinates[normalizedRouteCoordinates.length - 1];
+    return [
+      normalizedRouteCoordinates.length,
+      first?.latitude?.toFixed?.(5) || '',
+      first?.longitude?.toFixed?.(5) || '',
+      last?.latitude?.toFixed?.(5) || '',
+      last?.longitude?.toFixed?.(5) || '',
+      currentCoordinate?.latitude?.toFixed?.(5) || '',
+      currentCoordinate?.longitude?.toFixed?.(5) || '',
+    ].join(':');
+  }, [currentCoordinate?.latitude, currentCoordinate?.longitude, normalizedRouteCoordinates]);
   const mapCenter = currentCoordinate || destinationCoordinate || DEFAULT_REGION;
   const [region, setRegion] = useState(() => buildRegion(mapCenter, radiusKm));
-  const [routeCoordinates, setRouteCoordinates] = useState([]);
-  const [routeError, setRouteError] = useState('');
   const mapRef = useRef(null);
   const didInitialFitRef = useRef(false);
-  const lastRouteKeyRef = useRef('');
-
-  const routeKey = mode === 'route' ? buildRouteKey(currentCoordinate, destinationCoordinate) : '';
   const helperRadiusMeters = Math.max(1000, Number(radiusKm || 50) * 1000);
 
   useEffect(() => {
-    let active = true;
-
-    if (mode !== 'route') {
-      setRouteCoordinates([]);
-      setRouteError('');
-      lastRouteKeyRef.current = '';
-      return () => {
-        active = false;
-      };
+    if (mode === 'route') {
+      didInitialFitRef.current = false;
     }
-
-    if (!routeKey) {
-      setRouteCoordinates([]);
-      setRouteError('');
-      lastRouteKeyRef.current = '';
-      return () => {
-        active = false;
-      };
-    }
-
-    if (routeKey === lastRouteKeyRef.current) {
-      return () => {
-        active = false;
-      };
-    }
-
-    lastRouteKeyRef.current = routeKey;
-    didInitialFitRef.current = false;
-
-    fetchRouteCoordinates(currentCoordinate, destinationCoordinate)
-      .then((coordinates) => {
-        if (!active) return;
-        setRouteCoordinates(coordinates);
-        setRouteError('');
-      })
-      .catch((error) => {
-        if (!active) return;
-        setRouteCoordinates([]);
-        setRouteError(error.message || 'Unable to load route directions.');
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [currentCoordinate, destinationCoordinate, mode, routeKey]);
+  }, [mode, routeSignature, routeView]);
 
   useEffect(() => {
     if (!mapRef.current) return;
@@ -353,11 +223,11 @@ export function HelperMapPlaceholder({
 
     if (didInitialFitRef.current) return;
 
-    const coords = routeCoordinates.length > 1
+    const coords = normalizedRouteCoordinates.length > 1
       ? (
         routeView === 'navigation'
-          ? getNavigationFocusCoordinates(routeCoordinates, currentCoordinate, destinationCoordinate)
-          : routeCoordinates
+          ? getNavigationFocusCoordinates(normalizedRouteCoordinates, currentCoordinate, destinationCoordinate)
+          : normalizedRouteCoordinates
       )
       : [currentCoordinate, destinationCoordinate].filter(Boolean);
 
@@ -381,14 +251,14 @@ export function HelperMapPlaceholder({
     }, 250);
 
     return () => clearTimeout(timer);
-  }, [currentCoordinate, destinationCoordinate, floatingBottomInset, mode, radiusKm, routeCoordinates, routeView]);
+  }, [currentCoordinate, destinationCoordinate, floatingBottomInset, mode, normalizedRouteCoordinates, radiusKm, routeView]);
 
   const recenter = () => {
-    const coords = mode === 'route' && routeCoordinates.length > 1
+    const coords = mode === 'route' && normalizedRouteCoordinates.length > 1
       ? (
         routeView === 'navigation'
-          ? getNavigationFocusCoordinates(routeCoordinates, currentCoordinate, destinationCoordinate)
-          : routeCoordinates
+          ? getNavigationFocusCoordinates(normalizedRouteCoordinates, currentCoordinate, destinationCoordinate)
+          : normalizedRouteCoordinates
       )
       : [currentCoordinate, destinationCoordinate].filter(Boolean);
 
@@ -431,8 +301,8 @@ export function HelperMapPlaceholder({
     || (mode === 'route'
       ? (isLoading ? 'Preparing live route tracking.' : 'Showing the helper route to the customer destination.')
       : (currentUserMarker
-        ? `Showing active customers within ${radiusKm} km of your current live location.`
-        : 'Allow location access so nearby active customers can appear on the map.'));
+        ? `Showing your live location and ${radiusKm} km service radius.`
+        : 'Allow location access to show your live location and service radius.'));
 
   if (!NativeMapView || !NativeMarker) {
     return (
@@ -492,12 +362,7 @@ export function HelperMapPlaceholder({
           return (
             <Fragment key={customer.id}>
               {mode === 'nearby' && NativePolyline && currentCoordinate ? (
-                <NativePolyline
-                  coordinates={[currentCoordinate, customerCoordinate]}
-                  strokeColor={colors.brand}
-                  strokeWidth={3}
-                  lineDashPattern={[6, 3]}
-                />
+                null
               ) : null}
               <NativeMarker coordinate={customerCoordinate} identifier={customer.id}>
                 <AvatarMarker initials={customer.initials || customer.fullName} photoUri={customer.profilePhoto} />
@@ -506,9 +371,9 @@ export function HelperMapPlaceholder({
           );
         })}
 
-        {mode === 'route' && NativePolyline && routeCoordinates.length > 1 ? (
+        {mode === 'route' && NativePolyline && normalizedRouteCoordinates.length > 1 ? (
           <NativePolyline
-            coordinates={routeCoordinates}
+            coordinates={normalizedRouteCoordinates}
             strokeColor={colors.brand}
             strokeWidth={5}
             lineCap="round"

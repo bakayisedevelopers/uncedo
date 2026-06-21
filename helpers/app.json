@@ -14,16 +14,25 @@
       "permissions": [
         "CAMERA",
         "ACCESS_FINE_LOCATION",
-        "ACCESS_COARSE_LOCATION"
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION"
       ]
     },
     "ios": {
       "bundleIdentifier": "com.bakayisedevelopers.helpers",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "Helpers uses your location while you are online so nearby customers can find you on the map.",
+        "NSLocationWhenInUseUsageDescription": "Uncedo Helpers uses your location while you are travelling to active jobs.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Uncedo Helpers uses your location during active jobs so customers can track your arrival.",
+        "NSLocationAlwaysUsageDescription": "Uncedo Helpers uses your location during active jobs so customers can track your arrival.",
         "NSCameraUsageDescription": "Helpers uses the camera so you can capture a profile selfie for verification.",
-        "NSPhotoLibraryUsageDescription": "Helpers uses your photo library so you can upload work pictures for your helper skills."
-      }
+        "NSPhotoLibraryUsageDescription": "Helpers uses your photo library so you can upload work pictures for your helper skills.",
+        "UIBackgroundModes": [
+          "location"
+        ]
+      },
+      "supportsTablet": false
     },
     "extra": {
       "eas": {
@@ -33,7 +42,16 @@
     "owner": "bakayisedevelopers",
     "plugins": [
       "expo-font",
-      "expo-image-picker"
+      "expo-image-picker",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Uncedo Helpers uses your location during active jobs so customers can track your arrival.",
+          "locationWhenInUsePermission": "Uncedo Helpers uses your location while you are travelling to active jobs.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isIosBackgroundLocationEnabled": true
+        }
+      ]
     ]
   }
 }

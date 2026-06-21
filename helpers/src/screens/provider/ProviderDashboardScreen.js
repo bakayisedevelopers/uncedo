@@ -5,7 +5,6 @@ import { HelperMapPlaceholder } from '../../components/app/HelperMapPlaceholder'
 import { useAuth } from '../../context/AuthContext';
 import { useHelpersApp } from '../../context/HelpersAppContext';
 import {
-  fetchNearbyActiveCustomersMapData,
   getCurrentHelperLocation,
   requestHelperMapLocationPermission,
   watchHelperLocation,
@@ -21,13 +20,10 @@ export function ProviderDashboardScreen({
   const { height: windowHeight } = useWindowDimensions();
   const { profile, onboardingStatus, actions, saveError, saving, activeJob } = useHelpersApp();
   const [composerHeight, setComposerHeight] = useState(0);
-  const [customerMarkers, setCustomerMarkers] = useState([]);
   const [currentLocation, setCurrentLocation] = useState(null);
   const [mapError, setMapError] = useState('');
   const [mapLoading, setMapLoading] = useState(true);
   const locationSubscriptionRef = useRef(null);
-  const latestLocationRef = useRef(null);
-  const refreshInFlightRef = useRef(false);
   const ctaGap = 14;
 
   const isOnline = profile.onlineStatus === 'online';
@@ -60,62 +56,12 @@ export function ProviderDashboardScreen({
     }
 
     let active = true;
-    let refreshTimer = null;
-
-    const refreshNearbyCustomers = async (location) => {
-      if (!location || !isOnline || refreshInFlightRef.current) {
-        if (active && !isOnline) {
-          setCustomerMarkers([]);
-          setMapLoading(false);
-          setMapError('');
-        }
-        return;
-      }
-
-      refreshInFlightRef.current = true;
-
-      try {
-        const payload = await fetchNearbyActiveCustomersMapData({
-          latitude: location.latitude,
-          longitude: location.longitude,
-          radiusKm: 50,
-          limit: 30,
-        });
-
-        if (!active) return;
-
-        setCustomerMarkers(
-          (payload.customers || [])
-            .map((customer) => ({
-              ...customer,
-              coordinate: {
-                latitude: customer.lastKnownLocation?.latitude,
-                longitude: customer.lastKnownLocation?.longitude,
-              },
-            }))
-            .filter((customer) => (
-              Number.isFinite(Number(customer.coordinate?.latitude))
-              && Number.isFinite(Number(customer.coordinate?.longitude))
-            )),
-        );
-        setMapError('');
-      } catch (error) {
-        if (active) {
-          setMapError(error.message || 'Unable to load nearby customers right now.');
-        }
-      } finally {
-        if (active) {
-          setMapLoading(false);
-        }
-        refreshInFlightRef.current = false;
-      }
-    };
 
     const handleLocation = async (location) => {
-      latestLocationRef.current = location;
       if (!active) return;
       setCurrentLocation(location);
-      await refreshNearbyCustomers(location);
+      setMapError('');
+      setMapLoading(false);
     };
 
     const start = async () => {
@@ -125,7 +71,7 @@ export function ProviderDashboardScreen({
 
         if (!granted) {
           setMapLoading(false);
-          setMapError('Location access is required to show your position and nearby customers.');
+          setMapError('Location access is required to show your position and service radius.');
           return;
         }
 
@@ -137,11 +83,6 @@ export function ProviderDashboardScreen({
         }
 
         locationSubscriptionRef.current = await watchHelperLocation(handleLocation);
-        refreshTimer = setInterval(() => {
-          if (latestLocationRef.current) {
-            refreshNearbyCustomers(latestLocationRef.current);
-          }
-        }, 60000);
       } catch (error) {
         if (active) {
           setMapLoading(false);
@@ -154,11 +95,10 @@ export function ProviderDashboardScreen({
 
     return () => {
       active = false;
-      refreshTimer && clearInterval(refreshTimer);
       locationSubscriptionRef.current?.remove?.();
       locationSubscriptionRef.current = null;
     };
-  }, [isOnline, user?.uid]);
+  }, [user?.uid]);
 
   useEffect(() => {
     if (!onBottomNavVisibilityChange || !windowHeight || !composerHeight) {
@@ -196,7 +136,7 @@ export function ProviderDashboardScreen({
     <View style={styles.screen}>
       <HelperMapPlaceholder
         currentUserMarker={currentUserMarker}
-        customerMarkers={customerMarkers}
+        customerMarkers={[]}
         floatingBottomInset={mapUiBottomInset}
         controlBottomInset={controlBottomInset}
         mapPadding={mapPadding}
