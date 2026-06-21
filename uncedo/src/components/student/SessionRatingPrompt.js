@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { colors } from '../../theme/colors';
 import { submitSessionRating } from '../../services/sessionService';
 
@@ -46,54 +46,58 @@ export function SessionRatingPrompt({ session, role = 'student', onHandled }) {
   };
 
   return (
-    <Modal animationType="fade" transparent visible onRequestClose={handleDismiss}>
-      <View style={styles.overlay}>
-        <View style={styles.modal}>
-          <View style={styles.header}>
-            <View>
-              <Text style={styles.kicker}>{statusCopy}</Text>
-              <Text style={styles.title}>Rate this job</Text>
-            </View>
-            <Pressable accessibilityRole="button" onPress={handleDismiss} style={styles.closeButton}>
-              <Text style={styles.closeLabel}>Close</Text>
+    <View pointerEvents="box-none" style={styles.portal}>
+      <View pointerEvents="none" style={styles.overlay} />
+      <View style={styles.modal}>
+        <View style={styles.header}>
+          <View>
+            <Text style={styles.kicker}>{statusCopy}</Text>
+            <Text style={styles.title}>Rate this job</Text>
+          </View>
+          <Pressable accessibilityRole="button" onPress={handleDismiss} style={styles.closeButton}>
+            <Text style={styles.closeLabel}>Close</Text>
+          </Pressable>
+        </View>
+
+        <Text style={styles.copy}>
+          Share a quick rating for {counterpart}. Tap a star to submit immediately.
+        </Text>
+
+        <View style={styles.stars}>
+          {STAR_VALUES.map((starValue) => (
+            <Pressable
+              accessibilityRole="button"
+              key={starValue}
+              onPress={() => handleSubmit(starValue)}
+              style={styles.starButton}
+            >
+              <Text style={[styles.star, starValue <= selectedRating && styles.starActive]}>*</Text>
             </Pressable>
-          </View>
+          ))}
+        </View>
 
-          <Text style={styles.copy}>
-            Share a quick rating for {counterpart}. Tap a star to submit immediately.
+        <View style={styles.footer}>
+          {isSaving ? <ActivityIndicator color={colors.brand} /> : null}
+          <Text style={styles.footerCopy}>
+            {isSaving ? 'Saving rating...' : 'Close to dismiss this rating prompt.'}
           </Text>
-
-          <View style={styles.stars}>
-            {STAR_VALUES.map((starValue) => (
-              <Pressable
-                accessibilityRole="button"
-                key={starValue}
-                onPress={() => handleSubmit(starValue)}
-                style={styles.starButton}
-              >
-                <Text style={[styles.star, starValue <= selectedRating && styles.starActive]}>★</Text>
-              </Pressable>
-            ))}
-          </View>
-
-          <View style={styles.footer}>
-            {isSaving ? <ActivityIndicator color={colors.brand} /> : null}
-            <Text style={styles.footerCopy}>
-              {isSaving ? 'Saving rating...' : 'Close to dismiss this rating prompt.'}
-            </Text>
-          </View>
         </View>
       </View>
-    </Modal>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  overlay: {
-    flex: 1,
+  portal: {
+    ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
     padding: 16,
+    zIndex: 80,
+    elevation: 80,
+  },
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(255,255,255,0.84)',
   },
   modal: {
@@ -101,15 +105,15 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     borderRadius: 28,
     borderWidth: 1,
+    maxWidth: 420,
     padding: 20,
     width: '100%',
-    maxWidth: 420,
   },
   header: {
     alignItems: 'center',
     flexDirection: 'row',
-    justifyContent: 'space-between',
     gap: 12,
+    justifyContent: 'space-between',
   },
   kicker: {
     color: colors.muted,

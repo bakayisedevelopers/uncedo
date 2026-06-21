@@ -64,11 +64,11 @@ export function HelperOfferOverlay() {
     outputRange: [-280, 280],
   });
 
-  if (!activeOffer) return null;
+  if (!activeOffer || !canRespond) return null;
 
   return (
     <View pointerEvents="box-none" style={styles.portal}>
-      <View style={styles.backdrop} />
+      <View pointerEvents="none" style={styles.backdrop} />
       <View style={styles.sheetWrap}>
         <View style={styles.sheet}>
           <View style={[styles.countdownFill, { width: `${countdownRatio * 100}%`, backgroundColor: countdownColor }]} />
