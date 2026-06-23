@@ -209,12 +209,46 @@ export const CUSTOMER_SERVICE_OPTIONS = ALL_SERVICE_DEFINITIONS.map((service) =>
 export const CUSTOMER_CATEGORY_LABELS = CUSTOMER_SERVICE_CATALOG.map((category) => category.label);
 export const CUSTOMER_SERVICE_LABELS = CUSTOMER_SERVICE_OPTIONS.map((service) => service.label);
 
+const LEGACY_SERVICE_ALIASES = {
+  cleaning_deep_cleaning: 'house_cleaning',
+  cleaning_dusting: 'floor_cleaning',
+  cleaning_floor_care: 'floor_cleaning',
+  laundry_hand_wash: 'laundry',
+  laundry_machine_wash: 'laundry',
+  beauty_nail_care: 'manicure',
+  beauty_hair_styling: 'hairstyles',
+  gardening_lawn_care: 'gardening',
+  gardening_pruning: 'gardening',
+  gardening_plant_watering: 'gardening',
+  gardening_garden_tidy_up: 'yard_tidy_up',
+};
+
+function normalizeToken(value = '') {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+}
+
 export function getCustomerServiceCategoryById(categoryId) {
   return CUSTOMER_SERVICE_CATALOG.find((category) => category.id === categoryId) || null;
 }
 
 export function getCustomerServiceById(serviceId) {
-  return CUSTOMER_SERVICE_OPTIONS.find((service) => service.id === serviceId) || null;
+  const normalizedServiceId = String(LEGACY_SERVICE_ALIASES[serviceId] || serviceId || '').trim().toLowerCase();
+  if (!normalizedServiceId) return null;
+
+  const directMatch = CUSTOMER_SERVICE_OPTIONS.find((service) => service.id === normalizedServiceId);
+  if (directMatch) return directMatch;
+
+  const normalizedToken = normalizeToken(normalizedServiceId);
+  const fuzzyMatch = CUSTOMER_SERVICE_OPTIONS.find((service) => (
+    normalizedToken.includes(normalizeToken(service.id))
+    || normalizedToken.includes(normalizeToken(service.label))
+    || normalizeToken(service.label).includes(normalizedToken)
+  ));
+
+  return fuzzyMatch || null;
 }
 
 export function getCustomerServicesForCategory(categoryId) {

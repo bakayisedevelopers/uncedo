@@ -128,7 +128,7 @@ export function CustomerDetailsScreen({ navigate }) {
       </Card>
 
       <ServiceCategoryPicker
-        description="These categories drive your personalized home screen and quick service packages."
+        description="These categories personalize your home screen and quick packages, but they are optional."
         selectedCategoryIds={form.preferredServiceCategories}
         onChange={(next) => setForm((prev) => ({ ...prev, preferredServiceCategories: next }))}
       />

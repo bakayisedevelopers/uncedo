@@ -27,6 +27,7 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
+import { connectStorageEmulator, getStorage } from 'firebase/storage';
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -72,16 +73,19 @@ function initializeFirebase() {
   const app = initializeApp(firebaseConfig);
   const auth = getAuth(app);
   const db = getFirestore(app);
+  const storage = getStorage(app);
 
   if (useFirebaseEmulators && !emulatorsConnected) {
     connectAuthEmulator(auth, `http://${firebaseEmulatorHost}:9099`, { disableWarnings: true });
     connectFirestoreEmulator(db, firebaseEmulatorHost, 8080);
+    connectStorageEmulator(storage, firebaseEmulatorHost, 9199);
     emulatorsConnected = true;
   }
 
   cachedClients = {
     auth,
     db,
+    storage,
     authModule: {
       browserLocalPersistence,
       browserSessionPersistence,

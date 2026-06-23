@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ImageBackground,
   Platform,
@@ -23,6 +23,7 @@ import {
   createCustomerServiceRequest,
   finalizeCustomerServiceRequest,
 } from '../../services/customerServiceRequestService';
+import { updateUserProfile } from '../../services/userService';
 import { colors } from '../../theme/colors';
 
 function formatCurrency(value) {
@@ -94,7 +95,7 @@ function QuestionField({ question, value, onChange }) {
 }
 
 export function CustomerServiceSelectionScreen({ route, navigate, goBack, systemInsets = {} }) {
-  const { user, homeLocation } = useAuth();
+  const { setUser, user, homeLocation } = useAuth();
   const item = route?.params?.item || null;
   const parentTab = route?.params?.parentTab || 'CustomerHome';
   const topInset = Platform.OS === 'ios' ? 54 : Math.max(24, Number(systemInsets?.top || 0) + 18);
@@ -106,6 +107,42 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
   const serviceIds = Array.isArray(item?.serviceIds) ? item.serviceIds : [];
   const selectedPackageId = item?.kind === 'package' ? String(item?.packageId || item?.entityId || '').trim() : '';
   const isFixedPrice = String(item?.pricing?.pricingMode || '').trim().toLowerCase() === 'fixed';
+
+  useEffect(() => {
+    if (!user?.uid || !categoryId) return;
+
+    const currentCategories = Array.isArray(user?.customerProfile?.preferredServiceCategories)
+      ? user.customerProfile.preferredServiceCategories.map((entry) => String(entry || '').trim()).filter(Boolean)
+      : [];
+
+    if (currentCategories.includes(categoryId)) {
+      return;
+    }
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const nextCategories = [...new Set([...currentCategories, categoryId])];
+        const profile = await updateUserProfile(user.uid, {
+          customerProfile: {
+            ...(user?.customerProfile || {}),
+            preferredServiceCategories: nextCategories,
+          },
+        });
+
+        if (!cancelled && profile) {
+          setUser((prev) => ({ ...prev, ...profile }));
+        }
+      } catch (_error) {
+        // Keep the flow moving if profile persistence fails here.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [categoryId, setUser, user?.customerProfile, user?.uid]);
 
   const requiredQuestions = useMemo(() => {
     if (!categoryId || !serviceIds.length) return [];

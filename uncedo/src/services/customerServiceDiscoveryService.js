@@ -1,11 +1,10 @@
 import {
-  CUSTOMER_SERVICE_CATALOG,
-  getCustomerPackagesForCategory,
   getCustomerServiceById,
-  getCustomerServicesForCategory,
+  getCustomerServiceCategoryById,
 } from '../constants/serviceCatalog';
 import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { getFirebaseClients } from '../firebase/config';
+import { subscribeToServiceCatalog } from './serviceCatalogService';
 
 function normalizeToken(value = '') {
   return String(value || '')
@@ -41,7 +40,9 @@ function normalizeSkill(skill = {}) {
 
   return {
     name,
+    catalogId: String(skill.catalogId || skill.serviceCatalogId || normalizeToken(name)).trim().toLowerCase(),
     active: skill.active !== false,
+    status: String(skill.status || 'approved').trim().toLowerCase(),
     pictures,
   };
 }
@@ -78,106 +79,127 @@ function buildCardPriceLabel(service) {
 function buildDiscoveryDescription(service, categoryLabel) {
   const description = String(service?.description || '').trim();
   if (description) return description;
-  if (service?.kind === 'package') {
-    return `${service.label} grouped under ${categoryLabel}.`;
-  }
-  return `${service.label} offered by available helpers in ${categoryLabel}.`;
+  return `${service.label} available from approved helpers in ${categoryLabel}.`;
 }
 
-function findCategoryService(helper, categoryId) {
-  return (helper.services || []).find((entry) => entry.serviceId === categoryId) || null;
-}
-
-function getMatchingSkillPictures(helper, categoryId, labels = []) {
-  const categoryService = findCategoryService(helper, categoryId);
+function findMatchingSkills(helper, categoryId, labels = []) {
+  const categoryService = (helper.services || []).find((entry) => entry.serviceId === categoryId) || null;
   if (!categoryService) return [];
 
   const normalizedLabels = labels.map(normalizeToken).filter(Boolean);
-  const activeSkills = (categoryService.skills || []).filter((skill) => skill.active && skill.pictures.length);
-  const fallbackSkills = (categoryService.skills || []).filter((skill) => skill.pictures.length);
-  const orderedSkills = [...activeSkills, ...fallbackSkills.filter((skill) => !activeSkills.includes(skill))];
-
-  const matchingSkill = orderedSkills.find((skill) => normalizedLabels.includes(normalizeToken(skill.name)));
-  if (matchingSkill?.pictures?.length) {
-    return matchingSkill.pictures;
-  }
-
-  return orderedSkills[0]?.pictures || [];
+  return (categoryService.skills || []).filter((skill) => (
+    skill.status === 'approved'
+    && skill.active !== false
+    && Array.isArray(skill.pictures)
+    && skill.pictures.length > 0
+    && (
+      !normalizedLabels.length
+      || normalizedLabels.includes(normalizeToken(skill.name))
+      || normalizedLabels.includes(normalizeToken(skill.catalogId))
+    )
+  ));
 }
 
-function resolveDiscoveryImage(helper, { categoryId, labels = [] } = {}) {
-  const pictures = getMatchingSkillPictures(helper, categoryId, labels);
-  if (pictures.length) {
-    return pictures[0]?.uri || '';
-  }
-  return helper.profilePhoto || '';
+function resolveDiscoveryImageUris(serviceEntry) {
+  return (Array.isArray(serviceEntry?.images) ? serviceEntry.images : [])
+    .map((picture) => normalizePicture(picture))
+    .filter(Boolean)
+    .map((picture) => picture.uri)
+    .filter(Boolean);
 }
 
-function buildDiscoveryItems({ helpers = [], preferredCategoryIds = [] } = {}) {
+function buildDiscoveryItems({ helpers = [], serviceCatalog = [], preferredCategoryIds = [] } = {}) {
   const helperItems = (Array.isArray(helpers) ? helpers : [])
     .filter((helper) => String(helper.onlineStatus || '').trim().toLowerCase() === 'online')
     .map(normalizeHelper)
     .filter((helper) => helper.id);
-  const categoryOrder = preferredCategoryIds.length
-    ? preferredCategoryIds
-    : CUSTOMER_SERVICE_CATALOG.map((category) => category.id);
+
+  const activeCatalog = (Array.isArray(serviceCatalog) ? serviceCatalog : [])
+    .filter((entry) => entry.active !== false && entry.approved !== false)
+    .filter((entry) => getCustomerServiceById(entry.id));
 
   const items = [];
+  const seen = new Set();
 
-  categoryOrder.forEach((categoryId) => {
-    const category = CUSTOMER_SERVICE_CATALOG.find((entry) => entry.id === categoryId);
-    if (!category) return;
+  activeCatalog.forEach((entry) => {
+    const customerService = getCustomerServiceById(entry.id);
+    if (!customerService) return;
 
-    const categoryHelpers = helperItems.filter((helper) => findCategoryService(helper, categoryId));
-    if (!categoryHelpers.length) return;
+    const categoryId = String(entry.categoryId || customerService.categoryId || '').trim();
+    const category = getCustomerServiceCategoryById(categoryId);
+    const categoryLabel = category?.label || entry.categoryName || categoryId;
+    const matchingHelpers = helperItems.filter((helper) => findMatchingSkills(helper, categoryId, [entry.label, customerService.label]));
+    const imageUris = resolveDiscoveryImageUris(entry);
+    if (!matchingHelpers.length || !imageUris.length) return;
 
-    const addItem = (service, kind) => {
-      const serviceIds = kind === 'package'
-        ? (Array.isArray(service.includedServiceIds) ? service.includedServiceIds : [])
-        : [service.id];
-      const includedLabels = serviceIds
-        .map((serviceId) => getCustomerServiceById(serviceId)?.label || '')
-        .filter(Boolean);
-      const matchLabels = kind === 'package' ? includedLabels : [service.label];
-      const bestHelper = categoryHelpers.find((helper) => resolveDiscoveryImage(helper, { categoryId, labels: matchLabels })) || categoryHelpers[0];
+    const resolvedServiceId = customerService.id || entry.id;
+    const key = `service-${categoryId}-${resolvedServiceId}`;
+    if (seen.has(key)) return;
+    seen.add(key);
 
-      items.push({
-        id: `${kind}-${categoryId}-${service.id}`,
-        entityId: service.id,
-        kind,
-        packageId: kind === 'package' ? service.id : '',
-        categoryId,
-        categoryLabel: category.label,
-        title: service.label,
-        description: buildDiscoveryDescription(service, category.label),
-        priceLabel: buildCardPriceLabel(service),
-        priceValue: Number(service?.pricing?.basePrice || service?.pricing?.minimumCallout || 0) || 0,
-        pricing: service.pricing || {},
-        serviceIds,
-        includedLabels,
-        helperCount: categoryHelpers.length,
-        helperName: bestHelper?.fullName || 'Helper',
-        imageUri: bestHelper ? resolveDiscoveryImage(bestHelper, { categoryId, labels: matchLabels }) : '',
-      });
-    };
-
-    getCustomerPackagesForCategory(categoryId).forEach((service) => addItem(service, 'package'));
-    getCustomerServicesForCategory(categoryId).forEach((service) => addItem(service, 'service'));
+    items.push({
+      id: key,
+      entityId: resolvedServiceId,
+      kind: 'service',
+      packageId: '',
+      categoryId,
+      categoryLabel,
+      title: customerService.label || entry.label,
+      description: buildDiscoveryDescription(customerService, categoryLabel),
+      priceLabel: buildCardPriceLabel(customerService),
+      priceValue: Number(customerService?.pricing?.basePrice || customerService?.pricing?.minimumCallout || 0) || 0,
+      pricing: customerService.pricing || {},
+      serviceIds: [resolvedServiceId],
+      includedLabels: [customerService.label || entry.label],
+      helperCount: matchingHelpers.length,
+      helperName: matchingHelpers[0]?.fullName || 'Helper',
+      imageUris,
+      imageUri: imageUris[0] || '',
+    });
   });
 
-  return items;
+  return items.sort((left, right) => {
+    const categoryCompare = String(left.categoryLabel || '').localeCompare(String(right.categoryLabel || ''));
+    if (categoryCompare !== 0) return categoryCompare;
+    return String(left.title || '').localeCompare(String(right.title || ''));
+  });
 }
 
 export function subscribeToCustomerServiceShowcase({ preferredCategoryIds = [], callback, onError } = {}) {
   const { db } = getFirebaseClients();
   const helpersQuery = query(collection(db, 'users'), where('role', '==', 'helper'));
 
-  return onSnapshot(
+  let helperItems = [];
+  let serviceCatalogItems = [];
+  let helpersReady = false;
+  let catalogReady = false;
+
+  const emit = () => {
+    if (!helpersReady || !catalogReady) return;
+    callback(buildDiscoveryItems({ helpers: helperItems, serviceCatalog: serviceCatalogItems, preferredCategoryIds }));
+  };
+
+  const unsubscribeHelpers = onSnapshot(
     helpersQuery,
     (snapshot) => {
-      const helpers = snapshot.docs.map((docSnap) => ({ uid: docSnap.id, ...docSnap.data() }));
-      callback(buildDiscoveryItems({ helpers, preferredCategoryIds }));
+      helperItems = snapshot.docs.map((docSnap) => ({ uid: docSnap.id, ...docSnap.data() }));
+      helpersReady = true;
+      emit();
     },
     onError,
   );
+
+  const unsubscribeCatalog = subscribeToServiceCatalog(
+    (entries) => {
+      serviceCatalogItems = entries;
+      catalogReady = true;
+      emit();
+    },
+    onError,
+  );
+
+  return () => {
+    unsubscribeHelpers?.();
+    unsubscribeCatalog?.();
+  };
 }

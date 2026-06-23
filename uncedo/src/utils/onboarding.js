@@ -10,9 +10,6 @@ export function getCustomerOnboardingStatus(user) {
   const customerProfile = user?.customerProfile || {};
   const paymentMethods = Array.isArray(user?.paymentMethods) ? user.paymentMethods : [];
   const accountType = String(customerProfile.accountType || '').trim().toLowerCase();
-  const preferredServiceCategories = Array.isArray(customerProfile.preferredServiceCategories)
-    ? customerProfile.preferredServiceCategories.map((item) => String(item || '').trim()).filter(Boolean)
-    : [];
   const baseProfileReady = Boolean(
     String(user?.fullName || user?.displayName || '').trim()
       && String(user?.phoneNumber || '').trim()
@@ -31,9 +28,7 @@ export function getCustomerOnboardingStatus(user) {
       && accountType === 'individual'
       && String(customerProfile.customerType || '').trim(),
   );
-
-  const hasCategoryPreferences = preferredServiceCategories.length > 0;
-  const hasBasicProfile = (hasBusinessProfile || hasIndividualProfile) && hasCategoryPreferences;
+  const hasBasicProfile = hasBusinessProfile || hasIndividualProfile;
   const hasPayment = paymentMethods.length > 0;
 
   if (hasBasicProfile && hasPayment) {
@@ -42,15 +37,6 @@ export function getCustomerOnboardingStatus(user) {
       step: null,
       title: 'Customer profile complete',
       message: 'You can request help instantly.',
-    };
-  }
-
-  if (!hasCategoryPreferences) {
-    return {
-      complete: false,
-      step: CUSTOMER_PROFILE_STEPS.PROFILE,
-      title: 'Choose service categories',
-      message: 'Pick at least one service category so we can tailor your home screen before you request help.',
     };
   }
 

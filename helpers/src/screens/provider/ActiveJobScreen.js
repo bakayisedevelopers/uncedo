@@ -308,20 +308,29 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
     }
 
     const previousCoordinate = previousNavigationLocationRef.current;
-    const explicitHeading = normalizeHeading(currentLocation.heading);
+    const deviceHeading = Number.isFinite(Number(currentLocation?.heading))
+      ? smoothHeading(normalizeHeading(currentLocation.heading), normalizeHeading(currentLocation.heading), 0.24)
+      : null;
     const travelBearing = previousCoordinate
       ? getBearingBetweenCoordinates(previousCoordinate, nextCoordinate)
       : null;
-    const nextHeading = travelBearing !== null
-      ? smoothHeading(explicitHeading ?? travelBearing, travelBearing, 0.24)
-      : explicitHeading;
-
-    if (Number.isFinite(nextHeading)) {
-      setNavigationHeading(nextHeading);
+    const destinationBearing = activeJobDestination
+      ? getBearingBetweenCoordinates(nextCoordinate, activeJobDestination)
+      : null;
+    if (travelBearing !== null) {
+      setNavigationHeading((currentHeading) => smoothHeading(currentHeading ?? travelBearing, travelBearing, 0.24));
+    } else if (deviceHeading !== null) {
+      setNavigationHeading((currentHeading) => (
+        Number.isFinite(currentHeading)
+          ? smoothHeading(currentHeading, deviceHeading, 0.24)
+          : deviceHeading
+      ));
+    } else if (destinationBearing !== null) {
+      setNavigationHeading((currentHeading) => (Number.isFinite(currentHeading) ? currentHeading : destinationBearing));
     }
 
     previousNavigationLocationRef.current = nextCoordinate;
-  }, [currentLocation]);
+  }, [activeJobDestination, currentLocation]);
 
   useEffect(() => {
     Animated.spring(sheetHeight, {
@@ -663,28 +672,38 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
     [trackingDocument?.routeSteps],
   );
   const navigationHint = useMemo(() => {
-    if (!routeSteps.length || !routeCoordinates.length || !currentLocation || !activeJobDestination) {
+    if (!currentLocation || !activeJobDestination) {
       return null;
     }
 
-    const nearestIndex = getNearestRouteIndex(routeCoordinates, currentLocation);
-    if (nearestIndex < 0) {
-      return null;
-    }
+    if (routeSteps.length) {
+      const nearestIndex = getNearestRouteIndex(routeCoordinates, currentLocation);
+      if (nearestIndex >= 0) {
+        const nextStep = routeSteps.find((step) => Number(step?.endIndex || 0) >= nearestIndex) || routeSteps[0];
+        const instruction = String(nextStep?.instruction || nextStep?.maneuver || '').trim();
+        const stepDistance = Number.isFinite(Number(nextStep?.distanceMeters)) ? Number(nextStep.distanceMeters) : null;
 
-    const nextStep = routeSteps.find((step) => Number(step?.endIndex || 0) >= nearestIndex) || routeSteps[0];
-    const instruction = String(nextStep?.instruction || nextStep?.maneuver || '').trim();
-    const stepDistance = Number.isFinite(Number(nextStep?.distanceMeters)) ? Number(nextStep.distanceMeters) : null;
-
-    if (!instruction && !stepDistance) {
-      return null;
+        if (instruction || stepDistance) {
+          return {
+            instruction: instruction || 'Continue on route',
+            distance: stepDistance,
+          };
+        }
+      }
     }
 
     return {
-      instruction: instruction || 'Continue on route',
-      distance: stepDistance,
+      instruction: activeJob?.status === 'arrived' ? 'Arrived' : 'Continue on route',
+      distance: Number.isFinite(routeDistanceMeters)
+        ? routeDistanceMeters
+        : getDistanceInMeters(
+          currentLocation.latitude,
+          currentLocation.longitude,
+          activeJobDestination.latitude,
+          activeJobDestination.longitude,
+        ),
     };
-  }, [activeJobDestination, currentLocation, routeCoordinates, routeSteps]);
+  }, [activeJob?.status, activeJobDestination, currentLocation, routeCoordinates, routeDistanceMeters, routeSteps]);
   const statusMeta = useMemo(() => getStatusMeta(activeJob?.status), [activeJob?.status]);
   const toneStyles = useMemo(() => getToneStyles(statusMeta.tone), [statusMeta.tone]);
   const canCancelJob = String(activeJob?.status || '').toLowerCase() !== 'completed';

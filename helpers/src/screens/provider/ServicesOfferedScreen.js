@@ -29,24 +29,24 @@ export function ServicesOfferedScreen({ navigate, goBack }) {
         <Text style={styles.eyebrow}>Helper</Text>
         <Text style={styles.title}>Skills</Text>
         <Text style={styles.description}>
-          Manage the skills you offer, keep them active or paused, and open each skill to update its work portfolio.
+          Manage the services you offer, keep them active or paused, and open each service to update its work portfolio.
         </Text>
       </View>
 
       <Card>
         <SectionHeading
-          title="Skill rules"
-          subtitle="Every helper skill needs at least one uploaded work picture. Newly added skills are auto-approved for now."
+          title="Service rules"
+          subtitle="Every helper service needs at least one uploaded work picture and must be approved by the admin before it can go live."
         />
-        <ActionButton label="Add skill" onPress={() => navigate({ key: 'SkillCatalog', params: { parentTab: 'Profile' } })} />
+        <ActionButton label="Add service" onPress={() => navigate({ key: 'SkillCatalog', params: { parentTab: 'Profile' } })} />
         {saveError ? <Text style={styles.error}>{saveError}</Text> : null}
       </Card>
 
       {!orderedSkills.length ? (
         <Card>
           <EmptyState
-            title="No skills added yet"
-            description="Add a helper skill, upload a work picture, and it will appear here with its status and availability switch."
+            title="No services added yet"
+            description="Add a helper service, upload work pictures, and it will appear here with its status and availability switch."
           />
         </Card>
       ) : null}
@@ -84,7 +84,7 @@ export function ServicesOfferedScreen({ navigate, goBack }) {
           <View style={styles.switchWrap}>
             <Text style={styles.switchLabel}>{skill.active ? 'On' : 'Off'}</Text>
             <Switch
-              disabled={saving}
+              disabled={saving || skill.status !== 'approved'}
               onValueChange={(value) => actions.toggleSkillActive({
                 serviceId: skill.serviceId,
                 skillName: skill.name,

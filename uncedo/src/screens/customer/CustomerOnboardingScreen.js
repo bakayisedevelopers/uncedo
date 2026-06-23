@@ -100,7 +100,6 @@ export function CustomerOnboardingScreen({ navigate }) {
     && accountType
     && serviceAddress.trim()
     && discoverySource.trim()
-    && preferredServiceCategories.length > 0
     && (
       isBusinessAccount
         ? businessName.trim() && businessEmail.trim() && businessCategory
@@ -119,12 +118,12 @@ export function CustomerOnboardingScreen({ navigate }) {
         <Text style={styles.title}>Complete your profile</Text>
         <StatusBadge label={status.complete ? 'Complete' : 'In progress'} tone={status.complete ? 'success' : 'warning'} />
       </View>
-      <Text style={styles.copy}>Complete your details, choose at least one service category, and add a payment card before requesting help.</Text>
+      <Text style={styles.copy}>Complete your details and add a payment card before requesting help. You can add service categories now or later when you search for services.</Text>
       <Text style={styles.copy}>{status.message}</Text>
       {message ? <Card><Text style={styles.message}>{message}</Text></Card> : null}
 
       <ServiceCategoryPicker
-        description="Pick at least one category. We will use it to tailor the home screen and quick service packages."
+        description="Service categories are optional. Add them now to personalize the home screen, or skip this step and search everything later."
         selectedCategoryIds={preferredServiceCategories}
         onChange={setPreferredServiceCategories}
       />

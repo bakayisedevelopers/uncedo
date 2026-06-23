@@ -11,6 +11,7 @@ import {
   syncHelperCurrentLocation,
   watchAndSyncHelperLocation,
 } from '../services/helperLocationService';
+import { subscribeToServiceCatalog } from '../services/serviceCatalogService';
 import {
   getStoredActiveTrackingSession,
   isTrackableActiveJobStatus,
@@ -137,6 +138,7 @@ function normalizeSkillEntry(skill = {}, serviceId = '') {
 
   return {
     id: String(skill.id || `skill_${serviceId}_${slugify(skillName)}`),
+    catalogId: String(skill.catalogId || skill.serviceCatalogId || slugify(skillName)).trim().toLowerCase(),
     name: skillName,
     status: String(skill.status || 'approved').trim().toLowerCase() || 'approved',
     active: skill.active !== false,
@@ -159,6 +161,7 @@ function normalizeServiceEntry(entry = {}) {
     serviceId,
     serviceName: serviceMeta?.name || entry.serviceName || serviceId,
     description: serviceMeta?.description || entry.description || '',
+    catalogId: String(entry.catalogId || '').trim().toLowerCase(),
     skills: (Array.isArray(entry.skills) ? entry.skills : [])
       .map((skill) => normalizeSkillEntry(skill, serviceId))
       .filter(Boolean),
@@ -179,6 +182,7 @@ function buildHelperSkillsList(services = []) {
       serviceId: service.serviceId,
       serviceName: service.serviceName,
       serviceDescription: service.description,
+      catalogId: skill.catalogId || slugify(skill.name),
       categoryId: service.serviceId,
     }))
   ));
@@ -220,7 +224,7 @@ function normalizeProfile(user) {
   });
 }
 
-function getHelperOnboardingStatus(profile) {
+function getHelperOnboardingStatus(profile, { serviceCatalog = [], serviceCatalogResolved = false } = {}) {
   const firstName = String(profile?.firstName || '').trim();
   const lastName = String(profile?.lastName || '').trim();
   const fullName = String(profile?.fullName || '').trim();
@@ -245,9 +249,21 @@ function getHelperOnboardingStatus(profile) {
   const services = Array.isArray(profile?.services) ? profile.services : [];
   const helperSkills = buildHelperSkillsList(services);
   const hasAnyService = helperSkills.length > 0;
+  const activeCatalogIds = new Set(
+    (Array.isArray(serviceCatalog) ? serviceCatalog : [])
+      .filter((entry) => entry.active !== false)
+      .map((entry) => String(entry.id || '').trim().toLowerCase())
+      .filter(Boolean),
+  );
   const hasQualifiedSkills = services.some((service) => (
     Array.isArray(service.skills)
-    && service.skills.some((skill) => skill.active !== false && Array.isArray(skill.pictures) && skill.pictures.length > 0)
+    && service.skills.some((skill) => (
+      skill.status === 'approved'
+      && skill.active !== false
+      && Array.isArray(skill.pictures)
+      && skill.pictures.length > 0
+      && (serviceCatalogResolved ? activeCatalogIds.has(String(skill.catalogId || slugify(skill.name)).trim().toLowerCase()) : true)
+    ))
   ));
   const hasProfilePhoto = Boolean(String(profile?.profilePhoto || profile?.selfieUrl || '').trim());
   const hasName = Boolean(fullName || (firstName && lastName));
@@ -274,8 +290,12 @@ function getHelperOnboardingStatus(profile) {
     return { complete: false, step: 'services', message: 'Add at least one helper skill before going online.' };
   }
 
+  if (!serviceCatalogResolved) {
+    return { complete: false, step: 'services', message: 'Loading the live service catalog...' };
+  }
+
   if (!hasQualifiedSkills) {
-    return { complete: false, step: 'services', message: 'Add at least one active skill with an uploaded work photo before going online.' };
+    return { complete: false, step: 'services', message: 'Add at least one approved skill with an uploaded work photo before going online.' };
   }
 
   if (!hasAgreement) {
@@ -308,6 +328,8 @@ export function HelpersAppProvider({ children }) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
   const [homeLocation, setHomeLocation] = useState(null);
+  const [serviceCatalog, setServiceCatalog] = useState([]);
+  const [serviceCatalogResolved, setServiceCatalogResolved] = useState(false);
   const helperLocationWatchRef = useRef(null);
 
   useEffect(() => {
@@ -336,6 +358,24 @@ export function HelpersAppProvider({ children }) {
       setHomeLocation(null);
     }
   }, [user?.uid]);
+
+  useEffect(() => {
+    const unsubscribe = subscribeToServiceCatalog(
+      (items) => {
+        setServiceCatalog(items);
+        setServiceCatalogResolved(true);
+      },
+      (error) => {
+        logError('HelpersAppContext.serviceCatalog', error);
+        setServiceCatalog([]);
+        setServiceCatalogResolved(true);
+      },
+    );
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, []);
 
   useEffect(() => {
     if (!user?.uid) {
@@ -490,7 +530,10 @@ export function HelpersAppProvider({ children }) {
     return result;
   };
 
-  const onboardingStatus = useMemo(() => getHelperOnboardingStatus(profile), [profile]);
+  const onboardingStatus = useMemo(
+    () => getHelperOnboardingStatus(profile, { serviceCatalog, serviceCatalogResolved }),
+    [profile, serviceCatalog, serviceCatalogResolved],
+  );
   const helperSkills = useMemo(() => buildHelperSkillsList(profile.services || []), [profile.services]);
 
   const completedJobs = useMemo(
@@ -760,8 +803,13 @@ export function HelpersAppProvider({ children }) {
     }
   };
 
-  const addSkillWithPhoto = async ({ serviceId, skillName, imageAsset }) => {
-    if (!user?.uid || !serviceId || !skillName || !imageAsset?.uri) {
+  const addSkillWithPhoto = async ({ serviceId, skillName, catalogId, imageAsset, imageAssets }) => {
+    const assets = [
+      ...(Array.isArray(imageAssets) ? imageAssets : []),
+      ...(imageAsset ? [imageAsset] : []),
+    ].filter((asset) => asset?.uri).slice(0, 10);
+
+    if (!user?.uid || !serviceId || !skillName || !assets.length) {
       return { success: false, message: 'A skill and uploaded work photo are required.' };
     }
 
@@ -769,13 +817,25 @@ export function HelpersAppProvider({ children }) {
     setSaveError('');
 
     try {
-      const upload = await uploadLocalFile({
-        userId: user.uid,
-        fileUri: imageAsset.uri,
-        fileName: imageAsset.fileName || `${slugify(skillName)}.jpg`,
-        mimeType: imageAsset.mimeType || 'image/jpeg',
-        pathPrefix: `helper-skills/${serviceId}`,
-      });
+      const normalizedCatalogId = String(catalogId || slugify(skillName)).trim().toLowerCase();
+      const nextTimestamp = new Date().toISOString();
+      const uploads = [];
+
+      for (const asset of assets) {
+        const upload = await uploadLocalFile({
+          userId: user.uid,
+          fileUri: asset.uri,
+          fileName: asset.fileName || `${slugify(skillName)}.jpg`,
+          mimeType: asset.mimeType || 'image/jpeg',
+          pathPrefix: `helper-skills/${serviceId}/${normalizedCatalogId || slugify(skillName)}`,
+        });
+
+        uploads.push(createPicture({
+          uri: upload.downloadUrl,
+          objectPath: upload.objectPath,
+          uploadedAt: upload.uploadedAt,
+        }));
+      }
 
       const nextProfile = withServiceMetadata({
         ...profile,
@@ -796,33 +856,32 @@ export function HelpersAppProvider({ children }) {
             skills: [],
           };
 
-      const existingSkillIndex = targetService.skills.findIndex((skill) => skill.name === skillName);
-      const picture = createPicture({
-        uri: upload.downloadUrl,
-        objectPath: upload.objectPath,
-        uploadedAt: upload.uploadedAt,
-      });
-      const nextTimestamp = new Date().toISOString();
+      const existingSkillIndex = targetService.skills.findIndex((skill) => (
+        skill.name === skillName || slugify(skill.catalogId || skill.name) === normalizedCatalogId
+      ));
 
       if (existingSkillIndex >= 0) {
         const currentSkill = targetService.skills[existingSkillIndex];
+        const mergedPictures = [...(currentSkill.pictures || []), ...uploads].slice(0, 10);
         targetService.skills[existingSkillIndex] = normalizeSkillEntry({
           ...currentSkill,
-          status: 'approved',
-          verified: true,
-          active: currentSkill.active !== false,
+          catalogId: normalizedCatalogId,
+          status: currentSkill.status || 'pending',
+          verified: currentSkill.verified === true,
+          active: currentSkill.active === true && currentSkill.status === 'approved',
           updatedAt: nextTimestamp,
-          pictures: [...(currentSkill.pictures || []), picture],
+          pictures: mergedPictures,
         }, serviceId);
       } else {
         targetService.skills.push(normalizeSkillEntry({
           name: skillName,
-          status: 'approved',
-          verified: true,
-          active: true,
+          catalogId: normalizedCatalogId,
+          status: 'pending',
+          verified: false,
+          active: false,
           createdAt: nextTimestamp,
           updatedAt: nextTimestamp,
-          pictures: [picture],
+          pictures: uploads,
         }, serviceId));
       }
 
@@ -844,7 +903,7 @@ export function HelpersAppProvider({ children }) {
         return result;
       }
 
-      return { success: true, message: `${skillName} saved and approved.` };
+      return { success: true, message: `${skillName} submitted for approval.` };
     } catch (error) {
       logError('HelpersAppContext.addSkillWithPhoto', error);
       setSaveError(error.message || 'Unable to upload this skill photo right now.');
@@ -1014,6 +1073,7 @@ export function HelpersAppProvider({ children }) {
     paymentSummary,
     saving,
     saveError,
+    serviceCatalog,
     payoutRates: {
       platform: PLATFORM_FEE_RATE,
       helper: HELPER_PAYOUT_RATE,
@@ -1048,6 +1108,7 @@ export function HelpersAppProvider({ children }) {
     profile,
     saveError,
     saving,
+    serviceCatalog,
     serviceRequests,
     weeklyGroups,
     weeklyPayouts,

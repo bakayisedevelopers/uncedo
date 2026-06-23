@@ -5,6 +5,7 @@ This folder contains the standalone React + Vite admin application for Uncedo.
 ## Purpose
 
 - Review and approve helper/provider services
+- Manage the live Firestore service catalog and admin-owned service images
 - Publish and update the latest helper agreement version
 - Inspect service photos and provider profiles
 - Suspend, restore, or remove service access
@@ -36,4 +37,5 @@ The app expects the usual `VITE_FIREBASE_*` environment variables that point at 
 
 - `admin/` is deployed as a separate Firebase Hosting site.
 - The app reads provider and customer records from the shared `users` collection.
+- Service catalog data is stored in the shared `serviceCatalog` collection, with service images uploaded to Firebase Storage.
 - Helper agreement publishing is handled through the dedicated helper agreement management screen and Cloud Function endpoints.

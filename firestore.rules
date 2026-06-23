@@ -105,6 +105,26 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
+    match /serviceCatalog/{serviceId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /customerServiceEvents/{eventId} {
+      allow create: if signedIn() && request.resource.data.customerId == request.auth.uid;
+      allow get, list: if isAdmin() || isOwner(resource.data.customerId);
+      allow update, delete: if isAdmin();
+    }
+
+    match /customerRecommendationProfiles/{customerId} {
+      allow read: if isAdmin() || isOwner(customerId);
+      allow write: if isAdmin();
+    }
+
+    match /customerRecommendationTrainingSamples/{sampleId} {
+      allow read, write: if isAdmin();
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

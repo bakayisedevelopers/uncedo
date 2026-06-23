@@ -2,28 +2,47 @@ import { useMemo } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Card, SectionHeading, StatusBadge } from '../../components/app/HelperUi';
-import { SERVICE_CATALOG } from '../../constants/serviceCatalog';
+import { buildHelperServiceCatalog } from '../../services/serviceCatalogService';
 import { useHelpersApp } from '../../context/HelpersAppContext';
 import { colors } from '../../theme/colors';
 
+function slugify(value = '') {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
 export function SkillCatalogScreen({ navigate, goBack }) {
-  const { helperSkills } = useHelpersApp();
+  const { helperSkills, serviceCatalog } = useHelpersApp();
+
+  const catalogGroups = useMemo(
+    () => buildHelperServiceCatalog(serviceCatalog),
+    [serviceCatalog],
+  );
 
   const catalogSkills = useMemo(
-    () => SERVICE_CATALOG.flatMap((service) => (
-      service.skills.map((skillName) => ({
-        id: `${service.id}_${skillName}`,
+    () => catalogGroups.flatMap((service) => (
+      service.services.map((entry) => ({
+        id: entry.id,
+        catalogId: entry.id,
         serviceId: service.id,
         serviceName: service.name,
         serviceDescription: service.description,
-        skillName,
+        skillName: entry.label,
+        active: entry.active !== false,
       }))
     )),
-    [],
+    [catalogGroups],
   );
 
   const existingSkillMap = useMemo(() => new Map(
-    helperSkills.map((skill) => [`${skill.serviceId}_${skill.name}`, skill]),
+    helperSkills.flatMap((skill) => ([
+      [String(skill.catalogId || '').trim().toLowerCase(), skill],
+      [slugify(skill.name), skill],
+      [slugify(`${skill.serviceId || ''}_${skill.name || ''}`), skill],
+    ])).filter(([key]) => Boolean(key)),
   ), [helperSkills]);
 
   return (
@@ -35,21 +54,21 @@ export function SkillCatalogScreen({ navigate, goBack }) {
 
       <View style={styles.header}>
         <Text style={styles.eyebrow}>Helper</Text>
-        <Text style={styles.title}>Add skill</Text>
+        <Text style={styles.title}>Add service</Text>
         <Text style={styles.description}>
-          Choose a skill from the approved catalog, then upload a work picture on the next page to activate it.
+          Choose from the live catalog that the admin team has published. Each service opens the next page where you upload the work pictures and submit it for approval.
         </Text>
       </View>
 
       <Card>
         <SectionHeading
-          title="Available skills"
-          subtitle="Each skill belongs to one service category. If you already added a skill, you can still open it and update its pictures."
+          title="Available services"
+          subtitle="Only services that the admin has published appear here. If you already added a service, you can still open it and update its pictures."
         />
       </Card>
 
-      {catalogSkills.map((item) => {
-        const existing = existingSkillMap.get(item.id);
+      {catalogSkills.length ? catalogSkills.map((item) => {
+        const existing = existingSkillMap.get(item.catalogId);
         return (
           <Pressable
             accessibilityRole="button"
@@ -60,6 +79,7 @@ export function SkillCatalogScreen({ navigate, goBack }) {
                 parentTab: 'Profile',
                 serviceId: item.serviceId,
                 skillName: item.skillName,
+                catalogId: item.catalogId,
                 mode: existing ? 'edit' : 'create',
               },
             })}
@@ -72,10 +92,19 @@ export function SkillCatalogScreen({ navigate, goBack }) {
               <Text style={styles.rowTitle}>{item.skillName}</Text>
               <Text style={styles.rowDescription}>{item.serviceName}</Text>
             </View>
-            {existing ? <StatusBadge label="Added" tone="success" /> : <StatusBadge label="Add" tone="info" />}
+            {existing ? (
+              <StatusBadge label={existing.status === 'approved' ? 'Approved' : 'Pending'} tone={existing.status === 'approved' ? 'success' : 'warning'} />
+            ) : (
+              <StatusBadge label="Add" tone="info" />
+            )}
           </Pressable>
         );
-      })}
+      }) : (
+        <Card>
+          <Text style={styles.emptyTitle}>No live services yet</Text>
+          <Text style={styles.emptyCopy}>Once the admin publishes services, they will appear here for you to add to your profile.</Text>
+        </Card>
+      )}
     </ScrollView>
   );
 }
@@ -150,5 +179,16 @@ const styles = StyleSheet.create({
     color: colors.muted,
     fontSize: 12,
     lineHeight: 18,
+  },
+  emptyTitle: {
+    color: colors.text,
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  emptyCopy: {
+    color: colors.muted,
+    fontSize: 13,
+    lineHeight: 20,
+    marginTop: 6,
   },
 });

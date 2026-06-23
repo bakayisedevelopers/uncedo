@@ -25,6 +25,7 @@ import {
   yardMaintenancePricingEngine,
 } from '../pricing';
 import { uploadUserFile } from './storageService';
+import { recordCustomerServiceEvent } from './customerRecommendationService';
 import { getFirebaseClients } from '../firebase/config';
 
 const ACTIVE_SERVICE_REQUEST_STATUSES = ['collecting_details', 'scheduled_pending', 'matching', 'helper_found', 'accepted', 'en_route', 'arrived', 'no_helper_available'];
@@ -284,6 +285,20 @@ export async function createCustomerServiceRequest({ user, location, initialDraf
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
+
+  recordCustomerServiceEvent({
+    customerId: user.uid,
+    eventType: 'request_started',
+    serviceId: serviceIds[0] || selectedPackageId || categoryId,
+    categoryId,
+    serviceIds,
+    source: 'customer_call',
+    metadata: {
+      requestId: docRef.id,
+      subject,
+      topic,
+    },
+  }).catch(() => {});
 
   return docRef.id;
 }
@@ -569,6 +584,23 @@ export async function finalizeCustomerServiceRequest({
     updatedAt: serverTimestamp(),
   });
 
+  const customerId = String(existingRequest.customerId || '').trim();
+  if (customerId) {
+    recordCustomerServiceEvent({
+      customerId,
+      eventType: 'request_submitted',
+      serviceId: serviceIds[0] || selectedPackageId || categoryId,
+      categoryId,
+      serviceIds,
+      source: 'customer_call',
+      metadata: {
+        requestId,
+        callId,
+        timingPreference: timingDetails.timingPreference,
+      },
+    }).catch(() => {});
+  }
+
   if (callId) {
     await updateDoc(doc(db, 'serviceCalls', callId), {
       status: 'completed',
@@ -664,6 +696,7 @@ export async function cancelServiceRequestByCustomer({ requestId, reason }) {
   const requestSnap = await getDoc(requestRef);
   if (!requestSnap.exists()) return;
   const requestData = requestSnap.data();
+  const customerId = String(requestData?.customerId || '').trim();
 
   const updates = {
     status: 'canceled',
@@ -685,5 +718,20 @@ export async function cancelServiceRequestByCustomer({ requestId, reason }) {
     });
   } else {
     await updateDoc(requestRef, updates);
+  }
+
+  if (customerId) {
+    recordCustomerServiceEvent({
+      customerId,
+      eventType: 'request_canceled',
+      serviceId: requestData?.serviceIds?.[0] || requestData?.selectedPackageId || requestData?.categoryId || '',
+      categoryId: requestData?.categoryId || '',
+      serviceIds: Array.isArray(requestData?.serviceIds) ? requestData.serviceIds : [],
+      source: 'customer_tracking',
+      metadata: {
+        requestId,
+        reason: reason || '',
+      },
+    }).catch(() => {});
   }
 }

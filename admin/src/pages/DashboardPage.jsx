@@ -65,7 +65,7 @@ export default function DashboardPage() {
           <div className="grid gap-3 sm:grid-cols-2">
             {[
               { to: '/providers', title: 'Provider directory', copy: 'Review profiles, business details, and account state.', icon: Users },
-              { to: '/services', title: 'Service approvals', copy: 'Approve or suspend individual skills and photos.', icon: BadgeCheck },
+              { to: '/services', title: 'Services', copy: 'Manage the live catalog, admin images, and helper submissions.', icon: BadgeCheck },
               { to: '/customers', title: 'Customer records', copy: 'Inspect customer profiles and location fields.', icon: UserCircle2 },
               { to: '/services', title: 'Photo audit', copy: 'Inspect uploaded work photos before approval.', icon: Building2 },
               { to: '/helper-agreements', title: 'Helper contracts', copy: 'Publish a new helper agreement version and invalidate old acceptances.', icon: FileText },

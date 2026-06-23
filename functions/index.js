@@ -1252,6 +1252,20 @@ const HELPER_CATEGORY_SERVICE_MAP = {
   care: ['care'],
   car_wash: ['car_wash'],
 };
+const SERVICE_CATALOG_CACHE_TTL_MS = 60 * 1000;
+const REQUEST_SERVICE_ALIASES = {
+  house_cleaning: ['cleaning_deep_cleaning'],
+  floor_cleaning: ['cleaning_dusting', 'cleaning_floor_care'],
+  laundry: ['laundry_hand_wash', 'laundry_machine_wash'],
+  manicure: ['beauty_nail_care'],
+  hairstyles: ['beauty_hair_styling'],
+  gardening: ['gardening_lawn_care', 'gardening_pruning', 'gardening_plant_watering'],
+  yard_tidy_up: ['gardening_garden_tidy_up'],
+};
+let serviceCatalogCache = {
+  loadedAtMs: 0,
+  entries: [],
+};
 const EARTH_RADIUS_KM = 6371;
 const DEFAULT_NEARBY_HELPERS_RADIUS_KM = 20;
 const MAX_NEARBY_HELPERS_RADIUS_KM = 50;
@@ -1267,13 +1281,117 @@ function normalizeServiceToken(value = '') {
     .replace(/^_+|_+$/g, '');
 }
 
-function helperSupportsCategory(helper = {}, categoryId = '', requestServiceIds = []) {
+function normalizeServiceCatalogEntry(entry = {}) {
+  const id = String(entry.id || entry.serviceId || '').trim().toLowerCase();
+  if (!id) return null;
+
+  return {
+    id,
+    categoryId: String(entry.categoryId || '').trim().toLowerCase(),
+    categoryName: String(entry.categoryName || '').trim(),
+    label: String(entry.label || entry.skillName || id).trim(),
+    description: String(entry.description || '').trim(),
+    active: entry.active !== false,
+    approved: entry.approved !== false,
+  };
+}
+
+function buildActiveServiceCatalogIndex(entries = []) {
+  const activeEntries = (Array.isArray(entries) ? entries : [])
+    .map(normalizeServiceCatalogEntry)
+    .filter(Boolean)
+    .filter((entry) => entry.active !== false && entry.approved !== false);
+
+  const byCategoryId = new Map();
+  const activeCatalogIds = new Set();
+  const activeTokens = new Set();
+
+  activeEntries.forEach((entry) => {
+    activeCatalogIds.add(normalizeServiceToken(entry.id));
+    [entry.id, entry.label, entry.categoryId, entry.categoryName].forEach((value) => {
+      const token = normalizeServiceToken(value);
+      if (token) activeTokens.add(token);
+    });
+
+    const categoryToken = normalizeServiceToken(entry.categoryId);
+    if (categoryToken) {
+      if (!byCategoryId.has(categoryToken)) {
+        byCategoryId.set(categoryToken, []);
+      }
+      byCategoryId.get(categoryToken).push(entry);
+    }
+  });
+
+  return {
+    activeEntries,
+    activeCatalogIds,
+    activeTokens,
+    byCategoryId,
+  };
+}
+
+function expandRequestedServiceTokens(requestServiceIds = []) {
+  const tokens = new Set();
+  (Array.isArray(requestServiceIds) ? requestServiceIds : []).forEach((serviceId) => {
+    const normalized = normalizeServiceToken(serviceId);
+    if (!normalized) return;
+    tokens.add(normalized);
+    const aliases = REQUEST_SERVICE_ALIASES[normalized] || [];
+    aliases.forEach((alias) => {
+      const aliasToken = normalizeServiceToken(alias);
+      if (aliasToken) tokens.add(aliasToken);
+    });
+  });
+  return [...tokens];
+}
+
+function skillBelongsToActiveCatalog(skill = {}, catalogIndex = buildActiveServiceCatalogIndex([])) {
+  const catalogToken = normalizeServiceToken(skill?.catalogId || skill?.serviceCatalogId || '');
+  const nameToken = normalizeServiceToken(skill?.name || '');
+  return (
+    (catalogToken && catalogIndex.activeCatalogIds.has(catalogToken))
+    || (nameToken && catalogIndex.activeTokens.has(nameToken))
+  );
+}
+
+async function getLiveServiceCatalogEntries() {
+  const now = Date.now();
+  if (serviceCatalogCache.entries.length && (now - serviceCatalogCache.loadedAtMs) < SERVICE_CATALOG_CACHE_TTL_MS) {
+    return serviceCatalogCache.entries;
+  }
+
+  try {
+    const snapshot = await db.collection('serviceCatalog').get();
+    const entries = snapshot.docs
+      .map((docSnap) => normalizeServiceCatalogEntry({ id: docSnap.id, ...docSnap.data() }))
+      .filter(Boolean);
+
+    serviceCatalogCache = {
+      loadedAtMs: now,
+      entries,
+    };
+
+    return entries;
+  } catch (error) {
+    logger.warn('service_catalog_lookup_failed', {
+      error: error.message,
+    });
+    return serviceCatalogCache.entries || [];
+  }
+}
+
+function helperSupportsCategory(helper = {}, categoryId = '', requestServiceIds = [], serviceCatalogIndex = null) {
   const supportedServiceIds = HELPER_CATEGORY_SERVICE_MAP[String(categoryId || '').trim().toLowerCase()] || [];
   if (!supportedServiceIds.length) return false;
 
-  const requestedTokens = Array.isArray(requestServiceIds)
-    ? requestServiceIds.map((serviceId) => normalizeServiceToken(serviceId)).filter(Boolean)
-    : [];
+  const catalogIndex = serviceCatalogIndex || buildActiveServiceCatalogIndex([]);
+  const categoryToken = normalizeServiceToken(categoryId);
+  const categoryEntries = catalogIndex.byCategoryId.get(categoryToken) || [];
+  if (!categoryEntries.length) {
+    return false;
+  }
+
+  const requestedTokens = expandRequestedServiceTokens(requestServiceIds);
   const helperServices = Array.isArray(helper.services) ? helper.services : [];
 
   return helperServices.some((entry) => {
@@ -1281,13 +1399,19 @@ function helperSupportsCategory(helper = {}, categoryId = '', requestServiceIds 
     if (!supportedServiceIds.includes(serviceId)) return false;
 
     const allSkillTokens = Array.isArray(entry?.skills)
-      ? entry.skills.map((skill) => normalizeServiceToken(skill?.name || '')).filter(Boolean)
+      ? entry.skills.flatMap((skill) => {
+        const nameToken = normalizeServiceToken(skill?.name || '');
+        const catalogToken = normalizeServiceToken(skill?.catalogId || skill?.serviceCatalogId || '');
+        return [nameToken, catalogToken].filter(Boolean);
+      }).filter(Boolean)
       : [];
     const activeSkills = Array.isArray(entry?.skills)
       ? entry.skills.filter((skill) => (
         skill?.active !== false
+          && String(skill?.status || '').toLowerCase() === 'approved'
           && Array.isArray(skill?.pictures)
           && skill.pictures.length > 0
+          && skillBelongsToActiveCatalog(skill, catalogIndex)
       ))
       : [];
 
@@ -1295,7 +1419,11 @@ function helperSupportsCategory(helper = {}, categoryId = '', requestServiceIds 
     if (!requestedTokens.length) return true;
 
     const helperSkillTokens = activeSkills
-      .map((skill) => normalizeServiceToken(skill?.name || ''))
+      .flatMap((skill) => {
+        const nameToken = normalizeServiceToken(skill?.name || '');
+        const catalogToken = normalizeServiceToken(skill?.catalogId || skill?.serviceCatalogId || '');
+        return [nameToken, catalogToken].filter(Boolean);
+      })
       .filter(Boolean);
     const hasExactConfiguredMatch = requestedTokens.some((token) => allSkillTokens.includes(token));
     if (hasExactConfiguredMatch) {
@@ -1306,7 +1434,164 @@ function helperSupportsCategory(helper = {}, categoryId = '', requestServiceIds 
   });
 }
 
-function isHelperDispatchEligible(helper = {}, categoryId = '', requestServiceIds = []) {
+const CUSTOMER_RECOMMENDATION_EVENT_WEIGHTS = {
+  feed_impression: {
+    serviceScore: 0.02,
+    categoryScore: 0.01,
+    exposureOnly: true,
+  },
+  search_open: {
+    serviceScore: 0.04,
+    categoryScore: 0.02,
+    exposureOnly: true,
+  },
+  service_open: {
+    serviceScore: 0.3,
+    categoryScore: 0.15,
+    exposureOnly: false,
+  },
+  search_select: {
+    serviceScore: 0.9,
+    categoryScore: 0.45,
+    exposureOnly: false,
+  },
+  request_started: {
+    serviceScore: 1.15,
+    categoryScore: 0.6,
+    exposureOnly: false,
+  },
+  request_submitted: {
+    serviceScore: 1.6,
+    categoryScore: 0.85,
+    exposureOnly: false,
+  },
+  request_completed: {
+    serviceScore: 2.3,
+    categoryScore: 1.2,
+    exposureOnly: false,
+  },
+  request_canceled: {
+    serviceScore: -0.85,
+    categoryScore: -0.45,
+    exposureOnly: false,
+  },
+};
+const CUSTOMER_RECOMMENDATION_RECENT_LIMIT = 20;
+const CUSTOMER_RECOMMENDATION_TOP_LIMIT = 8;
+const CUSTOMER_RECOMMENDATION_TRAINING_FEATURE_VERSION = 1;
+
+function normalizeRecommendationToken(value = '') {
+  return String(value || '').trim().toLowerCase();
+}
+
+function normalizeRecommendationTokenList(values = []) {
+  return [...new Set(
+    (Array.isArray(values) ? values : [values])
+      .map((value) => normalizeRecommendationToken(value))
+      .filter(Boolean),
+  )];
+}
+
+function appendRecommendationRecent(list = [], value = '', limit = CUSTOMER_RECOMMENDATION_RECENT_LIMIT) {
+  const nextValue = normalizeRecommendationToken(value);
+  if (!nextValue) {
+    return Array.isArray(list) ? list.slice(0, limit) : [];
+  }
+
+  const nextList = [nextValue, ...normalizeRecommendationTokenList(list).filter((item) => item !== nextValue)];
+  return nextList.slice(0, limit);
+}
+
+function sortRecommendationScoreMap(scoreMap = {}, limit = CUSTOMER_RECOMMENDATION_TOP_LIMIT) {
+  return Object.entries(scoreMap)
+    .map(([key, value]) => [normalizeRecommendationToken(key), Number(value || 0)])
+    .filter(([key]) => Boolean(key))
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .slice(0, limit)
+    .map(([key]) => key);
+}
+
+function resolveCustomerRecommendationEventTargets(eventData = {}) {
+  const metadata = eventData && typeof eventData.metadata === 'object' ? eventData.metadata : {};
+  const serviceIds = normalizeRecommendationTokenList([
+    ...(Array.isArray(eventData.serviceIds) ? eventData.serviceIds : []),
+    eventData.serviceId,
+    metadata.serviceId,
+    metadata.topServiceId,
+  ]);
+  const categoryIds = normalizeRecommendationTokenList([
+    eventData.categoryId,
+    metadata.categoryId,
+    metadata.topCategoryId,
+  ]);
+
+  return {
+    serviceId: serviceIds[0] || '',
+    serviceIds,
+    categoryId: categoryIds[0] || '',
+    categoryIds,
+    metadata,
+    requestId: String(eventData.requestId || metadata.requestId || '').trim(),
+    sessionId: String(eventData.sessionId || metadata.sessionId || '').trim(),
+  };
+}
+
+function getRecommendationEventProfileWeights(eventType = '') {
+  return CUSTOMER_RECOMMENDATION_EVENT_WEIGHTS[normalizeRecommendationToken(eventType)] || {
+    serviceScore: 0,
+    categoryScore: 0,
+    exposureOnly: true,
+  };
+}
+
+function buildCustomerRecommendationTrainingSample({
+  eventId = '',
+  eventType = '',
+  customerId = '',
+  serviceId = '',
+  serviceIds = [],
+  categoryId = '',
+  categoryIds = [],
+  requestId = '',
+  sessionId = '',
+  source = '',
+  metadata = {},
+  createdAtMs = Date.now(),
+  profileSnapshot = {},
+}) {
+  const labelWeights = {
+    feed_impression: 0,
+    search_open: 0,
+    service_open: 0.25,
+    search_select: 1,
+    request_started: 2,
+    request_submitted: 2.5,
+    request_completed: 4,
+    request_canceled: -1,
+  };
+
+  return {
+    eventId,
+    eventType: normalizeRecommendationToken(eventType),
+    customerId,
+    serviceId,
+    serviceIds,
+    categoryId,
+    categoryIds,
+    requestId,
+    sessionId,
+    source: normalizeRecommendationToken(source),
+    metadata: metadata && typeof metadata === 'object' ? metadata : {},
+    featureVersion: CUSTOMER_RECOMMENDATION_TRAINING_FEATURE_VERSION,
+    label: Number(labelWeights[normalizeRecommendationToken(eventType)] ?? 0),
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    createdAtMs,
+    dayBucket: `${new Date(createdAtMs).getUTCFullYear()}-${String(new Date(createdAtMs).getUTCMonth() + 1).padStart(2, '0')}-${String(new Date(createdAtMs).getUTCDate()).padStart(2, '0')}`,
+    profileSnapshot,
+  };
+}
+
+function isHelperDispatchEligible(helper = {}, categoryId = '', requestServiceIds = [], catalogIndex = null) {
   const isDispatchPaused = isTruthyFlag(helper.dispatchPaused ?? helper.isDispatchPaused);
   const isSuspendedOrBlocked = isTruthyFlag(
     helper.suspended
@@ -1320,7 +1605,7 @@ function isHelperDispatchEligible(helper = {}, categoryId = '', requestServiceId
   return verificationStatus === 'verified'
     && payoutVerificationStatus === 'verified'
     && isHelperAgreementCurrent(helper)
-    && helperSupportsCategory(helper, categoryId, requestServiceIds)
+    && helperSupportsCategory(helper, categoryId, requestServiceIds, catalogIndex)
     && !isDispatchPaused
     && !isSuspendedOrBlocked;
 }
@@ -1524,7 +1809,7 @@ async function getHelperQueueForServiceRequest(request = {}) {
   const requestServiceIds = Array.isArray(request.serviceIds) ? request.serviceIds : [];
   if (!categoryId) return [];
 
-  const [helpersSnap, activeRequestsSnap] = await Promise.all([
+  const [helpersSnap, activeRequestsSnap, catalogEntries] = await Promise.all([
     db.collection('users')
       .where('activeRole', '==', 'helper')
       .where('onlineStatus', '==', 'online')
@@ -1536,7 +1821,14 @@ async function getHelperQueueForServiceRequest(request = {}) {
         SERVICE_REQUEST_STATUS.ARRIVED,
       ])
       .get(),
+    getLiveServiceCatalogEntries(),
   ]);
+
+  const catalogIndex = buildActiveServiceCatalogIndex(catalogEntries);
+  const categoryToken = normalizeServiceToken(categoryId);
+  if (!catalogIndex.byCategoryId.has(categoryToken)) {
+    return [];
+  }
 
   const busyHelperIds = new Set(
     activeRequestsSnap.docs
@@ -1547,7 +1839,7 @@ async function getHelperQueueForServiceRequest(request = {}) {
   const eligibleHelpers = helpersSnap.docs
     .map((item) => ({ uid: item.id, ...item.data() }))
     .filter((helper) => !busyHelperIds.has(helper.uid))
-    .filter((helper) => isHelperDispatchEligible(helper, categoryId, requestServiceIds));
+    .filter((helper) => isHelperDispatchEligible(helper, categoryId, requestServiceIds, catalogIndex));
 
   return rankHelpersWithFairness(eligibleHelpers);
 }
@@ -1670,6 +1962,125 @@ exports.syncServiceRequestAssignmentState = onDocumentWritten('serviceRequests/{
       targetPath: `/customer/requests/${requestId}`,
     });
   }
+});
+
+exports.trackCustomerServiceEvents = onDocumentCreated('customerServiceEvents/{eventId}', async (event) => {
+  const rawEvent = event.data?.data();
+  if (!rawEvent) return;
+
+  const eventId = String(event.params.eventId || '').trim();
+  const customerId = String(rawEvent.customerId || '').trim();
+  const eventType = normalizeRecommendationToken(rawEvent.eventType);
+  if (!eventId || !customerId || !eventType) return;
+
+  const eventWeights = getRecommendationEventProfileWeights(eventType);
+  const targets = resolveCustomerRecommendationEventTargets(rawEvent);
+  const createdAtMs = normalizeMillis(rawEvent.createdAtMs || rawEvent.createdAt || Date.now()) || Date.now();
+  const profileRef = db.collection('customerRecommendationProfiles').doc(customerId);
+  const sampleRef = db.collection('customerRecommendationTrainingSamples').doc(eventId);
+
+  await db.runTransaction(async (transaction) => {
+    const profileSnap = await transaction.get(profileRef);
+    const currentProfile = profileSnap.exists ? (profileSnap.data() || {}) : {};
+
+    const eventCounts = { ...(currentProfile.eventCounts || {}) };
+    eventCounts[eventType] = Number(eventCounts[eventType] || 0) + 1;
+
+    const serviceScores = { ...(currentProfile.serviceScores || {}) };
+    const categoryScores = { ...(currentProfile.categoryScores || {}) };
+    const serviceCounts = { ...(currentProfile.serviceCounts || {}) };
+    const categoryCounts = { ...(currentProfile.categoryCounts || {}) };
+    const serviceExposureCounts = { ...(currentProfile.serviceExposureCounts || {}) };
+    const categoryExposureCounts = { ...(currentProfile.categoryExposureCounts || {}) };
+    const serviceLastEventAt = { ...(currentProfile.serviceLastEventAt || {}) };
+    const categoryLastEventAt = { ...(currentProfile.categoryLastEventAt || {}) };
+    let recentServiceIds = Array.isArray(currentProfile.recentServiceIds) ? [...currentProfile.recentServiceIds] : [];
+    let recentCategoryIds = Array.isArray(currentProfile.recentCategoryIds) ? [...currentProfile.recentCategoryIds] : [];
+
+    const serviceTargets = targets.serviceIds.length ? targets.serviceIds : (targets.serviceId ? [targets.serviceId] : []);
+    const categoryTargets = targets.categoryIds.length ? targets.categoryIds : (targets.categoryId ? [targets.categoryId] : []);
+    const profileSnapshot = {
+      serviceId: targets.serviceId || '',
+      categoryId: targets.categoryId || '',
+      serviceScore: Number(currentProfile.serviceScores?.[targets.serviceId] || 0),
+      categoryScore: Number(currentProfile.categoryScores?.[targets.categoryId] || 0),
+      serviceCount: Number(currentProfile.serviceCounts?.[targets.serviceId] || 0),
+      categoryCount: Number(currentProfile.categoryCounts?.[targets.categoryId] || 0),
+      serviceExposureCount: Number(currentProfile.serviceExposureCounts?.[targets.serviceId] || 0),
+      categoryExposureCount: Number(currentProfile.categoryExposureCounts?.[targets.categoryId] || 0),
+      topServiceIds: sortRecommendationScoreMap(currentProfile.serviceScores || {}, CUSTOMER_RECOMMENDATION_TOP_LIMIT),
+      topCategoryIds: sortRecommendationScoreMap(currentProfile.categoryScores || {}, CUSTOMER_RECOMMENDATION_TOP_LIMIT),
+      recentServiceIds: normalizeRecommendationTokenList(currentProfile.recentServiceIds || []).slice(0, CUSTOMER_RECOMMENDATION_RECENT_LIMIT),
+      recentCategoryIds: normalizeRecommendationTokenList(currentProfile.recentCategoryIds || []).slice(0, CUSTOMER_RECOMMENDATION_RECENT_LIMIT),
+    };
+
+    serviceTargets.forEach((serviceTarget) => {
+      if (!serviceTarget) return;
+      serviceExposureCounts[serviceTarget] = Number(serviceExposureCounts[serviceTarget] || 0) + 1;
+      if (!eventWeights.exposureOnly) {
+        serviceCounts[serviceTarget] = Number(serviceCounts[serviceTarget] || 0) + 1;
+      }
+      if (Number(eventWeights.serviceScore || 0) !== 0) {
+        serviceScores[serviceTarget] = Number((Number(serviceScores[serviceTarget] || 0) + Number(eventWeights.serviceScore || 0)).toFixed(4));
+      }
+      serviceLastEventAt[serviceTarget] = createdAtMs;
+      recentServiceIds = appendRecommendationRecent(recentServiceIds, serviceTarget);
+    });
+
+    categoryTargets.forEach((categoryTarget) => {
+      if (!categoryTarget) return;
+      categoryExposureCounts[categoryTarget] = Number(categoryExposureCounts[categoryTarget] || 0) + 1;
+      if (!eventWeights.exposureOnly) {
+        categoryCounts[categoryTarget] = Number(categoryCounts[categoryTarget] || 0) + 1;
+      }
+      if (Number(eventWeights.categoryScore || 0) !== 0) {
+        categoryScores[categoryTarget] = Number((Number(categoryScores[categoryTarget] || 0) + Number(eventWeights.categoryScore || 0)).toFixed(4));
+      }
+      categoryLastEventAt[categoryTarget] = createdAtMs;
+      recentCategoryIds = appendRecommendationRecent(recentCategoryIds, categoryTarget);
+    });
+
+    const topServiceIds = sortRecommendationScoreMap(serviceScores);
+    const topCategoryIds = sortRecommendationScoreMap(categoryScores);
+
+    transaction.set(profileRef, {
+      customerId,
+      eventCounts,
+      serviceScores,
+      categoryScores,
+      serviceCounts,
+      categoryCounts,
+      serviceExposureCounts,
+      categoryExposureCounts,
+      serviceLastEventAt,
+      categoryLastEventAt,
+      recentServiceIds: recentServiceIds.slice(0, CUSTOMER_RECOMMENDATION_RECENT_LIMIT),
+      recentCategoryIds: recentCategoryIds.slice(0, CUSTOMER_RECOMMENDATION_RECENT_LIMIT),
+      topServiceIds: topServiceIds.slice(0, CUSTOMER_RECOMMENDATION_TOP_LIMIT),
+      topCategoryIds: topCategoryIds.slice(0, CUSTOMER_RECOMMENDATION_TOP_LIMIT),
+      lastEventAt: createdAtMs,
+      lastEventType: eventType,
+      lastEventId: eventId,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdAt: currentProfile.createdAt || admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    transaction.set(sampleRef, buildCustomerRecommendationTrainingSample({
+      eventId,
+      eventType,
+      customerId,
+      serviceId: targets.serviceId || '',
+      serviceIds: serviceTargets,
+      categoryId: targets.categoryId || '',
+      categoryIds: categoryTargets,
+      requestId: targets.requestId,
+      sessionId: targets.sessionId,
+      source: rawEvent.source || '',
+      metadata: targets.metadata,
+      createdAtMs,
+      profileSnapshot,
+    }), { merge: true });
+  });
 });
 
 exports.reconcileServiceRequestOffers = onSchedule('every 1 minutes', async () => {
@@ -7172,6 +7583,25 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
 
   const updatedSnap = await requestRef.get();
   const updatedRequest = { id: updatedSnap.id, ...updatedSnap.data() };
+  const completionEventId = `request_completed_${requestId}`;
+  await db.collection('customerServiceEvents').doc(completionEventId).set({
+    customerId: request.customerId,
+    eventType: 'request_completed',
+    serviceId: request.serviceIds?.[0] || request.selectedPackageId || request.categoryId || '',
+    categoryId: request.categoryId || '',
+    serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
+    requestId,
+    source: 'finalizeServiceRequestBilling',
+    metadata: {
+      helperId: helperId || '',
+      paymentStatus,
+      totalAmount,
+      requestStatus: 'completed',
+    },
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    createdAtMs: endedAt,
+    dayBucket: new Date(endedAt).toISOString().slice(0, 10),
+  }, { merge: true });
 
   await Promise.all([
     createUserNotification({

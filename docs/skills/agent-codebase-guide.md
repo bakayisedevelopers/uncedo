@@ -10,7 +10,7 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
 * **Common References**: "Firebase backend", "functions backend", "cloud functions", "API functions".
 * **Purpose**: Houses all server-side logic, third-party integrations (Paystack, Resend, Gemini), and secure endpoints.
 * **Key Files & Logic**:
-  * [functions/index.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/index.js): Main entry point declaring all Cloud Functions.
+  * [functions/index.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/index.js): Main entry point declaring all Cloud Functions, including service-request matching, billing completion, and customer recommendation event aggregation.
   * [functions/pricingEngine.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/pricingEngine.js): Core logic for estimation, price quotes, and billing snapshots.
   * [functions/customerServiceAi.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/customerServiceAi.js): LLM processing logic for automated customer service threads.
   * [functions/aiSubjectExtraction.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/aiSubjectExtraction.js): Processes files/images to detect subject areas.
@@ -29,8 +29,8 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
     * [SessionRoomScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/screens/student/SessionRoomScreen.js): Full-screen bare classroom interface hosting WebView-backed WebRTC audio and tutor screen-sharing view.
     * [WalletScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/screens/student/WalletScreen.js): Shows balance, outstanding debt, and integration with the Paystack WebView credit card addition flow.
   * **Customer Surfaces (`screens/customer/`)**:
-    * [CustomerHomeScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/screens/customer/CustomerHomeScreen.js): Customer home surface with the Pinterest-style service discovery feed, search overlay, helper-photo-backed quick access tiles, and the request CTA.
-    * [CustomerServiceSelectionScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/screens/customer/CustomerServiceSelectionScreen.js): Customer service review screen that shows the selected tile details, collects quick required answers, and decides whether to go straight to tracking or continue into the AI intake flow.
+    * [CustomerHomeScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/screens/customer/CustomerHomeScreen.js): Customer home surface with the randomized service discovery feed, full-catalog search overlay, helper-photo-backed quick access tiles, and the request CTA.
+    * [CustomerServiceSelectionScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/screens/customer/CustomerServiceSelectionScreen.js): Customer service review screen that shows the selected tile details, auto-adds the category to the customer profile when needed, collects quick required answers, and decides whether to go straight to tracking or continue into the AI intake flow.
     * [CustomerServiceCallScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/screens/customer/CustomerServiceCallScreen.js): Core customer chat screen (formerly support voice call) that now seeds package selections into the AI intake flow.
     * [CustomerOnboardingScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/screens/customer/CustomerOnboardingScreen.js): Customer profile completion flow, including service-category preferences and payment setup.
     * [CustomerDetailsScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/screens/customer/CustomerDetailsScreen.js): Editable customer profile details with service-category preferences.
@@ -39,7 +39,9 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
     * [nearbyHelpersMapService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/services/nearbyHelpersMapService.js): Interfaces helper geolocation mapping.
     * [paystackService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/services/paystackService.js): Connects client to custom `/verify-paystack` functions.
     * [customerServiceMediaService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/services/customerServiceMediaService.js): Summarizes uploaded customer reference media so images or videos can influence the structured service request flow.
-    * [customerServiceDiscoveryService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/services/customerServiceDiscoveryService.js): Builds the customer home package feed from online helpers and their uploaded work photos.
+    * [customerServiceDiscoveryService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/services/customerServiceDiscoveryService.js): Builds the randomized customer home service feed from admin-approved catalog items, online helpers, and their uploaded work photos.
+    * [customerRecommendationService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/services/customerRecommendationService.js): Reads and writes customer recommendation profiles, records service events, and ranks the customer home feed from engagement history.
+    * [serviceCatalogService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/services/serviceCatalogService.js): Reads the live Firestore service catalog for customer discovery and request matching.
   * **Key Customer Components (`/uncedo/src/components/customer/`)**:
     * [ServiceShowcaseCarousel.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/components/customer/ServiceShowcaseCarousel.js): Pinterest-style masonry discovery feed for customer service tiles, using helper photos, lightweight card metadata, and fast service/package selection.
     * [ServiceSearchOverlay.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/components/customer/ServiceSearchOverlay.js): Search overlay for available service and package discovery on the customer home screen.
@@ -57,8 +59,11 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
   * [AgreementScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/screens/provider/AgreementScreen.js): Live helper agreement review and signing screen with full contract text, typed-name acceptance, and signed-version history.
   * [EarningsScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/screens/provider/EarningsScreen.js): Financial summaries, payouts, and historical log charts.
   * [JobDetailsScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/screens/provider/JobDetailsScreen.js): Information overlay for offers, showing client names, locations, and attachment summaries.
+  * [SkillCatalogScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/screens/provider/SkillCatalogScreen.js): Firestore-backed helper service catalog browser that replaces the hard-coded skill list.
+  * [SkillDetailsScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/screens/provider/SkillDetailsScreen.js): Helper service detail and submission flow with multi-image uploads, pending approval, and service-photo management.
   * [src/components/app/HelperHomeMap.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/components/app/HelperHomeMap.js): Dedicated helper home map with a live location marker and 50 km service radius, separate from the active-job route map.
   * [src/services/legalAgreementService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/services/legalAgreementService.js): Calls helper-agreement Cloud Functions to fetch the active contract bundle and submit signed acceptances.
+  * [src/services/serviceCatalogService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/services/serviceCatalogService.js): Reads the live Firestore service catalog for helper browsing and onboarding.
 
 ---
 
@@ -78,9 +83,11 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
   * [admin/src/App.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/App.jsx): Admin routing and protected layout wiring.
   * [admin/src/pages/HelperAgreementsPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/pages/HelperAgreementsPage.jsx): Admin contract-management screen for publishing new helper agreement versions and reviewing history.
   * [admin/src/pages/ProvidersPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/pages/ProvidersPage.jsx): Provider profile review, suspension, verification, and per-skill moderation.
-  * [admin/src/pages/ServicesPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/pages/ServicesPage.jsx): Flattened service approval queue with uploaded photo inspection.
+  * [admin/src/pages/ServicesPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/pages/ServicesPage.jsx): Firestore-backed service catalog management, admin image uploads, and helper approval queue.
   * [admin/src/pages/CustomersPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/pages/CustomersPage.jsx): Customer directory and stored location/profile data.
+  * [admin/src/constants/serviceCatalog.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/constants/serviceCatalog.js): Admin catalog seed data used to render the live service list and helper-approval workflow.
   * [admin/src/services/helperAgreementService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/services/helperAgreementService.js): Admin-side client for reading and publishing helper agreement versions through Cloud Functions.
+  * [admin/src/services/serviceCatalogService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/services/serviceCatalogService.js): Firestore service-catalog reads/writes plus Storage image uploads for the admin services page.
 
 ---
 

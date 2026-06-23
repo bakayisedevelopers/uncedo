@@ -162,6 +162,7 @@ export function MapPlaceholder({
   const mapCenter = customerCoordinate || helperCoordinate || DEFAULT_REGION;
   const [region, setRegion] = useState(() => buildRegion(mapCenter, radiusKm));
   const mapRef = useRef(null);
+  const [isMapReady, setIsMapReady] = useState(false);
   const didInitialFitRef = useRef(false);
 
   useEffect(() => {
@@ -171,7 +172,7 @@ export function MapPlaceholder({
   }, [mode, routeSignature]);
 
   useEffect(() => {
-    if (!mapRef.current) return;
+    if (!mapRef.current || !isMapReady) return;
 
     if (!customerCoordinate && !helperCoordinate) {
       didInitialFitRef.current = false;
@@ -224,7 +225,7 @@ export function MapPlaceholder({
     }, 250);
 
     return () => clearTimeout(timer);
-  }, [customerCoordinate, floatingBottomInset, helperCoordinate, mode, normalizedRouteCoordinates, radiusKm]);
+  }, [customerCoordinate, floatingBottomInset, helperCoordinate, isMapReady, mode, normalizedRouteCoordinates, radiusKm]);
 
   const recenter = () => {
     const coords = mode === 'route' && normalizedRouteCoordinates.length > 1
@@ -289,10 +290,11 @@ export function MapPlaceholder({
         ref={mapRef}
         customMapStyle={MAP_STYLE}
         initialRegion={region}
-        onRegionChangeComplete={setRegion}
+        onMapReady={() => setIsMapReady(true)}
+        onRegionChangeComplete={mode === 'route' ? undefined : setRegion}
         pointerEvents={interactive ? 'auto' : 'none'}
         provider={PROVIDER_GOOGLE || undefined}
-        region={region}
+        region={mode === 'route' ? undefined : region}
         pitchEnabled={interactive}
         mapPadding={mapPadding || { top: 80, right: 24, bottom: floatingBottomInset + 56, left: 24 }}
         rotateEnabled={interactive}

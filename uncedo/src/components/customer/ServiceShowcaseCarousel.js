@@ -39,6 +39,7 @@ export function ServiceShowcaseCarousel({
 }) {
   const { width } = useWindowDimensions();
   const [imageRatios, setImageRatios] = useState({});
+  const [activeImageIndices, setActiveImageIndices] = useState({});
   const horizontalPadding = 16;
   const gutter = 12;
   const columnWidth = Math.max(140, (width - (horizontalPadding * 2) - gutter) / 2);
@@ -47,9 +48,10 @@ export function ServiceShowcaseCarousel({
     let active = true;
 
     cards.forEach((card, index) => {
-      if (!card?.imageUri || imageRatios[card.id]) return;
+      const nextUri = (Array.isArray(card.imageUris) && card.imageUris.length ? card.imageUris[0] : card.imageUri) || '';
+      if (!nextUri || imageRatios[card.id]) return;
       Image.getSize(
-        card.imageUri,
+        nextUri,
         (imageWidth, imageHeight) => {
           if (!active || !imageWidth || !imageHeight) return;
           setImageRatios((current) => (
@@ -73,6 +75,29 @@ export function ServiceShowcaseCarousel({
       active = false;
     };
   }, [cards, imageRatios]);
+
+  useEffect(() => {
+    if (!cards.length) return () => {};
+
+    const timer = setInterval(() => {
+      setActiveImageIndices((current) => {
+        const next = { ...current };
+        cards.forEach((card) => {
+          const imageCount = Array.isArray(card.imageUris) && card.imageUris.length
+            ? card.imageUris.length
+            : card.imageUri ? 1 : 0;
+          if (imageCount > 1) {
+            next[card.id] = ((current[card.id] || 0) + 1) % imageCount;
+          } else if (imageCount === 1) {
+            next[card.id] = 0;
+          }
+        });
+        return next;
+      });
+    }, 5000);
+
+    return () => clearInterval(timer);
+  }, [cards]);
 
   const columns = useMemo(
     () => buildColumns(cards, imageRatios, columnWidth),
@@ -103,10 +128,12 @@ export function ServiceShowcaseCarousel({
                 pressed && styles.tilePressed,
               ]}
             >
-              {item.imageUri ? (
+              {((Array.isArray(item.imageUris) && item.imageUris.length) || item.imageUri) ? (
                 <ImageBackground
                   imageStyle={styles.tileImage}
-                  source={{ uri: item.imageUri }}
+                  source={{ uri: (Array.isArray(item.imageUris) && item.imageUris.length)
+                    ? item.imageUris[(activeImageIndices[item.id] || 0) % item.imageUris.length]
+                    : item.imageUri }}
                   style={[styles.tileMedia, { height: item.__tileHeight }]}
                 >
                   <View style={styles.tileTint} />

@@ -55,6 +55,7 @@ function normalizeSkill(skill = {}, serviceId = '') {
 
   return {
     id: String(skill.id || `${serviceId}_${name}`.replace(/[^a-z0-9]+/gi, '_').toLowerCase()),
+    catalogId: String(skill.catalogId || skill.serviceCatalogId || name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '_'),
     name,
     status: String(skill.status || 'pending').trim().toLowerCase(),
     active: skill.active !== false,
@@ -266,6 +267,7 @@ export function flattenProviderServices(profiles = []) {
         serviceName: service.serviceName,
         serviceDescription: service.description,
         skillId: skill.id,
+        catalogId: skill.catalogId || '',
         skillName: skill.name,
         skillStatus: String(skill.status || 'pending').toLowerCase(),
         skillActive: skill.active !== false,

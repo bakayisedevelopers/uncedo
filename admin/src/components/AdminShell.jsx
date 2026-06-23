@@ -18,7 +18,7 @@ import { logoutUser } from '../services/authService';
 const NAV_ITEMS = [
   { to: '/dashboard', label: 'Overview', icon: BarChart3 },
   { to: '/providers', label: 'Providers', icon: Users },
-  { to: '/services', label: 'Service approvals', icon: BadgeCheck },
+  { to: '/services', label: 'Services', icon: BadgeCheck },
   { to: '/customers', label: 'Customers', icon: FileImage },
   { to: '/helper-agreements', label: 'Helper agreements', icon: FileText },
 ];
@@ -47,7 +47,7 @@ export default function AdminShell() {
 
   const title = useMemo(() => {
     if (location.pathname.startsWith('/providers')) return 'Provider control';
-    if (location.pathname.startsWith('/services')) return 'Service review';
+    if (location.pathname.startsWith('/services')) return 'Services';
     if (location.pathname.startsWith('/customers')) return 'Customer directory';
     if (location.pathname.startsWith('/helper-agreements')) return 'Helper agreements';
     return 'Operations overview';

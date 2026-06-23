@@ -257,6 +257,7 @@ export function HelperMapPlaceholder({
   const [region, setRegion] = useState(() => buildRegion(mapCenter, radiusKm));
   const [isAutoFollowEnabled, setIsAutoFollowEnabled] = useState(true);
   const mapRef = useRef(null);
+  const [isMapReady, setIsMapReady] = useState(false);
   const didInitialFitRef = useRef(false);
   const lastCameraUpdateRef = useRef(0);
   const helperRadiusMeters = Math.max(1000, Number(radiusKm || 50) * 1000);
@@ -310,7 +311,7 @@ export function HelperMapPlaceholder({
   }, [navigationMode]);
 
   useEffect(() => {
-    if (!mapRef.current) return;
+    if (!mapRef.current || !isMapReady) return;
 
     if (!currentCoordinate && !destinationCoordinate) {
       didInitialFitRef.current = false;
@@ -372,7 +373,7 @@ export function HelperMapPlaceholder({
     }, 250);
 
     return () => clearTimeout(timer);
-  }, [currentCoordinate, destinationCoordinate, floatingBottomInset, mode, navigationMode, normalizedRouteCoordinates, radiusKm, routeView]);
+  }, [currentCoordinate, destinationCoordinate, floatingBottomInset, isMapReady, mode, navigationMode, normalizedRouteCoordinates, radiusKm, routeView]);
 
   useEffect(() => {
     if (!navigationMode || !isAutoFollowEnabled || !mapRef.current || !navigationCameraTarget || !currentCoordinate) {
@@ -393,6 +394,7 @@ export function HelperMapPlaceholder({
   }, [currentCoordinate, isAutoFollowEnabled, navigationCameraTarget, navigationMode]);
 
   const recenter = () => {
+    if (!isMapReady) return;
     if (navigationMode && navigationCameraTarget) {
       setIsAutoFollowEnabled(true);
       mapRef.current?.animateCamera?.(navigationCameraTarget, { duration: 500 });
@@ -467,6 +469,7 @@ export function HelperMapPlaceholder({
         ref={mapRef}
         customMapStyle={MAP_STYLE}
         initialRegion={region}
+        onMapReady={() => setIsMapReady(true)}
         onPanDrag={() => {
           if (navigationMode) {
             setIsAutoFollowEnabled(false);
@@ -481,7 +484,7 @@ export function HelperMapPlaceholder({
         pointerEvents={interactive ? 'auto' : 'none'}
         // TODO: Keep iOS on the default provider until the helper app has checked-in iOS Google Maps native setup.
         provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}
-        region={region}
+        region={navigationMode ? undefined : region}
         pitchEnabled={interactive}
         mapPadding={mapPadding || { top: 80, right: 24, bottom: floatingBottomInset + 56, left: 24 }}
         rotateEnabled={interactive}

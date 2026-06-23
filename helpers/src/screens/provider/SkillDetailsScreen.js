@@ -4,43 +4,65 @@ import { Ionicons } from '@expo/vector-icons';
 import { ActionButton, Card, EmptyState, SectionHeading, StatusBadge } from '../../components/app/HelperUi';
 import { getServiceById } from '../../constants/serviceCatalog';
 import { useHelpersApp } from '../../context/HelpersAppContext';
-import { pickSkillImageFromLibrary } from '../../services/imagePickerService';
+import { pickSkillImagesFromLibrary } from '../../services/imagePickerService';
 import { colors } from '../../theme/colors';
 
-function formatStatusLabel(status = 'approved') {
-  const normalized = String(status || 'approved').toLowerCase();
+function formatStatusLabel(status = 'pending') {
+  const normalized = String(status || 'pending').toLowerCase();
   if (normalized === 'approved') return 'Approved';
   if (normalized === 'pending') return 'Pending';
   if (normalized === 'rejected') return 'Rejected';
   return 'Saved';
 }
 
+function slugify(value = '') {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
 export function SkillDetailsScreen({ route, goBack }) {
-  const { helperSkills, actions, saving, saveError } = useHelpersApp();
+  const { helperSkills, serviceCatalog, actions, saving, saveError } = useHelpersApp();
   const serviceId = route?.params?.serviceId || '';
   const skillName = route?.params?.skillName || '';
+  const routeCatalogId = route?.params?.catalogId || slugify(skillName);
   const mode = route?.params?.mode || 'edit';
-  const [selectedAsset, setSelectedAsset] = useState(null);
+  const [selectedAssets, setSelectedAssets] = useState([]);
   const [message, setMessage] = useState('');
 
   const service = getServiceById(serviceId);
+  const catalogService = useMemo(
+    () => (Array.isArray(serviceCatalog) ? serviceCatalog.find((entry) => String(entry.id || '').toLowerCase() === String(routeCatalogId || '').toLowerCase()) : null),
+    [routeCatalogId, serviceCatalog],
+  );
   const savedSkill = useMemo(
-    () => helperSkills.find((skill) => skill.serviceId === serviceId && skill.name === skillName) || null,
-    [helperSkills, serviceId, skillName],
+    () => helperSkills.find((skill) => (
+      skill.serviceId === serviceId
+      && (
+        skill.name === skillName
+        || String(skill.catalogId || '').toLowerCase() === String(routeCatalogId || '').toLowerCase()
+        || slugify(`${skill.serviceId || ''}_${skill.name || ''}`) === String(routeCatalogId || '').toLowerCase()
+      )
+    )) || null,
+    [helperSkills, routeCatalogId, serviceId, skillName],
   );
 
   useEffect(() => {
-    setSelectedAsset(null);
+    setSelectedAssets([]);
     setMessage('');
-  }, [serviceId, skillName, mode]);
+  }, [serviceId, skillName, routeCatalogId, mode]);
 
-  const handleSelectImage = async () => {
-    const asset = await pickSkillImageFromLibrary().catch((error) => {
-      setMessage(error.message || 'Unable to select an image right now.');
+  const handleSelectImages = async () => {
+    const maxSelection = Math.max(1, 10 - ((savedSkill?.pictures || []).length + selectedAssets.length));
+    const assets = await pickSkillImagesFromLibrary({ maxSelection }).catch((error) => {
+      setMessage(error.message || 'Unable to select images right now.');
       return null;
     });
-    if (asset) {
-      setSelectedAsset(asset);
+
+    if (assets && assets.length) {
+      setSelectedAssets((current) => [...current, ...assets].slice(0, 10 - ((savedSkill?.pictures || []).length)));
       setMessage('');
     }
   };
@@ -49,18 +71,23 @@ export function SkillDetailsScreen({ route, goBack }) {
     const result = await actions.addSkillWithPhoto({
       serviceId,
       skillName,
-      imageAsset: selectedAsset,
+      catalogId: routeCatalogId,
+      imageAssets: selectedAssets,
     });
     setMessage(result?.message || '');
     if (result?.success) {
-      setSelectedAsset(null);
+      setSelectedAssets([]);
     }
   };
+
+  const totalPictures = (savedSkill?.pictures || []).length + selectedAssets.length;
+  const remainingSlots = Math.max(0, 10 - totalPictures);
+  const canToggleActive = Boolean(savedSkill && savedSkill.status === 'approved');
 
   if (!serviceId || !skillName) {
     return (
       <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false}>
-        <EmptyState title="Skill not found" description="This skill reference is missing." />
+        <EmptyState title="Service not found" description="This service reference is missing." />
       </ScrollView>
     );
   }
@@ -73,25 +100,45 @@ export function SkillDetailsScreen({ route, goBack }) {
       </Pressable>
 
       <View style={styles.header}>
-        <Text style={styles.eyebrow}>Helper skill</Text>
+        <Text style={styles.eyebrow}>Helper service</Text>
         <Text style={styles.title}>{skillName}</Text>
-        <Text style={styles.description}>{service?.name || 'Skill category'}</Text>
+        <Text style={styles.description}>{catalogService?.description || service?.description || service?.name || 'Service category'}</Text>
       </View>
+
+      {catalogService?.images?.length ? (
+        <Card>
+          <SectionHeading
+            title="Admin catalog images"
+            subtitle="These are the images that the admin has published for this service."
+          />
+          <View style={styles.gallery}>
+            {catalogService.images.map((picture) => (
+              <View key={picture.id} style={styles.galleryCard}>
+                <Image resizeMode="cover" source={{ uri: picture.uri }} style={styles.galleryImage} />
+              </View>
+            ))}
+          </View>
+        </Card>
+      ) : null}
 
       <Card>
         <SectionHeading
-          title="Skill status"
-          subtitle="This skill becomes available for matching only when it is active and has at least one uploaded work picture."
-          action={savedSkill ? <StatusBadge label={formatStatusLabel(savedSkill.status)} tone="success" /> : <StatusBadge label="New" tone="info" />}
+          title="Service status"
+          subtitle="This service stays pending until the admin approves it, and it only becomes available for matching when it is active and has at least one uploaded work picture."
+          action={savedSkill ? <StatusBadge label={formatStatusLabel(savedSkill.status)} tone={savedSkill.status === 'approved' ? 'success' : 'warning'} /> : <StatusBadge label="New" tone="info" />}
         />
         {savedSkill ? (
           <View style={styles.toggleRow}>
             <View style={styles.toggleCopy}>
               <Text style={styles.toggleTitle}>Available for matching</Text>
-              <Text style={styles.toggleDescription}>Turn this off if you do not want to receive requests for this skill right now.</Text>
+              <Text style={styles.toggleDescription}>
+                {savedSkill.status === 'approved'
+                  ? 'Turn this off if you do not want to receive requests for this service right now.'
+                  : 'This switch unlocks after the admin approves your service submission.'}
+              </Text>
             </View>
             <Switch
-              disabled={saving}
+              disabled={saving || !canToggleActive}
               onValueChange={(value) => actions.toggleSkillActive({ serviceId, skillName, active: value })}
               thumbColor="#ffffff"
               trackColor={{ false: '#d1d5db', true: '#22c55e' }}
@@ -99,7 +146,7 @@ export function SkillDetailsScreen({ route, goBack }) {
             />
           </View>
         ) : (
-          <Text style={styles.copy}>Upload your first work picture to add this skill to your profile.</Text>
+          <Text style={styles.copy}>Upload your first work pictures to submit this service for approval.</Text>
         )}
         {message ? <Text style={styles.message}>{message}</Text> : null}
         {saveError ? <Text style={styles.error}>{saveError}</Text> : null}
@@ -107,26 +154,31 @@ export function SkillDetailsScreen({ route, goBack }) {
 
       <Card>
         <SectionHeading
-          title={savedSkill ? 'Work portfolio' : 'Add first work picture'}
-          subtitle="Pictures help customers trust the skill and are required before the skill can be offered."
+          title={savedSkill ? 'Work portfolio' : 'Submit service'}
+          subtitle="Upload up to 10 pictures for this service. The admin will review them before the service becomes available."
         />
-        {selectedAsset ? (
-          <View style={styles.previewCard}>
-            <Image resizeMode="cover" source={{ uri: selectedAsset.uri }} style={styles.previewImage} />
-            <Text style={styles.previewName}>{selectedAsset.fileName || 'Selected image'}</Text>
+        {selectedAssets.length ? (
+          <View style={styles.previewGrid}>
+            {selectedAssets.map((asset) => (
+              <View key={`${asset.uri}-${asset.fileName}`} style={styles.previewCard}>
+                <Image resizeMode="cover" source={{ uri: asset.uri }} style={styles.previewImage} />
+                <Text style={styles.previewName}>{asset.fileName || 'Selected image'}</Text>
+              </View>
+            ))}
           </View>
         ) : null}
         <View style={styles.actionRow}>
-          <ActionButton label={selectedAsset ? 'Choose a different picture' : 'Upload picture'} onPress={handleSelectImage} tone="secondary" />
-          {selectedAsset ? (
-            <ActionButton label={saving ? 'Saving...' : savedSkill ? 'Save picture' : 'Save skill'} onPress={handleSaveSkill} disabled={saving} />
+          <ActionButton label={selectedAssets.length ? 'Add more pictures' : 'Upload pictures'} onPress={handleSelectImages} tone="secondary" disabled={remainingSlots === 0} />
+          {selectedAssets.length ? (
+            <ActionButton label={saving ? 'Submitting...' : savedSkill ? 'Save pictures' : 'Submit for approval'} onPress={handleSaveSkill} disabled={saving} />
           ) : null}
         </View>
+        {remainingSlots === 0 ? <Text style={styles.limitText}>This service already has 10 pictures saved.</Text> : null}
       </Card>
 
       {savedSkill ? (
         <Card>
-          <SectionHeading title="Saved pictures" subtitle="Add more pictures or remove older ones from this skill." />
+          <SectionHeading title="Saved pictures" subtitle="Add more pictures or remove older ones from this service." />
           {(savedSkill.pictures || []).length ? (
             <View style={styles.gallery}>
               {savedSkill.pictures.map((picture) => (
@@ -146,10 +198,10 @@ export function SkillDetailsScreen({ route, goBack }) {
               ))}
             </View>
           ) : (
-            <EmptyState title="No pictures yet" description="Upload at least one picture so this skill stays available for matching." />
+            <EmptyState title="No pictures yet" description="Upload at least one picture so this service stays available for matching." />
           )}
           <ActionButton
-            label="Delete skill"
+            label="Delete service"
             onPress={() => actions.removeSkill({ serviceId, skillName }).then(() => goBack('ServicesOffered'))}
             tone="danger"
             disabled={saving}
@@ -230,6 +282,10 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
   },
+  previewGrid: {
+    gap: 12,
+    marginBottom: 10,
+  },
   previewCard: {
     backgroundColor: '#fff8fc',
     borderColor: colors.border,
@@ -252,6 +308,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 10,
+  },
+  limitText: {
+    color: colors.muted,
+    fontSize: 12,
+    marginTop: 8,
   },
   gallery: {
     gap: 12,

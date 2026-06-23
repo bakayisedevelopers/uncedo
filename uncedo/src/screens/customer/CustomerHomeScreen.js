@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useMemo, useState } from 'react';
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { CustomerCallToActionSheet } from '../../components/customer/CustomerCallToActionSheet';
@@ -6,6 +6,11 @@ import { ServiceSearchOverlay } from '../../components/customer/ServiceSearchOve
 import { ServiceShowcaseCarousel } from '../../components/customer/ServiceShowcaseCarousel';
 import { useAuth } from '../../context/AuthContext';
 import { subscribeToCustomerServiceShowcase } from '../../services/customerServiceDiscoveryService';
+import {
+  rankCustomerServiceItems,
+  recordCustomerServiceEvent,
+  subscribeToCustomerRecommendationProfile,
+} from '../../services/customerRecommendationService';
 import { getCustomerOnboardingStatus } from '../../utils/onboarding';
 
 function scoreSearchMatch(item, query) {
@@ -40,8 +45,10 @@ export function CustomerHomeScreen({
   const { user } = useAuth();
   const onboardingStatus = getCustomerOnboardingStatus(user);
   const [cards, setCards] = useState([]);
+  const [recommendationProfile, setRecommendationProfile] = useState(null);
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const lastImpressionKeyRef = useRef('');
 
   const preferredCategoryIds = useMemo(() => (
     Array.isArray(user?.customerProfile?.preferredServiceCategories)
@@ -67,22 +74,93 @@ export function CustomerHomeScreen({
   }, [preferredCategoryIds, user?.uid]);
 
   useEffect(() => {
+    if (!user?.uid) {
+      setRecommendationProfile(null);
+      return () => {};
+    }
+
+    return subscribeToCustomerRecommendationProfile(
+      user.uid,
+      (profile) => {
+        setRecommendationProfile(profile);
+      },
+      () => {
+        setRecommendationProfile(null);
+      },
+    );
+  }, [user?.uid]);
+
+  const rankedCards = useMemo(() => (
+    rankCustomerServiceItems(cards, {
+      customerId: user?.uid || '',
+      recommendationProfile: recommendationProfile || {},
+      preferredCategoryIds,
+    })
+  ), [cards, preferredCategoryIds, recommendationProfile, user?.uid]);
+
+  useEffect(() => {
     if (typeof onBottomNavVisibilityChange === 'function' && !bottomNavVisible) {
       onBottomNavVisibilityChange(true);
     }
   }, [bottomNavVisible, onBottomNavVisibilityChange]);
 
+  useEffect(() => {
+    if (!user?.uid || !rankedCards.length) return;
+
+    const visibleIds = rankedCards
+      .slice(0, 6)
+      .map((item) => `${item.id}:${item.rankScore || 0}`)
+      .join('|');
+
+    if (lastImpressionKeyRef.current === visibleIds) {
+      return;
+    }
+
+    lastImpressionKeyRef.current = visibleIds;
+
+    rankedCards.slice(0, 6).forEach((item, index) => {
+      recordCustomerServiceEvent({
+        customerId: user.uid,
+        eventType: 'feed_impression',
+        serviceId: item.entityId || item.id,
+        categoryId: item.categoryId,
+        serviceIds: item.serviceIds || [item.entityId || item.id],
+        source: 'customer_home',
+        metadata: {
+          position: index + 1,
+          totalShown: Math.min(6, rankedCards.length),
+          rankScore: item.rankScore || 0,
+        },
+      }).catch(() => {});
+    });
+  }, [rankedCards, user?.uid]);
+
   const isTrackingActive = !!activeRequest && activeRequest.status !== 'collecting_details';
   const canUseServices = onboardingStatus.complete;
   const filteredResults = useMemo(() => {
-    const ranked = cards
+    const ranked = rankedCards
       .map((item) => ({ item, score: scoreSearchMatch(item, deferredSearchQuery) }))
       .filter(({ score }) => !deferredSearchQuery.trim() || score > 0)
       .sort((left, right) => right.score - left.score || left.item.title.localeCompare(right.item.title));
     return ranked.map(({ item }) => item);
-  }, [cards, deferredSearchQuery]);
+  }, [deferredSearchQuery, rankedCards]);
 
-  const openSelection = (item) => {
+  const openSelection = (item, source = 'home_feed') => {
+    if (user?.uid) {
+      recordCustomerServiceEvent({
+        customerId: user.uid,
+        eventType: source === 'search' ? 'search_select' : 'service_open',
+        serviceId: item.entityId || item.id,
+        categoryId: item.categoryId,
+        serviceIds: item.serviceIds || [item.entityId || item.id],
+        source,
+        metadata: {
+          rankScore: item.rankScore || 0,
+          searchQuery: source === 'search' ? deferredSearchQuery : '',
+        },
+      }).catch(() => {});
+    }
+
     if (!canUseServices) {
       navigate('Onboarding');
       return;
@@ -105,7 +183,26 @@ export function CustomerHomeScreen({
       </View>
 
       <View style={[styles.searchShell, { top: topInset }]}>
-        <Pressable accessibilityRole="button" onPress={() => setSearchVisible(true)} style={styles.searchBar}>
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => {
+            if (user?.uid) {
+        recordCustomerServiceEvent({
+          customerId: user.uid,
+          eventType: 'search_open',
+          serviceId: rankedCards[0]?.entityId || rankedCards[0]?.id || '',
+          categoryId: rankedCards[0]?.categoryId || '',
+          source: 'customer_home',
+          metadata: {
+            topServiceId: rankedCards[0]?.entityId || rankedCards[0]?.id || '',
+            topCategoryId: rankedCards[0]?.categoryId || '',
+          },
+        }).catch(() => {});
+      }
+            setSearchVisible(true);
+          }}
+          style={styles.searchBar}
+        >
           <Ionicons color="#d946ef" name="search-outline" size={18} />
           <Text style={styles.searchPlaceholder}>Search for a service or package</Text>
         </Pressable>
@@ -118,7 +215,7 @@ export function CustomerHomeScreen({
         }}
         showsVerticalScrollIndicator={false}
       >
-        <ServiceShowcaseCarousel cards={cards} onSelect={openSelection} />
+        <ServiceShowcaseCarousel cards={rankedCards} onSelect={openSelection} />
       </ScrollView>
 
       <View style={[styles.bottomSheetWrap, { bottom: bottomInset + 12 }]}>
@@ -159,7 +256,7 @@ export function CustomerHomeScreen({
         onSelect={(item) => {
           setSearchVisible(false);
           setSearchQuery('');
-          openSelection(item);
+          openSelection(item, 'search');
         }}
         results={filteredResults}
         value={searchQuery}
