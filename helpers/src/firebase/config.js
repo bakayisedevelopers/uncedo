@@ -2,6 +2,7 @@ import { getApp, getApps, initializeApp } from 'firebase/app';
 import { connectAuthEmulator, getAuth, getReactNativePersistence, initializeAuth } from 'firebase/auth';
 import {
   connectFirestoreEmulator,
+  collection,
   doc,
   getDoc,
   getDocs,
@@ -64,6 +65,7 @@ export function getFirebaseClients() {
     db,
     storage,
     firestoreModule: {
+      collection,
       doc,
       getDoc,
       getDocs,
