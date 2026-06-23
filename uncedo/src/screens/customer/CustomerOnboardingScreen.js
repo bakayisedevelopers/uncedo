@@ -32,7 +32,7 @@ export function CustomerOnboardingScreen({ navigate }) {
   );
   const [serviceAddress, setServiceAddress] = useState(user?.customerProfile?.serviceAddress || '');
   const [discoverySource, setDiscoverySource] = useState(
-    user?.customerProfile?.discoverySource || user?.studentProfile?.discoverySource || '',
+    user?.customerProfile?.discoverySource || '',
   );
   const [message, setMessage] = useState('');
   const [saving, setSaving] = useState(false);
@@ -49,7 +49,7 @@ export function CustomerOnboardingScreen({ navigate }) {
       Array.isArray(user?.customerProfile?.preferredServiceCategories) ? user.customerProfile.preferredServiceCategories : [],
     );
     setServiceAddress(user?.customerProfile?.serviceAddress || '');
-    setDiscoverySource(user?.customerProfile?.discoverySource || user?.studentProfile?.discoverySource || '');
+    setDiscoverySource(user?.customerProfile?.discoverySource || '');
   }, [user?.email, user?.uid]);
 
   const status = useMemo(() => getCustomerOnboardingStatus(user), [user]);
@@ -76,10 +76,6 @@ export function CustomerOnboardingScreen({ navigate }) {
           businessEmail: accountType === 'business' ? businessEmail.trim() : '',
           businessCategory: accountType === 'business' ? businessCategory : '',
           preferredServiceCategories,
-        },
-        studentProfile: {
-          ...(user?.studentProfile || {}),
-          discoverySource: discoverySource.trim(),
         },
       });
       const syncedProfile = await syncCustomerGrowth().catch(() => null);

@@ -11,11 +11,11 @@ Read this file after the repository root `AGENTS.md` when working in `uncedo/`.
 
 ## Scope
 
-- `uncedo/` is the student/customer Expo React Native app.
-- Keep mobile flows aligned with the web student experience unless React Native constraints force a difference.
+- `uncedo/` is the customer Expo React Native app, with legacy student screens kept only where the academic flow still exists.
+- Keep mobile flows aligned with the customer marketplace experience unless React Native constraints force a difference.
 - Reflect significant flow or structure changes in `uncedo/README.md`.
 
 ## Change Rules
 
 - Update the README when screens, services, navigation, or build steps change.
-- Keep edits scoped to the student app unless the request explicitly spans other packages.
+- Keep edits scoped to the customer app unless the request explicitly spans other packages.

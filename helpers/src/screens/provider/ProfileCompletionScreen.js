@@ -78,7 +78,7 @@ export function ProfileCompletionScreen({ navigate, goBack }) {
       </Card>
 
       <Card>
-        <SectionHeading title="Profile basics" subtitle="Helper name and provider type are required." />
+        <SectionHeading title="Profile basics" subtitle="Helper name and helper type are required." />
         <TextInput
           placeholder="First name"
           placeholderTextColor={colors.muted}

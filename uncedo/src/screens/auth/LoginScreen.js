@@ -3,7 +3,7 @@ import { Linking, StyleSheet, Text, View } from 'react-native';
 import { AuthField, AuthMessage, AuthScaffold } from '../../components/auth/AuthScaffold';
 import { LEGAL_URLS } from '../../constants/legal';
 import { useAuth } from '../../context/AuthContext';
-import { TUTOR_LOGIN_BLOCKED_CODE } from '../../services/authService';
+import { HELPER_LOGIN_BLOCKED_CODE } from '../../services/authService';
 import { colors } from '../../theme/colors';
 
 const socialButtons = [
@@ -19,19 +19,19 @@ export function LoginScreen({ navigate }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [tutorBlocked, setTutorBlocked] = useState(false);
+  const [helperBlocked, setHelperBlocked] = useState(false);
   const openLegalUrl = (url) => Linking.openURL(url).catch(() => null);
 
   async function submit() {
     setBusy(true);
     setError('');
     setNotice('');
-    setTutorBlocked(false);
+    setHelperBlocked(false);
     try {
       await login({ email, password });
     } catch (nextError) {
-      if (nextError?.code === TUTOR_LOGIN_BLOCKED_CODE) {
-        setTutorBlocked(true);
+      if (nextError?.code === HELPER_LOGIN_BLOCKED_CODE) {
+        setHelperBlocked(true);
       }
       setError(nextError.message);
     } finally {
@@ -41,13 +41,13 @@ export function LoginScreen({ navigate }) {
 
   const handleSocialPress = async (label) => {
     setError('');
-    setTutorBlocked(false);
+    setHelperBlocked(false);
 
     setNotice(`${label} sign-in is coming soon.`);
   };
 
-  const activeMessage = tutorBlocked
-    ? error || 'Providers are not allowed to log in on this app. Please use the Uncedo Helpers app.'
+  const activeMessage = helperBlocked
+    ? error || 'Helpers are not allowed to log in on this app. Please use the Uncedo Helpers app.'
     : error;
 
   return (

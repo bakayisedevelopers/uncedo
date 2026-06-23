@@ -17,7 +17,7 @@ import { logoutUser } from '../services/authService';
 
 const NAV_ITEMS = [
   { to: '/dashboard', label: 'Overview', icon: BarChart3 },
-  { to: '/providers', label: 'Providers', icon: Users },
+  { to: '/helpers', label: 'Helpers', icon: Users },
   { to: '/services', label: 'Services', icon: BadgeCheck },
   { to: '/customers', label: 'Customers', icon: FileImage },
   { to: '/helper-agreements', label: 'Helper agreements', icon: FileText },
@@ -46,7 +46,7 @@ export default function AdminShell() {
   const location = useLocation();
 
   const title = useMemo(() => {
-    if (location.pathname.startsWith('/providers')) return 'Provider control';
+    if (location.pathname.startsWith('/helpers')) return 'Helper control';
     if (location.pathname.startsWith('/services')) return 'Services';
     if (location.pathname.startsWith('/customers')) return 'Customer directory';
     if (location.pathname.startsWith('/helper-agreements')) return 'Helper agreements';
@@ -113,7 +113,7 @@ export default function AdminShell() {
               <div className="rounded-[24px] border border-white/10 bg-gradient-to-br from-brand/15 to-amber-500/10 p-4 text-sm text-ink-200">
                 <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-brand-soft/80">Moderation policy</p>
                 <p className="mt-2 leading-6">
-                  Review provider photos, approve useful services, and suspend bad actors without deleting their history.
+                  Review helper photos, approve useful services, and suspend bad actors without deleting their history.
                 </p>
               </div>
             </div>

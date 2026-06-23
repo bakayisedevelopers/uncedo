@@ -14,7 +14,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { LEGAL_URLS } from '../../constants/legal';
 import { useAuth } from '../../context/AuthContext';
-import { TUTOR_LOGIN_BLOCKED_CODE } from '../../services/authService';
+import { HELPER_LOGIN_BLOCKED_CODE } from '../../services/authService';
 import { colors } from '../../theme/colors';
 
 const socialButtons = [
@@ -59,8 +59,8 @@ export function HomeScreen() {
       }
     } catch (nextError) {
       const fallback = isSignup ? 'Unable to create your account.' : 'Unable to sign in.';
-      const blockedMessage = 'Providers are not allowed to log in on this app. Please use the Uncedo Helpers app.';
-      setError(nextError?.code === TUTOR_LOGIN_BLOCKED_CODE ? blockedMessage : (nextError?.message || fallback));
+      const blockedMessage = 'Helpers are not allowed to log in on this app. Please use the Uncedo Helpers app.';
+      setError(nextError?.code === HELPER_LOGIN_BLOCKED_CODE ? blockedMessage : (nextError?.message || fallback));
     } finally {
       setBusy(false);
     }

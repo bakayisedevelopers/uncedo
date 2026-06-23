@@ -14,14 +14,14 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
   * [functions/pricingEngine.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/pricingEngine.js): Core logic for estimation, price quotes, and billing snapshots.
   * [functions/customerServiceAi.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/customerServiceAi.js): LLM processing logic for automated customer service threads.
   * [functions/aiSubjectExtraction.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/aiSubjectExtraction.js): Processes files/images to detect subject areas.
-  * [functions/legalAgreements.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/legalAgreements.js): Database interactions, version publishing, and signed-record generation for tutor agreements.
+  * [functions/legalAgreements.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/legalAgreements.js): Database interactions, version publishing, and signed-record generation for helper agreements.
   * [functions/helperLegalAgreements.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/helperLegalAgreements.js): Helper-agreement versioning, immutable acceptance records, and signed PDF generation used by the admin and helper apps.
 
 ---
 
 ## 2. Uncedo Student / Customer Mobile App (`/uncedo`)
 * **Common References**: "Student app", "Student mobile app", "Uncedo app", "Customer app", "Student/customer mobile client".
-* **Purpose**: An Expo React Native application designed for students and customers to book requests, receive AI assistance, view active track maps, and join WebRTC classroom sessions.
+* **Purpose**: An Expo React Native application designed for customers to book requests, receive AI assistance, view active track maps, and join WebRTC classroom sessions.
 * **Key Folders & Screens (`/uncedo/src/screens/`)**:
   * **Student Surfaces (`screens/student/`)**:
     * [DashboardScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/screens/student/DashboardScreen.js): Home dashboard featuring request composer, quick suggestions, and navigation drawer access.
@@ -51,8 +51,8 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
 ---
 
 ## 3. Helpers / Providers Mobile App (`/helpers`)
-* **Common References**: "Helper app", "Helper mobile app", "Provider app", "Service provider application".
-* **Purpose**: An Expo React Native application designed for helpers (tutors or technicians) to accept job offers, track routing, set availability, and manage earnings.
+* **Common References**: "Helper app", "Helper mobile app", "Service helper application".
+* **Purpose**: An Expo React Native application designed for helpers to accept job offers, track routing, set availability, and manage earnings.
 * **Key Screens (`/helpers/src/screens/provider/`)**:
   * [ProviderDashboardScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/screens/provider/ProviderDashboardScreen.js): Dashboard with available job feed, active job alerts, and toggle switches for online/offline status.
   * [ActiveJobScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/screens/provider/ActiveJobScreen.js): Full-screen helper active job surface with route-based navigation, travel state actions (`driving`, `buying_resources`, `arrived`, `work_started`), wait timer handling, external maps handoff, and billing completion proof capture.
@@ -68,8 +68,8 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
 ---
 
 ## 4. Uncedo Web App (`/web`)
-* **Common References**: "Web dashboard", "tutor web portal", "Uncedo website".
-* **Purpose**: Vite + React web interface containing marketing landing pages, tutor portal (WebRTC transmitter, tldraw whiteboard implementation), and student-facing web flows.
+* **Common References**: "Web dashboard", "Uncedo website".
+* **Purpose**: Vite + React web interface containing marketing landing pages and web flows.
 * **Key Pages (`/web/src/pages/`)**:
   * [SessionRoomPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/web/src/pages/app/SessionRoomPage.jsx): Full classroom view embedding WebRTC voice broadcasting and the complete tldraw board canvas.
   * [OnboardingPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/web/src/pages/app/OnboardingPage.jsx): Registration wizard capturing credentials and pricing setups.
@@ -77,8 +77,8 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
 ---
 
 ## 5. Uncedo Admin App (`/admin`)
-* **Common References**: "Admin app", "admin console", "provider moderation panel", "service approval console".
-* **Purpose**: Standalone Vite + React admin console for provider moderation, service approval, photo review, customer lookup, and authentication-bound operational control.
+* **Common References**: "Admin app", "admin console", "helper moderation panel", "service approval console".
+* **Purpose**: Standalone Vite + React admin console for helper moderation, service approval, photo review, customer lookup, and authentication-bound operational control.
 * **Key Files & Logic**:
   * [admin/src/App.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/App.jsx): Admin routing and protected layout wiring.
   * [admin/src/pages/HelperAgreementsPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/pages/HelperAgreementsPage.jsx): Admin contract-management screen for publishing new helper agreement versions and reviewing history.

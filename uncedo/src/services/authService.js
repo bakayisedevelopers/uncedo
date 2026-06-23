@@ -7,27 +7,27 @@ import {
   updateProfile,
 } from 'firebase/auth';
 import { getFirebaseClients } from '../firebase/config';
-import { deleteUserProfile, getUserProfile, upsertStudentProfile } from './userService';
+import { deleteUserProfile, getUserProfile, upsertCustomerProfile } from './userService';
 
-export const TUTOR_LOGIN_BLOCKED_CODE = 'TUTOR_LOGIN_BLOCKED';
+export const HELPER_LOGIN_BLOCKED_CODE = 'HELPER_LOGIN_BLOCKED';
 
-function buildTutorBlockedError() {
-  const error = new Error('Providers are not allowed to log in on this app. Please use the Uncedo Helpers app.');
-  error.code = TUTOR_LOGIN_BLOCKED_CODE;
+function buildHelperBlockedError() {
+  const error = new Error('Helpers are not allowed to log in on this app. Please use the Uncedo Helpers app.');
+  error.code = HELPER_LOGIN_BLOCKED_CODE;
   return error;
 }
 
-function isTutorProfile(profile = {}) {
+function isHelperProfile(profile = {}) {
   const role = String(profile?.role || '').toLowerCase();
   const activeRole = String(profile?.activeRole || '').toLowerCase();
   const roles = Array.isArray(profile?.roles)
     ? profile.roles.map((nextRole) => String(nextRole || '').toLowerCase())
     : [];
 
-  return role === 'tutor' || activeRole === 'tutor' || roles.includes('tutor');
+  return role === 'helper' || activeRole === 'helper' || roles.includes('helper');
 }
 
-function normalizeStudentUser(firebaseUser, profile = {}) {
+function normalizeCustomerUser(firebaseUser, profile = {}) {
   if (!firebaseUser) return null;
 
   return {
@@ -36,9 +36,9 @@ function normalizeStudentUser(firebaseUser, profile = {}) {
     emailVerified: Boolean(firebaseUser.emailVerified),
     displayName: profile.displayName || firebaseUser.displayName || '',
     fullName: profile.fullName || profile.displayName || firebaseUser.displayName || '',
-    role: 'student',
-    activeRole: 'student',
-    roles: ['student'],
+    role: 'customer',
+    activeRole: 'customer',
+    roles: ['customer'],
     ...profile,
   };
 }
@@ -54,16 +54,16 @@ export function subscribeToAuthChanges(callback, onError) {
       }
 
       const profile = await getUserProfile(firebaseUser.uid);
-      if (isTutorProfile(profile)) {
+      if (isHelperProfile(profile)) {
         await signOut(auth);
-        onError?.(buildTutorBlockedError());
+        onError?.(buildHelperBlockedError());
         callback(null);
         return;
       }
-      callback(normalizeStudentUser(firebaseUser, profile || {}));
+      callback(normalizeCustomerUser(firebaseUser, profile || {}));
     } catch (error) {
       onError?.(error);
-      callback(normalizeStudentUser(firebaseUser));
+      callback(normalizeCustomerUser(firebaseUser));
     }
   }, onError);
 }
@@ -72,24 +72,24 @@ export async function loginWithEmail({ email, password }) {
   const { auth } = getFirebaseClients();
   const credential = await signInWithEmailAndPassword(auth, email.trim(), password);
   const profile = await getUserProfile(credential.user.uid);
-  if (isTutorProfile(profile)) {
+  if (isHelperProfile(profile)) {
     await signOut(auth);
-    throw buildTutorBlockedError();
+    throw buildHelperBlockedError();
   }
-  return normalizeStudentUser(credential.user, profile || {});
+  return normalizeCustomerUser(credential.user, profile || {});
 }
 
 export async function signupWithEmail({ name, email, password }) {
   const { auth } = getFirebaseClients();
   const credential = await createUserWithEmailAndPassword(auth, email.trim(), password);
   await updateProfile(credential.user, { displayName: name.trim() });
-  const profile = await upsertStudentProfile({
+  const profile = await upsertCustomerProfile({
     uid: credential.user.uid,
     email: credential.user.email,
     displayName: name.trim(),
   });
 
-  return normalizeStudentUser(credential.user, profile || {});
+  return normalizeCustomerUser(credential.user, profile || {});
 }
 
 export async function logoutUser() {

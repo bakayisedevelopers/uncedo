@@ -32,10 +32,10 @@ export const MVP_SERVICE_CATALOG = CUSTOMER_SERVICE_CATALOG;
 export const MVP_SERVICE_OPTIONS = CUSTOMER_SERVICE_LABELS;
 
 export const MOCK_PROVIDER_MARKERS = [
-  { id: 'provider-1', name: 'Amahle', category: 'Cleaning', x: 22, y: 30, eta: '8 min away' },
-  { id: 'provider-2', name: 'Thabo', category: 'Yard Maintenance', x: 58, y: 42, eta: '12 min away' },
-  { id: 'provider-3', name: 'Lerato', category: 'Beauty', x: 72, y: 22, eta: '6 min away' },
-  { id: 'provider-4', name: 'Sizwe', category: 'Barber', x: 40, y: 66, eta: '10 min away' },
+  { id: 'helper-1', name: 'Amahle', category: 'Cleaning', x: 22, y: 30, eta: '8 min away' },
+  { id: 'helper-2', name: 'Thabo', category: 'Yard Maintenance', x: 58, y: 42, eta: '12 min away' },
+  { id: 'helper-3', name: 'Lerato', category: 'Beauty', x: 72, y: 22, eta: '6 min away' },
+  { id: 'helper-4', name: 'Sizwe', category: 'Barber', x: 40, y: 66, eta: '10 min away' },
 ];
 
 export const PLACEHOLDER_THREAD_QUICK_REPLIES = [

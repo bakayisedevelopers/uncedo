@@ -48,7 +48,7 @@ export default function LoginPage() {
             Uncedo Admin
           </div>
           <h1 className="mt-5 max-w-xl text-4xl font-bold tracking-tight text-white sm:text-5xl">
-            Review providers, customers, and service photos from one console.
+            Review helpers, customers, and service photos from one console.
           </h1>
           <p className="mt-4 max-w-xl text-sm leading-7 text-ink-200 sm:text-base">
             Approve or suspend helper services, inspect uploaded work pictures, and keep customer records visible for
@@ -57,7 +57,7 @@ export default function LoginPage() {
 
           <div className="mt-8 grid gap-3 sm:grid-cols-3">
             {[
-              ['Provider moderation', 'Approve or suspend helpers.'],
+              ['Helper moderation', 'Approve or suspend helpers.'],
               ['Service control', 'Review individual skill photos.'],
               ['Customer insight', 'See profile and location data.'],
             ].map(([title, copy]) => (

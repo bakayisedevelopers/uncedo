@@ -55,7 +55,7 @@ export function CustomerDetailsScreen({ navigate }) {
           accountType: profileData.customerProfile?.accountType || '',
           customerType: profileData.customerProfile?.customerType || '',
           serviceAddress: profileData.customerProfile?.serviceAddress || '',
-          discoverySource: profileData.customerProfile?.discoverySource || profileData.studentProfile?.discoverySource || '',
+          discoverySource: profileData.customerProfile?.discoverySource || '',
           businessName: profileData.customerProfile?.businessName || '',
           businessEmail: profileData.customerProfile?.businessEmail || profileData.email || '',
           businessCategory: profileData.customerProfile?.businessCategory || '',
@@ -94,10 +94,6 @@ export function CustomerDetailsScreen({ navigate }) {
           businessEmail: form.accountType === 'business' ? form.businessEmail.trim() : '',
           businessCategory: form.accountType === 'business' ? form.businessCategory.trim() : '',
           preferredServiceCategories: Array.isArray(form.preferredServiceCategories) ? form.preferredServiceCategories : [],
-        },
-        studentProfile: {
-          ...(user?.studentProfile || {}),
-          discoverySource: form.discoverySource.trim(),
         },
       };
       const profile = await updateUserProfile(user.uid, updates);

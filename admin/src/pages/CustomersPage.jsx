@@ -75,7 +75,7 @@ export default function CustomersPage() {
         {!isLoading && !filtered.length ? (
           <EmptyState
             title="No customers found"
-            description="Customer profiles will appear here once students create accounts."
+            description="Customer profiles will appear here once customers create accounts."
           />
         ) : null}
 
@@ -99,7 +99,7 @@ export default function CustomersPage() {
                       <p className="mt-1 truncate text-sm text-ink-200">{customer.email}</p>
                       <p className="mt-2 text-xs text-ink-300">{customerAddress(customer)}</p>
                     </div>
-                    <Badge tone="neutral">{customer.activeRole || customer.role || 'student'}</Badge>
+                    <Badge tone="neutral">{customer.activeRole || customer.role || 'customer'}</Badge>
                   </div>
                 </button>
               ))}
@@ -119,9 +119,9 @@ export default function CustomersPage() {
                       ['Email', selected.email || 'Not set'],
                       ['Address', customerAddress(selected)],
                       ['Phone', selected.phoneNumber || 'Not set'],
-                      ['Grade', selected.studentProfile?.grade || 'Not set'],
-                      ['Curriculum', selected.studentProfile?.curriculum || 'Not set'],
-                      ['Discovery source', selected.customerProfile?.discoverySource || selected.studentProfile?.discoverySource || 'Not set'],
+                      ['Account type', selected.customerProfile?.accountType || 'Not set'],
+                      ['Customer type', selected.customerProfile?.customerType || 'Not set'],
+                      ['Discovery source', selected.customerProfile?.discoverySource || 'Not set'],
                     ].map(([label, value]) => (
                       <div key={label} className="rounded-[20px] border border-white/10 bg-white/5 p-4">
                         <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-ink-300">{label}</p>
@@ -161,7 +161,7 @@ export default function CustomersPage() {
                     </div>
                     <div className="mt-3 flex flex-wrap gap-2">
                       <Badge tone={selected.suspended ? 'danger' : 'neutral'}>{selected.suspended ? 'Suspended' : 'Active'}</Badge>
-                      <Badge tone="neutral">{selected.activeRole || selected.role || 'student'}</Badge>
+                      <Badge tone="neutral">{selected.activeRole || selected.role || 'customer'}</Badge>
                       <Badge tone={selected.customerProfile?.customerType ? 'brand' : 'neutral'}>
                         {selected.customerProfile?.customerType || 'personal'}
                       </Badge>

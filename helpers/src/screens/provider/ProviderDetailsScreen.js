@@ -67,7 +67,7 @@ export function ProviderDetailsScreen({ goBack }) {
 
       <View style={styles.header}>
         <Text style={styles.title}>Personal details</Text>
-        <Text style={styles.copy}>Edit your helper identity, provider type, and address details used for dispatch and profile completion.</Text>
+        <Text style={styles.copy}>Edit your helper identity, helper type, and address details used for dispatch and profile completion.</Text>
       </View>
 
       <Card style={styles.card}>

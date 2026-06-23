@@ -13,19 +13,19 @@ import { stopActiveJobTrackingForSignOut } from './activeJobTrackingService';
 export const HELPER_LOGIN_BLOCKED_CODE = 'HELPER_LOGIN_BLOCKED';
 
 function buildHelperBlockedError() {
-  const error = new Error('Client accounts are not allowed in this app. Please use the Uncedo app.');
+  const error = new Error('Customer accounts are not allowed in this app. Please use the Uncedo customer app.');
   error.code = HELPER_LOGIN_BLOCKED_CODE;
   return error;
 }
 
-function isClientProfile(profile = {}) {
+function isCustomerProfile(profile = {}) {
   const role = String(profile?.role || '').toLowerCase();
   const activeRole = String(profile?.activeRole || '').toLowerCase();
   const roles = Array.isArray(profile?.roles)
     ? profile.roles.map((nextRole) => String(nextRole || '').toLowerCase())
     : [];
 
-  return role === 'student' || activeRole === 'student' || roles.includes('student');
+  return role === 'customer' || activeRole === 'customer' || roles.includes('customer');
 }
 
 function normalizeHelperUser(firebaseUser, profile = {}) {
@@ -55,7 +55,7 @@ export function subscribeToAuthChanges(callback, onError) {
       }
 
       const profile = await getUserProfile(firebaseUser.uid);
-      if (isClientProfile(profile)) {
+      if (isCustomerProfile(profile)) {
         await signOut(auth);
         onError?.(buildHelperBlockedError());
         callback(null);
@@ -75,7 +75,7 @@ export async function loginWithEmail({ email, password }) {
   const credential = await signInWithEmailAndPassword(auth, email.trim(), password);
   const profile = await getUserProfile(credential.user.uid);
 
-  if (isClientProfile(profile)) {
+  if (isCustomerProfile(profile)) {
     await signOut(auth);
     throw buildHelperBlockedError();
   }

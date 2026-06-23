@@ -145,7 +145,7 @@ function HelperCard({ helperAssignment }) {
         </View>
         <View style={styles.noHelperInfo}>
           <Text style={styles.noHelperTitle}>No helper assigned yet</Text>
-          <Text style={styles.noHelperDesc}>We will automatically match a student helper to your request closer to the scheduled time.</Text>
+          <Text style={styles.noHelperDesc}>We will automatically match a helper to your request closer to the scheduled time.</Text>
         </View>
       </View>
     );
@@ -284,7 +284,7 @@ export function ServiceRequestDetailsScreen({ route, goBack, navigate }) {
       return 'AI details collection is active. Reconnect to finish setting up your request.';
     }
     if (status === 'matching') {
-      return 'We are searching for a student helper in your area. You will receive a notification as soon as they accept.';
+      return 'We are searching for a helper in your area. You will receive a notification as soon as they accept.';
     }
     if (status === 'no_helper_available') {
       return 'No helpers have accepted yet. We will continue checking as more helpers log in.';

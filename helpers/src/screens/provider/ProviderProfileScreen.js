@@ -193,7 +193,7 @@ export function ProviderProfileScreen({ navigate }) {
         <ProfileRow
           icon="person-circle-outline"
           title="Personal details"
-          description="Edit your name, phone number, provider type, home address, and business details."
+          description="Edit your name, phone number, helper type, home address, and business details."
           onPress={() => navigate({ key: 'ProviderDetails', params: { parentTab: 'Profile' } })}
         />
         <ProfileRow

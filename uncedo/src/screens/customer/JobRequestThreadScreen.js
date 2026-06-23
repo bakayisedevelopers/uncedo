@@ -12,7 +12,7 @@ function MessageBubble({ item }) {
     <View style={[styles.messageRow, isCustomer && styles.messageRowRight]}>
       <View style={[styles.messageBubble, isCustomer ? styles.messageBubbleCustomer : styles.messageBubbleSystem]}>
         <Text style={[styles.messageAuthor, isCustomer && styles.messageAuthorCustomer]}>
-          {isCustomer ? 'Customer' : item.role === 'provider' ? 'Helper' : 'Uncedo'}
+          {isCustomer ? 'Customer' : (item.role === 'helper' || item.role === 'provider') ? 'Helper' : 'Uncedo'}
         </Text>
         <Text style={[styles.messageText, isCustomer && styles.messageTextCustomer]}>{item.text}</Text>
       </View>
@@ -44,7 +44,7 @@ export function JobRequestThreadScreen({ goBack, route, systemInsets = {} }) {
     setMessages((prev) => [
       ...prev,
       { id: `c-${prev.length + 1}`, role: 'customer', text: trimmed },
-      { id: `u-${prev.length + 2}`, role: 'system', text: 'Placeholder follow-up saved. Full AI and provider chat will connect here later.' },
+      { id: `u-${prev.length + 2}`, role: 'system', text: 'Placeholder follow-up saved. Full AI and helper chat will connect here later.' },
     ]);
     setComposerText('');
   };
@@ -112,7 +112,7 @@ export function JobRequestThreadScreen({ goBack, route, systemInsets = {} }) {
 
         <Card style={styles.providerPlaceholderCard}>
           <Text style={styles.sectionTitle}>Future helper card</Text>
-          <Text style={styles.placeholderCopy}>Assigned helper details, provider chat messages, arrival updates, completion approval, and rating prompts will appear here later.</Text>
+          <Text style={styles.placeholderCopy}>Assigned helper details, helper chat messages, arrival updates, completion approval, and rating prompts will appear here later.</Text>
         </Card>
       </ScrollView>
 

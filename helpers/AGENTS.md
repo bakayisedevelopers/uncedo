@@ -11,8 +11,8 @@ Read this file after the repository root `AGENTS.md` when working in `helpers/`.
 
 ## Scope
 
-- `helpers/` is the helper/provider Expo React Native app.
-- Keep helper workflows aligned with the provider screens and services in this folder.
+- `helpers/` is the helper Expo React Native app.
+- Keep helper workflows aligned with the helper screens and services in this folder.
 - Reflect significant flow or structure changes in `helpers/README.md`.
 
 ## Change Rules

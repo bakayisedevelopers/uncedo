@@ -27,7 +27,7 @@ function statusTone(status = '') {
   return 'neutral';
 }
 
-function providerStateLabel(profile) {
+function helperStateLabel(profile) {
   if (profile.suspended || profile.adminStatus === 'suspended') return 'Suspended';
   if (String(profile.verificationStatus || '').toLowerCase() === 'verified') return 'Verified';
   if (String(profile.verificationStatus || '').toLowerCase() === 'rejected') return 'Rejected';
@@ -61,7 +61,7 @@ function helperAgreementLabel(profile = {}) {
   return requiredVersion ? `Agreement pending (needs v${requiredVersion})` : 'Agreement pending';
 }
 
-export default function ProvidersPage() {
+export default function HelpersPage() {
   const [helpers, setHelpers] = useState([]);
   const [selectedId, setSelectedId] = useState('');
   const [search, setSearch] = useState('');
@@ -85,7 +85,7 @@ export default function ProvidersPage() {
 
   const selected = helpers.find((item) => item.uid === selectedId) || helpers[0] || null;
 
-  const providerCards = useMemo(() => {
+  const helperCards = useMemo(() => {
     const normalizedSearch = String(search || '').trim().toLowerCase();
     return helpers.filter((item) => {
       if (!normalizedSearch) return true;
@@ -150,7 +150,7 @@ export default function ProvidersPage() {
       <Card>
         <SectionTitle
           eyebrow="Directory"
-          title="Provider moderation"
+          title="Helper moderation"
           description="Inspect helper profiles, business details, and service-level approvals."
           action={(
             <label className="relative block">
@@ -158,26 +158,26 @@ export default function ProvidersPage() {
               <input
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search providers"
+                placeholder="Search helpers"
                 className="w-full rounded-2xl border border-white/10 bg-ink-950/50 py-3 pl-11 pr-4 text-sm text-white outline-none placeholder:text-ink-400 focus:border-brand"
               />
             </label>
           )}
         />
 
-        {isLoading ? <LoadingState label="Loading providers..." /> : null}
+        {isLoading ? <LoadingState label="Loading helpers..." /> : null}
 
-        {!isLoading && !providerCards.length ? (
+        {!isLoading && !helperCards.length ? (
           <EmptyState
-            title="No providers found"
-            description="Provider profiles will appear here once helpers create accounts in the shared Firebase project."
+            title="No helpers found"
+            description="Helper profiles will appear here once helpers create accounts in the shared Firebase project."
           />
         ) : null}
 
-        {!isLoading && providerCards.length ? (
+        {!isLoading && helperCards.length ? (
           <div className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
             <div className="space-y-3">
-              {providerCards.map((profile) => {
+              {helperCards.map((profile) => {
                 const serviceCount = flattenProviderServices([profile]).length;
                 const selectedRow = profile.uid === selectedId;
                 return (
@@ -203,7 +203,7 @@ export default function ProvidersPage() {
                       <ChevronRight className="mt-1 h-4 w-4 text-ink-300" />
                     </div>
                     <div className="mt-4 flex flex-wrap gap-2">
-                      <Badge tone={statusTone(profile.verificationStatus)}>{providerStateLabel(profile)}</Badge>
+                      <Badge tone={statusTone(profile.verificationStatus)}>{helperStateLabel(profile)}</Badge>
                       <Badge tone={profile.suspended ? 'danger' : 'neutral'}>{profile.suspended ? 'Blocked' : 'Active'}</Badge>
                       <Badge tone="neutral">{serviceCount} skills</Badge>
                     </div>
@@ -218,7 +218,7 @@ export default function ProvidersPage() {
                   <Card className="bg-white/7">
                     <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
                       <div>
-                        <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-brand-soft/80">Provider profile</p>
+                        <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-brand-soft/80">Helper profile</p>
                         <h3 className="mt-2 text-2xl font-bold text-white">{selected.fullName || selected.displayName || selected.email}</h3>
                         <p className="mt-1 text-sm text-ink-200">{selected.email}</p>
                         <p className="mt-2 text-sm text-ink-300">
@@ -227,7 +227,7 @@ export default function ProvidersPage() {
                       </div>
 
                       <div className="flex flex-wrap gap-2">
-                        <Badge tone={statusTone(selected.verificationStatus)}>{providerStateLabel(selected)}</Badge>
+                        <Badge tone={statusTone(selected.verificationStatus)}>{helperStateLabel(selected)}</Badge>
                         <Badge tone={selected.suspended ? 'danger' : 'success'}>{selected.suspended ? 'Suspended' : 'Available'}</Badge>
                       </div>
                     </div>
@@ -292,7 +292,7 @@ export default function ProvidersPage() {
                   <Card>
                     <SectionTitle
                       eyebrow="Services"
-                      title="Provider skills and photos"
+                      title="Helper skills and photos"
                       description="Each row shows the service, its work photos, and the moderation controls."
                     />
 
@@ -375,13 +375,13 @@ export default function ProvidersPage() {
                     ) : (
                       <EmptyState
                         title="No services yet"
-                        description="This provider has not uploaded any service skills with work pictures."
+                        description="This helper has not uploaded any service skills with work pictures."
                       />
                     )}
                   </Card>
                 </>
               ) : (
-                <EmptyState title="Select a provider" description="Choose a provider to review their profile and services." />
+                <EmptyState title="Select a helper" description="Choose a helper to review their profile and services." />
               )}
             </div>
           </div>

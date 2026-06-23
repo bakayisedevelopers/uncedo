@@ -31,17 +31,17 @@ export default function DashboardPage() {
   const summary = useMemo(() => {
     const serviceRows = flattenProviderServices(helpers);
     const pendingServices = serviceRows.filter((item) => item.skillStatus === 'pending' || item.skillStatus === 'review');
-    const suspendedProviders = helpers.filter((item) => item.suspended || item.adminStatus === 'suspended');
-    const businessProviders = helpers.filter((item) => String(item.providerType || '').toLowerCase() === 'business');
-    const verifiedProviders = helpers.filter((item) => String(item.verificationStatus || '').toLowerCase() === 'verified');
+    const suspendedHelpers = helpers.filter((item) => item.suspended || item.adminStatus === 'suspended');
+    const businessHelpers = helpers.filter((item) => String(item.providerType || '').toLowerCase() === 'business');
+    const verifiedHelpers = helpers.filter((item) => String(item.verificationStatus || '').toLowerCase() === 'verified');
     const activeServices = serviceRows.filter((item) => item.skillActive !== false && item.skillStatus !== 'rejected');
 
     return {
       serviceRows,
       pendingServices,
-      suspendedProviders,
-      businessProviders,
-      verifiedProviders,
+      suspendedHelpers,
+      businessHelpers,
+      verifiedHelpers,
       activeServices,
     };
   }, [helpers]);
@@ -49,10 +49,10 @@ export default function DashboardPage() {
   return (
     <div className="space-y-6">
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <MetricCard label="Service providers" value={formatCount(helpers.length)} detail="Helper accounts in the shared users collection" tone="brand" />
-        <MetricCard label="Customers" value={formatCount(customers.length)} detail="Student/customer accounts stored in Firestore" tone="neutral" />
+        <MetricCard label="Helpers" value={formatCount(helpers.length)} detail="Helper accounts in the shared users collection" tone="brand" />
+        <MetricCard label="Customers" value={formatCount(customers.length)} detail="Customer accounts stored in Firestore" tone="neutral" />
         <MetricCard label="Pending services" value={formatCount(summary.pendingServices.length)} detail="Skills that still need review" tone="accent" />
-        <MetricCard label="Suspended providers" value={formatCount(summary.suspendedProviders.length)} detail="Providers blocked from active work" tone="danger" />
+        <MetricCard label="Suspended helpers" value={formatCount(summary.suspendedHelpers.length)} detail="Helpers blocked from active work" tone="danger" />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
@@ -64,7 +64,7 @@ export default function DashboardPage() {
           />
           <div className="grid gap-3 sm:grid-cols-2">
             {[
-              { to: '/providers', title: 'Provider directory', copy: 'Review profiles, business details, and account state.', icon: Users },
+              { to: '/helpers', title: 'Helper directory', copy: 'Review profiles, business details, and account state.', icon: Users },
               { to: '/services', title: 'Services', copy: 'Manage the live catalog, admin images, and helper submissions.', icon: BadgeCheck },
               { to: '/customers', title: 'Customer records', copy: 'Inspect customer profiles and location fields.', icon: UserCircle2 },
               { to: '/services', title: 'Photo audit', copy: 'Inspect uploaded work photos before approval.', icon: Building2 },
@@ -93,8 +93,8 @@ export default function DashboardPage() {
           />
           <div className="space-y-3">
             {[
-              ['Verified providers', summary.verifiedProviders.length, 'success'],
-              ['Business providers', summary.businessProviders.length, 'brand'],
+              ['Verified helpers', summary.verifiedHelpers.length, 'success'],
+              ['Business helpers', summary.businessHelpers.length, 'brand'],
               ['Active services', summary.activeServices.length, 'neutral'],
             ].map(([label, value, tone]) => (
               <div key={label} className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
@@ -136,7 +136,7 @@ export default function DashboardPage() {
             ) : (
               <EmptyState
                 title="No pending reviews"
-                description="New provider services will appear here when they are submitted for moderation."
+                description="New helper services will appear here when they are submitted for moderation."
               />
             )}
           </Card>
@@ -148,21 +148,21 @@ export default function DashboardPage() {
               description="A few high-level indicators for the admin team."
             />
             <div className="space-y-3">
-              {summary.suspendedProviders.length ? (
+              {summary.suspendedHelpers.length ? (
                 <div className="rounded-[22px] border border-rose-400/20 bg-rose-400/10 p-4">
                   <div className="flex items-start gap-3">
                     <AlertTriangle className="mt-0.5 h-5 w-5 text-rose-200" />
                     <div>
-                      <p className="font-bold text-white">Suspended providers detected</p>
+                      <p className="font-bold text-white">Suspended helpers detected</p>
                       <p className="mt-1 text-sm leading-6 text-rose-100/90">
-                        {summary.suspendedProviders.length} provider account{summary.suspendedProviders.length === 1 ? ' is' : 's are'} currently blocked from active work.
+                        {summary.suspendedHelpers.length} helper account{summary.suspendedHelpers.length === 1 ? ' is' : 's are'} currently blocked from active work.
                       </p>
                     </div>
                   </div>
                 </div>
               ) : (
                 <div className="rounded-[22px] border border-emerald-400/20 bg-emerald-400/10 p-4 text-sm text-emerald-100">
-                  No providers are currently suspended.
+                  No helpers are currently suspended.
                 </div>
               )}
 

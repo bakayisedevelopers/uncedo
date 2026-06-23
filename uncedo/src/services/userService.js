@@ -7,15 +7,15 @@ function buildReferralSlug() {
   return `clx-${Math.random().toString(36).slice(2, 22)}`;
 }
 
-export function buildDefaultStudentProfile({ uid, email, displayName }) {
+export function buildDefaultCustomerProfile({ uid, email, displayName }) {
   return {
     uid,
     email,
     fullName: displayName,
     displayName,
-    role: 'student',
-    activeRole: 'student',
-    roles: ['student'],
+    role: 'customer',
+    activeRole: 'customer',
+    roles: ['customer'],
     profilePhoto: '',
     phoneNumber: '',
     subjects: [],
@@ -56,6 +56,8 @@ export function buildDefaultStudentProfile({ uid, email, displayName }) {
     },
   };
 }
+
+export const buildDefaultStudentProfile = buildDefaultCustomerProfile;
 
 export async function getUserProfile(uid) {
   const { db } = getFirebaseClients();
@@ -117,11 +119,11 @@ export async function updateUserRatingSummary(uid, roleKey, overallScore) {
   });
 }
 
-export async function upsertStudentProfile({ uid, email, displayName }) {
+export async function upsertCustomerProfile({ uid, email, displayName }) {
   const { db } = getFirebaseClients();
   const userRef = doc(db, 'users', uid);
   const existing = await getDoc(userRef);
-  const base = existing.exists() ? existing.data() : buildDefaultStudentProfile({ uid, email, displayName });
+  const base = existing.exists() ? existing.data() : buildDefaultCustomerProfile({ uid, email, displayName });
 
   await setDoc(
     userRef,
@@ -131,9 +133,9 @@ export async function upsertStudentProfile({ uid, email, displayName }) {
       email,
       displayName: base.displayName || displayName,
       fullName: base.fullName || displayName,
-      role: 'student',
-      activeRole: 'student',
-      roles: ['student'],
+      role: 'customer',
+      activeRole: 'customer',
+      roles: ['customer'],
       updatedAt: serverTimestamp(),
       createdAt: existing.exists() ? base.createdAt : serverTimestamp(),
     },
@@ -142,6 +144,8 @@ export async function upsertStudentProfile({ uid, email, displayName }) {
 
   return getUserProfile(uid);
 }
+
+export const upsertStudentProfile = upsertCustomerProfile;
 
 export function subscribeToUserProfile(uid, callback, onError) {
   if (!uid) {

@@ -1,6 +1,6 @@
-# Helpers Provider App
+# Helpers App
 
-This folder contains the Expo React Native app for helpers and service providers.
+This folder contains the Expo React Native app for helpers.
 
 ## Purpose
 

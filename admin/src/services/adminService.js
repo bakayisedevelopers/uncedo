@@ -1,8 +1,8 @@
 import { getFirebaseClients } from '../firebase/config';
 
 const ROLE_GROUPS = {
-  provider: new Set(['helper', 'tutor']),
-  customer: new Set(['student', 'customer']),
+  helper: new Set(['helper', 'tutor', 'provider']),
+  customer: new Set(['customer', 'student']),
   admin: new Set(['admin']),
 };
 
@@ -165,13 +165,14 @@ export async function listUsersByRole(activeRole) {
   const { collection, getDocs } = firestoreModule;
   const snapshot = await getDocs(collection(db, 'users'));
   const normalizedGroup = normalizeRole(activeRole);
+  const resolvedGroup = normalizedGroup === 'provider' ? 'helper' : normalizedGroup;
 
   return snapshot.docs
     .map((item) => normalizeAdminProfile({ uid: item.id, ...item.data() }))
     .filter((profile) => {
-      if (normalizedGroup === 'provider') return profileMatchesGroup(profile, 'provider');
-      if (normalizedGroup === 'customer') return profileMatchesGroup(profile, 'customer');
-      if (normalizedGroup === 'admin') return profileMatchesGroup(profile, 'admin');
+      if (resolvedGroup === 'helper') return profileMatchesGroup(profile, 'helper');
+      if (resolvedGroup === 'customer') return profileMatchesGroup(profile, 'customer');
+      if (resolvedGroup === 'admin') return profileMatchesGroup(profile, 'admin');
       return [
         profile.role,
         profile.activeRole,
@@ -181,7 +182,7 @@ export async function listUsersByRole(activeRole) {
 }
 
 export async function listHelperProfiles() {
-  return listUsersByRole('provider');
+  return listUsersByRole('helper');
 }
 
 export async function listCustomerProfiles() {

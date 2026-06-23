@@ -3,7 +3,7 @@ import { PlaceholderScreen } from '../../components/PlaceholderScreen';
 export function AvailabilityScreen() {
   return (
     <PlaceholderScreen
-      eyebrow="Provider"
+      eyebrow="Helper"
       title="Availability"
       description="This screen will later support going online, setting work hours, service radius, busy states, and map-based availability."
       actions={[

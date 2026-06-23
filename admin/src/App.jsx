@@ -4,7 +4,7 @@ import ProtectedRoute from './components/ProtectedRoute';
 import DashboardPage from './pages/DashboardPage';
 import HelperAgreementsPage from './pages/HelperAgreementsPage';
 import LoginPage from './pages/LoginPage';
-import ProvidersPage from './pages/ProvidersPage';
+import HelpersPage from './pages/ProvidersPage';
 import ServicesPage from './pages/ServicesPage';
 import CustomersPage from './pages/CustomersPage';
 
@@ -22,7 +22,7 @@ export default function App() {
         }
       >
         <Route path="/dashboard" element={<DashboardPage />} />
-        <Route path="/providers" element={<ProvidersPage />} />
+        <Route path="/helpers" element={<HelpersPage />} />
         <Route path="/services" element={<ServicesPage />} />
         <Route path="/customers" element={<CustomersPage />} />
         <Route path="/helper-agreements" element={<HelperAgreementsPage />} />
