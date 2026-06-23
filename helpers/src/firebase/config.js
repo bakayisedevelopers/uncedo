@@ -1,6 +1,21 @@
 import { getApp, getApps, initializeApp } from 'firebase/app';
 import { connectAuthEmulator, getAuth, getReactNativePersistence, initializeAuth } from 'firebase/auth';
-import { connectFirestoreEmulator, getFirestore } from 'firebase/firestore';
+import {
+  connectFirestoreEmulator,
+  doc,
+  getDoc,
+  getDocs,
+  getFirestore,
+  onSnapshot,
+  orderBy,
+  query,
+  runTransaction,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+  where,
+  writeBatch,
+} from 'firebase/firestore';
 import { connectStorageEmulator, getStorage } from 'firebase/storage';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
@@ -43,7 +58,27 @@ export function getFirebaseClients() {
     emulatorsConnected = true;
   }
 
-  return { app, auth, db, storage };
+  return {
+    app,
+    auth,
+    db,
+    storage,
+    firestoreModule: {
+      doc,
+      getDoc,
+      getDocs,
+      getFirestore,
+      onSnapshot,
+      orderBy,
+      query,
+      runTransaction,
+      serverTimestamp,
+      setDoc,
+      updateDoc,
+      where,
+      writeBatch,
+    },
+  };
 }
 
 export function getFunctionEndpoint(functionName) {
