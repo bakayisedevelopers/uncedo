@@ -60,9 +60,6 @@ export function HelperOfferOverlay() {
     : 0;
   const countdownColor = getCountdownColor(secondsLeft);
   const offerTimingLabel = activeOffer?.timingPreference === 'later' ? 'Later' : 'Now';
-  const offerTimingCopy = activeOffer?.timingPreference === 'later'
-    ? (activeOffer?.scheduledForText || 'Scheduled request')
-    : 'Needs help now';
   const offerPrice = formatCurrency(activeOffer?.payoutEstimate);
   const shimmerTranslate = shimmer.interpolate({
     inputRange: [0, 1],
@@ -99,16 +96,10 @@ export function HelperOfferOverlay() {
               </View>
             </View>
 
-            <Text style={styles.description}>{activeOffer.description}</Text>
-
-            <View style={styles.statusCard}>
-              <View style={styles.statusRow}>
-                <View style={[styles.statusPill, activeOffer.timingPreference === 'later' ? styles.statusPillLater : styles.statusPillNow]}>
-                  <Text style={styles.statusPillText}>{offerTimingLabel}</Text>
-                </View>
-                <Text style={styles.statusCopy}>{offerTimingCopy}</Text>
+            <View style={[styles.statusCard, activeOffer.timingPreference === 'later' ? styles.statusCardLater : styles.statusCardNow]}>
+              <View style={[styles.statusPill, activeOffer.timingPreference === 'later' ? styles.statusPillLater : styles.statusPillNow]}>
+                <Text style={styles.statusPillText}>{offerTimingLabel}</Text>
               </View>
-              {activeOffer.statusDetail ? <Text style={styles.statusNote}>{activeOffer.statusDetail}</Text> : null}
             </View>
 
             {!canRespond ? (
@@ -226,55 +217,37 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     textAlign: 'center',
   },
-  description: {
-    color: colors.text,
-    fontSize: 14,
-    lineHeight: 21,
-  },
   statusCard: {
-    backgroundColor: 'rgba(248, 250, 252, 0.92)',
-    borderColor: colors.border,
+    alignItems: 'flex-start',
     borderRadius: 18,
     borderWidth: 1,
-    gap: 8,
-    padding: 14,
+    padding: 12,
   },
-  statusRow: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 10,
-  },
-  statusPill: {
-    borderRadius: 999,
-    borderWidth: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-  },
-  statusPillNow: {
+  statusCardNow: {
     backgroundColor: '#dcfce7',
     borderColor: '#86efac',
   },
+  statusCardLater: {
+    backgroundColor: '#dcfce7',
+    borderColor: '#86efac',
+  },
+  statusPill: {
+    borderRadius: 999,
+    borderWidth: 0,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  statusPillNow: {
+    backgroundColor: 'rgba(255,255,255,0.14)',
+  },
   statusPillLater: {
-    backgroundColor: '#fdf2f8',
-    borderColor: '#f9a8d4',
+    backgroundColor: 'rgba(255,255,255,0.16)',
   },
   statusPillText: {
     color: colors.brandDark,
     fontSize: 11,
     fontWeight: '900',
     textTransform: 'uppercase',
-  },
-  statusCopy: {
-    color: colors.text,
-    flex: 1,
-    fontSize: 13,
-    fontWeight: '800',
-    lineHeight: 20,
-  },
-  statusNote: {
-    color: colors.muted,
-    fontSize: 12,
-    lineHeight: 18,
   },
   warningCard: {
     backgroundColor: '#fffbeb',

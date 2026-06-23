@@ -1727,6 +1727,41 @@ exports.reconcileServiceRequestOffers = onSchedule('every 1 minutes', async () =
   }
 });
 
+exports.promoteScheduledServiceRequests = onSchedule('every 1 minutes', async () => {
+  const now = Date.now();
+  const snapshot = await db.collection('serviceRequests')
+    .where('status', '==', SERVICE_REQUEST_STATUS.SCHEDULED_PENDING)
+    .get();
+
+  if (snapshot.empty) {
+    return;
+  }
+
+  const batch = db.batch();
+  let updatesCount = 0;
+
+  snapshot.docs.forEach((docSnap) => {
+    const request = docSnap.data() || {};
+    const scheduledAtMs = normalizeMillis(request?.requestPayload?.scheduledForAtMs)
+      || normalizeMillis(Date.parse(String(request?.requestPayload?.scheduledForText || '').trim()));
+
+    if (!scheduledAtMs || scheduledAtMs > now) {
+      return;
+    }
+
+    batch.update(docSnap.ref, {
+      status: SERVICE_REQUEST_STATUS.MATCHING,
+      statusDetail: 'Scheduled time reached. Matching the next helper.',
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    updatesCount += 1;
+  });
+
+  if (updatesCount) {
+    await batch.commit();
+  }
+});
+
 exports.syncClassRequestLifecycle = onDocumentWritten('classRequests/{requestId}', async (event) => {
   const afterData = event.data.after.exists ? event.data.after.data() : null;
   if (!afterData) return;

@@ -64,6 +64,42 @@ function getDistanceInMeters(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
+function normalizeHeading(heading = null) {
+  const value = Number(heading);
+  if (!Number.isFinite(value)) return null;
+  const normalized = value % 360;
+  return normalized < 0 ? normalized + 360 : normalized;
+}
+
+function getBearingBetweenCoordinates(from, to) {
+  const start = normalizeCoordinate(from);
+  const end = normalizeCoordinate(to);
+  if (!start || !end) return null;
+
+  const lat1 = (start.latitude * Math.PI) / 180;
+  const lat2 = (end.latitude * Math.PI) / 180;
+  const deltaLng = ((end.longitude - start.longitude) * Math.PI) / 180;
+  const y = Math.sin(deltaLng) * Math.cos(lat2);
+  const x =
+    Math.cos(lat1) * Math.sin(lat2)
+    - Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLng);
+  const bearing = (Math.atan2(y, x) * 180) / Math.PI;
+  return normalizeHeading(bearing);
+}
+
+function smoothHeading(previousHeading, nextHeading, smoothing = 0.22) {
+  const current = normalizeHeading(previousHeading);
+  const target = normalizeHeading(nextHeading);
+  if (current === null) return target;
+  if (target === null) return current;
+
+  const currentRad = (current * Math.PI) / 180;
+  const targetRad = (target * Math.PI) / 180;
+  const x = Math.cos(currentRad) * (1 - smoothing) + Math.cos(targetRad) * smoothing;
+  const y = Math.sin(currentRad) * (1 - smoothing) + Math.sin(targetRad) * smoothing;
+  return normalizeHeading((Math.atan2(y, x) * 180) / Math.PI);
+}
+
 function normalizeCoordinate(coordinate = null) {
   const latitude = Number(coordinate?.latitude);
   const longitude = Number(coordinate?.longitude);
@@ -201,6 +237,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
   const { activeJob, actions, profile, saving, saveError } = useHelpersApp();
   const [currentLocation, setCurrentLocation] = useState(null);
   const [trackingDocument, setTrackingDocument] = useState(null);
+  const [navigationHeading, setNavigationHeading] = useState(null);
   const [resolvedCustomerLocation, setResolvedCustomerLocation] = useState(null);
   const [routeCoordinates, setRouteCoordinates] = useState([]);
   const [routeDistanceMeters, setRouteDistanceMeters] = useState(null);
@@ -220,6 +257,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
   const [ratingTarget, setRatingTarget] = useState(null);
   const [nowTime, setNowTime] = useState(Date.now());
   const locationSubscriptionRef = useRef(null);
+  const previousNavigationLocationRef = useRef(null);
   const activeTrackingRequestIdRef = useRef('');
   const latestTrackedStatusRef = useRef('');
   const keepLocationSharingEnabledRef = useRef(false);
@@ -251,6 +289,39 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
   useEffect(() => {
     keepLocationSharingEnabledRef.current = profile?.onlineStatus === 'online';
   }, [profile?.onlineStatus]);
+
+  useEffect(() => {
+    previousNavigationLocationRef.current = null;
+    setNavigationHeading(null);
+  }, [activeJob?.requestId]);
+
+  useEffect(() => {
+    if (!currentLocation) {
+      previousNavigationLocationRef.current = null;
+      setNavigationHeading(null);
+      return;
+    }
+
+    const nextCoordinate = normalizeCoordinate(currentLocation);
+    if (!nextCoordinate) {
+      return;
+    }
+
+    const previousCoordinate = previousNavigationLocationRef.current;
+    const explicitHeading = normalizeHeading(currentLocation.heading);
+    const travelBearing = previousCoordinate
+      ? getBearingBetweenCoordinates(previousCoordinate, nextCoordinate)
+      : null;
+    const nextHeading = travelBearing !== null
+      ? smoothHeading(explicitHeading ?? travelBearing, travelBearing, 0.24)
+      : explicitHeading;
+
+    if (Number.isFinite(nextHeading)) {
+      setNavigationHeading(nextHeading);
+    }
+
+    previousNavigationLocationRef.current = nextCoordinate;
+  }, [currentLocation]);
 
   useEffect(() => {
     Animated.spring(sheetHeight, {
@@ -896,27 +967,14 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
         </Pressable>
       </View>
 
-      {navigationHint ? (
-        <View style={styles.navigationHintCard}>
-          <Ionicons color={colors.brandDark} name="navigate-outline" size={18} />
-          <View style={styles.navigationHintBody}>
-            <Text style={styles.navigationHintTitle}>Next direction</Text>
-            <Text style={styles.navigationHintCopy}>
-              {navigationHint.instruction}
-              {navigationHint.distance ? ` in ${formatDistanceValue(navigationHint.distance)}` : ''}
-            </Text>
-          </View>
-        </View>
-      ) : null}
-
       <View style={styles.metricsRow}>
-        <View style={[styles.metricPill, { backgroundColor: toneStyles.badgeBg, borderColor: toneStyles.badgeBg }]}>
+        <View style={[styles.metricChip, { backgroundColor: toneStyles.badgeBg, borderColor: toneStyles.badgeBg }]}>
           <Text style={[styles.metricValue, { color: toneStyles.badgeText }]}>{formatDistanceValue(distance)}</Text>
         </View>
-        <View style={[styles.metricPill, { backgroundColor: toneStyles.badgeBg, borderColor: toneStyles.badgeBg }]}>
+        <View style={[styles.metricChip, { backgroundColor: toneStyles.badgeBg, borderColor: toneStyles.badgeBg }]}>
           <Text style={[styles.metricValue, { color: toneStyles.badgeText }]}>{etaMinutes ? `${etaMinutes} min` : 'Waiting'}</Text>
         </View>
-        <View style={[styles.statusBadge, { backgroundColor: toneStyles.badgeBg }]}>
+        <View style={[styles.metricChip, { backgroundColor: toneStyles.badgeBg, borderColor: toneStyles.badgeBg }]}>
           <Text style={[styles.statusBadgeText, { color: toneStyles.badgeText }]}>
             {statusMeta.label}
           </Text>
@@ -995,7 +1053,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
           currentUserMarker={currentLocation ? {
             latitude: currentLocation.latitude,
             longitude: currentLocation.longitude,
-            heading: currentLocation.heading,
+            heading: navigationHeading ?? currentLocation.heading,
             initials: 'You',
           } : null}
           customerMarkers={customerMarkers}
@@ -1005,21 +1063,35 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
           controlBottomInset={isLandscape ? 24 : collapsedHeight + bottomInset + 24}
         />
 
-        <Pressable
-          accessibilityRole="button"
-          style={[styles.topBackButton, { top: topInset + 16 }]}
-          onPress={() => goBack('Home')}
-        >
-          <Ionicons name="chevron-back" size={24} color={colors.text} />
-        </Pressable>
+        <View style={[styles.topChromeRow, { top: topInset + 16 }]}>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => goBack('Home')}
+            style={styles.topBackButton}
+          >
+            <Ionicons name="chevron-back" size={24} color={colors.text} />
+          </Pressable>
 
-        <Pressable
-          accessibilityRole="button"
-          style={[styles.topSafetyButton, { top: topInset + 16 }]}
-          onPress={() => setShowSafetyModal(true)}
-        >
-          <Ionicons name="shield-checkmark" size={24} color={colors.brand} />
-        </Pressable>
+          {navigationHint ? (
+            <View style={styles.topDirectionCard}>
+              <Ionicons color={colors.brandDark} name="navigate-outline" size={16} />
+              <Text style={styles.topDirectionText} numberOfLines={2}>
+                {navigationHint.instruction}
+                {navigationHint.distance ? ` in ${formatDistanceValue(navigationHint.distance)}` : ''}
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.topDirectionCardSpacer} />
+          )}
+
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => setShowSafetyModal(true)}
+            style={styles.topSafetyButton}
+          >
+            <Ionicons name="shield-checkmark" size={24} color={colors.brand} />
+          </Pressable>
+        </View>
       </View>
 
       {isLandscape ? (
@@ -1216,9 +1288,6 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
   },
   topBackButton: {
-    position: 'absolute',
-    top: 50,
-    left: 16,
     width: 48,
     height: 48,
     borderRadius: 24,
@@ -1233,9 +1302,6 @@ const styles = StyleSheet.create({
     zIndex: 10,
   },
   topSafetyButton: {
-    position: 'absolute',
-    top: 50,
-    right: 16,
     width: 48,
     height: 48,
     borderRadius: 24,
@@ -1248,6 +1314,19 @@ const styles = StyleSheet.create({
     shadowRadius: 6,
     elevation: 5,
     zIndex: 10,
+  },
+  recenterButton: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 6,
+    justifyContent: 'center',
+    minWidth: 108,
+    paddingHorizontal: 12,
+  },
+  recenterButtonText: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: '800',
   },
   sheet: {
     position: 'absolute',
@@ -1296,51 +1375,56 @@ const styles = StyleSheet.create({
   metricsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: 10,
     flexWrap: 'wrap',
+    justifyContent: 'flex-start',
   },
-  metricPill: {
-    flex: 1,
-    minWidth: 104,
-    borderRadius: 18,
+  metricChip: {
+    alignSelf: 'flex-start',
+    borderRadius: 16,
     borderWidth: 1,
     paddingHorizontal: 14,
-    paddingVertical: 12,
-    justifyContent: 'center',
+    paddingVertical: 10,
   },
   metricValue: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '800',
     textAlign: 'center',
   },
-  navigationHintCard: {
+  topChromeRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 10,
+    justifyContent: 'space-between',
+    left: 16,
+    position: 'absolute',
+    right: 16,
+    zIndex: 8,
+  },
+  topDirectionCard: {
     alignItems: 'center',
     backgroundColor: 'rgba(255,255,255,0.96)',
     borderColor: 'rgba(15,23,42,0.08)',
     borderRadius: 18,
     borderWidth: 1,
+    flex: 1,
     flexDirection: 'row',
-    gap: 10,
-    marginBottom: 10,
-    paddingHorizontal: 14,
+    gap: 8,
+    justifyContent: 'center',
+    marginHorizontal: 8,
+    paddingHorizontal: 12,
     paddingVertical: 10,
   },
-  navigationHintBody: {
+  topDirectionCardSpacer: {
     flex: 1,
-    gap: 2,
+    marginHorizontal: 8,
   },
-  navigationHintTitle: {
+  topDirectionText: {
     color: colors.brandDark,
-    fontSize: 11,
+    flex: 1,
+    fontSize: 12,
     fontWeight: '900',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-  },
-  navigationHintCopy: {
-    color: colors.text,
-    fontSize: 13,
-    fontWeight: '800',
-    lineHeight: 18,
+    lineHeight: 16,
   },
   sheetSubtitle: {
     marginTop: 12,
@@ -1349,14 +1433,13 @@ const styles = StyleSheet.create({
     color: colors.muted,
   },
   statusBadge: {
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
   },
   statusBadgeText: {
     fontSize: 11,
     fontWeight: '800',
-    textTransform: 'uppercase',
   },
   summaryCard: {
     marginTop: 16,

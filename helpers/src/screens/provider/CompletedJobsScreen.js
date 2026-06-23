@@ -41,7 +41,7 @@ function formatDate(value) {
 export function CompletedJobsScreen({ navigate }) {
   const { serviceRequests } = useHelpersApp();
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState('scheduled');
+  const [activeTab, setActiveTab] = useState('previous');
 
   useEffect(() => {
     setLoading(false);
@@ -51,6 +51,10 @@ export function CompletedJobsScreen({ navigate }) {
     const statusSet = activeTab === 'previous' ? PREVIOUS_STATUSES : SCHEDULED_STATUSES;
     return serviceRequests.filter((request) => statusSet.includes(String(request.status || '').toLowerCase()));
   }, [activeTab, serviceRequests]);
+  const scheduledCount = useMemo(
+    () => serviceRequests.filter((request) => SCHEDULED_STATUSES.includes(String(request.status || '').toLowerCase())).length,
+    [serviceRequests],
+  );
 
   if (loading) {
     return (
@@ -80,6 +84,7 @@ export function CompletedJobsScreen({ navigate }) {
       <View style={styles.tabRow}>
         {TAB_OPTIONS.map((tab) => {
           const isActive = tab.id === activeTab;
+          const isScheduledTab = tab.id === 'scheduled';
           return (
             <Pressable
               accessibilityRole="button"
@@ -88,6 +93,11 @@ export function CompletedJobsScreen({ navigate }) {
               style={[styles.tabButton, isActive && styles.tabButtonActive]}
             >
               <Text style={[styles.tabText, isActive && styles.tabTextActive]}>{tab.label}</Text>
+              {isScheduledTab && scheduledCount > 0 ? (
+                <View style={styles.tabBadge}>
+                  <Text style={styles.tabBadgeText}>{scheduledCount > 99 ? '99+' : String(scheduledCount)}</Text>
+                </View>
+              ) : null}
             </Pressable>
           );
         })}
@@ -181,6 +191,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     minHeight: 44,
     paddingHorizontal: 14,
+    position: 'relative',
   },
   tabButtonActive: {
     backgroundColor: colors.brandDark,
@@ -193,6 +204,22 @@ const styles = StyleSheet.create({
   },
   tabTextActive: {
     color: '#ffffff',
+  },
+  tabBadge: {
+    alignItems: 'center',
+    backgroundColor: '#ef4444',
+    borderRadius: 999,
+    minHeight: 18,
+    minWidth: 18,
+    paddingHorizontal: 5,
+    position: 'absolute',
+    right: 10,
+    top: -6,
+  },
+  tabBadgeText: {
+    color: '#ffffff',
+    fontSize: 10,
+    fontWeight: '900',
   },
   emptyTabWrap: {
     alignItems: 'center',

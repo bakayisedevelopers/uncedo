@@ -54,6 +54,76 @@ function normalizeCoordinate(coordinate = null) {
   return { latitude, longitude };
 }
 
+function normalizeHeading(heading = null) {
+  const value = Number(heading);
+  if (!Number.isFinite(value)) return null;
+  const normalized = value % 360;
+  return normalized < 0 ? normalized + 360 : normalized;
+}
+
+function getBearingBetweenCoordinates(from, to) {
+  const start = normalizeCoordinate(from);
+  const end = normalizeCoordinate(to);
+  if (!start || !end) return null;
+
+  const lat1 = (start.latitude * Math.PI) / 180;
+  const lat2 = (end.latitude * Math.PI) / 180;
+  const deltaLng = ((end.longitude - start.longitude) * Math.PI) / 180;
+  const y = Math.sin(deltaLng) * Math.cos(lat2);
+  const x =
+    Math.cos(lat1) * Math.sin(lat2)
+    - Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLng);
+  const bearing = (Math.atan2(y, x) * 180) / Math.PI;
+  return normalizeHeading(bearing);
+}
+
+function offsetCoordinate(coordinate, bearing, distanceMeters) {
+  const base = normalizeCoordinate(coordinate);
+  const normalizedBearing = normalizeHeading(bearing);
+  const meters = Number(distanceMeters);
+  if (!base || !Number.isFinite(normalizedBearing) || !Number.isFinite(meters)) {
+    return base;
+  }
+
+  const radius = 6371000;
+  const angularDistance = meters / radius;
+  const bearingRad = (normalizedBearing * Math.PI) / 180;
+  const lat1 = (base.latitude * Math.PI) / 180;
+  const lon1 = (base.longitude * Math.PI) / 180;
+
+  const lat2 = Math.asin(
+    Math.sin(lat1) * Math.cos(angularDistance)
+    + Math.cos(lat1) * Math.sin(angularDistance) * Math.cos(bearingRad),
+  );
+  const lon2 = lon1 + Math.atan2(
+    Math.sin(bearingRad) * Math.sin(angularDistance) * Math.cos(lat1),
+    Math.cos(angularDistance) - Math.sin(lat1) * Math.sin(lat2),
+  );
+
+  return {
+    latitude: (lat2 * 180) / Math.PI,
+    longitude: (lon2 * 180) / Math.PI,
+  };
+}
+
+function getDistanceInMeters(from, to) {
+  const start = normalizeCoordinate(from);
+  const end = normalizeCoordinate(to);
+  if (!start || !end) return null;
+
+  const radius = 6371000;
+  const phi1 = (start.latitude * Math.PI) / 180;
+  const phi2 = (end.latitude * Math.PI) / 180;
+  const deltaPhi = ((end.latitude - start.latitude) * Math.PI) / 180;
+  const deltaLambda = ((end.longitude - start.longitude) * Math.PI) / 180;
+  const a =
+    Math.sin(deltaPhi / 2) * Math.sin(deltaPhi / 2)
+    + Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda / 2) * Math.sin(deltaLambda / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return radius * c;
+}
+
 function appendCoordinateIfNeeded(target, coordinate) {
   const next = normalizeCoordinate(coordinate);
   if (!next) return;
@@ -166,6 +236,7 @@ export function HelperMapPlaceholder({
     () => (Array.isArray(routeCoordinates) ? routeCoordinates.map((item) => normalizeCoordinate(item)).filter(Boolean) : []),
     [routeCoordinates],
   );
+  const navigationMode = mode === 'route' && routeView === 'navigation';
   const routeSignature = useMemo(() => {
     if (!normalizedRouteCoordinates.length) return '';
     const first = normalizedRouteCoordinates[0];
@@ -184,15 +255,59 @@ export function HelperMapPlaceholder({
   }, [currentCoordinate?.latitude, currentCoordinate?.longitude, destinationCoordinate?.latitude, destinationCoordinate?.longitude, normalizedRouteCoordinates]);
   const mapCenter = currentCoordinate || destinationCoordinate || DEFAULT_REGION;
   const [region, setRegion] = useState(() => buildRegion(mapCenter, radiusKm));
+  const [isAutoFollowEnabled, setIsAutoFollowEnabled] = useState(true);
   const mapRef = useRef(null);
   const didInitialFitRef = useRef(false);
+  const lastCameraUpdateRef = useRef(0);
   const helperRadiusMeters = Math.max(1000, Number(radiusKm || 50) * 1000);
+  const navigationHeading = useMemo(() => {
+    const explicitHeading = normalizeHeading(currentUserMarker?.heading);
+    if (explicitHeading !== null) {
+      return explicitHeading;
+    }
+
+    if (currentCoordinate && destinationCoordinate) {
+      return getBearingBetweenCoordinates(currentCoordinate, destinationCoordinate);
+    }
+
+    return null;
+  }, [currentCoordinate, currentUserMarker?.heading, destinationCoordinate]);
+  const navigationDistanceMeters = useMemo(
+    () => (navigationMode ? getDistanceInMeters(currentCoordinate, destinationCoordinate) : null),
+    [currentCoordinate, destinationCoordinate, navigationMode],
+  );
+  const navigationCameraTarget = useMemo(() => {
+    if (!navigationMode || !currentCoordinate) return null;
+
+    const heading = Number.isFinite(navigationHeading) ? navigationHeading : 0;
+    const distance = Number.isFinite(navigationDistanceMeters) ? navigationDistanceMeters : null;
+    const aheadMeters = distance !== null
+      ? (distance < 250 ? 30 : distance < 1000 ? 70 : distance < 3000 ? 120 : 180)
+      : 100;
+    const zoom = distance !== null
+      ? (distance < 250 ? 16.4 : distance < 1000 ? 15.6 : distance < 3000 ? 14.9 : 14.2)
+      : 15.1;
+
+    return {
+      center: offsetCoordinate(currentCoordinate, heading, aheadMeters),
+      heading,
+      pitch: distance !== null && distance < 250 ? 58 : 56,
+      zoom,
+    };
+  }, [currentCoordinate, navigationDistanceMeters, navigationHeading, navigationMode]);
 
   useEffect(() => {
-    if (mode === 'route') {
+    if (mode === 'route' && !navigationMode) {
       didInitialFitRef.current = false;
     }
-  }, [mode, routeSignature, routeView]);
+  }, [mode, navigationMode, routeSignature, routeView]);
+
+  useEffect(() => {
+    if (navigationMode) {
+      didInitialFitRef.current = false;
+      setIsAutoFollowEnabled(true);
+    }
+  }, [navigationMode]);
 
   useEffect(() => {
     if (!mapRef.current) return;
@@ -220,6 +335,10 @@ export function HelperMapPlaceholder({
         }, 500);
         return () => clearTimeout(timer);
       }
+      return;
+    }
+
+    if (navigationMode) {
       return;
     }
 
@@ -253,9 +372,33 @@ export function HelperMapPlaceholder({
     }, 250);
 
     return () => clearTimeout(timer);
-  }, [currentCoordinate, destinationCoordinate, floatingBottomInset, mode, normalizedRouteCoordinates, radiusKm, routeView]);
+  }, [currentCoordinate, destinationCoordinate, floatingBottomInset, mode, navigationMode, normalizedRouteCoordinates, radiusKm, routeView]);
+
+  useEffect(() => {
+    if (!navigationMode || !isAutoFollowEnabled || !mapRef.current || !navigationCameraTarget || !currentCoordinate) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastCameraUpdateRef.current < 450) {
+      return;
+    }
+
+    lastCameraUpdateRef.current = now;
+    const timer = setTimeout(() => {
+      mapRef.current?.animateCamera?.(navigationCameraTarget, { duration: 650 });
+    }, 60);
+
+    return () => clearTimeout(timer);
+  }, [currentCoordinate, isAutoFollowEnabled, navigationCameraTarget, navigationMode]);
 
   const recenter = () => {
+    if (navigationMode && navigationCameraTarget) {
+      setIsAutoFollowEnabled(true);
+      mapRef.current?.animateCamera?.(navigationCameraTarget, { duration: 500 });
+      return;
+    }
+
     const coords = mode === 'route' && normalizedRouteCoordinates.length > 1
       ? (
         routeView === 'navigation'
@@ -324,7 +467,17 @@ export function HelperMapPlaceholder({
         ref={mapRef}
         customMapStyle={MAP_STYLE}
         initialRegion={region}
-        onRegionChangeComplete={setRegion}
+        onPanDrag={() => {
+          if (navigationMode) {
+            setIsAutoFollowEnabled(false);
+          }
+        }}
+        onRegionChangeComplete={(nextRegion, details) => {
+          setRegion(nextRegion);
+          if (navigationMode && details?.isGesture) {
+            setIsAutoFollowEnabled(false);
+          }
+        }}
         pointerEvents={interactive ? 'auto' : 'none'}
         // TODO: Keep iOS on the default provider until the helper app has checked-in iOS Google Maps native setup.
         provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}
@@ -399,9 +552,12 @@ export function HelperMapPlaceholder({
           <Pressable accessibilityRole="button" onPress={() => zoom(1.25)} style={styles.controlButton}>
             <Ionicons color={colors.text} name="remove" size={18} />
           </Pressable>
-          <Pressable accessibilityRole="button" onPress={recenter} style={styles.controlButton}>
-            <Ionicons color={colors.text} name="locate" size={18} />
-          </Pressable>
+          {navigationMode && !isAutoFollowEnabled ? (
+            <Pressable accessibilityRole="button" onPress={recenter} style={[styles.controlButton, styles.recenterButton]}>
+              <Ionicons color={colors.text} name="locate" size={16} />
+              <Text style={styles.recenterButtonText}>Recenter</Text>
+            </Pressable>
+          ) : null}
         </View>
       ) : null}
     </View>
@@ -515,5 +671,14 @@ const styles = StyleSheet.create({
     height: 42,
     justifyContent: 'center',
     width: 42,
+  },
+  recenterButton: {
+    width: 124,
+    paddingHorizontal: 12,
+  },
+  recenterButtonText: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: '800',
   },
 });

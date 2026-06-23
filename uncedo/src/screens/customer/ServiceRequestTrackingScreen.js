@@ -73,9 +73,10 @@ function normalizeCoordinate(coordinate = null) {
 }
 
 function formatDistance(distance) {
-  if (!Number.isFinite(distance)) return 'Waiting for helper location';
-  if (distance < 1000) return `${Math.round(distance)} m away`;
-  return `${(distance / 1000).toFixed(1)} km away`;
+  if (!Number.isFinite(distance)) return 'Waiting';
+  const kmValue = distance / 1000;
+  const rounded = Math.round(kmValue * 10) / 10;
+  return Number.isInteger(rounded) ? `${rounded.toFixed(0)} km` : `${rounded} km`;
 }
 
 function formatEta(durationSeconds) {
@@ -759,19 +760,17 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
       </View>
 
       <View style={styles.metricsRow}>
-        <View style={[styles.metricPill, { backgroundColor: toneStyles.badgeBg, borderColor: toneStyles.badgeBg }]}>
-          <Text style={[styles.metricLabel, { color: toneStyles.badgeText }]}>Distance</Text>
+        <View style={[styles.metricChip, { backgroundColor: toneStyles.badgeBg, borderColor: toneStyles.badgeBg }]}>
           <Text style={[styles.metricValue, { color: toneStyles.badgeText }]}>{formatDistance(distance)}</Text>
         </View>
-        <View style={[styles.metricPill, { backgroundColor: toneStyles.badgeBg, borderColor: toneStyles.badgeBg }]}>
-          <Text style={[styles.metricLabel, { color: toneStyles.badgeText }]}>ETA</Text>
+        <View style={[styles.metricChip, { backgroundColor: toneStyles.badgeBg, borderColor: toneStyles.badgeBg }]}>
           <Text style={[styles.metricValue, { color: toneStyles.badgeText }]}>
             {etaMinutes && ['accepted', 'driving', 'en_route', 'buying_resources'].includes(String(request.status || '').toLowerCase())
               ? `${etaMinutes} min`
               : 'Waiting'}
           </Text>
         </View>
-        <View style={[styles.statusBadge, { backgroundColor: toneStyles.badgeBg }]}>
+        <View style={[styles.metricChip, { backgroundColor: toneStyles.badgeBg, borderColor: toneStyles.badgeBg }]}>
           <Text style={[styles.statusBadgeText, { color: toneStyles.badgeText }]}>{statusMeta.label}</Text>
         </View>
       </View>
@@ -1044,27 +1043,22 @@ const styles = StyleSheet.create({
   },
   metricsRow: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 12,
+    alignItems: 'center',
+    gap: 10,
     flexWrap: 'wrap',
+    justifyContent: 'flex-start',
   },
-  metricPill: {
-    flex: 1,
-    minWidth: 96,
+  metricChip: {
+    alignSelf: 'flex-start',
     borderRadius: 16,
     borderWidth: 1,
-    paddingHorizontal: 12,
+    paddingHorizontal: 14,
     paddingVertical: 10,
   },
-  metricLabel: {
-    fontSize: 10,
-    fontWeight: '800',
-    textTransform: 'uppercase',
-  },
   metricValue: {
-    marginTop: 4,
-    fontSize: 14,
+    fontSize: 11,
     fontWeight: '800',
+    textAlign: 'center',
   },
   sheetSubtitle: {
     marginTop: 12,
@@ -1073,14 +1067,13 @@ const styles = StyleSheet.create({
     color: colors.muted,
   },
   statusBadge: {
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
   },
   statusBadgeText: {
     fontSize: 11,
     fontWeight: '800',
-    textTransform: 'uppercase',
   },
   summaryCard: {
     marginTop: 16,

@@ -42,6 +42,11 @@ function normalizeText(value) {
   return String(value || '').trim();
 }
 
+function parseScheduledDateTime(value = '') {
+  const parsed = Date.parse(String(value || '').trim());
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function normalizeCoordinate(coordinate = null) {
   const latitude = Number(coordinate?.latitude);
   const longitude = Number(coordinate?.longitude);
@@ -108,16 +113,25 @@ export function deriveTimingDetails(structuredAnswers = {}) {
   const scheduledForText = normalizeText(scheduleEntry?.[1] || timingEntry?.[1]);
 
   if (rawTiming.includes('later') || rawTiming.includes('tomorrow') || rawTiming.includes('schedule')) {
-    return { timingPreference: 'later', scheduledForText };
+    return {
+      timingPreference: 'later',
+      scheduledForText,
+      scheduledForAtMs: parseScheduledDateTime(scheduledForText),
+    };
   }
 
   if (rawTiming.includes('now') || rawTiming.includes('asap') || rawTiming.includes('immediately')) {
-    return { timingPreference: 'now', scheduledForText };
+    return {
+      timingPreference: 'now',
+      scheduledForText,
+      scheduledForAtMs: null,
+    };
   }
 
   return {
     timingPreference: scheduledForText ? 'later' : 'now',
     scheduledForText,
+    scheduledForAtMs: parseScheduledDateTime(scheduledForText),
   };
 }
 
@@ -245,6 +259,9 @@ export async function createCustomerServiceRequest({ user, location, initialDraf
       ...draft,
       selectedPackageId,
       location: resolvedLocation,
+      timingPreference: draft.timingPreference || 'now',
+      scheduledForText: draft.scheduledForText || '',
+      scheduledForAtMs: parseScheduledDateTime(draft.scheduledForText || ''),
     },
     categoryId,
     serviceIds,
@@ -449,6 +466,7 @@ export async function saveCustomerServiceQuotePreview({
       aiUsageSnapshot,
       timingPreference: timingDetails.timingPreference,
       scheduledForText: timingDetails.scheduledForText,
+      scheduledForAtMs: timingDetails.scheduledForAtMs,
       location,
       serviceAddress,
     },
@@ -461,6 +479,7 @@ export async function saveCustomerServiceQuotePreview({
     summary,
     timingPreference: timingDetails.timingPreference,
     scheduledForText: timingDetails.scheduledForText,
+    scheduledForAtMs: timingDetails.scheduledForAtMs,
   };
 }
 
@@ -543,6 +562,7 @@ export async function finalizeCustomerServiceRequest({
       aiUsageSnapshot,
       timingPreference: timingDetails.timingPreference,
       scheduledForText: timingDetails.scheduledForText,
+      scheduledForAtMs: timingDetails.scheduledForAtMs,
       location,
       serviceAddress,
     },
