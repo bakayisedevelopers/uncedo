@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Button } from '../../components/ui/Button';
@@ -7,6 +7,27 @@ import { useAuth } from '../../context/AuthContext';
 import { subscribeToCustomerServiceRequests } from '../../services/customerServiceRequestService';
 import { colors } from '../../theme/colors';
 import { getServiceRequestStatusMeta, getServiceRequestToneStyle } from '../../utils/serviceRequestStatus';
+
+const TAB_OPTIONS = [
+  { id: 'scheduled', label: 'Scheduled' },
+  { id: 'previous', label: 'Previous' },
+];
+
+const SCHEDULED_STATUSES = [
+  'collecting_details',
+  'scheduled_pending',
+  'matching',
+  'helper_found',
+  'accepted',
+  'en_route',
+  'driving',
+  'buying_resources',
+  'arrived',
+  'work_started',
+  'no_helper_available',
+];
+
+const PREVIOUS_STATUSES = ['completed', 'canceled', 'cancelled', 'expired', 'rejected'];
 
 function formatDate(value) {
   if (!value) return 'Date pending';
@@ -24,6 +45,7 @@ export function CustomerServiceRequestsScreen({ navigate }) {
   const [requests, setRequests] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [activeTab, setActiveTab] = useState('scheduled');
 
   useEffect(
     () =>
@@ -40,6 +62,11 @@ export function CustomerServiceRequestsScreen({ navigate }) {
       ),
     [user?.uid],
   );
+
+  const filteredRequests = useMemo(() => {
+    const statusSet = activeTab === 'previous' ? PREVIOUS_STATUSES : SCHEDULED_STATUSES;
+    return requests.filter((request) => statusSet.includes(String(request.status || '').toLowerCase()));
+  }, [activeTab, requests]);
 
   if (loading) return <LoadingState label="Loading service requests" />;
   if (error) return <ErrorState message={error} />;
@@ -66,7 +93,35 @@ export function CustomerServiceRequestsScreen({ navigate }) {
       </View>
 
       {/* ── Request list ── */}
-      {requests.map((request) => {
+      <View style={styles.tabRow}>
+        {TAB_OPTIONS.map((tab) => {
+          const isActive = tab.id === activeTab;
+          return (
+            <Pressable
+              accessibilityRole="button"
+              key={tab.id}
+              onPress={() => setActiveTab(tab.id)}
+              style={[styles.tabButton, isActive && styles.tabButtonActive]}
+            >
+              <Text style={[styles.tabText, isActive && styles.tabTextActive]}>{tab.label}</Text>
+            </Pressable>
+          );
+        })}
+      </View>
+
+      {!filteredRequests.length ? (
+        <View style={styles.emptyWrap}>
+          <Ionicons color={colors.brandDark} name="time-outline" size={24} />
+          <Text style={styles.emptyTitle}>
+            {activeTab === 'previous' ? 'No previous requests yet' : 'No scheduled requests yet'}
+          </Text>
+          <Text style={styles.emptyCopy}>
+            {activeTab === 'previous'
+              ? 'Completed and canceled requests will appear here.'
+              : 'Scheduled and active requests will appear here.'}
+          </Text>
+        </View>
+      ) : filteredRequests.map((request) => {
         const statusMeta = getServiceRequestStatusMeta(request.status);
         const toneStyle = getServiceRequestToneStyle(request.status);
         const openHistory = () => {
@@ -205,6 +260,54 @@ const styles = StyleSheet.create({
   },
 
   // ── Request card ─────────────────────────────────────────────────────────
+  tabRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  tabButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.9)',
+    borderColor: colors.border,
+    borderRadius: 999,
+    borderWidth: 1,
+    flex: 1,
+    justifyContent: 'center',
+    minHeight: 44,
+    paddingHorizontal: 14,
+  },
+  tabButtonActive: {
+    backgroundColor: colors.brandDark,
+    borderColor: colors.brandDark,
+  },
+  tabText: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  tabTextActive: {
+    color: '#ffffff',
+  },
+  emptyWrap: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.9)',
+    borderColor: colors.border,
+    borderRadius: 22,
+    borderWidth: 1,
+    gap: 8,
+    padding: 20,
+  },
+  emptyTitle: {
+    color: colors.text,
+    fontSize: 16,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  emptyCopy: {
+    color: colors.muted,
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: 'center',
+  },
   card: {
     alignItems: 'center',
     backgroundColor: colors.surface,

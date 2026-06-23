@@ -114,9 +114,7 @@ function getNavigationFocusCoordinates(routeCoordinates, currentCoordinate, dest
     appendCoordinateIfNeeded(focusCoordinates, coordinate);
   });
 
-  if (focusCoordinates.length < 2 && destinationCoordinate) {
-    appendCoordinateIfNeeded(focusCoordinates, destinationCoordinate);
-  }
+  appendCoordinateIfNeeded(focusCoordinates, destinationCoordinate);
 
   return focusCoordinates;
 }
@@ -180,8 +178,10 @@ export function HelperMapPlaceholder({
       last?.longitude?.toFixed?.(5) || '',
       currentCoordinate?.latitude?.toFixed?.(5) || '',
       currentCoordinate?.longitude?.toFixed?.(5) || '',
+      destinationCoordinate?.latitude?.toFixed?.(5) || '',
+      destinationCoordinate?.longitude?.toFixed?.(5) || '',
     ].join(':');
-  }, [currentCoordinate?.latitude, currentCoordinate?.longitude, normalizedRouteCoordinates]);
+  }, [currentCoordinate?.latitude, currentCoordinate?.longitude, destinationCoordinate?.latitude, destinationCoordinate?.longitude, normalizedRouteCoordinates]);
   const mapCenter = currentCoordinate || destinationCoordinate || DEFAULT_REGION;
   const [region, setRegion] = useState(() => buildRegion(mapCenter, radiusKm));
   const mapRef = useRef(null);

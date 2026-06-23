@@ -526,11 +526,17 @@ async function uploadAgreementPdf({
       },
     },
   });
-  const [signedUrl] = await file.getSignedUrl({
-    action: 'read',
-    expires: '01-01-2500',
+  const downloadToken = randomUUID();
+  await file.setMetadata({
+    metadata: {
+      userId,
+      version,
+      acceptanceId,
+      documentId: TUTOR_AGREEMENT_DOCUMENT_ID,
+      firebaseStorageDownloadTokens: downloadToken,
+    },
   });
-  return signedUrl;
+  return `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(filePath)}?alt=media&token=${downloadToken}`;
 }
 
 async function acceptTutorAgreement({

@@ -64,6 +64,7 @@ function sanitizeRouteSnapshot(routeSnapshot = null) {
   if (!routeSnapshot) {
     return {
       routeCoordinates: [],
+      routeSteps: [],
       encodedPolyline: '',
       overviewEncodedPolyline: '',
       distanceMeters: null,
@@ -77,6 +78,19 @@ function sanitizeRouteSnapshot(routeSnapshot = null) {
 
   return {
     routeCoordinates: Array.isArray(routeSnapshot.routeCoordinates) ? routeSnapshot.routeCoordinates : [],
+    routeSteps: Array.isArray(routeSnapshot.routeSteps)
+      ? routeSnapshot.routeSteps.map((step) => ({
+          instruction: String(step?.instruction || '').trim(),
+          maneuver: String(step?.maneuver || '').trim(),
+          distanceMeters: isFiniteNumber(step?.distanceMeters) ? Number(step.distanceMeters) : null,
+          durationSeconds: isFiniteNumber(step?.durationSeconds) ? Number(step.durationSeconds) : null,
+          distanceText: String(step?.distanceText || '').trim(),
+          durationText: String(step?.durationText || '').trim(),
+          startIndex: isFiniteNumber(step?.startIndex) ? Number(step.startIndex) : 0,
+          endIndex: isFiniteNumber(step?.endIndex) ? Number(step.endIndex) : 0,
+          polyline: String(step?.polyline || '').trim(),
+        }))
+      : [],
     encodedPolyline: String(routeSnapshot.encodedPolyline || '').trim(),
     overviewEncodedPolyline: String(routeSnapshot.overviewEncodedPolyline || '').trim(),
     distanceMeters: isFiniteNumber(routeSnapshot.distanceMeters) ? Number(routeSnapshot.distanceMeters) : null,
@@ -138,6 +152,7 @@ function buildTrackingPayload(session, helperLocation, routeSnapshot) {
     requestId: session.requestId,
     helperLocation: helperLocation || null,
     destination: session.destination || null,
+    routeSteps: Array.isArray(safeRouteSnapshot.routeSteps) ? safeRouteSnapshot.routeSteps : [],
     routePolylineEncoded: safeRouteSnapshot.encodedPolyline || '',
     routePolylineOverviewEncoded: safeRouteSnapshot.overviewEncodedPolyline || '',
     routeCoordinatesLastUpdatedAtMs: safeRouteSnapshot.lastSuccessfulRouteFetchAtMs || 0,
@@ -199,6 +214,7 @@ async function fetchLatestRouteSnapshot(session, helperLocation, rerouteReason) 
     });
     return {
       routeCoordinates: [],
+      routeSteps: [],
       encodedPolyline: '',
       overviewEncodedPolyline: '',
       distanceMeters: null,
@@ -405,6 +421,7 @@ export async function stopActiveJobTracking({ finalStatus = '', keepLocationShar
         helperLocation: null,
         routePolylineEncoded: '',
         routePolylineOverviewEncoded: '',
+        routeSteps: [],
         routeCoordinatesLastUpdatedAtMs: 0,
         distanceMeters: null,
         durationSeconds: null,

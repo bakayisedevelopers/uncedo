@@ -39,7 +39,7 @@ export function StatusBadge({ label, tone = 'neutral' }) {
   );
 }
 
-export function ActionButton({ label, onPress, tone = 'primary', disabled = false }) {
+export function ActionButton({ label, onPress, tone = 'primary', disabled = false, style, labelStyle }) {
   return (
     <Pressable
       accessibilityRole="button"
@@ -49,9 +49,10 @@ export function ActionButton({ label, onPress, tone = 'primary', disabled = fals
         styles.button,
         buttonTones[tone] || buttonTones.primary,
         disabled && styles.buttonDisabled,
+        style,
       ]}
     >
-      <Text style={[styles.buttonLabel, buttonLabelTones[tone] || buttonLabelTones.primary]}>{label}</Text>
+      <Text style={[styles.buttonLabel, buttonLabelTones[tone] || buttonLabelTones.primary, labelStyle]}>{label}</Text>
     </Pressable>
   );
 }

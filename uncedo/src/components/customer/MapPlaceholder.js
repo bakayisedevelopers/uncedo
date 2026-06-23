@@ -71,6 +71,33 @@ function buildRegion(center = DEFAULT_REGION, radiusKm = 20) {
   };
 }
 
+function buildRouteFocusCoordinates({ helperCoordinate = null, customerCoordinate = null, routeCoordinates = [] } = {}) {
+  const focusCoordinates = [];
+  const appendCoordinateIfNeeded = (target, coordinate) => {
+    const next = normalizeCoordinate(coordinate);
+    if (!next) return;
+
+    const last = target[target.length - 1];
+    if (
+      last
+      && Math.abs(last.latitude - next.latitude) < 0.00001
+      && Math.abs(last.longitude - next.longitude) < 0.00001
+    ) {
+      return;
+    }
+
+    target.push(next);
+  };
+
+  appendCoordinateIfNeeded(focusCoordinates, customerCoordinate);
+  appendCoordinateIfNeeded(focusCoordinates, helperCoordinate);
+  (Array.isArray(routeCoordinates) ? routeCoordinates : []).forEach((coordinate) => {
+    appendCoordinateIfNeeded(focusCoordinates, coordinate);
+  });
+
+  return focusCoordinates;
+}
+
 function AvatarMarker({ initials, photoUri, isCurrentUser = false, heading = null }) {
   return (
     <View style={styles.markerRoot}>
@@ -126,10 +153,12 @@ export function MapPlaceholder({
       first?.longitude?.toFixed?.(5) || '',
       last?.latitude?.toFixed?.(5) || '',
       last?.longitude?.toFixed?.(5) || '',
+      customerCoordinate?.latitude?.toFixed?.(5) || '',
+      customerCoordinate?.longitude?.toFixed?.(5) || '',
       helperCoordinate?.latitude?.toFixed?.(5) || '',
       helperCoordinate?.longitude?.toFixed?.(5) || '',
     ].join(':');
-  }, [helperCoordinate?.latitude, helperCoordinate?.longitude, normalizedRouteCoordinates]);
+  }, [customerCoordinate?.latitude, customerCoordinate?.longitude, helperCoordinate?.latitude, helperCoordinate?.longitude, normalizedRouteCoordinates]);
   const mapCenter = customerCoordinate || helperCoordinate || DEFAULT_REGION;
   const [region, setRegion] = useState(() => buildRegion(mapCenter, radiusKm));
   const mapRef = useRef(null);
@@ -158,7 +187,7 @@ export function MapPlaceholder({
       } else if (coords.length > 1) {
         const timer = setTimeout(() => {
           mapRef.current?.fitToCoordinates?.(coords, {
-            edgePadding: { top: 100, right: 80, bottom: floatingBottomInset + 100, left: 80 },
+            edgePadding: { top: 128, right: 84, bottom: floatingBottomInset + 132, left: 84 },
             animated: true,
           });
         }, 500);
@@ -170,7 +199,11 @@ export function MapPlaceholder({
     if (didInitialFitRef.current) return;
 
     const coords = normalizedRouteCoordinates.length > 1
-      ? normalizedRouteCoordinates
+      ? buildRouteFocusCoordinates({
+          helperCoordinate,
+          customerCoordinate,
+          routeCoordinates: normalizedRouteCoordinates,
+        })
       : [helperCoordinate, customerCoordinate].filter(Boolean);
 
     if (!coords.length) return;
@@ -185,7 +218,7 @@ export function MapPlaceholder({
 
     const timer = setTimeout(() => {
       mapRef.current?.fitToCoordinates?.(coords, {
-        edgePadding: { top: 120, right: 80, bottom: floatingBottomInset + 120, left: 80 },
+        edgePadding: { top: 128, right: 84, bottom: floatingBottomInset + 132, left: 84 },
         animated: true,
       });
     }, 250);
@@ -213,7 +246,7 @@ export function MapPlaceholder({
     }
 
     mapRef.current?.fitToCoordinates?.(coords, {
-      edgePadding: { top: 120, right: 80, bottom: floatingBottomInset + 120, left: 80 },
+      edgePadding: { top: 128, right: 84, bottom: floatingBottomInset + 132, left: 84 },
       animated: true,
     });
   };

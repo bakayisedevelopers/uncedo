@@ -78,6 +78,8 @@ export function getRequestedServiceLabels(categoryId = '', serviceIds = []) {
 
 export function mapServiceRequestToOffer(request) {
   if (!request?.id) return null;
+  const timingPreference = String(request?.requestPayload?.timingPreference || 'now').trim().toLowerCase();
+  const scheduledForText = String(request?.requestPayload?.scheduledForText || '').trim();
 
   return {
     id: request.id,
@@ -96,6 +98,9 @@ export function mapServiceRequestToOffer(request) {
     area: request.requestPayload?.serviceAddress || request.serviceAddress || 'Location pending',
     status: request.status || 'helper_found',
     statusDetail: request.statusDetail || '',
+    timingPreference,
+    scheduledForText,
+    isScheduled: timingPreference === 'later' || String(request.status || '').toLowerCase() === 'scheduled_pending',
     pricingSnapshot: request.pricingSnapshot || null,
     helperAssignment: request.helperAssignment || null,
     raw: request,

@@ -1,10 +1,31 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { ActionButton, EmptyState } from '../../components/app/HelperUi';
 import { useHelpersApp } from '../../context/HelpersAppContext';
 import { colors } from '../../theme/colors';
 import { getServiceRequestStatusMeta, getServiceRequestToneStyle } from '../../utils/serviceRequestStatus';
+
+const TAB_OPTIONS = [
+  { id: 'scheduled', label: 'Scheduled' },
+  { id: 'previous', label: 'Previous' },
+];
+
+const SCHEDULED_STATUSES = [
+  'collecting_details',
+  'scheduled_pending',
+  'matching',
+  'helper_found',
+  'accepted',
+  'en_route',
+  'driving',
+  'buying_resources',
+  'arrived',
+  'work_started',
+  'no_helper_available',
+];
+
+const PREVIOUS_STATUSES = ['completed', 'canceled', 'cancelled', 'expired', 'rejected'];
 
 function formatDate(value) {
   if (!value) return 'Date pending';
@@ -20,10 +41,16 @@ function formatDate(value) {
 export function CompletedJobsScreen({ navigate }) {
   const { serviceRequests } = useHelpersApp();
   const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState('scheduled');
 
   useEffect(() => {
     setLoading(false);
   }, [serviceRequests]);
+
+  const filteredRequests = useMemo(() => {
+    const statusSet = activeTab === 'previous' ? PREVIOUS_STATUSES : SCHEDULED_STATUSES;
+    return serviceRequests.filter((request) => statusSet.includes(String(request.status || '').toLowerCase()));
+  }, [activeTab, serviceRequests]);
 
   if (loading) {
     return (
@@ -50,7 +77,35 @@ export function CompletedJobsScreen({ navigate }) {
       <Text style={styles.title}>Services</Text>
       <Text style={styles.subtitle}>Track every accepted, completed, canceled, or active customer service request.</Text>
 
-      {serviceRequests.map((request) => (
+      <View style={styles.tabRow}>
+        {TAB_OPTIONS.map((tab) => {
+          const isActive = tab.id === activeTab;
+          return (
+            <Pressable
+              accessibilityRole="button"
+              key={tab.id}
+              onPress={() => setActiveTab(tab.id)}
+              style={[styles.tabButton, isActive && styles.tabButtonActive]}
+            >
+              <Text style={[styles.tabText, isActive && styles.tabTextActive]}>{tab.label}</Text>
+            </Pressable>
+          );
+        })}
+      </View>
+
+      {!filteredRequests.length ? (
+        <View style={styles.emptyTabWrap}>
+          <Ionicons color={colors.brandDark} name="time-outline" size={24} />
+          <Text style={styles.emptyTabTitle}>
+            {activeTab === 'previous' ? 'No previous services yet' : 'No scheduled services yet'}
+          </Text>
+          <Text style={styles.emptyTabCopy}>
+            {activeTab === 'previous'
+              ? 'Completed and canceled jobs will appear here.'
+              : 'Scheduled and active jobs will appear here.'}
+          </Text>
+        </View>
+      ) : filteredRequests.map((request) => (
         <Pressable
           accessibilityRole="button"
           key={request.id}
@@ -112,6 +167,54 @@ const styles = StyleSheet.create({
   wrap: { gap: 14, paddingBottom: 32 },
   title: { color: colors.text, fontSize: 30, fontWeight: '900' },
   subtitle: { color: colors.muted, fontSize: 14, lineHeight: 20 },
+  tabRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  tabButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.9)',
+    borderColor: colors.border,
+    borderRadius: 999,
+    borderWidth: 1,
+    flex: 1,
+    justifyContent: 'center',
+    minHeight: 44,
+    paddingHorizontal: 14,
+  },
+  tabButtonActive: {
+    backgroundColor: colors.brandDark,
+    borderColor: colors.brandDark,
+  },
+  tabText: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  tabTextActive: {
+    color: '#ffffff',
+  },
+  emptyTabWrap: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.9)',
+    borderColor: colors.border,
+    borderRadius: 22,
+    borderWidth: 1,
+    gap: 8,
+    padding: 20,
+  },
+  emptyTabTitle: {
+    color: colors.text,
+    fontSize: 16,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  emptyTabCopy: {
+    color: colors.muted,
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: 'center',
+  },
   row: {
     alignItems: 'center',
     backgroundColor: colors.surface,

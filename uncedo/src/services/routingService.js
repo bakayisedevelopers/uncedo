@@ -107,6 +107,14 @@ function appendCoordinateIfNeeded(target, coordinate) {
   target.push(next);
 }
 
+function stripHtml(value = '') {
+  return String(value || '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function extractGoogleRouteCoordinates(route = null) {
   const detailedCoordinates = [];
   const steps = route?.legs?.flatMap((leg) => leg?.steps || []) || [];
@@ -122,8 +130,45 @@ function extractGoogleRouteCoordinates(route = null) {
   return decodePolyline(route?.overview_polyline?.points || '');
 }
 
+function extractGoogleRouteSteps(route = null) {
+  const steps = route?.legs?.flatMap((leg) => leg?.steps || []) || [];
+  const routeSteps = [];
+  const routeCoordinates = [];
+
+  steps.forEach((step) => {
+    const decodedCoordinates = decodePolyline(step?.polyline?.points || '');
+    if (!decodedCoordinates.length) {
+      return;
+    }
+
+    const startIndex = routeCoordinates.length;
+    decodedCoordinates.forEach((coordinate) => appendCoordinateIfNeeded(routeCoordinates, coordinate));
+    const endIndex = Math.max(startIndex, routeCoordinates.length - 1);
+
+    routeSteps.push({
+      instruction: stripHtml(step?.html_instructions || step?.instructions || step?.maneuver || ''),
+      maneuver: String(step?.maneuver || '').trim(),
+      distanceMeters: Number(step?.distance?.value || 0),
+      durationSeconds: Number(step?.duration?.value || 0),
+      distanceText: String(step?.distance?.text || '').trim(),
+      durationText: String(step?.duration?.text || '').trim(),
+      startIndex,
+      endIndex,
+      polyline: encodePolyline(decodedCoordinates),
+    });
+  });
+
+  return {
+    routeCoordinates,
+    routeSteps,
+  };
+}
+
 function parseGoogleRoute(route = null) {
-  const routeCoordinates = extractGoogleRouteCoordinates(route);
+  const routeSegments = extractGoogleRouteSteps(route);
+  const routeCoordinates = routeSegments.routeCoordinates.length > 1
+    ? routeSegments.routeCoordinates
+    : extractGoogleRouteCoordinates(route);
   const legs = Array.isArray(route?.legs) ? route.legs : [];
   const overviewEncodedPolyline = String(route?.overview_polyline?.points || '').trim();
   const detailedEncodedPolyline = routeCoordinates.length > 1
@@ -132,6 +177,7 @@ function parseGoogleRoute(route = null) {
 
   return {
     routeCoordinates,
+    routeSteps: routeSegments.routeSteps,
     encodedPolyline: detailedEncodedPolyline,
     overviewEncodedPolyline,
     distanceMeters: legs.reduce((sum, leg) => sum + Number(leg?.distance?.value || 0), 0),
@@ -143,6 +189,7 @@ function parseOsrmRoute(route = null) {
   const encodedPolyline = String(route?.geometry || '').trim();
   return {
     routeCoordinates: decodePolyline(encodedPolyline),
+    routeSteps: [],
     encodedPolyline,
     overviewEncodedPolyline: encodedPolyline,
     distanceMeters: Number(route?.distance || 0),
@@ -219,6 +266,7 @@ export async function fetchRouteData(originInput, destinationInput) {
   if (!origin || !destination) {
     return {
       routeCoordinates: [],
+      routeSteps: [],
       encodedPolyline: '',
       distanceMeters: null,
       durationSeconds: null,
@@ -243,6 +291,7 @@ export async function fetchRouteData(originInput, destinationInput) {
     });
     return {
       routeCoordinates: [],
+      routeSteps: [],
       encodedPolyline: '',
       distanceMeters: null,
       durationSeconds: null,
@@ -374,6 +423,19 @@ export function getRerouteReason({
 export function buildRouteSnapshot(routeData, origin, destination) {
   return {
     routeCoordinates: Array.isArray(routeData?.routeCoordinates) ? routeData.routeCoordinates : [],
+    routeSteps: Array.isArray(routeData?.routeSteps)
+      ? routeData.routeSteps.map((step) => ({
+          instruction: String(step?.instruction || '').trim(),
+          maneuver: String(step?.maneuver || '').trim(),
+          distanceMeters: Number.isFinite(Number(step?.distanceMeters)) ? Number(step.distanceMeters) : null,
+          durationSeconds: Number.isFinite(Number(step?.durationSeconds)) ? Number(step.durationSeconds) : null,
+          distanceText: String(step?.distanceText || '').trim(),
+          durationText: String(step?.durationText || '').trim(),
+          startIndex: Number.isFinite(Number(step?.startIndex)) ? Number(step.startIndex) : 0,
+          endIndex: Number.isFinite(Number(step?.endIndex)) ? Number(step.endIndex) : 0,
+          polyline: String(step?.polyline || '').trim(),
+        }))
+      : [],
     encodedPolyline: String(routeData?.encodedPolyline || '').trim(),
     overviewEncodedPolyline: String(routeData?.overviewEncodedPolyline || '').trim(),
     distanceMeters: Number.isFinite(Number(routeData?.distanceMeters)) ? Number(routeData.distanceMeters) : null,

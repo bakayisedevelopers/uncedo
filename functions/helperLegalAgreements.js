@@ -1,4 +1,4 @@
-const { createHash } = require('crypto');
+const { createHash, randomUUID } = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const PDFDocument = require('pdfkit');
@@ -461,6 +461,7 @@ async function uploadAgreementPdf({
   acceptance,
 }) {
   const bucket = admin.storage().bucket();
+  const downloadToken = randomUUID();
   const pdfBuffer = await buildAgreementPdfBuffer({
     title: documentTitle,
     version,
@@ -484,14 +485,11 @@ async function uploadAgreementPdf({
         version,
         acceptanceId,
         documentId: HELPER_AGREEMENT_DOCUMENT_ID,
+        firebaseStorageDownloadTokens: downloadToken,
       },
     },
   });
-  const [signedUrl] = await file.getSignedUrl({
-    action: 'read',
-    expires: '01-01-2500',
-  });
-  return signedUrl;
+  return `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(filePath)}?alt=media&token=${downloadToken}`;
 }
 
 async function acceptHelperAgreement({

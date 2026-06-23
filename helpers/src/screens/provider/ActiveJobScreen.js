@@ -74,15 +74,41 @@ function normalizeCoordinate(coordinate = null) {
   return { latitude, longitude };
 }
 
-function formatDistance(distance) {
-  if (!Number.isFinite(distance)) return 'Distance unavailable';
-  if (distance < 1000) return `${Math.round(distance)} m away`;
-  return `${(distance / 1000).toFixed(1)} km away`;
+function formatDistanceValue(distance) {
+  if (!Number.isFinite(distance)) return 'Waiting';
+
+  const kmValue = distance / 1000;
+  const rounded = Math.round(kmValue * 10) / 10;
+  const display = Number.isInteger(rounded) ? String(rounded.toFixed(0)) : String(rounded);
+  return `${display} km`;
 }
 
 function formatEta(durationSeconds) {
   if (!Number.isFinite(durationSeconds)) return null;
   return Math.max(1, Math.round(durationSeconds / 60));
+}
+
+function getNearestRouteIndex(routeCoordinates = [], currentLocation = null) {
+  if (!Array.isArray(routeCoordinates) || !routeCoordinates.length || !currentLocation) {
+    return -1;
+  }
+
+  return routeCoordinates.reduce((bestIndex, coordinate, index, coordinates) => {
+    const currentDistance = getDistanceInMeters(
+      currentLocation.latitude,
+      currentLocation.longitude,
+      coordinate.latitude,
+      coordinate.longitude,
+    );
+    const bestDistance = getDistanceInMeters(
+      currentLocation.latitude,
+      currentLocation.longitude,
+      coordinates[bestIndex]?.latitude,
+      coordinates[bestIndex]?.longitude,
+    );
+
+    return currentDistance < bestDistance ? index : bestIndex;
+  }, 0);
 }
 
 function getInitials(name = '') {
@@ -174,6 +200,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
   const { user } = useAuth();
   const { activeJob, actions, profile, saving, saveError } = useHelpersApp();
   const [currentLocation, setCurrentLocation] = useState(null);
+  const [trackingDocument, setTrackingDocument] = useState(null);
   const [resolvedCustomerLocation, setResolvedCustomerLocation] = useState(null);
   const [routeCoordinates, setRouteCoordinates] = useState([]);
   const [routeDistanceMeters, setRouteDistanceMeters] = useState(null);
@@ -455,6 +482,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
       setRouteDistanceMeters(null);
       setRouteDurationSeconds(null);
       setRouteError('');
+      setTrackingDocument(null);
       return () => {};
     }
 
@@ -462,6 +490,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
     setRouteDistanceMeters(null);
     setRouteDurationSeconds(null);
     setRouteError('');
+    setTrackingDocument(null);
 
     try {
       const { db } = getFirebaseClients();
@@ -471,6 +500,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
         }
 
         const data = snapshot.data() || {};
+        setTrackingDocument(data);
         const encodedPolyline = String(
           data.routePolylineEncoded
           || data.routePolylineOverviewEncoded
@@ -557,6 +587,33 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
     [routeDistanceMeters],
   );
   const etaMinutes = useMemo(() => formatEta(routeDurationSeconds), [routeDurationSeconds]);
+  const routeSteps = useMemo(
+    () => (Array.isArray(trackingDocument?.routeSteps) ? trackingDocument.routeSteps : []),
+    [trackingDocument?.routeSteps],
+  );
+  const navigationHint = useMemo(() => {
+    if (!routeSteps.length || !routeCoordinates.length || !currentLocation || !activeJobDestination) {
+      return null;
+    }
+
+    const nearestIndex = getNearestRouteIndex(routeCoordinates, currentLocation);
+    if (nearestIndex < 0) {
+      return null;
+    }
+
+    const nextStep = routeSteps.find((step) => Number(step?.endIndex || 0) >= nearestIndex) || routeSteps[0];
+    const instruction = String(nextStep?.instruction || nextStep?.maneuver || '').trim();
+    const stepDistance = Number.isFinite(Number(nextStep?.distanceMeters)) ? Number(nextStep.distanceMeters) : null;
+
+    if (!instruction && !stepDistance) {
+      return null;
+    }
+
+    return {
+      instruction: instruction || 'Continue on route',
+      distance: stepDistance,
+    };
+  }, [activeJobDestination, currentLocation, routeCoordinates, routeSteps]);
   const statusMeta = useMemo(() => getStatusMeta(activeJob?.status), [activeJob?.status]);
   const toneStyles = useMemo(() => getToneStyles(statusMeta.tone), [statusMeta.tone]);
   const canCancelJob = String(activeJob?.status || '').toLowerCase() !== 'completed';
@@ -839,13 +896,24 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
         </Pressable>
       </View>
 
+      {navigationHint ? (
+        <View style={styles.navigationHintCard}>
+          <Ionicons color={colors.brandDark} name="navigate-outline" size={18} />
+          <View style={styles.navigationHintBody}>
+            <Text style={styles.navigationHintTitle}>Next direction</Text>
+            <Text style={styles.navigationHintCopy}>
+              {navigationHint.instruction}
+              {navigationHint.distance ? ` in ${formatDistanceValue(navigationHint.distance)}` : ''}
+            </Text>
+          </View>
+        </View>
+      ) : null}
+
       <View style={styles.metricsRow}>
         <View style={[styles.metricPill, { backgroundColor: toneStyles.badgeBg, borderColor: toneStyles.badgeBg }]}>
-          <Text style={[styles.metricLabel, { color: toneStyles.badgeText }]}>Distance</Text>
-          <Text style={[styles.metricValue, { color: toneStyles.badgeText }]}>{formatDistance(distance)}</Text>
+          <Text style={[styles.metricValue, { color: toneStyles.badgeText }]}>{formatDistanceValue(distance)}</Text>
         </View>
         <View style={[styles.metricPill, { backgroundColor: toneStyles.badgeBg, borderColor: toneStyles.badgeBg }]}>
-          <Text style={[styles.metricLabel, { color: toneStyles.badgeText }]}>ETA</Text>
           <Text style={[styles.metricValue, { color: toneStyles.badgeText }]}>{etaMinutes ? `${etaMinutes} min` : 'Waiting'}</Text>
         </View>
         <View style={[styles.statusBadge, { backgroundColor: toneStyles.badgeBg }]}>
@@ -1227,27 +1295,52 @@ const styles = StyleSheet.create({
   },
   metricsRow: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     gap: 12,
     flexWrap: 'wrap',
   },
   metricPill: {
     flex: 1,
-    minWidth: 96,
-    borderRadius: 16,
+    minWidth: 104,
+    borderRadius: 18,
     borderWidth: 1,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-  },
-  metricLabel: {
-    fontSize: 10,
-    fontWeight: '800',
-    textTransform: 'uppercase',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    justifyContent: 'center',
   },
   metricValue: {
-    marginTop: 4,
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: '800',
+    textAlign: 'center',
+  },
+  navigationHintCard: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.96)',
+    borderColor: 'rgba(15,23,42,0.08)',
+    borderRadius: 18,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  navigationHintBody: {
+    flex: 1,
+    gap: 2,
+  },
+  navigationHintTitle: {
+    color: colors.brandDark,
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+  },
+  navigationHintCopy: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: '800',
+    lineHeight: 18,
   },
   sheetSubtitle: {
     marginTop: 12,

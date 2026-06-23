@@ -59,6 +59,11 @@ export function HelperOfferOverlay() {
     ? Math.max(0, Math.min(1, (Number(activeOffer.offerExpiresAt) - now) / 30000))
     : 0;
   const countdownColor = getCountdownColor(secondsLeft);
+  const offerTimingLabel = activeOffer?.timingPreference === 'later' ? 'Later' : 'Now';
+  const offerTimingCopy = activeOffer?.timingPreference === 'later'
+    ? (activeOffer?.scheduledForText || 'Scheduled request')
+    : 'Needs help now';
+  const offerPrice = formatCurrency(activeOffer?.payoutEstimate);
   const shimmerTranslate = shimmer.interpolate({
     inputRange: [0, 1],
     outputRange: [-280, 280],
@@ -89,17 +94,21 @@ export function HelperOfferOverlay() {
                 <Text style={styles.title}>{activeOffer.title}</Text>
                 <Text style={styles.subtitle}>{activeOffer.customerName} | {activeOffer.area}</Text>
               </View>
-              <View style={[styles.timerBadge, { borderColor: countdownColor }]}>
-                <Text style={[styles.timerText, { color: countdownColor }]}>{secondsLeft}s</Text>
+              <View style={styles.priceBadge}>
+                <Text style={styles.priceBadgeText}>{offerPrice}</Text>
               </View>
             </View>
 
             <Text style={styles.description}>{activeOffer.description}</Text>
 
-            <View style={styles.metaCard}>
-              <Text style={styles.metaLine}>Requested help: {(activeOffer.requestedSkills || []).join(', ') || 'General service help'}</Text>
-              <Text style={styles.metaLine}>Estimated payout: {formatCurrency(activeOffer.payoutEstimate)}</Text>
-              <Text style={styles.metaLine}>Address: {activeOffer.area}</Text>
+            <View style={styles.statusCard}>
+              <View style={styles.statusRow}>
+                <View style={[styles.statusPill, activeOffer.timingPreference === 'later' ? styles.statusPillLater : styles.statusPillNow]}>
+                  <Text style={styles.statusPillText}>{offerTimingLabel}</Text>
+                </View>
+                <Text style={styles.statusCopy}>{offerTimingCopy}</Text>
+              </View>
+              {activeOffer.statusDetail ? <Text style={styles.statusNote}>{activeOffer.statusDetail}</Text> : null}
             </View>
 
             {!canRespond ? (
@@ -117,12 +126,14 @@ export function HelperOfferOverlay() {
                 label="Accept"
                 onPress={() => actions.acceptOffer(activeOffer.id)}
                 disabled={!canRespond || secondsLeft <= 0}
+                style={styles.buttonFill}
               />
               <ActionButton
                 label="Decline"
                 tone="secondary"
                 onPress={() => actions.declineOffer(activeOffer.id)}
                 disabled={!canRespond || secondsLeft <= 0}
+                style={styles.buttonFill}
               />
             </View>
           </View>
@@ -170,7 +181,7 @@ const styles = StyleSheet.create({
     width: 120,
   },
   content: {
-    gap: 12,
+    gap: 14,
     padding: 18,
     position: 'relative',
     zIndex: 2,
@@ -202,16 +213,16 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
   },
-  timerBadge: {
-    backgroundColor: '#ffffff',
+  priceBadge: {
+    alignItems: 'center',
+    backgroundColor: colors.brandDark,
     borderRadius: 999,
-    borderWidth: 2,
-    minWidth: 66,
-    paddingHorizontal: 12,
+    paddingHorizontal: 14,
     paddingVertical: 8,
   },
-  timerText: {
-    fontSize: 18,
+  priceBadgeText: {
+    color: '#ffffff',
+    fontSize: 16,
     fontWeight: '900',
     textAlign: 'center',
   },
@@ -220,19 +231,50 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 21,
   },
-  metaCard: {
-    backgroundColor: 'rgba(248, 250, 252, 0.88)',
+  statusCard: {
+    backgroundColor: 'rgba(248, 250, 252, 0.92)',
     borderColor: colors.border,
     borderRadius: 18,
     borderWidth: 1,
     gap: 8,
     padding: 14,
   },
-  metaLine: {
+  statusRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 10,
+  },
+  statusPill: {
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  statusPillNow: {
+    backgroundColor: '#dcfce7',
+    borderColor: '#86efac',
+  },
+  statusPillLater: {
+    backgroundColor: '#fdf2f8',
+    borderColor: '#f9a8d4',
+  },
+  statusPillText: {
+    color: colors.brandDark,
+    fontSize: 11,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  statusCopy: {
     color: colors.text,
+    flex: 1,
     fontSize: 13,
-    fontWeight: '700',
+    fontWeight: '800',
     lineHeight: 20,
+  },
+  statusNote: {
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 18,
   },
   warningCard: {
     backgroundColor: '#fffbeb',
@@ -250,5 +292,8 @@ const styles = StyleSheet.create({
   buttonRow: {
     flexDirection: 'row',
     gap: 10,
+  },
+  buttonFill: {
+    flex: 1,
   },
 });
