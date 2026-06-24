@@ -245,3 +245,15 @@ export async function sourceServiceCatalogImages(payload = {}) {
 
   return Array.isArray(result?.images) ? result.images.map(normalizeImage).filter(Boolean) : [];
 }
+
+export async function generateServiceCatalogImages(payload = {}) {
+  const result = await authorizedFetch('generateServiceCatalogImages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  return Array.isArray(result?.images) ? result.images.map(normalizeImage).filter(Boolean) : [];
+}

@@ -8,6 +8,7 @@ import { flattenProviderServices, listHelperProfiles } from '../services/adminSe
 import {
   buildServiceCatalogView,
   deleteServiceCatalogImage,
+  generateServiceCatalogImages,
   saveServiceCatalogEntry,
   sourceServiceCatalogImages,
   subscribeToServiceCatalog,
@@ -23,6 +24,13 @@ function slugify(value = '') {
     .replace(/^_+|_+$/g, '');
 }
 
+let draftSequence = 0;
+
+function createDraftKey(prefix = 'draft') {
+  draftSequence += 1;
+  return `${prefix}_${draftSequence}`;
+}
+
 function tone(status = '') {
   const normalized = String(status || '').toLowerCase();
   if (normalized === 'approved' || normalized === 'verified') return 'success';
@@ -34,6 +42,7 @@ function tone(status = '') {
 function createOptionDraft(option = {}, index = 0) {
   const value = String(option.value || '').trim() || `option_${index + 1}`;
   return {
+    draftKey: String(option.draftKey || option.clientId || '').trim() || createDraftKey('option'),
     value,
     label: String(option.label || value).trim(),
     priceAdder: Number(option.priceAdder || 0),
@@ -43,6 +52,7 @@ function createOptionDraft(option = {}, index = 0) {
 
 function createQuestionDraft(question = {}, index = 0, required = true) {
   return {
+    draftKey: String(question.draftKey || question.clientId || '').trim() || createDraftKey('question'),
     id: String(question.id || `question_${index + 1}`).trim(),
     prompt: String(question.prompt || question.label || '').trim(),
     answerType: String(question.answerType || 'enum').trim().toLowerCase(),
@@ -123,7 +133,7 @@ function QuestionOptionEditor({ option, onChange, onRemove }) {
       <div className="grid gap-3 md:grid-cols-[1.2fr_0.8fr_auto]">
         <input
           value={option.label}
-          onChange={(event) => onChange({ ...option, label: event.target.value, value: slugify(event.target.value) })}
+          onChange={(event) => onChange({ ...option, label: event.target.value })}
           placeholder="Option label"
           className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
         />
@@ -197,7 +207,7 @@ function QuestionEditor({
 
       <div className="mt-4 space-y-4">
         {questions.length ? questions.map((question, index) => (
-          <div key={`${question.id}-${index}`} className="rounded-[24px] border border-white/10 bg-ink-950/30 p-4">
+          <div key={question.draftKey || `question_${index}`} className="rounded-[24px] border border-white/10 bg-ink-950/30 p-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-4">
                 <span className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Question {index + 1}</span>
@@ -226,7 +236,6 @@ function QuestionEditor({
                 onChange={(event) => updateQuestion(index, {
                   ...question,
                   prompt: event.target.value,
-                  id: slugify(event.target.value) || question.id,
                 })}
                 placeholder="Question prompt"
                 className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
@@ -266,7 +275,7 @@ function QuestionEditor({
                 </div>
                 {question.options.length ? question.options.map((option, optionIndex) => (
                   <QuestionOptionEditor
-                    key={`${option.value}-${optionIndex}`}
+                    key={option.draftKey || `option_${optionIndex}`}
                     option={option}
                     onChange={(nextOption) => updateQuestion(index, {
                       ...question,
@@ -577,6 +586,54 @@ export default function ServiceDetailsPage() {
       setMessage(`Added ${sourcedImages.length} sourced image${sourcedImages.length === 1 ? '' : 's'}.`);
     } catch (error) {
       setMessage(error.message || 'Unable to source reusable images right now.');
+    } finally {
+      setIsMutating(false);
+    }
+  };
+
+  const handleGenerateImages = async (targetCount = 1) => {
+    const targetServiceId = slugify(draftServiceId || draftLabel);
+    if (!targetServiceId || !draftLabel.trim() || !draftCategoryId.trim()) {
+      setMessage('Save the service name and category first before generating images.');
+      return;
+    }
+    if (remainingUploads <= 0) {
+      setMessage('This service already has the maximum number of images.');
+      return;
+    }
+
+    setIsMutating(true);
+    setMessage(`Generating ${Math.min(targetCount, remainingUploads)} image${Math.min(targetCount, remainingUploads) === 1 ? '' : 's'} with Gemini...`);
+    try {
+      const includedServices = catalogEntries
+        .filter((entry) => draftIncludedServiceIds.includes(entry.id))
+        .map((entry) => ({
+          id: entry.id,
+          label: entry.label,
+          description: entry.description,
+        }));
+
+      const generatedImages = await generateServiceCatalogImages({
+        service: {
+          id: targetServiceId,
+          serviceId: targetServiceId,
+          label: String(draftLabel || '').trim(),
+          promptLabel: String(draftPromptLabel || draftLabel || '').trim(),
+          description: String(draftDescription || '').trim(),
+          categoryId: draftCategoryId,
+          categoryName: selectedCategory?.name || '',
+          kind: draftKind,
+          includedServices,
+        },
+        targetCount: Math.min(targetCount, remainingUploads),
+      });
+
+      const images = [...(selectedService?.images || []), ...generatedImages, ...inheritedBundleImages].slice(0, 10);
+      const saved = await saveServiceCatalogEntry(targetServiceId, buildPayload(images));
+      upsertSavedService(saved);
+      setMessage(`Generated ${generatedImages.length} Gemini image${generatedImages.length === 1 ? '' : 's'}.`);
+    } catch (error) {
+      setMessage(error.message || 'Unable to generate images right now.');
     } finally {
       setIsMutating(false);
     }
@@ -896,7 +953,25 @@ export default function ServiceDetailsPage() {
                       className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-bold text-white disabled:opacity-60"
                     >
                       <Sparkles className="h-4 w-4" />
-                      Get pictures online
+                      Get recent pictures online
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleGenerateImages(1)}
+                      disabled={isMutating || remainingUploads <= 0}
+                      className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-bold text-white disabled:opacity-60"
+                    >
+                      <Sparkles className="h-4 w-4" />
+                      Generate 1 AI image
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleGenerateImages(3)}
+                      disabled={isMutating || remainingUploads <= 0}
+                      className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-bold text-white disabled:opacity-60"
+                    >
+                      <Sparkles className="h-4 w-4" />
+                      Generate 3 AI images
                     </button>
                     <label className="inline-flex cursor-pointer items-center rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-bold text-white">
                       Upload images

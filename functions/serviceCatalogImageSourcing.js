@@ -3,6 +3,7 @@ const sharp = require('sharp');
 const { randomUUID } = require('crypto');
 
 const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
+const DEFAULT_GEMINI_IMAGE_MODEL = 'gemini-2.5-flash-image';
 const OPENVERSE_ENDPOINT = 'https://api.openverse.org/v1/images/';
 const WIKIMEDIA_ENDPOINT = 'https://commons.wikimedia.org/w/api.php';
 const DEFAULT_TARGET_DIMENSIONS = { width: 1200, height: 900 };
@@ -51,6 +52,40 @@ function parseJsonObject(text = '') {
 
 function stripHtml(value = '') {
   return String(value || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function toIsoDate(value = '') {
+  const normalized = String(value || '').trim();
+  if (!normalized) return '';
+
+  const parsed = Date.parse(normalized);
+  if (Number.isFinite(parsed)) {
+    return new Date(parsed).toISOString();
+  }
+
+  const yearMatch = normalized.match(/\b(19|20)\d{2}\b/);
+  if (yearMatch) {
+    const fallback = Date.parse(`${yearMatch[0]}-01-01T00:00:00Z`);
+    if (Number.isFinite(fallback)) {
+      return new Date(fallback).toISOString();
+    }
+  }
+
+  return '';
+}
+
+function getImageAgeScore(capturedAt = '') {
+  const iso = toIsoDate(capturedAt);
+  if (!iso) return 0;
+  const capturedTime = Date.parse(iso);
+  if (!Number.isFinite(capturedTime)) return 0;
+
+  const year = new Date(capturedTime).getUTCFullYear();
+  if (year >= 2024) return 5;
+  if (year >= 2022) return 4;
+  if (year >= 2020) return 3;
+  if (year >= 2017) return 1;
+  return -3;
 }
 
 function getVertexAiConfig(overrides = {}) {
@@ -105,8 +140,12 @@ function buildManualQueries(service = {}) {
 
   const queries = uniq([
     label,
+    `modern ${label}`,
+    `recent ${label}`,
+    `professional ${label}`,
     `${label} service`,
     categoryName ? `${categoryName} ${label}` : '',
+    categoryName ? `modern ${categoryName} ${label}` : '',
     categoryName ? `${categoryName} service` : '',
     description ? `${label} ${description}` : '',
     ...includedLabels,
@@ -126,6 +165,8 @@ async function buildSearchQueriesWithAi({ firebaseConfig = {}, service = {} } = 
     'The goal is to find existing real photos on open-license platforms.',
     'Avoid logos, posters, icon packs, product ads, screenshots, text-heavy graphics, and watermarked results.',
     'Favor direct service activity, tools, finished outcomes, and customer-ready scenes.',
+    'Prioritize modern, recent, clean, high-quality photos that feel current and visually appealing.',
+    'Prefer photos from roughly 2021 onward when available.',
     'If the service is a bundle, include searches covering the bundle and the included services.',
     'Return up to 8 short search phrases in English.',
     'JSON shape: {"queries":["..."]}',
@@ -184,6 +225,7 @@ async function searchOpenverse(query, limit = 8) {
       attribution: clip(item.attribution || '', 300),
       creator: clip(item.creator || '', 140),
       license: clip(`${item.license || ''} ${item.license_version || ''}`, 80).trim(),
+      capturedAt: toIsoDate(item.created_on || item.indexed_on || ''),
     }))
     .filter((item) => item.imageUrl);
 }
@@ -221,6 +263,11 @@ async function searchWikimediaCommons(query, limit = 8) {
       if (!info) return null;
 
       const license = stripHtml(info?.extmetadata?.LicenseShortName?.value || info?.extmetadata?.License?.value || '');
+      const capturedAt = toIsoDate(
+        info?.extmetadata?.DateTimeOriginal?.value
+        || info?.extmetadata?.DateTime?.value
+        || '',
+      );
       return {
         source: 'wikimedia',
         sourceId: String(page?.title || '').trim(),
@@ -233,10 +280,21 @@ async function searchWikimediaCommons(query, limit = 8) {
         attribution: clip(stripHtml(info?.extmetadata?.Artist?.value || ''), 220),
         creator: clip(stripHtml(info?.extmetadata?.Artist?.value || ''), 140),
         license,
+        capturedAt,
       };
     })
     .filter(Boolean)
     .filter((item) => item.imageUrl);
+}
+
+function scoreCandidate(candidate = {}) {
+  const width = Number(candidate.width || 0);
+  const height = Number(candidate.height || 0);
+  const pixelScore = width && height ? Math.min((width * height) / 500000, 8) : 0;
+  const sourceScore = candidate.source === 'wikimedia' ? 2.5 : 1;
+  const ageScore = getImageAgeScore(candidate.capturedAt);
+  const titlePenalty = /(\b200\d\b|\b201\d\b|vintage|historic|archive|old)/i.test(String(candidate.title || '')) ? -2.5 : 0;
+  return sourceScore + pixelScore + ageScore + titlePenalty;
 }
 
 async function collectImageCandidates({ firebaseConfig = {}, service = {}, limit = 20 } = {}) {
@@ -259,13 +317,11 @@ async function collectImageCandidates({ firebaseConfig = {}, service = {}, limit
         query,
       });
     });
-
-    if (candidates.length >= limit) {
-      break;
-    }
   }
 
-  return candidates.slice(0, limit);
+  return candidates
+    .sort((left, right) => scoreCandidate(right) - scoreCandidate(left))
+    .slice(0, limit);
 }
 
 function clamp(value, min, max) {
@@ -355,6 +411,7 @@ async function uploadImageToStorage({ bucket, serviceId, index, buffer, source =
         sourcePageUrl: String(source.pageUrl || '').trim(),
         sourceLicense: String(source.license || '').trim(),
         sourceCreator: String(source.creator || '').trim(),
+        sourceCapturedAt: String(source.capturedAt || '').trim(),
       },
     },
   });
@@ -368,6 +425,65 @@ async function uploadImageToStorage({ bucket, serviceId, index, buffer, source =
     sourcePageUrl: String(source.pageUrl || '').trim(),
     attribution: String(source.attribution || '').trim(),
     license: String(source.license || '').trim(),
+  };
+}
+
+function buildImageGenerationPrompt(service = {}) {
+  const label = clip(service.label || 'home service', 140);
+  const category = clip(service.categoryName || service.categoryId || 'service', 120);
+  const description = clip(service.description || '', 500);
+  const includedServices = (Array.isArray(service.includedServices) ? service.includedServices : [])
+    .map((item) => item?.label || item?.id || '')
+    .filter(Boolean)
+    .join(', ');
+
+  return [
+    `Create a modern, high-quality promotional photo for the service "${label}".`,
+    `Category: ${category}.`,
+    description ? `Service details: ${description}.` : '',
+    includedServices ? `Bundle contents: ${includedServices}.` : '',
+    'Style requirements:',
+    '- realistic photography, not illustration',
+    '- modern, current-day scene',
+    '- clean natural lighting',
+    '- visually attractive and trustworthy for a service marketplace',
+    '- no text, no watermark, no collage, no logo',
+    '- show the actual service being performed or the finished result',
+    '- frame for a 4:3 catalog card image',
+  ].filter(Boolean).join('\n');
+}
+
+async function generateAndNormalizeImage({ firebaseConfig = {}, service = {}, targetDimensions = null } = {}) {
+  const ai = getVertexAiClient({ firebaseConfig });
+  const interaction = await ai.interactions.create({
+    model: firebaseConfig.GEMINI_IMAGE_MODEL || DEFAULT_GEMINI_IMAGE_MODEL,
+    input: buildImageGenerationPrompt(service),
+  });
+
+  const generatedImage = interaction?.output_image;
+  const base64Data = String(generatedImage?.data || '').trim();
+  if (!base64Data) {
+    throw new Error('Gemini did not return an image.');
+  }
+
+  const generatedBuffer = Buffer.from(base64Data, 'base64');
+  const metadata = await sharp(generatedBuffer).rotate().metadata();
+  const finalTarget = targetDimensions || resolveTargetDimensions(metadata);
+  const outputBuffer = await sharp(generatedBuffer)
+    .rotate()
+    .resize(finalTarget.width, finalTarget.height, {
+      fit: 'cover',
+      position: 'attention',
+    })
+    .jpeg({
+      quality: 88,
+      chromaSubsampling: '4:4:4',
+    })
+    .toBuffer();
+
+  return {
+    buffer: outputBuffer,
+    targetDimensions: finalTarget,
   };
 }
 
@@ -430,6 +546,54 @@ async function sourceServiceCatalogImages({
   };
 }
 
+async function generateServiceCatalogImages({
+  firebaseConfig = {},
+  bucket,
+  service = {},
+  targetCount = 1,
+} = {}) {
+  if (!bucket || typeof bucket.file !== 'function') {
+    throw new Error('Firebase Storage bucket is required for service image generation.');
+  }
+
+  const serviceId = slugify(service.serviceId || service.id || service.label || '');
+  if (!serviceId) {
+    throw new Error('Service id is required before generating images.');
+  }
+
+  const requestedCount = clamp(targetCount || 1, 1, 3);
+  const uploads = [];
+  let targetDimensions = null;
+
+  for (let index = 0; index < requestedCount; index += 1) {
+    const generated = await generateAndNormalizeImage({
+      firebaseConfig,
+      service,
+      targetDimensions,
+    });
+    targetDimensions = generated.targetDimensions;
+    const uploaded = await uploadImageToStorage({
+      bucket,
+      serviceId,
+      index,
+      buffer: generated.buffer,
+      source: {
+        source: 'gemini_generated',
+        title: `${service.label || 'service'} generated image`,
+        attribution: 'Generated with Gemini 2.5 Flash Image',
+        license: 'generated',
+      },
+    });
+    uploads.push(uploaded);
+  }
+
+  return {
+    images: uploads,
+    targetDimensions: targetDimensions || { ...DEFAULT_TARGET_DIMENSIONS },
+  };
+}
+
 module.exports = {
+  generateServiceCatalogImages,
   sourceServiceCatalogImages,
 };

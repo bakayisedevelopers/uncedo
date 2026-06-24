@@ -40,6 +40,14 @@ function getLiveServiceQuestionPlan(serviceId = '') {
   };
 }
 
+function hasLiveSelectionQuestionPlan({ serviceIds = [], selectedPackageId = '' } = {}) {
+  if (selectedPackageId && getLiveServiceQuestionPlan(selectedPackageId)) {
+    return true;
+  }
+
+  return (Array.isArray(serviceIds) ? serviceIds : []).some((serviceId) => Boolean(getLiveServiceQuestionPlan(serviceId)));
+}
+
 const CATEGORY_QUESTION_PLAN = {
   cleaning: {
     required: [
@@ -931,7 +939,8 @@ export function getSelectedServiceMetadata(serviceIds = []) {
 }
 
 export function getRequiredQuestionDefinitions({ categoryId = '', serviceIds = [], selectedPackageId = '' } = {}) {
-  const categoryRequired = getCategoryQuestionPlan(categoryId).required;
+  const useCategoryFallback = !hasLiveSelectionQuestionPlan({ serviceIds, selectedPackageId });
+  const categoryRequired = useCategoryFallback ? getCategoryQuestionPlan(categoryId).required : [];
   const seen = new Set(categoryRequired.map((question) => question.id));
   const allRequired = [...categoryRequired];
 
@@ -957,7 +966,8 @@ export function getRequiredQuestionDefinitions({ categoryId = '', serviceIds = [
 }
 
 export function getOptionalQuestionDefinitions({ categoryId = '', serviceIds = [], selectedPackageId = '' } = {}) {
-  const categoryOptional = getCategoryQuestionPlan(categoryId).optional;
+  const useCategoryFallback = !hasLiveSelectionQuestionPlan({ serviceIds, selectedPackageId });
+  const categoryOptional = useCategoryFallback ? getCategoryQuestionPlan(categoryId).optional : [];
   const seen = new Set(categoryOptional.map((question) => question.id));
   const allOptional = [...categoryOptional];
 
@@ -1071,6 +1081,17 @@ function createQuickReply(value, label = '') {
   };
 }
 
+function normalizeQuickReplyOption(option) {
+  if (!option) return null;
+  if (typeof option === 'string') {
+    return createQuickReply(option);
+  }
+
+  const value = String(option.value || option.id || '').trim();
+  if (!value) return null;
+  return createQuickReply(value, String(option.label || value).trim());
+}
+
 function createRangeReplies(values = []) {
   return values.map((entry) => (
     typeof entry === 'string'
@@ -1100,7 +1121,7 @@ export function getCustomerIntakeQuickReplyOptions(question = {}, context = {}) 
   }
 
   if (answerType === 'enum' && Array.isArray(question?.options) && question.options.length) {
-    return question.options.map((option) => createQuickReply(option));
+    return question.options.map(normalizeQuickReplyOption).filter(Boolean);
   }
 
   if (questionId.includes('timing_preference') || prompt.includes('now or later')) {
