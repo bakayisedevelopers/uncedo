@@ -471,3 +471,35 @@ export async function cancelServiceRequest({ requestId, helperId, reason }) {
     });
   });
 }
+
+export async function submitServiceRequestRating({ requestId, score, comment = '' }) {
+  if (!requestId) {
+    throw new Error('A request ID is required to submit a rating.');
+  }
+
+  const { auth } = getFirebaseClients();
+  const idToken = await auth.currentUser?.getIdToken();
+  if (!idToken) {
+    throw new Error('You must be signed in to submit a rating.');
+  }
+
+  const response = await fetch(getFunctionEndpoint('submitServiceRequestRating'), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      requestId,
+      score,
+      comment,
+    }),
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.success === false) {
+    throw new Error(payload?.message || 'Unable to submit this rating.');
+  }
+
+  return payload?.rating || null;
+}

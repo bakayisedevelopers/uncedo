@@ -222,27 +222,23 @@ export function CustomerHomeScreen({
         <CustomerCallToActionSheet
           disabled={!onboardingStatus.complete}
           hasActiveRequest={isTrackingActive}
-          label={isTrackingActive ? 'Track Active Request' : 'Describe what you want'}
+          label={isTrackingActive ? 'Track Active Request' : 'Browse services'}
           onPress={() => {
             if (activeRequest) {
-              if (activeRequest.status === 'collecting_details') {
+              if (activeRequest.status !== 'collecting_details') {
                 navigate({
-                  key: 'CustomerServiceCall',
+                  key: 'ServiceRequestTracking',
                   params: { requestId: activeRequest.id, parentTab: 'CustomerHome' },
                 });
               } else {
                 navigate({
-                  key: 'ServiceRequestTracking',
+                  key: 'ServiceRequestDetails',
                   params: { requestId: activeRequest.id, parentTab: 'CustomerHome' },
                 });
               }
               return;
             }
-
-            navigate({
-              key: 'CustomerServiceCall',
-              params: { parentTab: 'CustomerHome' },
-            });
+            setSearchVisible(true);
           }}
         />
       </View>
