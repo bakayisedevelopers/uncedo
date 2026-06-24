@@ -24,15 +24,16 @@ export function SkillCatalogScreen({ navigate, goBack }) {
 
   const catalogSkills = useMemo(
     () => catalogGroups.flatMap((service) => (
-      service.services.map((entry) => ({
-        id: entry.id,
-        catalogId: entry.id,
-        serviceId: service.id,
-        serviceName: service.name,
-        serviceDescription: service.description,
-        skillName: entry.label,
-        active: entry.active !== false,
-      }))
+        service.services.map((entry) => ({
+          id: entry.id,
+          catalogId: entry.id,
+          serviceId: service.id,
+          serviceName: service.name,
+          serviceDescription: service.description,
+          skillName: entry.label,
+          active: entry.active !== false,
+          kind: entry.kind || 'service',
+        }))
     )),
     [catalogGroups],
   );
@@ -90,7 +91,7 @@ export function SkillCatalogScreen({ navigate, goBack }) {
             </View>
             <View style={styles.rowBody}>
               <Text style={styles.rowTitle}>{item.skillName}</Text>
-              <Text style={styles.rowDescription}>{item.serviceName}</Text>
+              <Text style={styles.rowDescription}>{item.serviceName}{item.kind === 'bundle' ? ' • bundle' : ''}</Text>
             </View>
             {existing ? (
               <StatusBadge label={existing.status === 'approved' ? 'Approved' : 'Pending'} tone={existing.status === 'approved' ? 'success' : 'warning'} />

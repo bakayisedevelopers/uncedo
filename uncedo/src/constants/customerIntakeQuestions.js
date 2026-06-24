@@ -1,4 +1,10 @@
-import { CUSTOMER_SERVICE_CATALOG, getCustomerPackagesForCategory, getCustomerServiceById, getCustomerServicesForCategory } from './serviceCatalog';
+import {
+  CUSTOMER_SERVICE_CATALOG,
+  getCustomerPackagesForCategory,
+  getCustomerServiceById,
+  getCustomerServicesForCategory,
+  getLiveQuestionnaireForService,
+} from './serviceCatalog';
 
 function q(id, prompt, config = {}) {
   return {
@@ -20,6 +26,18 @@ function hasAnswerValue(value) {
   if (Array.isArray(value)) return value.length > 0;
   if (value && typeof value === 'object') return Object.keys(value).length > 0;
   return String(value || '').trim().length > 0;
+}
+
+function getLiveServiceQuestionPlan(serviceId = '') {
+  const questionnaire = getLiveQuestionnaireForService(serviceId);
+  if (!questionnaire) {
+    return null;
+  }
+
+  return {
+    required: (Array.isArray(questionnaire.required) ? questionnaire.required : []).map((question) => q(question.id, question.prompt, question)),
+    optional: (Array.isArray(questionnaire.optional) ? questionnaire.optional : []).map((question) => q(question.id, question.prompt, question)),
+  };
 }
 
 const CATEGORY_QUESTION_PLAN = {
@@ -839,6 +857,10 @@ const PACKAGE_QUESTION_PLAN = {
 };
 
 export function getServiceQuestionPlan(serviceId) {
+  const livePlan = getLiveServiceQuestionPlan(serviceId);
+  if (livePlan) {
+    return livePlan;
+  }
   return SERVICE_QUESTION_PLAN[serviceId] || PACKAGE_QUESTION_PLAN[serviceId] || { required: [], optional: [] };
 }
 

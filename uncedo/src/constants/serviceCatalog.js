@@ -230,6 +230,144 @@ function normalizeToken(value = '') {
     .replace(/[^a-z0-9]+/g, '');
 }
 
+function normalizeEnumOptions(options = []) {
+  return (Array.isArray(options) ? options : [])
+    .map((option) => {
+      if (!option) return null;
+      if (typeof option === 'string') return option;
+      const value = String(option.value || option.id || '').trim();
+      return value || null;
+    })
+    .filter(Boolean);
+}
+
+function normalizeLiveQuestion(question = {}) {
+  const id = String(question.id || '').trim();
+  if (!id) return null;
+  return {
+    id,
+    prompt: String(question.prompt || question.label || id).trim(),
+    answerType: String(question.answerType || 'text').trim().toLowerCase(),
+    answerHint: String(question.answerHint || '').trim(),
+    options: normalizeEnumOptions(question.options),
+    required: question.required !== false,
+  };
+}
+
+function buildLiveServiceEntry(entry = {}) {
+  const id = String(entry.id || entry.serviceId || '').trim().toLowerCase();
+  const categoryId = String(entry.categoryId || '').trim().toLowerCase();
+  if (!id || !categoryId) return null;
+
+  const kind = String(entry.kind || 'service').trim().toLowerCase();
+  const questionnaire = entry.questionnaire && typeof entry.questionnaire === 'object'
+    ? entry.questionnaire
+    : { required: entry.requiredQuestions, optional: entry.optionalQuestions };
+
+  return {
+    id,
+    categoryId,
+    label: String(entry.label || entry.skillName || id).trim(),
+    promptLabel: String(entry.promptLabel || entry.label || entry.skillName || id).trim(),
+    kind: kind === 'bundle' ? 'bundle' : kind === 'package' ? 'bundle' : 'service',
+    description: String(entry.description || '').trim(),
+    includedServiceIds: (Array.isArray(entry.includedServiceIds) ? entry.includedServiceIds : [])
+      .map((item) => String(item || '').trim().toLowerCase())
+      .filter(Boolean),
+    packageQuestions: [],
+    pricing: { ...(entry.pricing || {}) },
+    questionnaire: {
+      required: (Array.isArray(questionnaire?.required) ? questionnaire.required : [])
+        .map((question) => normalizeLiveQuestion({ ...question, required: true }))
+        .filter(Boolean),
+      optional: (Array.isArray(questionnaire?.optional) ? questionnaire.optional : [])
+        .map((question) => normalizeLiveQuestion({ ...question, required: false }))
+        .filter(Boolean),
+    },
+    requiresPortfolioSelection: Boolean(entry.requiresPortfolioSelection),
+    sensitive: Boolean(entry.sensitive),
+    active: entry.active !== false,
+    approved: entry.approved !== false,
+    images: Array.isArray(entry.images) ? entry.images : [],
+    categoryName: String(entry.categoryName || '').trim(),
+    source: 'live',
+  };
+}
+
+const liveServiceMap = new Map();
+const liveCategoryMap = new Map();
+
+function rebuildMutableCatalogExports() {
+  const categoryLookup = new Map(Object.values(CATEGORY_LOOKUP).map((category) => [category.id, { ...category }]));
+  liveCategoryMap.forEach((category, key) => {
+    categoryLookup.set(key, {
+      id: key,
+      label: category.label || key,
+      description: category.description || '',
+      pricingEngineId: key,
+    });
+  });
+
+  const nextCatalog = [...categoryLookup.values()].map((category) => ({
+    ...category,
+    packages: [...liveServiceMap.values()].filter((service) => service.categoryId === category.id && service.kind === 'bundle'),
+    services: [
+      ...SERVICE_DEFINITIONS.filter((service) => service.categoryId === category.id && !liveServiceMap.has(service.id)),
+      ...[...liveServiceMap.values()].filter((service) => service.categoryId === category.id && service.kind !== 'bundle'),
+    ],
+  }));
+
+  CUSTOMER_SERVICE_CATALOG.splice(0, CUSTOMER_SERVICE_CATALOG.length, ...nextCatalog);
+
+  const nextOptions = [
+    ...PACKAGE_DEFINITIONS.filter((service) => !liveServiceMap.has(service.id)),
+    ...SERVICE_DEFINITIONS.filter((service) => !liveServiceMap.has(service.id)),
+    ...[...liveServiceMap.values()],
+  ].map((service) => ({
+    ...service,
+    kind: service.kind === 'package' ? 'bundle' : service.kind || 'service',
+  }));
+
+  CUSTOMER_SERVICE_OPTIONS.splice(0, CUSTOMER_SERVICE_OPTIONS.length, ...nextOptions);
+
+  CUSTOMER_SERVICE_CATEGORY_OPTIONS.splice(0, CUSTOMER_SERVICE_CATEGORY_OPTIONS.length, ...CUSTOMER_SERVICE_CATALOG.map((category) => ({
+    id: category.id,
+    label: category.label,
+    description: category.description,
+    pricingEngineId: category.pricingEngineId || category.id,
+  })));
+
+  CUSTOMER_CATEGORY_LABELS.splice(0, CUSTOMER_CATEGORY_LABELS.length, ...CUSTOMER_SERVICE_CATALOG.map((category) => category.label));
+  CUSTOMER_SERVICE_LABELS.splice(0, CUSTOMER_SERVICE_LABELS.length, ...CUSTOMER_SERVICE_OPTIONS.map((service) => service.label));
+}
+
+export function hydrateLiveServiceCatalog(entries = []) {
+  liveServiceMap.clear();
+  liveCategoryMap.clear();
+
+  (Array.isArray(entries) ? entries : []).forEach((entry) => {
+    const normalized = buildLiveServiceEntry(entry);
+    if (!normalized || normalized.active === false || normalized.approved === false) {
+      return;
+    }
+    liveServiceMap.set(normalized.id, normalized);
+
+    const existingCategory = getCustomerServiceCategoryById(normalized.categoryId);
+    liveCategoryMap.set(normalized.categoryId, {
+      id: normalized.categoryId,
+      label: normalized.categoryName || existingCategory?.label || normalized.categoryId.replace(/_/g, ' '),
+      description: existingCategory?.description || normalized.description || '',
+    });
+  });
+
+  rebuildMutableCatalogExports();
+}
+
+export function getLiveQuestionnaireForService(serviceId = '') {
+  const service = liveServiceMap.get(String(serviceId || '').trim().toLowerCase());
+  return service?.questionnaire || null;
+}
+
 export function getCustomerServiceCategoryById(categoryId) {
   return CUSTOMER_SERVICE_CATALOG.find((category) => category.id === categoryId) || null;
 }
@@ -237,6 +375,9 @@ export function getCustomerServiceCategoryById(categoryId) {
 export function getCustomerServiceById(serviceId) {
   const normalizedServiceId = String(LEGACY_SERVICE_ALIASES[serviceId] || serviceId || '').trim().toLowerCase();
   if (!normalizedServiceId) return null;
+
+  const liveMatch = CUSTOMER_SERVICE_OPTIONS.find((service) => service.id === normalizedServiceId);
+  if (liveMatch) return liveMatch;
 
   const directMatch = CUSTOMER_SERVICE_OPTIONS.find((service) => service.id === normalizedServiceId);
   if (directMatch) return directMatch;
@@ -252,11 +393,11 @@ export function getCustomerServiceById(serviceId) {
 }
 
 export function getCustomerServicesForCategory(categoryId) {
-  return CUSTOMER_SERVICE_OPTIONS.filter((service) => service.categoryId === categoryId && service.kind !== 'package');
+  return CUSTOMER_SERVICE_OPTIONS.filter((service) => service.categoryId === categoryId && !['package', 'bundle'].includes(service.kind));
 }
 
 export function getCustomerPackagesForCategory(categoryId) {
-  return CUSTOMER_SERVICE_OPTIONS.filter((service) => service.categoryId === categoryId && service.kind === 'package');
+  return CUSTOMER_SERVICE_OPTIONS.filter((service) => service.categoryId === categoryId && ['package', 'bundle'].includes(service.kind));
 }
 
 export function buildJobRequestSuggestions(limit = 8) {

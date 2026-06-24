@@ -16,6 +16,10 @@ const {
   sanitizePricingSnapshot,
 } = require('./pricingEngine');
 const {
+  computeMarketplaceQuote,
+  normalizeServiceCatalogEntry: normalizeMarketplaceServiceCatalogEntry,
+} = require('./serviceMarketplacePricing');
+const {
   normalizeSubjectName,
   isAllowedGrade1To12Subject,
   GRADE_1_TO_12_SUBJECT_NAMES,
@@ -1282,18 +1286,7 @@ function normalizeServiceToken(value = '') {
 }
 
 function normalizeServiceCatalogEntry(entry = {}) {
-  const id = String(entry.id || entry.serviceId || '').trim().toLowerCase();
-  if (!id) return null;
-
-  return {
-    id,
-    categoryId: String(entry.categoryId || '').trim().toLowerCase(),
-    categoryName: String(entry.categoryName || '').trim(),
-    label: String(entry.label || entry.skillName || id).trim(),
-    description: String(entry.description || '').trim(),
-    active: entry.active !== false,
-    approved: entry.approved !== false,
-  };
+  return normalizeMarketplaceServiceCatalogEntry(entry);
 }
 
 function buildActiveServiceCatalogIndex(entries = []) {
@@ -1381,9 +1374,6 @@ async function getLiveServiceCatalogEntries() {
 }
 
 function helperSupportsCategory(helper = {}, categoryId = '', requestServiceIds = [], serviceCatalogIndex = null) {
-  const supportedServiceIds = HELPER_CATEGORY_SERVICE_MAP[String(categoryId || '').trim().toLowerCase()] || [];
-  if (!supportedServiceIds.length) return false;
-
   const catalogIndex = serviceCatalogIndex || buildActiveServiceCatalogIndex([]);
   const categoryToken = normalizeServiceToken(categoryId);
   const categoryEntries = catalogIndex.byCategoryId.get(categoryToken) || [];
@@ -1391,6 +1381,10 @@ function helperSupportsCategory(helper = {}, categoryId = '', requestServiceIds 
     return false;
   }
 
+  const supportedServiceIds = [
+    ...(HELPER_CATEGORY_SERVICE_MAP[String(categoryId || '').trim().toLowerCase()] || []),
+    categoryToken,
+  ].filter(Boolean);
   const requestedTokens = expandRequestedServiceTokens(requestServiceIds);
   const helperServices = Array.isArray(helper.services) ? helper.services : [];
 
@@ -1409,9 +1403,14 @@ function helperSupportsCategory(helper = {}, categoryId = '', requestServiceIds 
       ? entry.skills.filter((skill) => (
         skill?.active !== false
           && String(skill?.status || '').toLowerCase() === 'approved'
-          && Array.isArray(skill?.pictures)
-          && skill.pictures.length > 0
           && skillBelongsToActiveCatalog(skill, catalogIndex)
+          && (
+            (Array.isArray(skill?.pictures) && skill.pictures.length > 0)
+            || categoryEntries.some((catalogEntry) => (
+              String(catalogEntry.kind || '').toLowerCase() === 'bundle'
+              && normalizeServiceToken(catalogEntry.id) === normalizeServiceToken(skill?.catalogId || skill?.serviceCatalogId || '')
+            ))
+          )
       ))
       : [];
 
@@ -4264,6 +4263,58 @@ async function getPricingSignalContext(subject) {
   };
 }
 
+async function getMarketplacePricingSignalContext(categoryId = '') {
+  const normalizedCategoryId = normalizeServiceToken(categoryId);
+  const liveCatalogEntries = await getLiveServiceCatalogEntries().catch(() => []);
+  const catalogIndex = buildActiveServiceCatalogIndex(liveCatalogEntries);
+  const relevantCatalogIds = new Set(
+    (catalogIndex.byCategoryId.get(normalizedCategoryId) || [])
+      .map((entry) => normalizeServiceToken(entry.id))
+      .filter(Boolean),
+  );
+
+  const [activeRequestsSnap, onlineHelpersSnap] = await Promise.all([
+    db.collection('serviceRequests').where('status', 'in', ['pending', 'matching', 'helper_found', 'accepted', 'scheduled_pending']).get(),
+    db.collection('users').where('activeRole', '==', 'helper').where('onlineStatus', '==', 'online').get(),
+  ]);
+
+  const activeRequests = activeRequestsSnap.docs
+    .map((item) => item.data() || {})
+    .filter((request) => normalizeServiceToken(request?.categoryId || '') === normalizedCategoryId)
+    .length;
+
+  const onlineHelpers = onlineHelpersSnap.docs
+    .map((item) => ({ uid: item.id, ...item.data() }))
+    .filter((helper) => {
+      if (!isHelperAgreementCurrent(helper)) {
+        return false;
+      }
+      const services = Array.isArray(helper.services) ? helper.services : [];
+      return services.some((service) => {
+        const serviceId = normalizeServiceToken(service?.serviceId || '');
+        if (serviceId !== normalizedCategoryId && !HELPER_CATEGORY_SERVICE_MAP[normalizedCategoryId]?.includes(serviceId)) {
+          return false;
+        }
+        const skills = Array.isArray(service?.skills) ? service.skills : [];
+        return skills.some((skill) => (
+          String(skill?.status || '').toLowerCase() === 'approved'
+          && skill?.active !== false
+          && (
+            !relevantCatalogIds.size
+            || relevantCatalogIds.has(normalizeServiceToken(skill?.catalogId || skill?.serviceCatalogId || skill?.name || ''))
+          )
+        ));
+      });
+    }).length;
+
+  return {
+    now: new Date(),
+    categoryId: normalizedCategoryId,
+    activeRequests,
+    onlineHelpers,
+  };
+}
+
 exports.getTutorAgreement = onRequest({ cors: true }, async (req, res) => {
   if (req.method !== 'GET') {
     res.status(405).json({ success: false, message: 'Method not allowed' });
@@ -4849,8 +4900,8 @@ exports.updateHelperLiveLocation = onRequest({ cors: true }, async (req, res) =>
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     }, { merge: true });
 
-    res.json({
-      success: true,
+  res.json({
+    success: true,
       location: {
         latitude: liveLocation.latitude,
         longitude: liveLocation.longitude,
@@ -5161,6 +5212,76 @@ exports.extractAttachmentAi = onRequest({ cors: true }, async (_req, res) => {
     success: false,
     message: 'extractAttachmentAi is deprecated. Use /image-ocr and Academic Brain classification.',
   });
+});
+
+exports.getServicePricingQuote = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') {
+    res.status(405).json({ success: false, message: 'Method not allowed' });
+    return;
+  }
+
+  const token = getBearerToken(req);
+  if (!token) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+
+  const decoded = await admin.auth().verifyIdToken(token).catch(() => null);
+  if (!decoded?.uid) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+
+  const categoryId = String(req.body?.categoryId || '').trim().toLowerCase();
+  const serviceIds = (Array.isArray(req.body?.serviceIds) ? req.body.serviceIds : [])
+    .map((serviceId) => String(serviceId || '').trim().toLowerCase())
+    .filter(Boolean);
+
+  if (!categoryId || !serviceIds.length) {
+    res.status(400).json({ success: false, message: 'categoryId and serviceIds are required.' });
+    return;
+  }
+
+  try {
+    const catalogEntries = await getLiveServiceCatalogEntries();
+    const signalContext = await getMarketplacePricingSignalContext(categoryId).catch(() => ({
+      now: new Date(),
+      categoryId,
+      activeRequests: 0,
+      onlineHelpers: 0,
+    }));
+
+    const quote = computeMarketplaceQuote({
+      categoryId,
+      serviceIds,
+      structuredAnswers: req.body?.structuredAnswers || {},
+      catalogEntries,
+      signalContext,
+      currency: 'ZAR',
+    });
+
+    res.json({
+      success: true,
+      pricingSnapshot: quote,
+      signalContext: {
+        activeRequests: signalContext.activeRequests ?? 0,
+        onlineHelpers: signalContext.onlineHelpers ?? 0,
+        demandLevel: quote.demandLevel,
+        availabilityLevel: quote.availabilityLevel,
+      },
+    });
+  } catch (error) {
+    logger.error('service_pricing_quote_failed', {
+      message: error.message,
+      categoryId,
+      serviceIds,
+      uid: decoded.uid,
+    });
+    res.status(400).json({
+      success: false,
+      message: error.message || 'Unable to calculate the service quote.',
+    });
+  }
 });
 
 const BOARD_EXTRACTION_MODE = 'gemini_2_5_flash_stream';
