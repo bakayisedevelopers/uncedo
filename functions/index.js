@@ -19,6 +19,7 @@ const {
   computeMarketplaceQuote,
   normalizeServiceCatalogEntry: normalizeMarketplaceServiceCatalogEntry,
 } = require('./serviceMarketplacePricing');
+const { sourceServiceCatalogImages } = require('./serviceCatalogImageSourcing');
 const {
   normalizeSubjectName,
   isAllowedGrade1To12Subject,
@@ -4217,6 +4218,92 @@ exports.customerServiceMediaSummary = onRequest(
         success: false,
         message: 'Unable to summarize the uploaded file right now.',
       });
+    }
+  },
+);
+
+exports.sourceServiceCatalogImages = onRequest(
+  {
+    cors: true,
+    secrets: [UNCEDO_AI_KEYS],
+    timeoutSeconds: 120,
+    memory: '1GiB',
+  },
+  async (req, res) => {
+    if (req.method !== 'POST') {
+      res.status(405).json({ success: false, message: 'Method not allowed' });
+      return;
+    }
+
+    const token = getBearerToken(req);
+    if (!token) {
+      res.status(401).json({ success: false, message: 'Unauthorized request.' });
+      return;
+    }
+
+    const decoded = await admin.auth().verifyIdToken(token).catch(() => null);
+    if (!decoded?.uid || !isAdminToken(decoded)) {
+      res.status(403).json({ success: false, message: 'Admin access required.' });
+      return;
+    }
+
+    let aiConfig;
+    try {
+      aiConfig = getAiSecrets();
+    } catch (error) {
+      logger.error('service_catalog_image_sourcing_missing_ai_config', {
+        uid: decoded.uid,
+        error: error.message,
+      });
+      res.status(500).json({
+        success: false,
+        message: 'Image sourcing configuration is unavailable.',
+      });
+      return;
+    }
+
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const inputService = body.service && typeof body.service === 'object' ? body.service : body;
+    const serviceId = String(inputService.serviceId || inputService.id || '').trim().toLowerCase();
+    const serviceLabel = String(inputService.label || '').trim();
+
+    if (!serviceId || !serviceLabel) {
+      res.status(400).json({ success: false, message: 'service.id and service.label are required.' });
+      return;
+    }
+
+    try {
+      const result = await sourceServiceCatalogImages({
+        firebaseConfig: aiConfig,
+        bucket: admin.storage().bucket(),
+        service: {
+          ...inputService,
+          serviceId,
+          id: serviceId,
+          label: serviceLabel,
+          promptLabel: String(inputService.promptLabel || '').trim(),
+          description: String(inputService.description || '').trim(),
+          categoryId: String(inputService.categoryId || '').trim(),
+          categoryName: String(inputService.categoryName || '').trim(),
+          kind: String(inputService.kind || 'service').trim().toLowerCase(),
+          includedServices: Array.isArray(inputService.includedServices) ? inputService.includedServices : [],
+        },
+        targetCount: Number(body.targetCount || inputService.targetCount || 10),
+      });
+
+      res.status(200).json({
+        success: true,
+        message: `Sourced ${result.images.length} reusable image${result.images.length === 1 ? '' : 's'}.`,
+        ...result,
+      });
+    } catch (error) {
+      const safeMessage = getSafeErrorMessage(error, 'Unable to source service images.');
+      logger.warn('service_catalog_image_sourcing_failed', {
+        uid: decoded.uid,
+        serviceId,
+        message: safeMessage,
+      });
+      res.status(400).json({ success: false, message: safeMessage });
     }
   },
 );

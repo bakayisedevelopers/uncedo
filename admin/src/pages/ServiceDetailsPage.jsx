@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Image as ImageIcon, Plus, Trash2 } from 'lucide-react';
+import { ArrowLeft, Image as ImageIcon, Plus, Sparkles, Trash2 } from 'lucide-react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Badge, Card, EmptyState, LoadingState, SectionTitle } from '../components/ui';
 import { getAdminCatalogCategories } from '../constants/serviceCatalog';
@@ -9,6 +9,7 @@ import {
   buildServiceCatalogView,
   deleteServiceCatalogImage,
   saveServiceCatalogEntry,
+  sourceServiceCatalogImages,
   subscribeToServiceCatalog,
   uploadServiceCatalogImages,
 } from '../services/serviceCatalogService';
@@ -493,6 +494,19 @@ export default function ServiceDetailsPage() {
     setHelpers(items);
   };
 
+  const upsertSavedService = (saved) => {
+    if (!saved) return;
+    setCatalogEntries((current) => {
+      const existing = current.some((entry) => entry.id === saved.id);
+      return existing
+        ? current.map((entry) => (entry.id === saved.id ? saved : entry))
+        : [...current, saved];
+    });
+    if (serviceId !== saved.id) {
+      navigate(`/services/${saved.id}`, { replace: true });
+    }
+  };
+
   const handleServiceSave = async () => {
     const targetServiceId = slugify(draftServiceId || draftLabel);
     if (!targetServiceId || !draftLabel.trim() || !draftCategoryId.trim()) {
@@ -508,24 +522,61 @@ export default function ServiceDetailsPage() {
         : [];
       const images = [...(selectedService?.images || []), ...uploads, ...inheritedBundleImages].slice(0, 10);
       const saved = await saveServiceCatalogEntry(targetServiceId, buildPayload(images));
-
-      if (saved) {
-        setCatalogEntries((current) => {
-          const existing = current.some((entry) => entry.id === saved.id);
-          return existing
-            ? current.map((entry) => (entry.id === saved.id ? saved : entry))
-            : [...current, saved];
-        });
-        if (serviceId !== saved.id) {
-          navigate(`/services/${saved.id}`, { replace: true });
-        }
-      }
+      upsertSavedService(saved);
 
       setDraftFiles([]);
       setMessage('Service saved to Firestore.');
       await refreshHelpers();
     } catch (error) {
       setMessage(error.message || 'Unable to save this service.');
+    } finally {
+      setIsMutating(false);
+    }
+  };
+
+  const handleAutoSourceImages = async () => {
+    const targetServiceId = slugify(draftServiceId || draftLabel);
+    if (!targetServiceId || !draftLabel.trim() || !draftCategoryId.trim()) {
+      setMessage('Save the service name and category first before sourcing images.');
+      return;
+    }
+    if (remainingUploads <= 0) {
+      setMessage('This service already has the maximum number of images.');
+      return;
+    }
+
+    setIsMutating(true);
+    setMessage('Finding reusable images and uploading them to storage...');
+    try {
+      const includedServices = catalogEntries
+        .filter((entry) => draftIncludedServiceIds.includes(entry.id))
+        .map((entry) => ({
+          id: entry.id,
+          label: entry.label,
+          description: entry.description,
+        }));
+
+      const sourcedImages = await sourceServiceCatalogImages({
+        service: {
+          id: targetServiceId,
+          serviceId: targetServiceId,
+          label: String(draftLabel || '').trim(),
+          promptLabel: String(draftPromptLabel || draftLabel || '').trim(),
+          description: String(draftDescription || '').trim(),
+          categoryId: draftCategoryId,
+          categoryName: selectedCategory?.name || '',
+          kind: draftKind,
+          includedServices,
+        },
+        targetCount: remainingUploads,
+      });
+
+      const images = [...(selectedService?.images || []), ...sourcedImages, ...inheritedBundleImages].slice(0, 10);
+      const saved = await saveServiceCatalogEntry(targetServiceId, buildPayload(images));
+      upsertSavedService(saved);
+      setMessage(`Added ${sourcedImages.length} sourced image${sourcedImages.length === 1 ? '' : 's'}.`);
+    } catch (error) {
+      setMessage(error.message || 'Unable to source reusable images right now.');
     } finally {
       setIsMutating(false);
     }
@@ -834,23 +885,34 @@ export default function ServiceDetailsPage() {
                   <div>
                     <p className="font-bold text-white">Service images</p>
                     <p className="mt-1 text-sm text-ink-200">
-                      Upload up to {remainingUploads} more image{remainingUploads === 1 ? '' : 's'} for this service.
+                      Upload up to {remainingUploads} more image{remainingUploads === 1 ? '' : 's'} for this service, or source reusable images from open-license libraries and save them into Firebase Storage.
                     </p>
                   </div>
-                  <label className="inline-flex cursor-pointer items-center rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-bold text-white">
-                    Upload images
-                    <input
-                      type="file"
-                      accept="image/*"
-                      multiple
-                      className="hidden"
-                      onChange={(event) => {
-                        const files = Array.from(event.target.files || []);
-                        setDraftFiles(files.slice(0, Math.max(0, 10 - effectiveImages.length)));
-                        if (event.target) event.target.value = '';
-                      }}
-                    />
-                  </label>
+                  <div className="flex flex-wrap gap-3">
+                    <button
+                      type="button"
+                      onClick={handleAutoSourceImages}
+                      disabled={isMutating || remainingUploads <= 0}
+                      className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-bold text-white disabled:opacity-60"
+                    >
+                      <Sparkles className="h-4 w-4" />
+                      Get pictures online
+                    </button>
+                    <label className="inline-flex cursor-pointer items-center rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-bold text-white">
+                      Upload images
+                      <input
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        className="hidden"
+                        onChange={(event) => {
+                          const files = Array.from(event.target.files || []);
+                          setDraftFiles(files.slice(0, Math.max(0, 10 - effectiveImages.length)));
+                          if (event.target) event.target.value = '';
+                        }}
+                      />
+                    </label>
+                  </div>
                 </div>
                 {draftFiles.length ? (
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">
