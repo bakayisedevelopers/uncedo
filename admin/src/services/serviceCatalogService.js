@@ -1,5 +1,6 @@
 import { deleteObject, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { getAdminCatalogSkills } from '../constants/serviceCatalog';
+import { getAdminQuestionPreset } from '../constants/serviceQuestionPresets';
 import { getFirebaseClients } from '../firebase/config';
 
 function slugify(value = '') {
@@ -32,6 +33,10 @@ export function normalizeServiceCatalogEntry(entry = {}, fallback = null) {
   const fallbackItem = fallback || null;
   const serviceId = String(entry.id || entry.serviceId || fallbackItem?.id || '').trim();
   if (!serviceId) return null;
+  const presetQuestionnaire = getAdminQuestionPreset({
+    serviceId,
+    categoryId: String(entry.categoryId || fallbackItem?.categoryId || '').trim(),
+  });
 
   return {
     id: serviceId,
@@ -50,7 +55,10 @@ export function normalizeServiceCatalogEntry(entry = {}, fallback = null) {
       .filter(Boolean),
     questionnaire: entry.questionnaire && typeof entry.questionnaire === 'object'
       ? entry.questionnaire
-      : { required: entry.requiredQuestions || [], optional: entry.optionalQuestions || [] },
+      : {
+          required: entry.requiredQuestions || presetQuestionnaire.required || [],
+          optional: entry.optionalQuestions || presetQuestionnaire.optional || [],
+        },
     requiresPortfolioSelection: Boolean(entry.requiresPortfolioSelection ?? fallbackItem?.requiresPortfolioSelection),
     inheritBundleImages: entry.inheritBundleImages !== false,
     createdAt: entry.createdAt || null,
