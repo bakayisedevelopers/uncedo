@@ -104,6 +104,7 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [pricePreview, setPricePreview] = useState(null);
+  const [priceLoading, setPriceLoading] = useState(false);
 
   const categoryId = String(item?.categoryId || '').trim();
   const serviceIds = Array.isArray(item?.serviceIds) ? item.serviceIds : [];
@@ -180,12 +181,14 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
 
     if (!categoryId || !serviceIds.length || missingRequired.length) {
       setPricePreview(null);
+      setPriceLoading(false);
       return () => {
         cancelled = true;
       };
     }
 
     (async () => {
+      setPriceLoading(true);
       try {
         const quote = await fetchServicePricingQuote({
           categoryId,
@@ -194,6 +197,7 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
         });
         if (!cancelled) {
           setPricePreview(quote);
+          setPriceLoading(false);
         }
       } catch (_error) {
         if (!cancelled) {
@@ -202,6 +206,7 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
             serviceIds,
             structuredAnswers,
           }));
+          setPriceLoading(false);
         }
       }
     })();
@@ -280,13 +285,16 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
     return <ErrorState message="Service details are missing." title="Unable to open service" />;
   }
 
+  const shouldWaitForPrice = !missingRequired.length;
   const buttonLabel = submitting
     ? 'Preparing request...'
-    : isFixedPrice && !missingRequired.length
-      ? 'Request this now'
-      : !missingRequired.length
-        ? 'Continue to final review'
+    : shouldWaitForPrice && priceLoading
+      ? 'Calculating price...'
+      : shouldWaitForPrice && pricePreview
+        ? `${isFixedPrice ? 'Request now' : 'Continue'} - ${formatCurrency(pricePreview.total)}`
         : 'Continue in chat';
+
+  const buttonDisabled = submitting || (shouldWaitForPrice && (priceLoading || !pricePreview));
 
   return (
     <View style={styles.screen}>
@@ -369,18 +377,6 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
           ))}
         </View>
 
-        {pricePreview ? (
-          <View style={styles.priceCard}>
-            <Text style={styles.priceCardLabel}>{isFixedPrice ? 'Exact total' : 'Current estimate'}</Text>
-            <Text style={styles.priceCardValue}>{formatCurrency(pricePreview.total)}</Text>
-            <Text style={styles.priceCardCopy}>
-              {isFixedPrice
-                ? 'This request can move straight into helper matching.'
-                : 'If you continue, the app will take you to the final confirmation step.'}
-            </Text>
-          </View>
-        ) : null}
-
         {error ? (
           <View style={styles.inlineError}>
             <Ionicons color="#b91c1c" name="alert-circle-outline" size={16} />
@@ -388,7 +384,7 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
           </View>
         ) : null}
 
-        <Button disabled={submitting} onPress={handleRequest} style={styles.requestButton}>
+        <Button disabled={buttonDisabled} onPress={handleRequest} style={styles.requestButton}>
           {buttonLabel}
         </Button>
 

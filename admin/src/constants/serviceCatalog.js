@@ -49,6 +49,14 @@ export const SERVICE_CATALOG = [
   },
 ];
 
+export function getAdminCatalogCategories() {
+  return SERVICE_CATALOG.map((category) => ({
+    id: category.id,
+    name: category.name,
+    description: category.description,
+  }));
+}
+
 export function getAdminCatalogCategoryById(categoryId) {
   return SERVICE_CATALOG.find((category) => category.id === categoryId) || null;
 }
