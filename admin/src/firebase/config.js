@@ -13,6 +13,7 @@ import {
 } from 'firebase/auth';
 import {
   connectFirestoreEmulator,
+  collection,
   doc,
   getDoc,
   getDocs,
@@ -97,6 +98,7 @@ function initializeFirebase() {
       updateProfile,
     },
     firestoreModule: {
+      collection,
       doc,
       getDoc,
       getDocs,

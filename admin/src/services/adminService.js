@@ -10,16 +10,64 @@ function normalizeRole(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function canonicalRole(value) {
+  const role = normalizeRole(value);
+  if (!role) return '';
+  if (role === 'provider' || role === 'tutor' || role === 'helper') return 'helper';
+  if (role === 'student' || role === 'customer') return 'customer';
+  if (role === 'admin') return 'admin';
+  return role;
+}
+
 function collectRoles(profile = {}) {
   return new Set([
-    normalizeRole(profile.role),
-    normalizeRole(profile.activeRole),
-    ...(Array.isArray(profile.roles) ? profile.roles.map(normalizeRole) : []),
+    canonicalRole(profile.role),
+    canonicalRole(profile.activeRole),
+    ...(Array.isArray(profile.roles) ? profile.roles.map(canonicalRole) : []),
   ].filter(Boolean));
 }
 
-function profileMatchesGroup(profile, groupName) {
+function inferRolesFromShape(profile = {}) {
   const roles = collectRoles(profile);
+  const helperProfile = profile.helperProfile || profile.providerProfile || {};
+  const customerProfile = profile.customerProfile || profile.studentProfile || {};
+
+  const hasHelperSignals = Boolean(
+    (Array.isArray(profile.services) && profile.services.length)
+    || (Array.isArray(helperProfile.services) && helperProfile.services.length)
+    || profile.agreement
+    || profile.payout
+    || profile.onlineStatus
+    || profile.verificationStatus
+    || profile.locationSharingEnabled !== undefined
+    || helperProfile.providerType
+    || helperProfile.businessName
+  );
+
+  const hasCustomerSignals = Boolean(
+    profile.wallet
+    || profile.freeMinutesRemaining !== undefined
+    || profile.referralSlug
+    || customerProfile.accountType
+    || customerProfile.customerType
+    || customerProfile.serviceAddress
+    || customerProfile.discoverySource
+    || customerProfile.preferredServiceCategories
+  );
+
+  if (hasHelperSignals) {
+    roles.add('helper');
+  }
+
+  if (hasCustomerSignals) {
+    roles.add('customer');
+  }
+
+  return roles;
+}
+
+function profileMatchesGroup(profile, groupName) {
+  const roles = inferRolesFromShape(profile);
   const group = ROLE_GROUPS[groupName];
   if (!group) return false;
   return [...group].some((role) => roles.has(role));
@@ -84,34 +132,48 @@ function normalizeService(service = {}) {
 }
 
 export function normalizeAdminProfile(profile = {}) {
+  const helperProfile = profile.helperProfile || profile.providerProfile || {};
+  const customerProfile = profile.customerProfile || profile.studentProfile || {};
+  const inferredRoles = inferRolesFromShape(profile);
+  const role = canonicalRole(profile.role) || canonicalRole(profile.activeRole) || [...inferredRoles][0] || '';
+  const activeRole = canonicalRole(profile.activeRole) || role;
+
   return {
     ...profile,
     uid: profile.uid || profile.id || '',
     fullName: String(profile.fullName || profile.displayName || '').trim(),
     displayName: String(profile.displayName || profile.fullName || '').trim(),
     email: String(profile.email || '').trim(),
-    role: String(profile.role || '').trim().toLowerCase(),
-    activeRole: String(profile.activeRole || profile.role || '').trim().toLowerCase(),
-    providerType: String(profile.providerType || '').trim().toLowerCase(),
-    businessName: String(profile.businessName || '').trim(),
-    city: String(profile.city || '').trim(),
-    homeAddress: String(profile.homeAddress || '').trim(),
-    phoneNumber: String(profile.phoneNumber || '').trim(),
-    services: (Array.isArray(profile.services) ? profile.services : [])
+    role,
+    activeRole,
+    roles: Array.from(inferredRoles),
+    providerType: String(profile.providerType || helperProfile.providerType || '').trim().toLowerCase(),
+    businessName: String(profile.businessName || helperProfile.businessName || '').trim(),
+    city: String(profile.city || helperProfile.city || '').trim(),
+    homeAddress: String(profile.homeAddress || helperProfile.homeAddress || '').trim(),
+    phoneNumber: String(profile.phoneNumber || helperProfile.phoneNumber || '').trim(),
+    suspended: Boolean(profile.suspended ?? helperProfile.suspended ?? false),
+    verificationStatus: String(profile.verificationStatus || helperProfile.verificationStatus || '').trim().toLowerCase(),
+    adminStatus: String(profile.adminStatus || helperProfile.adminStatus || '').trim().toLowerCase(),
+    services: (Array.isArray(profile.services) ? profile.services : Array.isArray(helperProfile.services) ? helperProfile.services : [])
       .map(normalizeService)
       .filter(Boolean),
     customerProfile: {
       ...(profile.customerProfile || {}),
-      serviceAddress: String(profile.customerProfile?.serviceAddress || '').trim(),
-      businessName: String(profile.customerProfile?.businessName || '').trim(),
-      businessEmail: String(profile.customerProfile?.businessEmail || '').trim(),
-      businessCategory: String(profile.customerProfile?.businessCategory || '').trim(),
+      serviceAddress: String(customerProfile?.serviceAddress || '').trim(),
+      businessName: String(customerProfile?.businessName || '').trim(),
+      businessEmail: String(customerProfile?.businessEmail || '').trim(),
+      businessCategory: String(customerProfile?.businessCategory || '').trim(),
+      accountType: String(customerProfile?.accountType || '').trim(),
+      customerType: String(customerProfile?.customerType || '').trim(),
+      discoverySource: String(customerProfile?.discoverySource || '').trim(),
+      preferredServiceCategories: Array.isArray(customerProfile?.preferredServiceCategories) ? customerProfile.preferredServiceCategories : [],
     },
     studentProfile: {
       ...(profile.studentProfile || {}),
-      grade: profile.studentProfile?.grade || null,
-      curriculum: String(profile.studentProfile?.curriculum || '').trim(),
-      discoverySource: String(profile.studentProfile?.discoverySource || '').trim(),
+      grade: customerProfile?.grade || profile.studentProfile?.grade || null,
+      curriculum: String(customerProfile?.curriculum || profile.studentProfile?.curriculum || '').trim(),
+      discoverySource: String(customerProfile?.discoverySource || profile.studentProfile?.discoverySource || '').trim(),
     },
   };
 }
@@ -177,7 +239,7 @@ export async function listUsersByRole(activeRole) {
         profile.role,
         profile.activeRole,
         ...(Array.isArray(profile.roles) ? profile.roles : []),
-      ].map(normalizeRole).includes(normalizedGroup);
+      ].map(canonicalRole).includes(canonicalRole(normalizedGroup));
     });
 }
 
@@ -256,7 +318,9 @@ export function flattenProviderServices(profiles = []) {
     (Array.isArray(profile.services) ? profile.services : []).flatMap((service) => (
       (Array.isArray(service.skills) ? service.skills : []).map((skill) => ({
         providerUid: profile.uid,
-        providerName: profile.fullName || profile.displayName || profile.email || 'Provider',
+        providerName: profile.fullName || profile.displayName || profile.email || 'Helper',
+        helperUid: profile.uid,
+        helperName: profile.fullName || profile.displayName || profile.email || 'Helper',
         providerEmail: profile.email || '',
         providerType: profile.providerType || 'individual',
         businessName: profile.businessName || '',

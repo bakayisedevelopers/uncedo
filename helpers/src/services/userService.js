@@ -75,6 +75,9 @@ export async function updateHelperProfile(uid, updates) {
     ref,
     {
       ...updates,
+      role: 'helper',
+      activeRole: 'helper',
+      roles: ['helper'],
       updatedAt: serverTimestamp(),
     },
     { merge: true },
