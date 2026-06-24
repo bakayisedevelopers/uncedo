@@ -26,7 +26,7 @@ import {
 } from '../pricing';
 import { uploadUserFile } from './storageService';
 import { recordCustomerServiceEvent } from './customerRecommendationService';
-import { getFirebaseClients } from '../firebase/config';
+import { getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
 
 const ACTIVE_SERVICE_REQUEST_STATUSES = ['collecting_details', 'scheduled_pending', 'matching', 'helper_found', 'accepted', 'en_route', 'arrived', 'no_helper_available'];
 const CATEGORY_ENGINE_LOOKUP = {
@@ -190,6 +190,38 @@ export function buildServicePricingSnapshot({
     ...result,
     quoteId: `service_quote_${Date.now()}`,
   };
+}
+
+export async function fetchServicePricingQuote({
+  categoryId = '',
+  serviceIds = [],
+  structuredAnswers = {},
+} = {}) {
+  const { auth } = getFirebaseClients();
+  const idToken = await auth.currentUser?.getIdToken();
+  if (!idToken) {
+    throw new Error('You must be signed in to price this service.');
+  }
+
+  const response = await fetch(getFunctionEndpoint('getServicePricingQuote'), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      categoryId,
+      serviceIds,
+      structuredAnswers,
+    }),
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.success === false) {
+    throw new Error(payload?.message || 'Unable to calculate the service quote.');
+  }
+
+  return payload?.pricingSnapshot || null;
 }
 
 export async function createCustomerServiceRequest({ user, location, initialDraft = {} }) {
@@ -428,13 +460,22 @@ export async function saveCustomerServiceQuotePreview({
     throw new Error('Service request id is required.');
   }
 
-  const pricingSnapshot = buildServicePricingSnapshot({
-    categoryId,
-    serviceIds,
-    structuredAnswers,
-    serviceOverrides,
-    aiUsageSnapshot,
-  });
+  let pricingSnapshot = null;
+  try {
+    pricingSnapshot = await fetchServicePricingQuote({
+      categoryId,
+      serviceIds,
+      structuredAnswers,
+    });
+  } catch (_error) {
+    pricingSnapshot = buildServicePricingSnapshot({
+      categoryId,
+      serviceIds,
+      structuredAnswers,
+      serviceOverrides,
+      aiUsageSnapshot,
+    });
+  }
 
   const { db } = getFirebaseClients();
   const requestRef = doc(db, 'serviceRequests', requestId);
@@ -509,13 +550,22 @@ export async function finalizeCustomerServiceRequest({
   referenceAttachments = [],
   serviceOverrides = {},
 }) {
-  const pricingSnapshot = buildServicePricingSnapshot({
-    categoryId,
-    serviceIds,
-    structuredAnswers,
-    serviceOverrides,
-    aiUsageSnapshot,
-  });
+  let pricingSnapshot = null;
+  try {
+    pricingSnapshot = await fetchServicePricingQuote({
+      categoryId,
+      serviceIds,
+      structuredAnswers,
+    });
+  } catch (_error) {
+    pricingSnapshot = buildServicePricingSnapshot({
+      categoryId,
+      serviceIds,
+      structuredAnswers,
+      serviceOverrides,
+      aiUsageSnapshot,
+    });
+  }
   const timingDetails = deriveTimingDetails(structuredAnswers);
   const categoryLabel = getCustomerServiceCategoryById(categoryId)?.label || 'Service request';
   const serviceLabels = serviceIds

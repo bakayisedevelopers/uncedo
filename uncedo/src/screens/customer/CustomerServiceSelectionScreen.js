@@ -21,6 +21,7 @@ import { useAuth } from '../../context/AuthContext';
 import {
   buildServicePricingSnapshot,
   createCustomerServiceRequest,
+  fetchServicePricingQuote,
   finalizeCustomerServiceRequest,
 } from '../../services/customerServiceRequestService';
 import { updateUserProfile } from '../../services/userService';
@@ -102,10 +103,13 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
   const [structuredAnswers, setStructuredAnswers] = useState(() => normalizeAnswerMap(route?.params?.initialStructuredAnswers) || {});
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [pricePreview, setPricePreview] = useState(null);
 
   const categoryId = String(item?.categoryId || '').trim();
   const serviceIds = Array.isArray(item?.serviceIds) ? item.serviceIds : [];
-  const selectedPackageId = item?.kind === 'package' ? String(item?.packageId || item?.entityId || '').trim() : '';
+  const selectedPackageId = ['package', 'bundle'].includes(String(item?.kind || '').trim().toLowerCase())
+    ? String(item?.packageId || item?.entityId || '').trim()
+    : '';
   const isFixedPrice = String(item?.pricing?.pricingMode || '').trim().toLowerCase() === 'fixed';
 
   useEffect(() => {
@@ -171,13 +175,40 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
     [categoryId, selectedPackageId, serviceIds, structuredAnswers],
   );
 
-  const pricePreview = useMemo(() => {
-    if (!categoryId || !serviceIds.length || missingRequired.length) return null;
-    return buildServicePricingSnapshot({
-      categoryId,
-      serviceIds,
-      structuredAnswers,
-    });
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!categoryId || !serviceIds.length || missingRequired.length) {
+      setPricePreview(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    (async () => {
+      try {
+        const quote = await fetchServicePricingQuote({
+          categoryId,
+          serviceIds,
+          structuredAnswers,
+        });
+        if (!cancelled) {
+          setPricePreview(quote);
+        }
+      } catch (_error) {
+        if (!cancelled) {
+          setPricePreview(buildServicePricingSnapshot({
+            categoryId,
+            serviceIds,
+            structuredAnswers,
+          }));
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [categoryId, missingRequired.length, serviceIds, structuredAnswers]);
 
   const handleAnswerChange = (questionId, nextValue) => {
@@ -271,7 +302,7 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
               <View style={styles.heroTint} />
               <View style={styles.heroOverlay}>
                 <View style={styles.heroPill}>
-                  <Text style={styles.heroPillText}>{item.kind === 'package' ? 'Package' : 'Service'}</Text>
+                  <Text style={styles.heroPillText}>{item.kind === 'bundle' || item.kind === 'package' ? 'Bundle' : 'Service'}</Text>
                 </View>
                 <View style={styles.heroFooter}>
                   <Text style={styles.heroTitle}>{item.title}</Text>

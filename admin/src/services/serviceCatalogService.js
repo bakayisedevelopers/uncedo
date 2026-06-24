@@ -38,10 +38,21 @@ export function normalizeServiceCatalogEntry(entry = {}, fallback = null) {
     categoryId: String(entry.categoryId || fallbackItem?.categoryId || '').trim(),
     categoryName: String(entry.categoryName || fallbackItem?.categoryName || '').trim(),
     label: String(entry.label || entry.skillName || fallbackItem?.label || fallbackItem?.skillName || serviceId).trim(),
+    promptLabel: String(entry.promptLabel || entry.label || fallbackItem?.promptLabel || fallbackItem?.label || serviceId).trim(),
     description: String(entry.description || fallbackItem?.description || '').trim(),
+    kind: String(entry.kind || fallbackItem?.kind || 'service').trim().toLowerCase(),
     persisted: entry.persisted === true,
     active: entry.active !== false,
     approved: entry.approved !== false,
+    pricing: entry.pricing && typeof entry.pricing === 'object' ? { ...entry.pricing } : {},
+    includedServiceIds: (Array.isArray(entry.includedServiceIds) ? entry.includedServiceIds : [])
+      .map((item) => String(item || '').trim().toLowerCase())
+      .filter(Boolean),
+    questionnaire: entry.questionnaire && typeof entry.questionnaire === 'object'
+      ? entry.questionnaire
+      : { required: entry.requiredQuestions || [], optional: entry.optionalQuestions || [] },
+    requiresPortfolioSelection: Boolean(entry.requiresPortfolioSelection ?? fallbackItem?.requiresPortfolioSelection),
+    inheritBundleImages: entry.inheritBundleImages !== false,
     createdAt: entry.createdAt || null,
     updatedAt: entry.updatedAt || null,
     createdBy: String(entry.createdBy || '').trim(),
@@ -53,8 +64,8 @@ export function normalizeServiceCatalogEntry(entry = {}, fallback = null) {
 
 export function buildServiceCatalogView(entries = []) {
   const entryMap = new Map(entries.map((entry) => [entry.id, entry]));
-
-  return getAdminCatalogSkills().map((seedItem) => {
+  const seededSkillIds = new Set(getAdminCatalogSkills().map((seedItem) => seedItem.id));
+  const seededEntries = getAdminCatalogSkills().map((seedItem) => {
     const existing = entryMap.get(seedItem.id);
     return normalizeServiceCatalogEntry({
       ...seedItem,
@@ -65,6 +76,13 @@ export function buildServiceCatalogView(entries = []) {
       approved: existing ? existing.approved !== false : false,
     }, seedItem);
   });
+
+  const customEntries = entries
+    .filter((entry) => !seededSkillIds.has(entry.id))
+    .map((entry) => normalizeServiceCatalogEntry(entry))
+    .filter(Boolean);
+
+  return [...seededEntries, ...customEntries];
 }
 
 export async function subscribeToServiceCatalog(callback, onError) {

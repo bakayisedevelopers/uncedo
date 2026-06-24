@@ -6,7 +6,7 @@ This folder contains the Expo React Native app for helpers.
 
 - Helper signup, login, and profile completion
 - Versioned helper agreement review, signing, and profile-completion gating
-- Firestore-backed service browsing, skill setup, and service approval flow
+- Firestore-backed service browsing, skill setup, bundle-service enrollment, and service approval flow
 - Multi-image uploads for helper service submissions
 - Availability management and active job handling
 - Helper home map with a dedicated native map, persistent live location marker, and 50 km service radius
@@ -50,6 +50,6 @@ npm run web
 - Read `../docs/skills/agent-codebase-guide.md` for the repo map.
 - Use `../docs/skills/agent-developer-workflow.md` when builds or release APKs are involved.
 - Keep this README in sync with helper workflow, screen, or service changes.
-- The helper service catalog is loaded from the shared `serviceCatalog` collection and helper submissions stay pending until the admin approves them.
+- The helper service catalog is loaded from the shared `serviceCatalog` collection, including admin-created bundle services, and helper submissions stay pending until the admin approves them.
 - Navigation is implemented in `src/navigation/RootNavigator.js`, including the custom route history used for Android hardware back behavior and mobile system-bar insets.
 - The helper agreement flow now loads the live contract text from Cloud Functions and blocks profile completion until the latest published version is signed.

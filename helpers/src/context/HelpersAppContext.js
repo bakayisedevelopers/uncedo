@@ -255,14 +255,24 @@ function getHelperOnboardingStatus(profile, { serviceCatalog = [], serviceCatalo
       .map((entry) => String(entry.id || '').trim().toLowerCase())
       .filter(Boolean),
   );
+  const activeCatalogMap = new Map(
+    (Array.isArray(serviceCatalog) ? serviceCatalog : [])
+      .filter((entry) => entry.active !== false)
+      .map((entry) => [String(entry.id || '').trim().toLowerCase(), entry]),
+  );
   const hasQualifiedSkills = services.some((service) => (
     Array.isArray(service.skills)
     && service.skills.some((skill) => (
       skill.status === 'approved'
       && skill.active !== false
-      && Array.isArray(skill.pictures)
-      && skill.pictures.length > 0
       && (serviceCatalogResolved ? activeCatalogIds.has(String(skill.catalogId || slugify(skill.name)).trim().toLowerCase()) : true)
+      && (
+        (Array.isArray(skill.pictures) && skill.pictures.length > 0)
+        || Boolean(
+          activeCatalogMap.get(String(skill.catalogId || slugify(skill.name)).trim().toLowerCase())?.kind === 'bundle'
+          && activeCatalogMap.get(String(skill.catalogId || slugify(skill.name)).trim().toLowerCase())?.inheritBundleImages !== false
+        )
+      )
     ))
   ));
   const hasProfilePhoto = Boolean(String(profile?.profilePhoto || profile?.selfieUrl || '').trim());
@@ -295,7 +305,7 @@ function getHelperOnboardingStatus(profile, { serviceCatalog = [], serviceCatalo
   }
 
   if (!hasQualifiedSkills) {
-    return { complete: false, step: 'services', message: 'Add at least one approved skill with an uploaded work photo before going online.' };
+      return { complete: false, step: 'services', message: 'Add at least one approved skill with a portfolio or an approved inherited bundle before going online.' };
   }
 
   if (!hasAgreement) {
@@ -809,15 +819,16 @@ export function HelpersAppProvider({ children }) {
       ...(imageAsset ? [imageAsset] : []),
     ].filter((asset) => asset?.uri).slice(0, 10);
 
-    if (!user?.uid || !serviceId || !skillName || !assets.length) {
-      return { success: false, message: 'A skill and uploaded work photo are required.' };
-    }
-
     setSaving(true);
     setSaveError('');
 
     try {
       const normalizedCatalogId = String(catalogId || slugify(skillName)).trim().toLowerCase();
+      const catalogEntry = (Array.isArray(serviceCatalog) ? serviceCatalog : []).find((entry) => String(entry.id || '').trim().toLowerCase() === normalizedCatalogId) || null;
+      const allowsInheritedPortfolio = catalogEntry?.kind === 'bundle' && catalogEntry?.inheritBundleImages !== false;
+      if (!user?.uid || !serviceId || !skillName || (!assets.length && !allowsInheritedPortfolio)) {
+        return { success: false, message: 'A skill and uploaded work photo are required unless this bundle inherits its portfolio.' };
+      }
       const nextTimestamp = new Date().toISOString();
       const uploads = [];
 
@@ -903,7 +914,7 @@ export function HelpersAppProvider({ children }) {
         return result;
       }
 
-      return { success: true, message: `${skillName} submitted for approval.` };
+      return { success: true, message: allowsInheritedPortfolio && !uploads.length ? `${skillName} submitted for approval with inherited bundle images.` : `${skillName} submitted for approval.` };
     } catch (error) {
       logError('HelpersAppContext.addSkillWithPhoto', error);
       setSaveError(error.message || 'Unable to upload this skill photo right now.');

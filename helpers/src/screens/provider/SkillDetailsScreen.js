@@ -48,6 +48,7 @@ export function SkillDetailsScreen({ route, goBack }) {
     )) || null,
     [helperSkills, routeCatalogId, serviceId, skillName],
   );
+  const canInheritBundleImages = Boolean(catalogService?.kind === 'bundle' && catalogService?.inheritBundleImages !== false);
 
   useEffect(() => {
     setSelectedAssets([]);
@@ -124,7 +125,9 @@ export function SkillDetailsScreen({ route, goBack }) {
       <Card>
         <SectionHeading
           title="Service status"
-          subtitle="This service stays pending until the admin approves it, and it only becomes available for matching when it is active and has at least one uploaded work picture."
+          subtitle={canInheritBundleImages
+            ? 'This bundle stays pending until the admin approves it. It can inherit admin portfolio images from the services inside the bundle.'
+            : 'This service stays pending until the admin approves it, and it only becomes available for matching when it is active and has at least one uploaded work picture.'}
           action={savedSkill ? <StatusBadge label={formatStatusLabel(savedSkill.status)} tone={savedSkill.status === 'approved' ? 'success' : 'warning'} /> : <StatusBadge label="New" tone="info" />}
         />
         {savedSkill ? (
@@ -146,7 +149,11 @@ export function SkillDetailsScreen({ route, goBack }) {
             />
           </View>
         ) : (
-          <Text style={styles.copy}>Upload your first work pictures to submit this service for approval.</Text>
+          <Text style={styles.copy}>
+            {canInheritBundleImages
+              ? 'Submit this bundle now, or add extra work pictures if you want your own portfolio on top of the inherited images.'
+              : 'Upload your first work pictures to submit this service for approval.'}
+          </Text>
         )}
         {message ? <Text style={styles.message}>{message}</Text> : null}
         {saveError ? <Text style={styles.error}>{saveError}</Text> : null}
@@ -155,7 +162,9 @@ export function SkillDetailsScreen({ route, goBack }) {
       <Card>
         <SectionHeading
           title={savedSkill ? 'Work portfolio' : 'Submit service'}
-          subtitle="Upload up to 10 pictures for this service. The admin will review them before the service becomes available."
+          subtitle={canInheritBundleImages
+            ? 'You can upload up to 10 extra pictures, or submit the bundle without new uploads and rely on inherited admin images.'
+            : 'Upload up to 10 pictures for this service. The admin will review them before the service becomes available.'}
         />
         {selectedAssets.length ? (
           <View style={styles.previewGrid}>
@@ -169,7 +178,7 @@ export function SkillDetailsScreen({ route, goBack }) {
         ) : null}
         <View style={styles.actionRow}>
           <ActionButton label={selectedAssets.length ? 'Add more pictures' : 'Upload pictures'} onPress={handleSelectImages} tone="secondary" disabled={remainingSlots === 0} />
-          {selectedAssets.length ? (
+          {selectedAssets.length || canInheritBundleImages ? (
             <ActionButton label={saving ? 'Submitting...' : savedSkill ? 'Save pictures' : 'Submit for approval'} onPress={handleSaveSkill} disabled={saving} />
           ) : null}
         </View>

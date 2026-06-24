@@ -172,8 +172,8 @@ function buildDiscoveryItems({ helpers = [], serviceCatalog = [], preferredCateg
     items.push({
       id: key,
       entityId: resolvedServiceId,
-      kind: 'service',
-      packageId: '',
+      kind: customerService.kind || 'service',
+      packageId: customerService.kind === 'bundle' ? resolvedServiceId : '',
       categoryId,
       categoryLabel,
       title: customerService.label || entry.label,
@@ -182,7 +182,9 @@ function buildDiscoveryItems({ helpers = [], serviceCatalog = [], preferredCateg
       priceValue: Number(customerService?.pricing?.basePrice || customerService?.pricing?.minimumCallout || 0) || 0,
       pricing: customerService.pricing || {},
       serviceIds: [resolvedServiceId],
-      includedLabels: [customerService.label || entry.label],
+      includedLabels: Array.isArray(customerService.includedServiceIds) && customerService.includedServiceIds.length
+        ? customerService.includedServiceIds.map((serviceId) => getCustomerServiceById(serviceId)?.label || serviceId).filter(Boolean)
+        : [customerService.label || entry.label],
       helperCount: matchingHelpers.length,
       onlineHelperCount,
       helperName: matchingHelpers[0]?.fullName || 'Helper',

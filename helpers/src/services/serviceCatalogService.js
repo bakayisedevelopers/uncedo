@@ -1,4 +1,4 @@
-import { SERVICE_CATALOG } from '../constants/serviceCatalog';
+import { SERVICE_CATALOG, hydrateHelperServiceCategories } from '../constants/serviceCatalog';
 import { getFirebaseClients } from '../firebase/config';
 
 function slugify(value = '') {
@@ -38,8 +38,18 @@ export function normalizeServiceCatalogEntry(entry = {}) {
     categoryName: String(entry.categoryName || '').trim(),
     label: String(entry.label || entry.skillName || id).trim(),
     description: String(entry.description || '').trim(),
+    kind: String(entry.kind || 'service').trim().toLowerCase(),
     active: entry.active !== false,
     approved: entry.approved !== false,
+    includedServiceIds: (Array.isArray(entry.includedServiceIds) ? entry.includedServiceIds : [])
+      .map((item) => String(item || '').trim().toLowerCase())
+      .filter(Boolean),
+    pricing: entry.pricing && typeof entry.pricing === 'object' ? { ...entry.pricing } : {},
+    questionnaire: entry.questionnaire && typeof entry.questionnaire === 'object'
+      ? entry.questionnaire
+      : { required: entry.requiredQuestions || [], optional: entry.optionalQuestions || [] },
+    inheritBundleImages: entry.inheritBundleImages !== false,
+    requiresPortfolioSelection: Boolean(entry.requiresPortfolioSelection),
     createdAt: entry.createdAt || null,
     updatedAt: entry.updatedAt || null,
     images: (Array.isArray(entry.images) ? entry.images : [])
@@ -54,6 +64,7 @@ export function buildHelperServiceCatalog(entries = []) {
     .filter(Boolean)
     .filter((entry) => entry.active !== false && entry.approved !== false);
 
+  hydrateHelperServiceCategories(activeEntries);
   return SERVICE_CATALOG.map((category) => ({
     ...category,
     services: activeEntries.filter((entry) => entry.categoryId === category.id),
@@ -69,7 +80,9 @@ export function subscribeToServiceCatalog(callback, onError) {
     catalogQuery,
     (snapshot) => {
       const entries = snapshot.docs.map((docSnap) => normalizeServiceCatalogEntry({ id: docSnap.id, ...docSnap.data() }));
-      callback(entries.filter(Boolean));
+      const normalizedEntries = entries.filter(Boolean);
+      hydrateHelperServiceCategories(normalizedEntries);
+      callback(normalizedEntries);
     },
     onError,
   );

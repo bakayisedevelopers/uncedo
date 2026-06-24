@@ -46,6 +46,8 @@ export default function AdminShell() {
   const location = useLocation();
 
   const title = useMemo(() => {
+    if (location.pathname.startsWith('/services/')) return 'Service details';
+    if (location.pathname.startsWith('/helpers/')) return 'Helper details';
     if (location.pathname.startsWith('/helpers')) return 'Helper control';
     if (location.pathname.startsWith('/services')) return 'Services';
     if (location.pathname.startsWith('/customers')) return 'Customer directory';

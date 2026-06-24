@@ -24,6 +24,7 @@ import {
 } from '../services/notificationService';
 import { subscribeToStudentSessions } from '../services/sessionService';
 import { subscribeToCustomerServiceRequests } from '../services/customerServiceRequestService';
+import { subscribeToServiceCatalog } from '../services/serviceCatalogService';
 import { colors } from '../theme/colors';
 import { RATABLE_SESSION_STATUSES } from '../utils/sessionStatus';
 
@@ -350,6 +351,19 @@ export function RootNavigator() {
       },
     );
   }, [user?.uid]);
+
+  useEffect(() => {
+    const unsubscribe = subscribeToServiceCatalog(
+      () => null,
+      (error) => {
+        console.warn('subscribeToServiceCatalog error:', error);
+      },
+    );
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, []);
 
   useEffect(() => {
     if (!user?.uid) {
