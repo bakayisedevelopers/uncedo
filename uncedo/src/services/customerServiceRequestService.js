@@ -741,47 +741,60 @@ export async function cancelServiceRequestByCustomer({ requestId, reason }) {
     throw new Error('A request ID is required to cancel.');
   }
 
-  const { db } = getFirebaseClients();
-  const requestRef = doc(db, 'serviceRequests', requestId);
-  const requestSnap = await getDoc(requestRef);
-  if (!requestSnap.exists()) return;
-  const requestData = requestSnap.data();
-  const customerId = String(requestData?.customerId || '').trim();
-
-  const updates = {
-    status: 'canceled',
-    statusDetail: 'Customer canceled the session.',
-    canceledBy: 'customer',
-    canceledReason: reason || '',
-    updatedAt: serverTimestamp(),
-  };
-
-  const helperId = requestData?.helperAssignment?.helperId;
-  if (helperId) {
-    const helperRef = doc(db, 'users', helperId);
-    await runTransaction(db, async (transaction) => {
-      transaction.update(requestRef, updates);
-      transaction.update(helperRef, {
-        activeServiceRequestId: null,
-        updatedAt: serverTimestamp(),
-      });
-    });
-  } else {
-    await updateDoc(requestRef, updates);
+  const { auth } = getFirebaseClients();
+  const idToken = await auth.currentUser?.getIdToken();
+  if (!idToken) {
+    throw new Error('You must be signed in to cancel this request.');
   }
 
-  if (customerId) {
-    recordCustomerServiceEvent({
-      customerId,
-      eventType: 'request_canceled',
-      serviceId: requestData?.serviceIds?.[0] || requestData?.selectedPackageId || requestData?.categoryId || '',
-      categoryId: requestData?.categoryId || '',
-      serviceIds: Array.isArray(requestData?.serviceIds) ? requestData.serviceIds : [],
-      source: 'customer_tracking',
-      metadata: {
-        requestId,
-        reason: reason || '',
-      },
-    }).catch(() => {});
+  const response = await fetch(getFunctionEndpoint('cancelCustomerServiceRequest'), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      requestId,
+      reason: reason || '',
+    }),
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.success === false) {
+    throw new Error(payload?.message || 'Unable to cancel this request.');
   }
+
+  return payload?.request || null;
+}
+
+export async function submitServiceRequestRating({ requestId, score, comment = '' }) {
+  if (!requestId) {
+    throw new Error('A request ID is required to submit a rating.');
+  }
+
+  const { auth } = getFirebaseClients();
+  const idToken = await auth.currentUser?.getIdToken();
+  if (!idToken) {
+    throw new Error('You must be signed in to submit a rating.');
+  }
+
+  const response = await fetch(getFunctionEndpoint('submitServiceRequestRating'), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      requestId,
+      score,
+      comment,
+    }),
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.success === false) {
+    throw new Error(payload?.message || 'Unable to submit this rating.');
+  }
+
+  return payload?.rating || null;
 }

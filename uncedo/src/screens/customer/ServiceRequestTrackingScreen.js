@@ -24,6 +24,7 @@ import { getCustomerServiceById } from '../../constants/serviceCatalog';
 import { getFirebaseClients } from '../../firebase/config';
 import {
   cancelServiceRequestByCustomer,
+  submitServiceRequestRating,
   subscribeToServiceRequestById,
 } from '../../services/customerServiceRequestService';
 import {
@@ -205,9 +206,15 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
   const [showSafetyModal, setShowSafetyModal] = useState(false);
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [cancelReason, setCancelReason] = useState('');
+  const [showRatingModal, setShowRatingModal] = useState(false);
+  const [rating, setRating] = useState(5);
+  const [ratingComment, setRatingComment] = useState('');
+  const [ratingTarget, setRatingTarget] = useState(null);
+  const [submittingRating, setSubmittingRating] = useState(false);
   const [nowTime, setNowTime] = useState(Date.now());
   const [trackingClockMs, setTrackingClockMs] = useState(Date.now());
   const scrollOffsetYRef = useRef(0);
+  const previousStatusRef = useRef('');
   const localRouteSnapshotRef = useRef({
     routeCoordinates: [],
     encodedPolyline: '',
@@ -290,6 +297,31 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
       },
     );
   }, [requestId]);
+
+  useEffect(() => {
+    const currentStatus = String(request?.status || '').toLowerCase();
+    if (!currentStatus) return;
+
+    const previousStatus = previousStatusRef.current;
+    previousStatusRef.current = currentStatus;
+
+    if (!previousStatus) {
+      return;
+    }
+
+    if (
+      !['completed', 'canceled'].includes(previousStatus)
+      && ['completed', 'canceled'].includes(currentStatus)
+      && request?.helperAssignment?.helperId
+    ) {
+      setRatingTarget({
+        requestId: request.id || requestId,
+        helperId: request.helperAssignment.helperId,
+        helperName: request.helperAssignment.helperName || 'helper',
+      });
+      setShowRatingModal(true);
+    }
+  }, [request, requestId]);
 
   useEffect(() => {
     if (!requestId) {
@@ -667,6 +699,34 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
     Linking.openURL(`tel:${phone}`);
   };
 
+  const dismissRatingModal = () => {
+    setShowRatingModal(false);
+    setRating(5);
+    setRatingComment('');
+    goBack('CustomerHome');
+  };
+
+  const handleSubmitRating = async () => {
+    if (!ratingTarget?.requestId) {
+      dismissRatingModal();
+      return;
+    }
+
+    try {
+      setSubmittingRating(true);
+      await submitServiceRequestRating({
+        requestId: ratingTarget.requestId,
+        score: rating,
+        comment: ratingComment,
+      });
+      dismissRatingModal();
+    } catch (nextError) {
+      Alert.alert('Rating failed', nextError.message || 'Unable to submit the rating right now.');
+    } finally {
+      setSubmittingRating(false);
+    }
+  };
+
   const handleCancelSubmit = async () => {
     if (!cancelReason.trim()) {
       Alert.alert('Reason required', 'Please provide a reason for cancellation.');
@@ -676,11 +736,24 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
     setShowCancelModal(false);
 
     try {
-      await cancelServiceRequestByCustomer({
+      const updatedRequest = await cancelServiceRequestByCustomer({
         requestId: request.id,
         reason: cancelReason,
       });
-      Alert.alert('Cancelled', 'Your service request has been cancelled.');
+      setCancelReason('');
+      if (updatedRequest) {
+        setRequest(updatedRequest);
+      }
+      if (updatedRequest?.helperAssignment?.helperId) {
+        setRatingTarget({
+          requestId: updatedRequest.id || request.id || requestId,
+          helperId: updatedRequest.helperAssignment.helperId,
+          helperName: updatedRequest.helperAssignment.helperName || 'helper',
+        });
+        setShowRatingModal(true);
+        return;
+      }
+
       goBack('CustomerHome');
     } catch (nextError) {
       Alert.alert('Error', nextError.message || 'Unable to cancel this request.');
@@ -946,6 +1019,42 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
               </Pressable>
               <Pressable style={[styles.primaryAction, styles.dangerAction]} onPress={handleCancelSubmit}>
                 <Text style={styles.primaryActionText}>Confirm cancel</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={showRatingModal} transparent animationType="slide">
+        <View style={styles.modalBg}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Rate {ratingTarget?.helperName || 'helper'}</Text>
+            <Text style={styles.modalText}>Leave quick feedback about this service.</Text>
+            <View style={styles.starRow}>
+              {[1, 2, 3, 4, 5].map((star) => (
+                <Pressable key={star} onPress={() => setRating(star)}>
+                  <Ionicons name={star <= rating ? 'star' : 'star-outline'} size={34} color="#eab308" />
+                </Pressable>
+              ))}
+            </View>
+            <TextInput
+              style={styles.reasonInput}
+              placeholder="Feedback (optional)"
+              placeholderTextColor={colors.muted}
+              value={ratingComment}
+              onChangeText={setRatingComment}
+              multiline
+            />
+            <View style={styles.modalButtonRow}>
+              <Pressable style={styles.secondaryAction} onPress={dismissRatingModal}>
+                <Text style={styles.secondaryActionText}>Skip</Text>
+              </Pressable>
+              <Pressable style={styles.primaryAction} onPress={handleSubmitRating} disabled={submittingRating}>
+                {submittingRating ? (
+                  <ActivityIndicator color="#ffffff" />
+                ) : (
+                  <Text style={styles.primaryActionText}>Done</Text>
+                )}
               </Pressable>
             </View>
           </View>
@@ -1387,6 +1496,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 12,
     width: '100%',
+  },
+  starRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 10,
   },
   dangerAction: {
     backgroundColor: colors.danger,

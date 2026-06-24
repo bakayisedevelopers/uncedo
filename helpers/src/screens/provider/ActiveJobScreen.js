@@ -19,7 +19,6 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
-import * as ImagePicker from 'expo-image-picker';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { HelperMapPlaceholder } from '../../components/app/HelperMapPlaceholder';
 import { useAuth } from '../../context/AuthContext';
@@ -35,6 +34,7 @@ import {
 } from '../../services/activeJobTrackingService';
 import { watchHelperLocation } from '../../services/helperLocationService';
 import { decodePolyline } from '../../services/routingService';
+import { submitServiceRequestRating } from '../../services/serviceRequestService';
 import { colors } from '../../theme/colors';
 import { formatCurrency } from '../../utils/payouts';
 
@@ -249,12 +249,12 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [cancelReason, setCancelReason] = useState('');
   const [showArrivalConfirmModal, setShowArrivalConfirmModal] = useState(false);
-  const [showPhotoModal, setShowPhotoModal] = useState(false);
-  const [completionPhoto, setCompletionPhoto] = useState(null);
+  const [showCompletionModal, setShowCompletionModal] = useState(false);
   const [showRatingModal, setShowRatingModal] = useState(false);
   const [rating, setRating] = useState(5);
   const [ratingComment, setRatingComment] = useState('');
   const [ratingTarget, setRatingTarget] = useState(null);
+  const [submittingRating, setSubmittingRating] = useState(false);
   const [nowTime, setNowTime] = useState(Date.now());
   const locationSubscriptionRef = useRef(null);
   const previousNavigationLocationRef = useRef(null);
@@ -516,7 +516,8 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
   useEffect(() => {
     if (activeJob) {
       setRatingTarget({
-        id: activeJob.id,
+        requestId: activeJob.requestId || activeJob.id,
+        customerId: activeJob.customerId || '',
         customerName: activeJob.customerName,
       });
     }
@@ -781,65 +782,94 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
     const success = await actions.cancelActiveJob(cancelReason);
     if (success) {
       setShowCancelModal(false);
-      goBack('Home');
+      setCancelReason('');
+      setShowRatingModal(true);
       return;
     }
 
     Alert.alert('Cancel failed', 'Unable to cancel this job right now.');
   };
 
-  const handlePickPhoto = async () => {
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) {
-      Alert.alert('Permission denied', 'Storage permission is required to select photos.');
-      return;
-    }
-
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      quality: 0.8,
-    });
-
-    if (!result.canceled && result.assets?.[0]?.uri) {
-      setCompletionPhoto(result.assets[0].uri);
-    }
+  const dismissRatingModal = () => {
+    setShowRatingModal(false);
+    setRating(5);
+    setRatingComment('');
+    goBack('Home');
   };
 
-  const handleTakePhoto = async () => {
-    const permission = await ImagePicker.requestCameraPermissionsAsync();
-    if (!permission.granted) {
-      Alert.alert('Permission denied', 'Camera permission is required to take photos.');
-      return;
-    }
-
-    const result = await ImagePicker.launchCameraAsync({
-      quality: 0.8,
-    });
-
-    if (!result.canceled && result.assets?.[0]?.uri) {
-      setCompletionPhoto(result.assets[0].uri);
-    }
-  };
-
-  const handleFinalizeJob = async () => {
-    if (!completionPhoto) {
-      Alert.alert('Photo proof required', 'Please provide a completion photo of the work.');
+  const handleSubmitRating = async () => {
+    if (!ratingTarget?.requestId) {
+      dismissRatingModal();
       return;
     }
 
     try {
+      setSubmittingRating(true);
+      await submitServiceRequestRating({
+        requestId: ratingTarget.requestId,
+        score: rating,
+        comment: ratingComment,
+      });
+      dismissRatingModal();
+    } catch (error) {
+      Alert.alert('Rating failed', error.message || 'Unable to submit the rating right now.');
+    } finally {
+      setSubmittingRating(false);
+    }
+  };
+
+  const handleCompleteJob = async () => {
+    try {
       const success = await actions.completeActiveJobWithBilling();
       if (!success) {
-        Alert.alert('Billing failed', 'Unable to finalize this job right now.');
+        Alert.alert('Completion failed', 'Unable to complete this job right now.');
         return;
       }
 
-      setShowPhotoModal(false);
+      setShowCompletionModal(false);
       setShowRatingModal(true);
     } catch (error) {
-      Alert.alert('Error', error.message || 'Billing failed.');
+      Alert.alert('Error', error.message || 'Unable to complete this job.');
     }
   };
+
+  const renderRatingModal = () => (
+    <Modal visible={showRatingModal} transparent animationType="slide">
+      <View style={styles.modalBg}>
+        <View style={styles.modalCard}>
+          <Text style={styles.modalTitle}>Rate {ratingTarget?.customerName || 'customer'}</Text>
+          <Text style={styles.modalText}>Leave quick feedback about this job experience.</Text>
+          <View style={styles.starRow}>
+            {[1, 2, 3, 4, 5].map((star) => (
+              <Pressable key={star} onPress={() => setRating(star)}>
+                <Ionicons name={star <= rating ? 'star' : 'star-outline'} size={34} color="#eab308" />
+              </Pressable>
+            ))}
+          </View>
+          <TextInput
+            style={styles.reasonInput}
+            placeholder="Feedback (optional)"
+            placeholderTextColor={colors.muted}
+            value={ratingComment}
+            onChangeText={setRatingComment}
+            multiline
+          />
+          <View style={styles.modalButtonRow}>
+            <Pressable style={styles.secondaryAction} onPress={dismissRatingModal}>
+              <Text style={styles.secondaryActionText}>Skip</Text>
+            </Pressable>
+            <Pressable style={styles.primaryAction} onPress={handleSubmitRating} disabled={submittingRating}>
+              {submittingRating ? (
+                <ActivityIndicator color="#ffffff" />
+              ) : (
+                <Text style={styles.primaryActionText}>Done</Text>
+              )}
+            </Pressable>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
 
   if (!activeJob) {
     return (
@@ -850,6 +880,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
         <Pressable style={styles.primaryAction} onPress={() => goBack('Home')}>
           <Text style={styles.primaryActionText}>Back to dashboard</Text>
         </Pressable>
+        {renderRatingModal()}
       </View>
     );
   }
@@ -952,12 +983,12 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
             <Ionicons name="build-outline" size={18} color="#1d4ed8" />
             <View style={styles.infoBannerBody}>
               <Text style={styles.infoBannerTitle}>Job in progress</Text>
-              <Text style={styles.infoBannerText}>Complete the work, then finalize the job with photo proof.</Text>
+              <Text style={styles.infoBannerText}>Complete the work, then confirm the job is done.</Text>
             </View>
           </View>
-          <Pressable style={styles.primaryAction} onPress={() => setShowPhotoModal(true)}>
-            <Ionicons name="camera-outline" size={18} color="#ffffff" />
-            <Text style={styles.primaryActionText}>Complete job</Text>
+          <Pressable style={styles.primaryAction} onPress={() => setShowCompletionModal(true)}>
+            <Ionicons name="checkmark-outline" size={18} color="#ffffff" />
+            <Text style={styles.primaryActionText}>Done</Text>
           </Pressable>
         </View>
       );
@@ -1214,45 +1245,21 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
         </View>
       </Modal>
 
-      <Modal visible={showPhotoModal} transparent animationType="slide">
+      <Modal visible={showCompletionModal} transparent animationType="slide">
         <View style={styles.modalBg}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Job completed proof</Text>
-            <Text style={styles.modalText}>Take a photo or choose one from your gallery before finalizing billing.</Text>
-
-            {completionPhoto ? (
-              <View style={styles.photoContainer}>
-                <Image source={{ uri: completionPhoto }} style={styles.photoPreview} />
-                <Pressable style={styles.photoReset} onPress={() => setCompletionPhoto(null)}>
-                  <Ionicons name="close-circle" size={24} color={colors.danger} />
-                </Pressable>
-              </View>
-            ) : (
-              <View style={styles.photoActions}>
-                <Pressable style={styles.photoPickerAction} onPress={handlePickPhoto}>
-                  <Ionicons name="images-outline" size={22} color={colors.brand} />
-                  <Text style={styles.photoPickerLabel}>Gallery</Text>
-                </Pressable>
-                <Pressable style={styles.photoPickerAction} onPress={handleTakePhoto}>
-                  <Ionicons name="camera-outline" size={22} color={colors.brand} />
-                  <Text style={styles.photoPickerLabel}>Camera</Text>
-                </Pressable>
-              </View>
-            )}
+            <Text style={styles.modalTitle}>Job completed</Text>
+            <Text style={styles.modalText}>Confirm that the work is finished and billing should be finalized.</Text>
 
             {saving ? (
               <ActivityIndicator color={colors.brand} size="large" style={{ marginVertical: 20 }} />
             ) : (
               <View style={styles.modalButtonRow}>
-                <Pressable style={styles.secondaryAction} onPress={() => setShowPhotoModal(false)}>
-                  <Text style={styles.secondaryActionText}>Close</Text>
+                <Pressable style={styles.secondaryAction} onPress={() => setShowCompletionModal(false)}>
+                  <Text style={styles.secondaryActionText}>Back</Text>
                 </Pressable>
-                <Pressable
-                  style={[styles.primaryAction, !completionPhoto && styles.disabledAction]}
-                  disabled={!completionPhoto}
-                  onPress={handleFinalizeJob}
-                >
-                  <Text style={styles.primaryActionText}>Finalize billing</Text>
+                <Pressable style={styles.primaryAction} onPress={handleCompleteJob}>
+                  <Text style={styles.primaryActionText}>Done</Text>
                 </Pressable>
               </View>
             )}
@@ -1262,38 +1269,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
         </View>
       </Modal>
 
-      <Modal visible={showRatingModal} transparent animationType="slide">
-        <View style={styles.modalBg}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Rate {ratingTarget?.customerName || 'customer'}</Text>
-            <Text style={styles.modalText}>Leave quick feedback about this job experience.</Text>
-            <View style={styles.starRow}>
-              {[1, 2, 3, 4, 5].map((star) => (
-                <Pressable key={star} onPress={() => setRating(star)}>
-                  <Ionicons name={star <= rating ? 'star' : 'star-outline'} size={34} color="#eab308" />
-                </Pressable>
-              ))}
-            </View>
-            <TextInput
-              style={styles.reasonInput}
-              placeholder="Feedback (optional)"
-              placeholderTextColor={colors.muted}
-              value={ratingComment}
-              onChangeText={setRatingComment}
-              multiline
-            />
-            <Pressable
-              style={styles.primaryAction}
-              onPress={() => {
-                setShowRatingModal(false);
-                goBack('Home');
-              }}
-            >
-              <Text style={styles.primaryActionText}>Submit rating</Text>
-            </Pressable>
-          </View>
-        </View>
-      </Modal>
+      {renderRatingModal()}
     </View>
   );
 }

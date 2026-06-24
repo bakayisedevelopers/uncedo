@@ -1,6 +1,8 @@
 import { getCustomerServiceCategoryById, getCustomerServiceById } from '../constants/serviceCatalog';
 
 const TRAVEL_RATE_PER_KM = 4;
+const BOOKING_FEE_RATE = 0.01;
+const BOOKING_FEE_CAP = 5;
 const MINIMUM_TRAVEL_FEE = 32;
 const AI_BOOKING_FEE_LABEL = 'Booking fee (AI intake)';
 const PRICING_CALIBRATION = {
@@ -122,6 +124,15 @@ function buildTravelLine(distanceKm) {
     label: normalizedDistance > 0
       ? `Travel (${normalizedDistance.toFixed(1)} km @ R${TRAVEL_RATE_PER_KM.toFixed(2)}/km, min R${MINIMUM_TRAVEL_FEE})`
       : `Travel minimum fee`,
+    amount,
+  };
+}
+
+function buildBookingFeeLine(baseAmount) {
+  const normalizedBase = Math.max(0, Number(baseAmount || 0));
+  const amount = roundCurrency(Math.min(BOOKING_FEE_CAP, normalizedBase * BOOKING_FEE_RATE));
+  return {
+    label: `Booking fee (${Math.round(BOOKING_FEE_RATE * 100)}%, max R${BOOKING_FEE_CAP})`,
     amount,
   };
 }
@@ -847,15 +858,14 @@ export function createCategoryPricingEngine(categoryId) {
     const travelLine = buildTravelLine(
       travelDistanceKm ?? serviceOverrides.travelDistanceKm ?? structuredAnswers.travel_distance_km ?? 0,
     );
-    const aiBookingFeeLine = buildAiBookingFeeLine(aiUsageSnapshot);
-
     const serviceLines = serviceBreakdown.flatMap((item) => item.lines);
     const serviceTotal = serviceBreakdown.reduce((sum, item) => sum + Number(item.subtotal || 0), 0);
-    const bookingFee = Number(aiBookingFeeLine?.amount || 0);
+    const bookingFeeLine = buildBookingFeeLine(serviceTotal + travelLine.amount);
+    const bookingFee = Number(bookingFeeLine.amount || 0);
     const total = roundCurrency(serviceTotal + travelLine.amount + bookingFee);
     const allLines = [...serviceLines, travelLine];
-    if (aiBookingFeeLine) {
-      allLines.push(aiBookingFeeLine);
+    if (bookingFeeLine.amount > 0) {
+      allLines.push(bookingFeeLine);
     }
 
     return {
@@ -872,6 +882,8 @@ export function createCategoryPricingEngine(categoryId) {
       travelFee: travelLine.amount,
       bookingFee,
       aiUsageSnapshot,
+      bookingFeeRate: BOOKING_FEE_RATE,
+      bookingFeeCap: BOOKING_FEE_CAP,
       travelRatePerKm: TRAVEL_RATE_PER_KM,
     };
   };

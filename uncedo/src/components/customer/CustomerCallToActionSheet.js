@@ -8,13 +8,13 @@ export function CustomerCallToActionSheet({
   label = '',
   onPress,
 }) {
-  const buttonLabel = String(label || '').trim() || (hasActiveRequest ? 'Track Active Request' : 'Describe what you want');
+  const buttonLabel = String(label || '').trim() || (hasActiveRequest ? 'Track Active Request' : 'Browse services');
 
   return (
     <View style={styles.sheet}>
       <Button
         disabled={disabled}
-        icon={<Ionicons color="#ffffff" name={hasActiveRequest ? 'map-outline' : 'chatbubble-ellipses'} size={18} />}
+        icon={<Ionicons color="#ffffff" name={hasActiveRequest ? 'map-outline' : 'search-outline'} size={18} />}
         onPress={onPress}
         style={hasActiveRequest ? styles.trackButton : styles.callButton}
       >

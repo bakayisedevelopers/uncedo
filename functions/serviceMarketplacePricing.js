@@ -1,9 +1,15 @@
 const DEFAULT_TRAVEL_FEE = 35;
 const DEFAULT_BOOKING_FEE = 0;
+const BOOKING_FEE_RATE = 0.01;
+const BOOKING_FEE_CAP = 5;
 const DEFAULT_CURRENCY = 'ZAR';
 
 function roundCurrency(value) {
   return Number(Number(value || 0).toFixed(2));
+}
+
+function computeDynamicBookingFee(baseAmount = 0) {
+  return roundCurrency(Math.min(BOOKING_FEE_CAP, Math.max(0, Number(baseAmount || 0)) * BOOKING_FEE_RATE));
 }
 
 function clamp(value, min = Number.NEGATIVE_INFINITY, max = Number.POSITIVE_INFINITY) {
@@ -418,10 +424,8 @@ function computeMarketplaceQuote({
 
   const travelFee = roundCurrency(DEFAULT_TRAVEL_FEE);
   const serviceTotal = roundCurrency(serviceBreakdown.reduce((sum, item) => sum + Number(item.subtotal || 0), 0));
-  const bookingFee = roundCurrency(serviceBreakdown.reduce((sum, item) => {
-    const entry = catalogIndex.get(item.serviceId);
-    return sum + Number(entry?.pricing?.bookingFee || 0);
-  }, 0));
+  const bookingFeeBase = roundCurrency(serviceTotal + travelFee);
+  const bookingFee = computeDynamicBookingFee(bookingFeeBase);
   const total = roundCurrency(serviceTotal + travelFee + bookingFee);
 
   return {
@@ -436,6 +440,8 @@ function computeMarketplaceQuote({
     subtotal: serviceTotal,
     travelFee,
     bookingFee,
+    bookingFeeRate: BOOKING_FEE_RATE,
+    bookingFeeCap: BOOKING_FEE_CAP,
     total,
     estimatedDurationMinutes: serviceBreakdown.reduce((sum, item) => sum + Number(item.estimatedDurationMinutes || 0), 0),
     demandLevel: normalizedSignals.demandLevel,
@@ -446,6 +452,8 @@ function computeMarketplaceQuote({
 
 module.exports = {
   DEFAULT_BOOKING_FEE,
+  BOOKING_FEE_CAP,
+  BOOKING_FEE_RATE,
   DEFAULT_CURRENCY,
   DEFAULT_TRAVEL_FEE,
   computeMarketplaceQuote,

@@ -20,10 +20,6 @@ const {
   normalizeServiceCatalogEntry: normalizeMarketplaceServiceCatalogEntry,
 } = require('./serviceMarketplacePricing');
 const {
-  generateServiceCatalogImages,
-  sourceServiceCatalogImages,
-} = require('./serviceCatalogImageSourcing');
-const {
   normalizeSubjectName,
   isAllowedGrade1To12Subject,
   GRADE_1_TO_12_SUBJECT_NAMES,
@@ -3469,6 +3465,63 @@ function toRand(value) {
   return Number(toMoney(value).toFixed(2));
 }
 
+const SERVICE_BOOKING_FEE_RATE = 0.01;
+const SERVICE_BOOKING_FEE_CAP = 5;
+const SERVICE_TRAVEL_RATE_PER_KM = 4;
+const SERVICE_DEFAULT_TRAVEL_FEE = 35;
+
+function computeServiceBookingFee(baseAmount = 0) {
+  return toRand(Math.min(SERVICE_BOOKING_FEE_CAP, Math.max(0, Number(baseAmount || 0)) * SERVICE_BOOKING_FEE_RATE));
+}
+
+function getServiceTravelFee(request = {}) {
+  return toRand(
+    request?.pricingSnapshot?.travelFee
+    || request?.requestPayload?.pricingSnapshot?.travelFee
+    || SERVICE_DEFAULT_TRAVEL_FEE,
+  );
+}
+
+function getServiceQuoteSubtotal(request = {}) {
+  const explicitSubtotal = Number(
+    request?.pricingSnapshot?.subtotal
+    || request?.requestPayload?.pricingSnapshot?.subtotal
+    || 0,
+  );
+  if (explicitSubtotal > 0) {
+    return toRand(explicitSubtotal);
+  }
+
+  const total = Number(
+    request?.pricingSnapshot?.total
+    || request?.requestPayload?.pricingSnapshot?.total
+    || 0,
+  );
+  const travelFee = getServiceTravelFee(request);
+  return toRand(Math.max(0, total - travelFee));
+}
+
+function getServiceBookingFee(request = {}) {
+  const baseAmount = getServiceQuoteSubtotal(request) + getServiceTravelFee(request);
+  return computeServiceBookingFee(baseAmount);
+}
+
+function buildNextRatingSummary(currentStats = {}, score = 0) {
+  const totalCount = Number(currentStats.totalLessons ?? currentStats.count ?? 0);
+  const totalRatings = Number(currentStats.totalRatings ?? ((currentStats.average || 0) * totalCount) ?? 0);
+  const nextCount = totalCount + 1;
+  const nextTotalRatings = Number((totalRatings + Number(score || 0)).toFixed(2));
+  const nextAverage = Number((nextTotalRatings / nextCount).toFixed(2));
+
+  return {
+    count: nextCount,
+    totalLessons: nextCount,
+    totalRatings: nextTotalRatings,
+    average: nextAverage,
+    updatedAt: Date.now(),
+  };
+}
+
 function getUsageMonthKey(value = Date.now()) {
   const date = new Date(value);
   const year = date.getUTCFullYear();
@@ -4221,178 +4274,6 @@ exports.customerServiceMediaSummary = onRequest(
         success: false,
         message: 'Unable to summarize the uploaded file right now.',
       });
-    }
-  },
-);
-
-exports.sourceServiceCatalogImages = onRequest(
-  {
-    cors: true,
-    secrets: [UNCEDO_AI_KEYS],
-    timeoutSeconds: 120,
-    memory: '1GiB',
-  },
-  async (req, res) => {
-    if (req.method !== 'POST') {
-      res.status(405).json({ success: false, message: 'Method not allowed' });
-      return;
-    }
-
-    const token = getBearerToken(req);
-    if (!token) {
-      res.status(401).json({ success: false, message: 'Unauthorized request.' });
-      return;
-    }
-
-    const decoded = await admin.auth().verifyIdToken(token).catch(() => null);
-    if (!decoded?.uid || !isAdminToken(decoded)) {
-      res.status(403).json({ success: false, message: 'Admin access required.' });
-      return;
-    }
-
-    let aiConfig;
-    try {
-      aiConfig = getAiSecrets();
-    } catch (error) {
-      logger.error('service_catalog_image_sourcing_missing_ai_config', {
-        uid: decoded.uid,
-        error: error.message,
-      });
-      res.status(500).json({
-        success: false,
-        message: 'Image sourcing configuration is unavailable.',
-      });
-      return;
-    }
-
-    const body = req.body && typeof req.body === 'object' ? req.body : {};
-    const inputService = body.service && typeof body.service === 'object' ? body.service : body;
-    const serviceId = String(inputService.serviceId || inputService.id || '').trim().toLowerCase();
-    const serviceLabel = String(inputService.label || '').trim();
-
-    if (!serviceId || !serviceLabel) {
-      res.status(400).json({ success: false, message: 'service.id and service.label are required.' });
-      return;
-    }
-
-    try {
-      const result = await sourceServiceCatalogImages({
-        firebaseConfig: aiConfig,
-        bucket: admin.storage().bucket(),
-        service: {
-          ...inputService,
-          serviceId,
-          id: serviceId,
-          label: serviceLabel,
-          promptLabel: String(inputService.promptLabel || '').trim(),
-          description: String(inputService.description || '').trim(),
-          categoryId: String(inputService.categoryId || '').trim(),
-          categoryName: String(inputService.categoryName || '').trim(),
-          kind: String(inputService.kind || 'service').trim().toLowerCase(),
-          includedServices: Array.isArray(inputService.includedServices) ? inputService.includedServices : [],
-        },
-        targetCount: Number(body.targetCount || inputService.targetCount || 10),
-      });
-
-      res.status(200).json({
-        success: true,
-        message: `Sourced ${result.images.length} reusable image${result.images.length === 1 ? '' : 's'}.`,
-        ...result,
-      });
-    } catch (error) {
-      const safeMessage = getSafeErrorMessage(error, 'Unable to source service images.');
-      logger.warn('service_catalog_image_sourcing_failed', {
-        uid: decoded.uid,
-        serviceId,
-        message: safeMessage,
-      });
-      res.status(400).json({ success: false, message: safeMessage });
-    }
-  },
-);
-
-exports.generateServiceCatalogImages = onRequest(
-  {
-    cors: true,
-    secrets: [UNCEDO_AI_KEYS],
-    timeoutSeconds: 120,
-    memory: '1GiB',
-  },
-  async (req, res) => {
-    if (req.method !== 'POST') {
-      res.status(405).json({ success: false, message: 'Method not allowed' });
-      return;
-    }
-
-    const token = getBearerToken(req);
-    if (!token) {
-      res.status(401).json({ success: false, message: 'Unauthorized request.' });
-      return;
-    }
-
-    const decoded = await admin.auth().verifyIdToken(token).catch(() => null);
-    if (!decoded?.uid || !isAdminToken(decoded)) {
-      res.status(403).json({ success: false, message: 'Admin access required.' });
-      return;
-    }
-
-    let aiConfig;
-    try {
-      aiConfig = getAiSecrets();
-    } catch (error) {
-      logger.error('service_catalog_image_generation_missing_ai_config', {
-        uid: decoded.uid,
-        error: error.message,
-      });
-      res.status(500).json({
-        success: false,
-        message: 'Image generation configuration is unavailable.',
-      });
-      return;
-    }
-
-    const body = req.body && typeof req.body === 'object' ? req.body : {};
-    const inputService = body.service && typeof body.service === 'object' ? body.service : body;
-    const serviceId = String(inputService.serviceId || inputService.id || '').trim().toLowerCase();
-    const serviceLabel = String(inputService.label || '').trim();
-
-    if (!serviceId || !serviceLabel) {
-      res.status(400).json({ success: false, message: 'service.id and service.label are required.' });
-      return;
-    }
-
-    try {
-      const result = await generateServiceCatalogImages({
-        firebaseConfig: aiConfig,
-        bucket: admin.storage().bucket(),
-        service: {
-          ...inputService,
-          serviceId,
-          id: serviceId,
-          label: serviceLabel,
-          promptLabel: String(inputService.promptLabel || '').trim(),
-          description: String(inputService.description || '').trim(),
-          categoryId: String(inputService.categoryId || '').trim(),
-          categoryName: String(inputService.categoryName || '').trim(),
-          kind: String(inputService.kind || 'service').trim().toLowerCase(),
-          includedServices: Array.isArray(inputService.includedServices) ? inputService.includedServices : [],
-        },
-        targetCount: Number(body.targetCount || inputService.targetCount || 1),
-      });
-
-      res.status(200).json({
-        success: true,
-        message: `Generated ${result.images.length} image${result.images.length === 1 ? '' : 's'} with Gemini.`,
-        ...result,
-      });
-    } catch (error) {
-      const safeMessage = getSafeErrorMessage(error, 'Unable to generate service images.');
-      logger.warn('service_catalog_image_generation_failed', {
-        uid: decoded.uid,
-        serviceId,
-        message: safeMessage,
-      });
-      res.status(400).json({ success: false, message: safeMessage });
     }
   },
 );
@@ -7792,8 +7673,11 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
     }
   }
 
-  const baseQuoteTotal = Number(request.pricingSnapshot?.total || 0);
-  const totalAmount = Number((baseQuoteTotal + waitingCost).toFixed(2));
+  const quoteTotal = toRand(request.pricingSnapshot?.total || 0);
+  const subtotal = getServiceQuoteSubtotal(request);
+  const travelFee = getServiceTravelFee(request);
+  const bookingFee = getServiceBookingFee(request);
+  const totalAmount = toRand(quoteTotal + waitingCost);
 
   const customerRef = db.collection('users').doc(request.customerId);
   const customerSnap = await customerRef.get();
@@ -7844,6 +7728,11 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
     totalAmount,
     pricingSnapshot: {
       ...(request.pricingSnapshot || {}),
+      subtotal,
+      travelFee,
+      bookingFee,
+      bookingFeeRate: SERVICE_BOOKING_FEE_RATE,
+      bookingFeeCap: SERVICE_BOOKING_FEE_CAP,
       waitingMinutes,
       waitingCost,
       finalAmount: totalAmount,
@@ -7893,6 +7782,7 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
       helperId: helperId || '',
       paymentStatus,
       totalAmount,
+      waitingCost,
       requestStatus: 'completed',
     },
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -7929,6 +7819,329 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
     success: true,
     request: updatedRequest,
     charge: { ok: charge.ok, reason: charge.reason || null },
+  });
+});
+
+exports.cancelCustomerServiceRequest = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRETS] }, async (req, res) => {
+  if (req.method !== 'POST') {
+    res.status(405).json({ success: false, message: 'Method not allowed' });
+    return;
+  }
+
+  const token = getBearerToken(req);
+  if (!token) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+
+  const decoded = await admin.auth().verifyIdToken(token).catch(() => null);
+  if (!decoded?.uid) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+
+  const requestId = String(req.body?.requestId || '').trim();
+  const canceledReason = String(req.body?.reason || '').trim();
+  if (!requestId) {
+    res.status(400).json({ success: false, message: 'Missing requestId.' });
+    return;
+  }
+
+  const requestRef = db.collection('serviceRequests').doc(requestId);
+  const requestSnap = await requestRef.get();
+  if (!requestSnap.exists) {
+    res.status(404).json({ success: false, message: 'Service request not found.' });
+    return;
+  }
+
+  const request = requestSnap.data() || {};
+  if (decoded.uid !== request.customerId) {
+    res.status(403).json({ success: false, message: 'Only the customer can cancel this request.' });
+    return;
+  }
+
+  if (['completed', 'canceled'].includes(String(request.status || '').toLowerCase())) {
+    res.status(200).json({ success: true, request: { id: requestId, ...request } });
+    return;
+  }
+
+  const helperId = String(request.helperAssignment?.helperId || '').trim();
+  const status = String(request.status || '').toLowerCase();
+  const endedAt = Date.now();
+  const bookingFee = getServiceBookingFee(request);
+  const travelFee = getServiceTravelFee(request);
+  const trackingSnap = await requestRef.collection('tracking').doc('live').get().catch(() => null);
+  const trackingData = trackingSnap?.exists ? (trackingSnap.data() || {}) : {};
+  const distanceTravelledMeters = Number(
+    request?.travelTracking?.distanceTravelledMeters
+    || trackingData?.distanceTravelledMeters
+    || 0,
+  );
+  const travelledKm = Math.max(0, distanceTravelledMeters / 1000);
+
+  let billingRule = 'booking_fee_only';
+  let travelCharge = 0;
+  if (['driving', 'en_route', 'buying_resources'].includes(status)) {
+    billingRule = 'travelled_distance_plus_booking_fee';
+    travelCharge = toRand(travelledKm * SERVICE_TRAVEL_RATE_PER_KM);
+  } else if (['arrived', 'work_started'].includes(status)) {
+    billingRule = 'travel_fee_plus_booking_fee';
+    travelCharge = toRand(travelFee);
+  }
+
+  const cancellationAmount = toRand(travelCharge + bookingFee);
+  const customerRef = db.collection('users').doc(request.customerId);
+  const customerSnap = await customerRef.get();
+  const customerData = customerSnap.data() || {};
+  const paymentMethods = customerData.paymentMethods || [];
+  const selectedCardId = request.selectedCardId || request.requestPayload?.selectedCardId || null;
+  const selectedCard = paymentMethods.find((card) => card.id === selectedCardId)
+    || paymentMethods.find((card) => card.isDefault)
+    || paymentMethods[0]
+    || null;
+
+  let charge = { ok: true, reason: null, transactionId: 'service-cancel-zero-charge' };
+  if (cancellationAmount > 0) {
+    let paymentsSecrets;
+    try {
+      paymentsSecrets = getPaymentsSecrets();
+    } catch (error) {
+      logger.error('Payment configuration is unavailable during service request cancellation.', {
+        requestId,
+        error: error.message,
+      });
+      res.status(500).json({ success: false, message: 'Payment configuration is unavailable.' });
+      return;
+    }
+
+    charge = await chargeAuthorizationWithPaystack({
+      paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY,
+      email: customerData.email || request.customerEmail || '',
+      amount: cancellationAmount,
+      authorizationCode: selectedCard?.paystackAuthorizationCode || '',
+    });
+  }
+
+  const paymentStatus = charge.ok ? 'paid' : 'wallet_debt_recorded';
+  const wallet = customerData.wallet || { balance: 0, currency: 'ZAR' };
+  const nextWalletBalance = charge.ok
+    ? Number(wallet.balance || 0)
+    : Number((Number(wallet.balance || 0) - cancellationAmount).toFixed(2));
+
+  const batch = db.batch();
+  batch.set(requestRef, {
+    status: 'canceled',
+    statusDetail: cancellationAmount > 0
+      ? `Customer canceled the service. Cancellation fee charged: R${cancellationAmount.toFixed(2)}.`
+      : 'Customer canceled the service.',
+    canceledAt: endedAt,
+    canceledBy: 'customer',
+    canceledReason: canceledReason || '',
+    cancellationFeeAmount: cancellationAmount,
+    paymentStatus,
+    paymentTransactionId: charge.transactionId || null,
+    chargedCardLast4: selectedCard?.last4 || null,
+    pricingSnapshot: {
+      ...(request.pricingSnapshot || {}),
+      subtotal: getServiceQuoteSubtotal(request),
+      travelFee,
+      bookingFee,
+      bookingFeeRate: SERVICE_BOOKING_FEE_RATE,
+      bookingFeeCap: SERVICE_BOOKING_FEE_CAP,
+      cancellationAmount,
+      cancellationTravelCharge: travelCharge,
+      cancellationDistanceKm: Number(travelledKm.toFixed(2)),
+      cancellationBillingRule: billingRule,
+      finalizedAt: new Date(endedAt).toISOString(),
+    },
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  if (helperId) {
+    batch.set(db.collection('users').doc(helperId), {
+      activeServiceRequestId: admin.firestore.FieldValue.delete(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+  }
+
+  if (!charge.ok) {
+    batch.set(customerRef, {
+      wallet: {
+        ...wallet,
+        balance: nextWalletBalance,
+        currency: wallet.currency || 'ZAR',
+        updatedAt: new Date().toISOString(),
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+  }
+
+  await batch.commit();
+
+  const updatedSnap = await requestRef.get();
+  const updatedRequest = { id: updatedSnap.id, ...updatedSnap.data() };
+
+  await db.collection('customerServiceEvents').doc(`request_canceled_${requestId}`).set({
+    customerId: request.customerId,
+    eventType: 'request_canceled',
+    serviceId: request.serviceIds?.[0] || request.selectedPackageId || request.categoryId || '',
+    categoryId: request.categoryId || '',
+    serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
+    requestId,
+    source: 'cancelCustomerServiceRequest',
+    metadata: {
+      helperId,
+      paymentStatus,
+      cancellationAmount,
+      cancellationBillingRule: billingRule,
+      cancellationDistanceKm: Number(travelledKm.toFixed(2)),
+      requestStatus: 'canceled',
+    },
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    createdAtMs: endedAt,
+    dayBucket: new Date(endedAt).toISOString().slice(0, 10),
+  }, { merge: true });
+
+  await Promise.all([
+    createUserNotification({
+      userId: request.customerId,
+      title: 'Service canceled',
+      message: cancellationAmount > 0
+        ? `Your service request was canceled. Cancellation fee: R${cancellationAmount.toFixed(2)}.`
+        : 'Your service request was canceled.',
+      type: 'service_canceled',
+      requestId,
+      targetPath: `/customer/requests/${requestId}`,
+      metadata: {
+        paymentStatus,
+        cancellationAmount,
+      },
+    }),
+    ...(helperId ? [
+      createUserNotification({
+        userId: helperId,
+        title: 'Job canceled',
+        message: `${request.customerName || 'The customer'} canceled this job.`,
+        type: 'job_canceled',
+        requestId,
+        targetPath: `/provider/jobs/${requestId}`,
+      }),
+    ] : []),
+  ]);
+
+  res.status(200).json({
+    success: true,
+    request: updatedRequest,
+    charge: { ok: charge.ok, reason: charge.reason || null },
+  });
+});
+
+exports.submitServiceRequestRating = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') {
+    res.status(405).json({ success: false, message: 'Method not allowed' });
+    return;
+  }
+
+  const token = getBearerToken(req);
+  if (!token) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+
+  const decoded = await admin.auth().verifyIdToken(token).catch(() => null);
+  if (!decoded?.uid) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+
+  const requestId = String(req.body?.requestId || '').trim();
+  const score = Math.max(1, Math.min(5, Number(req.body?.score || 0)));
+  const comment = String(req.body?.comment || '').trim();
+  if (!requestId || !Number.isFinite(score) || score <= 0) {
+    res.status(400).json({ success: false, message: 'requestId and a rating score are required.' });
+    return;
+  }
+
+  const requestRef = db.collection('serviceRequests').doc(requestId);
+  const requestSnap = await requestRef.get();
+  if (!requestSnap.exists) {
+    res.status(404).json({ success: false, message: 'Service request not found.' });
+    return;
+  }
+
+  const request = requestSnap.data() || {};
+  const helperId = String(request.helperAssignment?.helperId || '').trim();
+  const customerId = String(request.customerId || '').trim();
+  const isCustomer = decoded.uid === customerId;
+  const isHelper = decoded.uid === helperId;
+  if (!isCustomer && !isHelper) {
+    res.status(403).json({ success: false, message: 'Only request participants can submit ratings.' });
+    return;
+  }
+
+  const targetUserId = isCustomer ? helperId : customerId;
+  if (!targetUserId) {
+    res.status(400).json({ success: false, message: 'No valid rating target was found for this request.' });
+    return;
+  }
+
+  const ratingKey = isCustomer ? 'customer' : 'helper';
+  const roleKey = isCustomer ? 'asHelper' : 'asCustomer';
+  const existingRating = request?.ratings?.[ratingKey];
+  const targetRef = db.collection('users').doc(targetUserId);
+
+  await db.runTransaction(async (transaction) => {
+    const [requestTxnSnap, targetSnap] = await Promise.all([
+      transaction.get(requestRef),
+      transaction.get(targetRef),
+    ]);
+    const requestData = requestTxnSnap.data() || {};
+    const targetData = targetSnap.data() || {};
+    const currentStats = targetData?.ratings?.[roleKey] || {};
+    const nextSummary = buildNextRatingSummary(currentStats, score);
+
+    transaction.set(requestRef, {
+      ratings: {
+        ...(requestData.ratings || {}),
+        [ratingKey]: {
+          score,
+          comment,
+          submittedAt: admin.firestore.FieldValue.serverTimestamp(),
+          submittedBy: decoded.uid,
+          targetUserId,
+        },
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    transaction.set(targetRef, {
+      ratings: {
+        ...(targetData.ratings || {}),
+        [roleKey]: nextSummary,
+      },
+      ...(roleKey === 'asHelper'
+        ? {
+            metrics: {
+              ...(targetData.metrics || {}),
+              overallRating: nextSummary.average,
+            },
+            rating: nextSummary.average,
+          }
+        : {}),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+  });
+
+  res.status(200).json({
+    success: true,
+    rating: {
+      requestId,
+      score,
+      comment,
+      targetUserId,
+      roleKey,
+      replacedExisting: Boolean(existingRating),
+    },
   });
 });
 

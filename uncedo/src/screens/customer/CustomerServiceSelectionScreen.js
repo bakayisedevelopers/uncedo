@@ -115,7 +115,6 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
   const selectedPackageId = ['package', 'bundle'].includes(String(item?.kind || '').trim().toLowerCase())
     ? String(item?.packageId || item?.entityId || '').trim()
     : '';
-  const isFixedPrice = String(item?.pricing?.pricingMode || '').trim().toLowerCase() === 'fixed';
 
   useEffect(() => {
     if (!user?.uid || !categoryId) return;
@@ -229,51 +228,45 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
 
   const handleRequest = async () => {
     if (!item || !categoryId || !serviceIds.length || submitting) return;
+    if (missingRequired.length) {
+      setError('Complete the required details before continuing.');
+      return;
+    }
+    if (!pricePreview) {
+      setError('Wait for the price to finish loading before continuing.');
+      return;
+    }
 
     setSubmitting(true);
     setError('');
 
     try {
-      if (isFixedPrice && !missingRequired.length) {
-        const requestId = await createCustomerServiceRequest({
-          user,
-          location: homeLocation || route?.params?.location || null,
-          initialDraft: {
-            categoryId,
-            serviceIds,
-            selectedPackageId,
-            structuredAnswers,
-            serviceAddress: String(user?.customerProfile?.serviceAddress || '').trim(),
-            serviceAddressTarget: String(structuredAnswers?.service_address_target || '').trim(),
-          },
-        });
-
-        await finalizeCustomerServiceRequest({
-          requestId,
-          callId: '',
-          categoryId,
-          serviceIds,
-          structuredAnswers,
-        });
-
-        navigate({
-          key: 'ServiceRequestTracking',
-          params: {
-            requestId,
-            parentTab,
-          },
-        });
-        return;
-      }
-
-      navigate({
-        key: 'CustomerServiceCall',
-        params: {
-          parentTab,
+      const requestId = await createCustomerServiceRequest({
+        user,
+        location: homeLocation || route?.params?.location || null,
+        initialDraft: {
           categoryId,
           serviceIds,
           selectedPackageId,
-          initialStructuredAnswers: structuredAnswers,
+          structuredAnswers,
+          serviceAddress: String(user?.customerProfile?.serviceAddress || '').trim(),
+          serviceAddressTarget: String(structuredAnswers?.service_address_target || '').trim(),
+        },
+      });
+
+      await finalizeCustomerServiceRequest({
+        requestId,
+        callId: '',
+        categoryId,
+        serviceIds,
+        structuredAnswers,
+      });
+
+      navigate({
+        key: 'ServiceRequestTracking',
+        params: {
+          requestId,
+          parentTab,
         },
       });
     } catch (nextError) {
@@ -295,10 +288,10 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
     : shouldWaitForPrice && priceLoading
       ? 'Calculating price...'
       : shouldWaitForPrice && pricePreview
-        ? `${isFixedPrice ? 'Request now' : 'Continue'} - ${formatCurrency(pricePreview.total)}`
-        : 'Continue in chat';
+        ? `Request now - ${formatCurrency(pricePreview.total)}`
+        : 'Complete required details';
 
-  const buttonDisabled = submitting || (shouldWaitForPrice && (priceLoading || !pricePreview));
+  const buttonDisabled = submitting || missingRequired.length > 0 || priceLoading || !pricePreview;
 
   return (
     <View style={styles.screen}>
@@ -364,9 +357,7 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Quick details</Text>
           <Text style={styles.sectionCopy}>
-            {isFixedPrice
-              ? 'Complete the essentials here. If nothing else is needed, Uncedo can request the helper immediately.'
-              : 'Add what you know now. The chat will only collect whatever is still missing.'}
+            Complete the essentials here. Once the price is ready, Uncedo will submit the request directly and start helper matching.
           </Text>
         </View>
 
