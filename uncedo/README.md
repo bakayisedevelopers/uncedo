@@ -7,10 +7,10 @@ This folder contains the Expo React Native app for the customer experience, with
 - Student authentication and onboarding
 - Class request creation and tracking
 - Customer route-based helper tracking during active service requests
-- Customer AI service-request chat with voice transcription, media references, and saved chat history
+- Customer service-request chat with voice transcription, media references, and saved chat history for legacy or history flows
 - Customer home discovery feed with ranked service tiles, full-catalog search overlay, helper work photos, and optional category personalization
 - Customer home discovery feed with recommendation ranking from recorded activity, full-catalog search overlay, helper work photos, and optional category personalization
-- Customer service selection details flow that can continue into AI chat or jump straight into helper matching for fixed-price requests, with automatic category backfill when a customer selects a service from a new category and live Firestore-backed custom services or bundles
+- Customer service selection details flow that collects required answers, calculates the live quote, and then submits directly into helper matching and tracking, with automatic category backfill when a customer selects a service from a new category and live Firestore-backed custom services or bundles
 - Session room entry and live session flow
 - Wallet, payment methods, and billing follow-up
 - Student/customer profile, service-category preferences, and notifications

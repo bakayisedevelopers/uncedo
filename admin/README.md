@@ -5,7 +5,7 @@ This folder contains the standalone React + Vite admin application for Uncedo.
 ## Purpose
 
 - Review and approve helper services
-- Manage the live Firestore service catalog, custom bundle-style services, backend pricing inputs, intake questions, and admin-owned service images
+- Manage the live Firestore service catalog, custom bundle-style services, backend pricing inputs, intake questions, and admin-uploaded service images
 - Publish and update the latest helper agreement version
 - Inspect service photos and helper profiles
 - Suspend, restore, or remove service access

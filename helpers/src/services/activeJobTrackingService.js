@@ -22,6 +22,12 @@ const ACTIVE_JOB_STATUSES = new Set([
   'arrived',
   'work_started',
 ]);
+const ACTIVE_TRAVEL_STATUSES = new Set([
+  'accepted',
+  'driving',
+  'en_route',
+  'buying_resources',
+]);
 
 function normalizeStatus(status) {
   return String(status || '').trim().toLowerCase();
@@ -114,12 +120,43 @@ function buildSession(session = {}) {
     destination: normalizeDestination(session.destination),
     routeSnapshot: sanitizeRouteSnapshot(session.routeSnapshot),
     lastHelperLocation: normalizeHelperLocation(session.lastHelperLocation),
+    distanceTravelledMeters: isFiniteNumber(session.distanceTravelledMeters) ? Number(session.distanceTravelledMeters) : 0,
     updatedAtMs: isFiniteNumber(session.updatedAtMs) ? Number(session.updatedAtMs) : Date.now(),
   };
 }
 
 function shouldTrackStatus(status) {
   return ACTIVE_JOB_STATUSES.has(normalizeStatus(status));
+}
+
+function getDistanceInMeters(from = null, to = null) {
+  const start = normalizeCoordinate(from);
+  const end = normalizeCoordinate(to);
+  if (!start || !end) return 0;
+
+  const R = 6371e3;
+  const phi1 = (start.latitude * Math.PI) / 180;
+  const phi2 = (end.latitude * Math.PI) / 180;
+  const deltaPhi = ((end.latitude - start.latitude) * Math.PI) / 180;
+  const deltaLambda = ((end.longitude - start.longitude) * Math.PI) / 180;
+  const a =
+    Math.sin(deltaPhi / 2) * Math.sin(deltaPhi / 2)
+    + Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda / 2) * Math.sin(deltaLambda / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+function computeTravelStepMeters(previousLocation, nextLocation, status) {
+  if (!ACTIVE_TRAVEL_STATUSES.has(normalizeStatus(status))) {
+    return 0;
+  }
+
+  const distanceMeters = getDistanceInMeters(previousLocation, nextLocation);
+  if (!Number.isFinite(distanceMeters) || distanceMeters < 10 || distanceMeters > 5000) {
+    return 0;
+  }
+
+  return distanceMeters;
 }
 
 async function readTrackingSession() {
@@ -159,6 +196,7 @@ function buildTrackingPayload(session, helperLocation, routeSnapshot) {
     distanceMeters: safeRouteSnapshot.distanceMeters,
     durationSeconds: safeRouteSnapshot.durationSeconds,
     routeProvider: safeRouteSnapshot.routeProvider || '',
+    distanceTravelledMeters: isFiniteNumber(session.distanceTravelledMeters) ? Number(session.distanceTravelledMeters) : 0,
     status: session.status || '',
     updatedAt: serverTimestamp(),
     updatedAtMs: Date.now(),
@@ -172,12 +210,22 @@ async function writeTrackingDocuments(session, helperLocation, routeSnapshot, so
 
   const { db } = getFirebaseClients();
   const trackingRef = doc(db, 'serviceRequests', session.requestId, 'tracking', 'live');
+  const requestRef = doc(db, 'serviceRequests', session.requestId);
   const helperRef = doc(db, 'users', session.helperId);
   const normalizedLocation = normalizeHelperLocation(helperLocation);
   const payload = buildTrackingPayload(session, normalizedLocation, routeSnapshot);
 
   await Promise.all([
     setDoc(trackingRef, payload, { merge: true }),
+    setDoc(requestRef, {
+      travelTracking: {
+        distanceTravelledMeters: payload.distanceTravelledMeters,
+        status: payload.status,
+        updatedAt: serverTimestamp(),
+        updatedAtMs: payload.updatedAtMs,
+      },
+      updatedAt: serverTimestamp(),
+    }, { merge: true }),
     setDoc(helperRef, {
       liveLocation: normalizedLocation
         ? {
@@ -249,6 +297,10 @@ async function processTrackingLocationUpdate(locationInput, source = 'foreground
   }
 
   let routeSnapshot = sanitizeRouteSnapshot(session.routeSnapshot);
+  const distanceTravelledMeters = Math.max(
+    0,
+    Number(session.distanceTravelledMeters || 0) + computeTravelStepMeters(session.lastHelperLocation, helperLocation, session.status),
+  );
   const rerouteReason = getRerouteReason({
     currentLocation: helperLocation,
     destination: session.destination,
@@ -270,6 +322,7 @@ async function processTrackingLocationUpdate(locationInput, source = 'foreground
     ...session,
     routeSnapshot,
     lastHelperLocation: helperLocation,
+    distanceTravelledMeters,
     updatedAtMs: Date.now(),
   });
 
