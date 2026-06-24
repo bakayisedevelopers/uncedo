@@ -33,7 +33,17 @@ export function AuthProvider({ children }) {
       user.uid,
       (profile) => {
         if (profile) {
-          setUser((current) => ({ ...current, ...profile }));
+          setUser((current) => (
+            current
+              ? {
+                  ...current,
+                  ...profile,
+                  role: 'helper',
+                  activeRole: 'helper',
+                  roles: ['helper'],
+                }
+              : current
+          ));
         }
       },
       (error) => logError('AuthContext.profile', error),

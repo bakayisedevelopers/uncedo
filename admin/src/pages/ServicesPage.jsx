@@ -27,9 +27,32 @@ function slugify(value = '') {
 }
 
 function formatPublishedState(entry) {
-  if (!entry) return 'Draft';
+  if (!entry?.persisted) return 'Not added';
   if (entry.active === false) return 'Paused';
   return 'Added';
+}
+
+function matchesCatalogItem(row, item) {
+  const rowKeys = [
+    row.catalogId,
+    row.skillId,
+    row.skillName,
+    row.serviceId,
+    row.serviceName,
+  ]
+    .map(slugify)
+    .filter(Boolean);
+
+  const itemKeys = [
+    item.id,
+    item.label,
+    item.categoryId,
+    item.categoryName,
+  ]
+    .map(slugify)
+    .filter(Boolean);
+
+  return itemKeys.some((itemKey) => rowKeys.includes(itemKey));
 }
 
 export default function ServicesPage() {
@@ -119,7 +142,7 @@ export default function ServicesPage() {
     if (!selectedService) return;
     setDraftLabel(selectedService.label || '');
     setDraftDescription(selectedService.description || '');
-    setDraftActive(selectedService.active !== false);
+    setDraftActive(selectedService.persisted ? selectedService.active !== false : true);
     setDraftFiles([]);
     setMessage('');
   }, [selectedService?.id]);
@@ -140,11 +163,7 @@ export default function ServicesPage() {
 
   const helperRows = useMemo(() => {
     if (!selectedService) return [];
-    const selectedKey = slugify(selectedService.id);
-    return flattenProviderServices(helpers).filter((row) => {
-      const rowKey = slugify(row.catalogId || row.skillName || '');
-      return rowKey === selectedKey || row.catalogId === selectedService.id;
-    });
+    return flattenProviderServices(helpers).filter((row) => matchesCatalogItem(row, selectedService));
   }, [helpers, selectedService]);
 
   const pendingHelperRows = useMemo(
@@ -286,7 +305,7 @@ export default function ServicesPage() {
         {!isLoadingCatalog && filteredCatalog.length ? (
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
             {filteredCatalog.map((item) => {
-              const rowCount = helperRows.filter((row) => slugify(row.catalogId || row.skillName || '') === slugify(item.id)).length;
+              const rowCount = flattenProviderServices(helpers).filter((row) => matchesCatalogItem(row, item)).length;
               const activeRow = selectedService?.id === item.id;
               return (
                 <button
@@ -306,14 +325,16 @@ export default function ServicesPage() {
                       <p className="mt-1 text-sm leading-6 text-ink-200">{item.description || 'No description yet.'}</p>
                     </div>
                     <div className="flex flex-col gap-2">
-                      <Badge tone={item.active === false ? 'neutral' : 'success'}>{formatPublishedState(item)}</Badge>
+                      <Badge tone={item.persisted ? 'success' : 'neutral'}>{formatPublishedState(item)}</Badge>
                       <Badge tone={rowCount ? 'brand' : 'neutral'}>{rowCount} helper{rowCount === 1 ? '' : 's'}</Badge>
                     </div>
                   </div>
 
                   <div className="mt-4 flex flex-wrap gap-2">
                     <Badge tone={item.images.length ? 'success' : 'neutral'}>{item.images.length} image{item.images.length === 1 ? '' : 's'}</Badge>
-                    <Badge tone={item.approved ? 'success' : 'warning'}>{item.approved ? 'Published' : 'Draft'}</Badge>
+                    <Badge tone={item.persisted ? (item.active === false ? 'warning' : 'success') : 'neutral'}>
+                      {item.persisted ? (item.active === false ? 'Saved as paused' : 'Saved in Firestore') : 'Code only'}
+                    </Badge>
                   </div>
                 </button>
               );
@@ -335,7 +356,9 @@ export default function ServicesPage() {
             <SectionTitle
               eyebrow="Catalog item"
               title={selectedService.label}
-              description="Edit the service metadata, upload up to 10 admin images, and publish it for helpers."
+              description={selectedService.persisted
+                ? 'This service is saved in Firestore. Edit its details, update images, or pause it for helpers.'
+                : 'This service only exists in code right now. Save it to Firestore to make it available to helpers.'}
             />
 
             <div className="grid gap-4 md:grid-cols-2">
@@ -375,7 +398,9 @@ export default function ServicesPage() {
                 disabled={isMutating}
                 className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-bold text-white disabled:opacity-60"
               >
-                {draftActive ? 'Pause service' : 'Publish service'}
+                {selectedService.persisted
+                  ? (draftActive ? 'Pause service' : 'Publish service')
+                  : (draftActive ? 'Save as live' : 'Save as paused')}
               </button>
               <button
                 type="button"
@@ -383,7 +408,7 @@ export default function ServicesPage() {
                 disabled={isMutating}
                 className="rounded-2xl bg-brand px-4 py-3 text-sm font-bold text-white disabled:opacity-60"
               >
-                {selectedService.images.length ? 'Save changes' : 'Add service'}
+                {selectedService.persisted ? 'Save changes' : 'Add service'}
               </button>
             </div>
 

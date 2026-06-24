@@ -18,20 +18,55 @@ function buildHelperBlockedError() {
   return error;
 }
 
-function isCustomerProfile(profile = {}) {
-  const role = String(profile?.role || '').toLowerCase();
-  const activeRole = String(profile?.activeRole || '').toLowerCase();
-  const roles = Array.isArray(profile?.roles)
-    ? profile.roles.map((nextRole) => String(nextRole || '').toLowerCase())
-    : [];
+function normalizeRole(value) {
+  return String(value || '').trim().toLowerCase();
+}
 
-  return role === 'customer' || activeRole === 'customer' || roles.includes('customer');
+function collectRoles(profile = {}) {
+  return new Set([
+    normalizeRole(profile?.role),
+    normalizeRole(profile?.activeRole),
+    ...(Array.isArray(profile?.roles) ? profile.roles.map(normalizeRole) : []),
+  ].filter(Boolean));
+}
+
+function hasHelperSignals(profile = {}) {
+  return Boolean(
+    (Array.isArray(profile?.services) && profile.services.length)
+    || profile?.agreement
+    || profile?.payout
+    || normalizeRole(profile?.providerType)
+    || String(profile?.businessName || '').trim()
+    || normalizeRole(profile?.verificationStatus)
+    || normalizeRole(profile?.onlineStatus)
+    || profile?.locationSharingEnabled !== undefined
+  );
+}
+
+function shouldTreatAsHelper(profile = {}) {
+  const roles = collectRoles(profile);
+  return roles.has('helper') || roles.has('provider') || roles.has('tutor') || hasHelperSignals(profile);
+}
+
+function shouldBlockAsCustomer(profile = {}) {
+  const roles = collectRoles(profile);
+  const hasCustomerRole = roles.has('customer') || roles.has('student');
+  const hasCustomerSignals = Boolean(
+    profile?.wallet
+    || Array.isArray(profile?.paymentMethods)
+    || profile?.freeMinutesRemaining !== undefined
+    || profile?.customerProfile
+    || profile?.studentProfile
+  );
+
+  return !shouldTreatAsHelper(profile) && hasCustomerSignals && hasCustomerRole;
 }
 
 function normalizeHelperUser(firebaseUser, profile = {}) {
   if (!firebaseUser) return null;
 
   return {
+    ...profile,
     uid: firebaseUser.uid,
     email: firebaseUser.email,
     emailVerified: Boolean(firebaseUser.emailVerified),
@@ -40,7 +75,6 @@ function normalizeHelperUser(firebaseUser, profile = {}) {
     role: 'helper',
     activeRole: 'helper',
     roles: ['helper'],
-    ...profile,
   };
 }
 
@@ -55,10 +89,20 @@ export function subscribeToAuthChanges(callback, onError) {
       }
 
       const profile = await getUserProfile(firebaseUser.uid);
-      if (isCustomerProfile(profile)) {
+      if (shouldBlockAsCustomer(profile)) {
         await signOut(auth);
         onError?.(buildHelperBlockedError());
         callback(null);
+        return;
+      }
+
+      if (!shouldTreatAsHelper(profile || {})) {
+        const repairedProfile = await upsertHelperProfile({
+          uid: firebaseUser.uid,
+          email: firebaseUser.email,
+          fullName: firebaseUser.displayName || profile?.fullName || profile?.displayName || '',
+        });
+        callback(normalizeHelperUser(firebaseUser, repairedProfile || {}));
         return;
       }
 
@@ -75,12 +119,20 @@ export async function loginWithEmail({ email, password }) {
   const credential = await signInWithEmailAndPassword(auth, email.trim(), password);
   const profile = await getUserProfile(credential.user.uid);
 
-  if (isCustomerProfile(profile)) {
+  if (shouldBlockAsCustomer(profile)) {
     await signOut(auth);
     throw buildHelperBlockedError();
   }
 
-  return normalizeHelperUser(credential.user, profile || {});
+  const syncedProfile = shouldTreatAsHelper(profile || {})
+    ? profile
+    : await upsertHelperProfile({
+        uid: credential.user.uid,
+        email: credential.user.email,
+        fullName: credential.user.displayName || profile?.fullName || profile?.displayName || '',
+      });
+
+  return normalizeHelperUser(credential.user, syncedProfile || {});
 }
 
 export async function signupWithEmail({ name, email, password }) {

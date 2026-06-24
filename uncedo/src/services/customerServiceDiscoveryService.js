@@ -2,7 +2,7 @@ import {
   getCustomerServiceById,
   getCustomerServiceCategoryById,
 } from '../constants/serviceCatalog';
-import { collection, onSnapshot, query, where } from 'firebase/firestore';
+import { collection, onSnapshot, query } from 'firebase/firestore';
 import { getFirebaseClients } from '../firebase/config';
 import { subscribeToServiceCatalog } from './serviceCatalogService';
 
@@ -11,6 +11,34 @@ function normalizeToken(value = '') {
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '');
+}
+
+function normalizeRole(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function collectRoles(profile = {}) {
+  return new Set([
+    normalizeRole(profile?.role),
+    normalizeRole(profile?.activeRole),
+    ...(Array.isArray(profile?.roles) ? profile.roles.map(normalizeRole) : []),
+  ].filter(Boolean));
+}
+
+function isHelperRecord(profile = {}) {
+  const roles = collectRoles(profile);
+  return roles.has('helper')
+    || roles.has('provider')
+    || roles.has('tutor')
+    || Boolean(
+      (Array.isArray(profile?.services) && profile.services.length)
+      || profile?.agreement
+      || profile?.payout
+      || normalizeRole(profile?.providerType)
+      || String(profile?.businessName || '').trim()
+      || normalizeRole(profile?.verificationStatus)
+      || normalizeRole(profile?.onlineStatus)
+    );
 }
 
 function normalizePicture(picture) {
@@ -67,6 +95,7 @@ function normalizeHelper(helper = {}) {
     id: String(helper.uid || helper.id || '').trim(),
     fullName: String(helper.fullName || helper.displayName || 'Helper').trim(),
     profilePhoto: String(helper.profilePhoto || helper.selfieUrl || '').trim(),
+    onlineStatus: normalizeRole(helper.onlineStatus || 'offline'),
     services,
   };
 }
@@ -110,7 +139,7 @@ function resolveDiscoveryImageUris(serviceEntry) {
 
 function buildDiscoveryItems({ helpers = [], serviceCatalog = [], preferredCategoryIds = [] } = {}) {
   const helperItems = (Array.isArray(helpers) ? helpers : [])
-    .filter((helper) => String(helper.onlineStatus || '').trim().toLowerCase() === 'online')
+    .filter((helper) => isHelperRecord(helper))
     .map(normalizeHelper)
     .filter((helper) => helper.id);
 
@@ -125,12 +154,15 @@ function buildDiscoveryItems({ helpers = [], serviceCatalog = [], preferredCateg
     const customerService = getCustomerServiceById(entry.id);
     if (!customerService) return;
 
-    const categoryId = String(entry.categoryId || customerService.categoryId || '').trim();
+    const helperCategoryId = String(entry.categoryId || customerService.categoryId || '').trim();
+    const categoryId = String(customerService.categoryId || entry.categoryId || '').trim();
     const category = getCustomerServiceCategoryById(categoryId);
     const categoryLabel = category?.label || entry.categoryName || categoryId;
-    const matchingHelpers = helperItems.filter((helper) => findMatchingSkills(helper, categoryId, [entry.label, customerService.label]));
+    const matchingHelpers = helperItems.filter((helper) => findMatchingSkills(helper, helperCategoryId, [entry.label, customerService.label]));
     const imageUris = resolveDiscoveryImageUris(entry);
     if (!matchingHelpers.length || !imageUris.length) return;
+
+    const onlineHelperCount = matchingHelpers.filter((helper) => helper.onlineStatus === 'online').length;
 
     const resolvedServiceId = customerService.id || entry.id;
     const key = `service-${categoryId}-${resolvedServiceId}`;
@@ -152,6 +184,7 @@ function buildDiscoveryItems({ helpers = [], serviceCatalog = [], preferredCateg
       serviceIds: [resolvedServiceId],
       includedLabels: [customerService.label || entry.label],
       helperCount: matchingHelpers.length,
+      onlineHelperCount,
       helperName: matchingHelpers[0]?.fullName || 'Helper',
       imageUris,
       imageUri: imageUris[0] || '',
@@ -167,7 +200,7 @@ function buildDiscoveryItems({ helpers = [], serviceCatalog = [], preferredCateg
 
 export function subscribeToCustomerServiceShowcase({ preferredCategoryIds = [], callback, onError } = {}) {
   const { db } = getFirebaseClients();
-  const helpersQuery = query(collection(db, 'users'), where('role', '==', 'helper'));
+  const helpersQuery = query(collection(db, 'users'));
 
   let helperItems = [];
   let serviceCatalogItems = [];

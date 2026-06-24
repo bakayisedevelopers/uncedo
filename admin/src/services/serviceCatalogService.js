@@ -39,6 +39,7 @@ export function normalizeServiceCatalogEntry(entry = {}, fallback = null) {
     categoryName: String(entry.categoryName || fallbackItem?.categoryName || '').trim(),
     label: String(entry.label || entry.skillName || fallbackItem?.label || fallbackItem?.skillName || serviceId).trim(),
     description: String(entry.description || fallbackItem?.description || '').trim(),
+    persisted: entry.persisted === true,
     active: entry.active !== false,
     approved: entry.approved !== false,
     createdAt: entry.createdAt || null,
@@ -59,6 +60,7 @@ export function buildServiceCatalogView(entries = []) {
       ...seedItem,
       ...(existing || {}),
       id: seedItem.id,
+      persisted: Boolean(existing),
       active: existing ? existing.active !== false : false,
       approved: existing ? existing.approved !== false : false,
     }, seedItem);
@@ -79,7 +81,7 @@ export async function subscribeToServiceCatalog(callback, onError) {
   return onSnapshot(
     refQuery,
     (snapshot) => {
-      const entries = snapshot.docs.map((docSnap) => normalizeServiceCatalogEntry({ id: docSnap.id, ...docSnap.data() }));
+      const entries = snapshot.docs.map((docSnap) => normalizeServiceCatalogEntry({ id: docSnap.id, ...docSnap.data(), persisted: true }));
       callback(buildServiceCatalogView(entries));
     },
     onError,
@@ -93,7 +95,7 @@ export async function getServiceCatalogEntry(serviceId) {
   const { db, firestoreModule } = clients;
   const { doc, getDoc } = firestoreModule;
   const snapshot = await getDoc(doc(db, 'serviceCatalog', serviceId));
-  return snapshot.exists() ? normalizeServiceCatalogEntry({ id: snapshot.id, ...snapshot.data() }) : null;
+  return snapshot.exists() ? normalizeServiceCatalogEntry({ id: snapshot.id, ...snapshot.data(), persisted: true }) : null;
 }
 
 export async function saveServiceCatalogEntry(serviceId, updates = {}) {
@@ -113,12 +115,13 @@ export async function saveServiceCatalogEntry(serviceId, updates = {}) {
     ...current,
     ...updates,
     id: normalizedId,
+    persisted: true,
     updatedAt: serverTimestamp(),
     createdAt: current.createdAt || serverTimestamp(),
   }, { merge: true });
 
   const saved = await getDoc(refDoc);
-  return saved.exists() ? normalizeServiceCatalogEntry({ id: saved.id, ...saved.data() }) : null;
+  return saved.exists() ? normalizeServiceCatalogEntry({ id: saved.id, ...saved.data(), persisted: true }) : null;
 }
 
 export async function uploadServiceCatalogImages({ serviceId, files = [] }) {
