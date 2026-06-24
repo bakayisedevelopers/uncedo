@@ -234,9 +234,16 @@ function normalizeEnumOptions(options = []) {
   return (Array.isArray(options) ? options : [])
     .map((option) => {
       if (!option) return null;
-      if (typeof option === 'string') return option;
+      if (typeof option === 'string') {
+        const value = String(option || '').trim();
+        return value ? { value, label: value } : null;
+      }
       const value = String(option.value || option.id || '').trim();
-      return value || null;
+      if (!value) return null;
+      return {
+        value,
+        label: String(option.label || value).trim(),
+      };
     })
     .filter(Boolean);
 }
