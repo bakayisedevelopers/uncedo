@@ -13,10 +13,12 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
   * [functions/index.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/index.js): Main entry point declaring all Cloud Functions, including service-request matching, marketplace pricing quotes, billing completion, and customer recommendation event aggregation.
   * [functions/pricingEngine.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/pricingEngine.js): Core logic for estimation, price quotes, and billing snapshots.
   * [functions/serviceMarketplacePricing.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/serviceMarketplacePricing.js): Dynamic marketplace pricing engine for live services and bundle-style services stored in `serviceCatalog`.
+  * [functions/serviceCatalogImageSourcing.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/serviceCatalogImageSourcing.js): Admin-only service-image sourcing pipeline that uses Gemini to generate search phrases, pulls reusable images from open-license catalogs, normalizes them to a common size, uploads them into Firebase Storage, and returns the saved image metadata.
   * [functions/customerServiceAi.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/customerServiceAi.js): LLM processing logic for automated customer service threads.
   * [functions/aiSubjectExtraction.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/aiSubjectExtraction.js): Processes files/images to detect subject areas.
   * [functions/legalAgreements.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/legalAgreements.js): Database interactions, version publishing, and signed-record generation for helper agreements.
   * [functions/helperLegalAgreements.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/helperLegalAgreements.js): Helper-agreement versioning, immutable acceptance records, and signed PDF generation used by the admin and helper apps.
+  * [functions/index.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/index.js): Main function registry, now also exposing the admin-only `sourceServiceCatalogImages` HTTP endpoint for catalog image sourcing and storage upload.
 
 ---
 
@@ -85,11 +87,11 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
   * [admin/src/pages/HelperAgreementsPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/pages/HelperAgreementsPage.jsx): Admin contract-management screen for publishing new helper agreement versions and reviewing history.
   * [admin/src/pages/ProvidersPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/pages/ProvidersPage.jsx): Provider profile review, suspension, verification, and per-skill moderation.
   * [admin/src/pages/ServicesPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/pages/ServicesPage.jsx): Firestore-backed service catalog management, custom service creation, pricing-input editing, admin image uploads, and helper approval queue.
-  * [admin/src/pages/ServiceDetailsPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/pages/ServiceDetailsPage.jsx): Dedicated service detail editor for pricing controls, live intake questions, bundle composition, images, and helper moderation entry points.
+  * [admin/src/pages/ServiceDetailsPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/pages/ServiceDetailsPage.jsx): Dedicated service detail editor for pricing controls, live intake questions, bundle composition, uploaded images, AI-assisted reusable image sourcing, and helper moderation entry points.
   * [admin/src/pages/CustomersPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/pages/CustomersPage.jsx): Customer directory and stored location/profile data.
   * [admin/src/constants/serviceCatalog.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/constants/serviceCatalog.js): Admin catalog seed data used to render the live service list and helper-approval workflow.
   * [admin/src/services/helperAgreementService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/services/helperAgreementService.js): Admin-side client for reading and publishing helper agreement versions through Cloud Functions.
-  * [admin/src/services/serviceCatalogService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/services/serviceCatalogService.js): Firestore service-catalog reads/writes plus Storage image uploads for the admin services page.
+  * [admin/src/services/serviceCatalogService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/services/serviceCatalogService.js): Firestore service-catalog reads/writes plus Storage image uploads and admin-authenticated image-sourcing function calls for the admin services page.
 
 ---
 
