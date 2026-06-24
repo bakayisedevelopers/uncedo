@@ -85,9 +85,9 @@ function formatEta(durationSeconds) {
 }
 
 function formatCurrency(value) {
-  const amount = Number(value || 0);
-  if (!Number.isFinite(amount) || amount <= 0) return 'R0.00';
-  return `R${amount.toFixed(2)}`;
+  const amount = Math.round(Number(value || 0));
+  if (!Number.isFinite(amount) || amount <= 0) return 'R0';
+  return `R${amount}`;
 }
 
 function getInitials(name = '') {

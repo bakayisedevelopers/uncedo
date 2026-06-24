@@ -28,9 +28,9 @@ import { updateUserProfile } from '../../services/userService';
 import { colors } from '../../theme/colors';
 
 function formatCurrency(value) {
-  const amount = Number(value || 0);
-  if (!Number.isFinite(amount)) return 'R0.00';
-  return `R${amount.toFixed(2)}`;
+  const amount = Math.round(Number(value || 0));
+  if (!Number.isFinite(amount)) return 'R0';
+  return `R${amount}`;
 }
 
 function normalizeAnswerMap(value) {
@@ -56,12 +56,16 @@ function QuestionField({ question, value, onChange }) {
         <Text style={styles.questionLabel}>{question.prompt}</Text>
         <View style={styles.optionWrap}>
           {question.options.map((option) => {
-            const isActive = finalValue === option;
+            const optionValue = typeof option === 'string' ? option : String(option?.value || option?.id || '').trim();
+            const optionLabel = typeof option === 'string'
+              ? option.replace(/_/g, ' ')
+              : String(option?.label || optionValue).trim();
+            const isActive = finalValue === optionValue;
             return (
               <Pressable
                 accessibilityRole="button"
-                key={option}
-                onPress={() => onChange(option)}
+                key={optionValue}
+                onPress={() => onChange(optionValue)}
                 style={({ pressed }) => [
                   styles.optionChip,
                   isActive && styles.optionChipActive,
@@ -69,7 +73,7 @@ function QuestionField({ question, value, onChange }) {
                 ]}
               >
                 <Text style={[styles.optionChipText, isActive && styles.optionChipTextActive]}>
-                  {option.replace(/_/g, ' ')}
+                  {optionLabel}
                 </Text>
               </Pressable>
             );

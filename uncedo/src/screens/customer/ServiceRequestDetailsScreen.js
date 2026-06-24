@@ -23,9 +23,9 @@ import { subscribeToServiceRequestById } from '../../services/customerServiceReq
 import { getCustomerServiceCategoryById, getCustomerServiceById } from '../../constants/serviceCatalog';
 
 function formatCurrency(value) {
-  const amount = Number(value || 0);
+  const amount = Math.round(Number(value || 0));
   if (!Number.isFinite(amount) || amount <= 0) return 'Pending quote';
-  return `R${amount.toFixed(2)}`;
+  return `R${amount}`;
 }
 
 function formatTimingLabel(request) {
