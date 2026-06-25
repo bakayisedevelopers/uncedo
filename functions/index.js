@@ -524,6 +524,13 @@ function normalizeMillis(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function getRequestMatchingStartedAtMs(request = {}) {
+  return normalizeMillis(request.matchingStartedAtMs)
+    || normalizeMillis(request.createdAt)
+    || normalizeMillis(request.updatedAt)
+    || 0;
+}
+
 function nextOfferRevision(request = {}) {
   const current = Number(request.offerRevision || 0);
   if (!Number.isFinite(current) || current < 0) return 1;
@@ -2207,15 +2214,18 @@ exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{reques
     });
 
     if (!queue.length) {
-      transaction.update(requestRef, {
-        status: SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE,
-        statusDetail: 'No helper accepted yet. Matching will continue as helpers come online.',
-        helperQueue: [],
-        currentOfferHelperId: null,
-        offerExpiresAt: null,
-        offerToken: null,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
+      if (request.status !== SERVICE_REQUEST_STATUS.MATCHING) {
+        transaction.update(requestRef, {
+          status: SERVICE_REQUEST_STATUS.MATCHING,
+          statusDetail: 'No helper accepted yet. Matching will continue as helpers come online.',
+          helperQueue: [],
+          currentOfferHelperId: null,
+          offerExpiresAt: null,
+          offerToken: null,
+          matchingStartedAtMs: getRequestMatchingStartedAtMs(request) || Date.now(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
       return;
     }
 
@@ -2552,7 +2562,25 @@ exports.reconcileServiceRequestOffers = onSchedule('every 1 minutes', async () =
     const request = docSnap.data() || {};
     const status = String(request.status || '').toLowerCase();
     const offerExpiresAt = normalizeMillis(request.offerExpiresAt);
-    const updatedAtMs = normalizeMillis(request.updatedAt);
+    const matchingStartedAtMs = getRequestMatchingStartedAtMs(request);
+    const matchingDeadlineMs = matchingStartedAtMs > 0
+      ? matchingStartedAtMs + MATCHING_TIMEOUT_MS
+      : 0;
+
+    if (matchingDeadlineMs > 0 && matchingDeadlineMs <= now) {
+      batch.update(docSnap.ref, {
+        status: SERVICE_REQUEST_STATUS.EXPIRED,
+        statusDetail: 'Request expired because no helper accepted in time.',
+        helperQueue: [],
+        currentOfferHelperId: null,
+        offerExpiresAt: null,
+        offerToken: null,
+        matchingStartedAtMs: null,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      updatesCount += 1;
+      return;
+    }
 
     if (status === SERVICE_REQUEST_STATUS.HELPER_FOUND && offerExpiresAt > 0 && offerExpiresAt <= now) {
       batch.update(docSnap.ref, {
@@ -2561,23 +2589,25 @@ exports.reconcileServiceRequestOffers = onSchedule('every 1 minutes', async () =
         currentOfferHelperId: null,
         offerExpiresAt: null,
         offerToken: null,
+        matchingStartedAtMs: matchingStartedAtMs || now,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
       updatesCount += 1;
       return;
     }
 
-    if (
-      status === SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE
-      && updatedAtMs > 0
-      && now - updatedAtMs >= 60 * 1000
-    ) {
+    if (status === SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE) {
       batch.update(docSnap.ref, {
         status: SERVICE_REQUEST_STATUS.MATCHING,
         statusDetail: 'Retrying helper matching.',
+        currentOfferHelperId: null,
+        offerExpiresAt: null,
+        offerToken: null,
+        matchingStartedAtMs: matchingStartedAtMs || now,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
       updatesCount += 1;
+      return;
     }
   });
 
@@ -2611,6 +2641,7 @@ exports.promoteScheduledServiceRequests = onSchedule('every 1 minutes', async ()
     batch.update(docSnap.ref, {
       status: SERVICE_REQUEST_STATUS.MATCHING,
       statusDetail: 'Scheduled time reached. Matching the next helper.',
+      matchingStartedAtMs: Date.now(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
     updatesCount += 1;
