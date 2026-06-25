@@ -63,12 +63,12 @@ export async function syncHelperCurrentLocation() {
   return location;
 }
 
-export async function watchHelperLocation(onLocation) {
+export async function watchHelperLocation(onLocation, options = {}) {
   return Location.watchPositionAsync(
     {
-      accuracy: Location.Accuracy.Balanced,
-      distanceInterval: 25,
-      timeInterval: 15000,
+      accuracy: options.accuracy ?? Location.Accuracy.Balanced,
+      distanceInterval: options.distanceInterval ?? 25,
+      timeInterval: options.timeInterval ?? 15000,
     },
     (position) => {
       const location = normalizeLocation(position?.coords || {});
