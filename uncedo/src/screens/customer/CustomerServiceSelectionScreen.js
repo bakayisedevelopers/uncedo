@@ -19,7 +19,6 @@ import {
 } from '../../constants/customerIntakeQuestions';
 import { useAuth } from '../../context/AuthContext';
 import {
-  buildServicePricingSnapshot,
   createCustomerServiceRequest,
   fetchServicePricingQuote,
   finalizeCustomerServiceRequest,
@@ -202,13 +201,10 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
           setPricePreview(quote);
           setPriceLoading(false);
         }
-      } catch (_error) {
+      } catch (nextError) {
         if (!cancelled) {
-          setPricePreview(buildServicePricingSnapshot({
-            categoryId,
-            serviceIds,
-            structuredAnswers,
-          }));
+          setPricePreview(null);
+          setError(nextError.message || 'Unable to calculate the live service price right now.');
           setPriceLoading(false);
         }
       }
