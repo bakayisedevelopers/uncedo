@@ -134,6 +134,13 @@ export default function ServicesPage() {
               </label>
               <button
                 type="button"
+                onClick={() => navigate('/services/bulk-images')}
+                className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-bold text-white"
+              >
+                Bulk image upload
+              </button>
+              <button
+                type="button"
                 onClick={() => navigate('/services/new')}
                 className="rounded-2xl bg-brand px-4 py-3 text-sm font-bold text-white"
               >
