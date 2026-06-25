@@ -414,8 +414,7 @@ export function RootNavigator() {
   useEffect(() => {
     if (activeRequest) {
       setLastActiveRequestId(activeRequest.id);
-      const isCollecting = String(activeRequest.status || '').toLowerCase() === 'collecting_details';
-      const targetKey = isCollecting ? 'ServiceRequestDetails' : 'ServiceRequestTracking';
+      const targetKey = 'ServiceRequestTracking';
       if (activeRoute.key !== targetKey || activeRoute.params?.requestId !== activeRequest.id) {
         openRoute({
           key: targetKey,
