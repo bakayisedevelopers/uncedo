@@ -23,7 +23,6 @@ const ACTIVE_JOB_STATUSES = new Set([
   'work_started',
 ]);
 const ACTIVE_TRAVEL_STATUSES = new Set([
-  'accepted',
   'driving',
   'en_route',
   'buying_resources',
