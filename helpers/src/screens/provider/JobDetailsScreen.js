@@ -21,7 +21,7 @@ import {
 function formatCurrency(value) {
   const amount = Number(value || 0);
   if (!Number.isFinite(amount) || amount <= 0) return 'Pending quote';
-  return `R${amount.toFixed(2)}`;
+  return `R${Math.round(amount)}`;
 }
 
 function formatTimingLabel(request) {

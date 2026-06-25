@@ -28,6 +28,15 @@ import {
   subscribeToServiceRequestById,
 } from '../../services/customerServiceRequestService';
 import {
+  getCurrentCustomerLocation,
+  requestCustomerLocationPermission,
+  watchCustomerLocation,
+} from '../../services/nearbyHelpersMapService';
+import {
+  subscribeToLiveTracking,
+  updateLiveTracking,
+} from '../../services/liveTrackingRealtimeService';
+import {
   buildRouteSnapshot,
   decodePolyline,
   fetchRouteData,
@@ -109,19 +118,19 @@ function getStatusMeta(status) {
     case 'matching':
       return {
         label: 'Searching for a helper',
-        detail: 'We are matching your request with an available helper.',
+        detail: 'We are searching for a helper who can take this request.',
         tone: 'info',
       };
     case 'helper_found':
       return {
-        label: 'Helper offer sent',
-        detail: 'A helper has been found and asked to accept your request.',
+        label: 'Waiting for helper to accept',
+        detail: 'A helper has been found and is reviewing your request now.',
         tone: 'info',
       };
     case 'accepted':
       return {
-        label: 'Helper is preparing to travel',
-        detail: 'Your helper accepted the request and is getting ready to leave.',
+        label: 'Helper accepted',
+        detail: 'Your helper accepted the request and is preparing to travel.',
         tone: 'info',
       };
     case 'driving':
@@ -189,7 +198,7 @@ function getToneStyles(tone) {
 }
 
 export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} }) {
-  const { homeLocation } = useAuth();
+  const { setHomeLocation } = useAuth();
   const requestId = route?.params?.requestId || '';
   const [request, setRequest] = useState(null);
   const [helperLocation, setHelperLocation] = useState(null);
@@ -215,6 +224,9 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
   const [trackingClockMs, setTrackingClockMs] = useState(Date.now());
   const scrollOffsetYRef = useRef(0);
   const previousStatusRef = useRef('');
+  const lastPromptedRequestIdRef = useRef('');
+  const customerLocationSubscriptionRef = useRef(null);
+  const lastSyncedCustomerLocationRef = useRef(null);
   const localRouteSnapshotRef = useRef({
     routeCoordinates: [],
     encodedPolyline: '',
@@ -313,7 +325,9 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
       !['completed', 'canceled'].includes(previousStatus)
       && ['completed', 'canceled'].includes(currentStatus)
       && request?.helperAssignment?.helperId
+      && lastPromptedRequestIdRef.current !== String(request?.id || requestId || '')
     ) {
+      lastPromptedRequestIdRef.current = String(request?.id || requestId || '');
       setRatingTarget({
         requestId: request.id || requestId,
         helperId: request.helperAssignment.helperId,
@@ -324,20 +338,44 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
   }, [request, requestId]);
 
   useEffect(() => {
+    lastPromptedRequestIdRef.current = '';
+    lastSyncedCustomerLocationRef.current = null;
+    customerLocationSubscriptionRef.current?.remove?.();
+    customerLocationSubscriptionRef.current = null;
+    setRatingTarget(null);
+    setShowRatingModal(false);
+    setRating(5);
+    setRatingComment('');
+  }, [requestId]);
+
+  useEffect(() => {
     if (!requestId) {
       setTrackingDocument(null);
       return () => {};
     }
 
-    try {
-      const { db } = getFirebaseClients();
-      return onSnapshot(doc(db, 'serviceRequests', requestId, 'tracking', 'live'), (snapshot) => {
-        setTrackingDocument(snapshot.exists() ? (snapshot.data() || {}) : null);
-      });
-    } catch (nextError) {
+    let cancelled = false;
+    let unsubscribe = null;
+
+    subscribeToLiveTracking(requestId, (data) => {
+      if (cancelled) return;
+      setTrackingDocument(data || null);
+    }, (nextError) => {
+      if (cancelled) return;
       console.warn('[uncedo:request-tracking]', nextError?.message || nextError);
-      return () => {};
-    }
+    })
+      .then((nextUnsubscribe) => {
+        unsubscribe = nextUnsubscribe;
+      })
+      .catch((nextError) => {
+        if (cancelled) return;
+        console.warn('[uncedo:request-tracking]', nextError?.message || nextError);
+      });
+
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
   }, [requestId]);
 
   useEffect(() => {
@@ -376,6 +414,119 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
   useEffect(() => {
     let cancelled = false;
 
+    const target = String(
+      request?.requestPayload?.structuredAnswers?.service_address_target
+      || request?.structuredAnswers?.service_address_target
+      || '',
+    ).trim().toLowerCase();
+    if (target !== 'current_location') {
+      if (customerLocationSubscriptionRef.current?.remove) {
+        customerLocationSubscriptionRef.current.remove();
+        customerLocationSubscriptionRef.current = null;
+      }
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const syncCurrentLocation = async (nextLocation) => {
+      const normalized = normalizeCoordinate(nextLocation);
+      if (!normalized) return;
+      const previous = lastSyncedCustomerLocationRef.current;
+      if (
+        previous
+        && previous.latitude === normalized.latitude
+        && previous.longitude === normalized.longitude
+      ) {
+        return;
+      }
+
+      lastSyncedCustomerLocationRef.current = normalized;
+      setResolvedClientLocation(normalized);
+      setHomeLocation(normalized);
+
+      setRequest((current) => (
+          current
+            ? {
+                ...current,
+                location: normalized,
+              requestPayload: {
+                ...(current.requestPayload || {}),
+                location: normalized,
+              },
+            }
+            : current
+      ));
+
+      await updateLiveTracking(requestId, {
+        requestId,
+        customerLocation: normalized,
+        updatedAtMs: Date.now(),
+      }).catch((error) => {
+        console.warn('[uncedo:current-location-sync]', error?.message || error);
+      });
+    };
+
+    const startWatchingLocation = async () => {
+      const explicitLocation = normalizeCoordinate(request?.location || request?.requestPayload?.location || null);
+      if (explicitLocation) {
+        lastSyncedCustomerLocationRef.current = explicitLocation;
+        setResolvedClientLocation(explicitLocation);
+        setHomeLocation(explicitLocation);
+      }
+
+      const permissionGranted = await requestCustomerLocationPermission().catch(() => false);
+      if (!permissionGranted) {
+        if (explicitLocation) {
+          setResolvedClientLocation(explicitLocation);
+        }
+        return;
+      }
+
+      const initialLocation = explicitLocation
+        || await getCurrentCustomerLocation().catch(() => null);
+      if (!cancelled && initialLocation) {
+        await syncCurrentLocation(initialLocation);
+      }
+
+      const subscription = await watchCustomerLocation((nextLocation) => {
+        if (cancelled) return;
+        syncCurrentLocation(nextLocation).catch(() => null);
+      }).catch((error) => {
+        console.warn('[uncedo:current-location-watch]', error?.message || error);
+        return null;
+      });
+
+      if (subscription?.remove) {
+        customerLocationSubscriptionRef.current = subscription;
+      }
+    };
+
+    startWatchingLocation();
+
+    return () => {
+      cancelled = true;
+      customerLocationSubscriptionRef.current?.remove?.();
+      customerLocationSubscriptionRef.current = null;
+    };
+  }, [
+    request?.requestPayload?.structuredAnswers?.service_address_target,
+    request?.structuredAnswers?.service_address_target,
+    requestId,
+    setHomeLocation,
+  ]);
+
+  useEffect(() => {
+    const target = String(
+      request?.requestPayload?.structuredAnswers?.service_address_target
+      || request?.structuredAnswers?.service_address_target
+      || '',
+    ).trim().toLowerCase();
+    if (target === 'current_location') {
+      return;
+    }
+
+    let cancelled = false;
     const explicitLocation = normalizeCoordinate(request?.location || request?.requestPayload?.location || null);
     if (explicitLocation) {
       setResolvedClientLocation(explicitLocation);
@@ -384,27 +535,14 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
       };
     }
 
-    const target = String(
-      request?.requestPayload?.structuredAnswers?.service_address_target
-      || request?.structuredAnswers?.service_address_target
-      || '',
-    ).trim().toLowerCase();
     const addressText = String(
       request?.requestPayload?.serviceAddress
       || request?.serviceAddress
       || '',
     ).trim();
-    const fallbackLocation = normalizeCoordinate(homeLocation);
-
-    if (target === 'current_location' && fallbackLocation) {
-      setResolvedClientLocation(fallbackLocation);
-      return () => {
-        cancelled = true;
-      };
-    }
 
     if (!addressText) {
-      setResolvedClientLocation(fallbackLocation);
+      setResolvedClientLocation(null);
       return () => {
         cancelled = true;
       };
@@ -413,18 +551,17 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
     Location.geocodeAsync(addressText)
       .then((matches) => {
         if (cancelled) return;
-        setResolvedClientLocation(normalizeCoordinate(Array.isArray(matches) ? matches[0] : null) || fallbackLocation);
+        setResolvedClientLocation(normalizeCoordinate(Array.isArray(matches) ? matches[0] : null));
       })
       .catch(() => {
         if (cancelled) return;
-        setResolvedClientLocation(fallbackLocation);
+        setResolvedClientLocation(null);
       });
 
     return () => {
       cancelled = true;
     };
   }, [
-    homeLocation,
     request?.location,
     request?.requestPayload?.location,
     request?.requestPayload?.serviceAddress,
@@ -873,7 +1010,11 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
       ) : (
         <View style={styles.waitingCard}>
           <ActivityIndicator color={colors.brand} />
-          <Text style={styles.waitingCardText}>Waiting for a helper to accept the request.</Text>
+          <Text style={styles.waitingCardText}>
+            {String(request?.status || '').toLowerCase() === 'matching'
+              ? 'Searching for a helper.'
+              : 'Waiting for a helper to accept the request.'}
+          </Text>
         </View>
       )}
 
@@ -1025,11 +1166,14 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
         </View>
       </Modal>
 
-      <Modal visible={showRatingModal} transparent animationType="slide">
-        <View style={styles.modalBg}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Rate {ratingTarget?.helperName || 'helper'}</Text>
-            <Text style={styles.modalText}>Leave quick feedback about this service.</Text>
+      <Modal visible={showRatingModal} animationType="fade">
+        <View style={styles.ratingOverlay}>
+          <Pressable accessibilityRole="button" onPress={dismissRatingModal} style={styles.ratingCloseButton}>
+            <Ionicons color={colors.text} name="close" size={26} />
+          </Pressable>
+          <View style={styles.ratingCard}>
+            <Text style={styles.ratingTitle}>Rate {ratingTarget?.helperName || 'helper'}</Text>
+            <Text style={styles.ratingCopy}>Leave quick feedback about this service.</Text>
             <View style={styles.starRow}>
               {[1, 2, 3, 4, 5].map((star) => (
                 <Pressable key={star} onPress={() => setRating(star)}>
@@ -1454,6 +1598,40 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 15,
     fontWeight: '800',
+  },
+  ratingOverlay: {
+    flex: 1,
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 24,
+    paddingTop: 28,
+    paddingBottom: 28,
+  },
+  ratingCloseButton: {
+    alignSelf: 'flex-end',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    borderRadius: 999,
+    height: 42,
+    justifyContent: 'center',
+    marginBottom: 16,
+    width: 42,
+  },
+  ratingCard: {
+    flex: 1,
+    justifyContent: 'center',
+    gap: 16,
+  },
+  ratingTitle: {
+    color: colors.text,
+    fontSize: 24,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  ratingCopy: {
+    color: colors.muted,
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: 'center',
   },
   modalBg: {
     flex: 1,

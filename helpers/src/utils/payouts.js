@@ -39,11 +39,12 @@ export function getWeekKey(dateInput) {
 }
 
 export function formatCurrency(amount, currency = 'ZAR') {
-  return new Intl.NumberFormat('en-ZA', {
-    style: 'currency',
-    currency,
-    maximumFractionDigits: 2,
-  }).format(Number(amount || 0));
+  const normalized = Math.round(Number(amount || 0));
+  if (!Number.isFinite(normalized)) return 'R0';
+  if (currency && currency !== 'ZAR') {
+    return `${currency} ${normalized}`;
+  }
+  return `R${normalized}`;
 }
 
 export function formatDate(value) {

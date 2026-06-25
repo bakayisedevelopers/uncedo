@@ -16,7 +16,9 @@ export const LEGACY_SAFE_PRICING_SNAPSHOT = {
 };
 
 export function formatRand(amount) {
-  return `R${Number(amount || 0).toFixed(2)}`;
+  const normalized = Math.round(Number(amount || 0));
+  if (!Number.isFinite(normalized)) return 'R0';
+  return `R${normalized}`;
 }
 
 export function normalizePricingSnapshot(snapshot) {

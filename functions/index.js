@@ -203,7 +203,9 @@ async function queueEmailEventOnce({
 }
 
 function formatMoney(value) {
-  return `R${Number(value || 0).toFixed(2)}`;
+  const normalized = Math.round(Number(value || 0));
+  if (!Number.isFinite(normalized)) return 'R0';
+  return `R${normalized}`;
 }
 
 async function writeAiLog({
@@ -8086,7 +8088,7 @@ exports.finalizeSessionBilling = onRequest({ cors: true, secrets: [UNCEDO_PAYMEN
     createUserNotification({
       userId: updatedSession.tutorId,
       title: closureType === 'canceled_during' ? 'Session canceled' : 'Lesson completed',
-      message: `${updatedSession.topic || updatedSession.subject || 'Your lesson'} is ${closureType === 'canceled_during' ? 'canceled' : 'completed'}. Tutor earnings: R${tutorAmount.toFixed(2)}.`,
+      message: `${updatedSession.topic || updatedSession.subject || 'Your lesson'} is ${closureType === 'canceled_during' ? 'canceled' : 'completed'}. Tutor earnings: ${formatMoney(tutorAmount)}.`,
       type: closureType === 'canceled_during' ? 'session_canceled' : 'lesson_completed',
       requestId: updatedSession.requestId || null,
       sessionId,
@@ -8345,7 +8347,7 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
     createUserNotification({
       userId: request.customerId,
       title: 'Service completed',
-      message: `Your service request for ${request.subject || 'help'} was marked as completed. Total: R${totalAmount.toFixed(2)}.`,
+      message: `Your service request for ${request.subject || 'help'} was marked as completed. Total: ${formatMoney(totalAmount)}.`,
       type: 'service_completed',
       requestId,
       targetPath: `/customer/requests/${requestId}`,
@@ -8358,7 +8360,7 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
       createUserNotification({
         userId: helperId,
         title: 'Job completed',
-        message: `Your job for ${request.customerName || 'Customer'} was marked as completed. Helper earnings recorded: R${helperPayoutBreakdown.helperAmount.toFixed(2)}.`,
+        message: `Your job for ${request.customerName || 'Customer'} was marked as completed. Helper earnings recorded: ${formatMoney(helperPayoutBreakdown.helperAmount)}.`,
         type: 'job_completed',
         requestId,
         targetPath: `/provider/jobs/${requestId}`,
@@ -8463,9 +8465,12 @@ exports.cancelCustomerServiceRequest = onRequest({ cors: true, secrets: [UNCEDO_
   const travelFee = getServiceTravelFee(request);
   const trackingSnap = await requestRef.collection('tracking').doc('live').get().catch(() => null);
   const trackingData = trackingSnap?.exists ? (trackingSnap.data() || {}) : {};
+  const liveTrackingSnap = await admin.database().ref(`liveTracking/serviceRequests/${requestId}`).get().catch(() => null);
+  const liveTrackingData = liveTrackingSnap?.exists() ? (liveTrackingSnap.val() || {}) : {};
   const distanceTravelledMeters = Number(
     request?.travelTracking?.distanceTravelledMeters
     || trackingData?.distanceTravelledMeters
+    || liveTrackingData?.distanceTravelledMeters
     || 0,
   );
   const travelledKm = Math.max(0, distanceTravelledMeters / 1000);
@@ -8531,7 +8536,7 @@ exports.cancelCustomerServiceRequest = onRequest({ cors: true, secrets: [UNCEDO_
   batch.set(requestRef, {
     status: 'canceled',
     statusDetail: cancellationAmount > 0
-      ? `Customer canceled the service. Cancellation fee charged: R${cancellationAmount.toFixed(2)}.`
+      ? `Customer canceled the service. Cancellation fee charged: ${formatMoney(cancellationAmount)}.`
       : 'Customer canceled the service.',
     canceledAt: endedAt,
     canceledBy: 'customer',
@@ -8612,7 +8617,7 @@ exports.cancelCustomerServiceRequest = onRequest({ cors: true, secrets: [UNCEDO_
       userId: request.customerId,
       title: 'Service canceled',
       message: cancellationAmount > 0
-        ? `Your service request was canceled. Cancellation fee: R${cancellationAmount.toFixed(2)}.`
+        ? `Your service request was canceled. Cancellation fee: ${formatMoney(cancellationAmount)}.`
         : 'Your service request was canceled.',
       type: 'service_canceled',
       requestId,
@@ -8626,7 +8631,7 @@ exports.cancelCustomerServiceRequest = onRequest({ cors: true, secrets: [UNCEDO_
       createUserNotification({
         userId: helperId,
         title: 'Job canceled',
-        message: `${request.customerName || 'The customer'} canceled this job. Helper earnings recorded: R${helperPayoutBreakdown.helperAmount.toFixed(2)}.`,
+        message: `${request.customerName || 'The customer'} canceled this job. Helper earnings recorded: ${formatMoney(helperPayoutBreakdown.helperAmount)}.`,
         type: 'job_canceled',
         requestId,
         targetPath: `/provider/jobs/${requestId}`,
@@ -8866,7 +8871,7 @@ exports.payOutstandingBalance = onRequest({ cors: true, secrets: [UNCEDO_PAYMENT
   await createUserNotification({
     userId: decoded.uid,
     title: 'Payment completed',
-    message: `Your outstanding balance payment of R${outstandingAmount.toFixed(2)} was completed.`,
+    message: `Your outstanding balance payment of ${formatMoney(outstandingAmount)} was completed.`,
     type: 'payment_completed',
     targetPath: '/app/student/payment',
     metadata: {
@@ -9234,7 +9239,7 @@ exports.processWeeklyTutorPayouts = onSchedule({
     await createUserNotification({
       userId: payout.tutorId,
       title: 'Tutor payout processing',
-      message: `Your ${payout.weekKey || 'weekly'} payout is being processed. Amount: R${amount.toFixed(2)}.`,
+      message: `Your ${payout.weekKey || 'weekly'} payout is being processed. Amount: ${formatMoney(amount)}.`,
       type: 'tutor_payout_processing',
       targetPath: '/app/tutor/payments',
       metadata: {
@@ -9268,7 +9273,7 @@ exports.processWeeklyTutorPayouts = onSchedule({
       await createUserNotification({
         userId: payout.tutorId,
         title: 'Tutor payout paid',
-        message: `Your ${payout.weekKey || 'weekly'} payout was paid successfully. Amount: R${amount.toFixed(2)}.`,
+        message: `Your ${payout.weekKey || 'weekly'} payout was paid successfully. Amount: ${formatMoney(amount)}.`,
         type: 'tutor_payout_paid',
         targetPath: '/app/tutor/payments',
         metadata: {
@@ -9548,7 +9553,7 @@ exports.processWeeklyHelperPayouts = onSchedule({
     await createUserNotification({
       userId: payout.helperId,
       title: 'Helper payout processing',
-      message: `Your ${payout.weekKey || 'weekly'} payout is being processed. Amount: R${amount.toFixed(2)}.`,
+      message: `Your ${payout.weekKey || 'weekly'} payout is being processed. Amount: ${formatMoney(amount)}.`,
       type: 'helper_payout_processing',
       targetPath: '/provider/earnings',
       metadata: {
@@ -9582,7 +9587,7 @@ exports.processWeeklyHelperPayouts = onSchedule({
       await createUserNotification({
         userId: payout.helperId,
         title: 'Helper payout paid',
-        message: `Your ${payout.weekKey || 'weekly'} payout was paid successfully. Amount: R${amount.toFixed(2)}.`,
+        message: `Your ${payout.weekKey || 'weekly'} payout was paid successfully. Amount: ${formatMoney(amount)}.`,
         type: 'helper_payout_paid',
         targetPath: '/provider/earnings',
         metadata: {

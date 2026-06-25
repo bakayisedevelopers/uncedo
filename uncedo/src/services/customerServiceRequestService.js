@@ -93,8 +93,8 @@ async function resolveRequestLocation({
   const target = normalizeText(serviceAddressTarget).toLowerCase();
   const normalizedHomeLocation = normalizeCoordinate(homeLocation);
 
-  if (target === 'current_location' && normalizedHomeLocation) {
-    return normalizedHomeLocation;
+  if (target === 'current_location') {
+    return providedLocation;
   }
 
   const geocodedAddress = await geocodeAddressToCoordinate(serviceAddress);
