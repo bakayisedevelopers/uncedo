@@ -167,32 +167,47 @@ export function HelperHomeCallToActionSheet({
   needsProfileCompletion = false,
   isOnline = false,
   hasActiveJob = false,
+  walletAmountLabel = 'R0.00',
   onPress,
   onGoToActiveJob,
 }) {
   if (hasActiveJob) {
     return (
       <View style={styles.sheet}>
-        <Pressable
-          accessibilityRole="button"
-          onPress={onGoToActiveJob}
-          style={styles.activeJobButton}
-        >
-          <Ionicons color="#ffffff" name="briefcase" size={18} />
-          <Text style={styles.activeJobButtonText}>Go to Existing Job</Text>
-        </Pressable>
+        <View style={styles.row}>
+          <View style={styles.walletCard}>
+            <Text style={styles.walletLabel}>Wallet</Text>
+            <Text style={styles.walletValue}>{walletAmountLabel}</Text>
+          </View>
+          <Pressable
+            accessibilityRole="button"
+            onPress={onGoToActiveJob}
+            style={styles.activeJobButton}
+          >
+            <Ionicons color="#ffffff" name="briefcase" size={18} />
+            <Text style={styles.activeJobButtonText}>Go to Existing Job</Text>
+          </Pressable>
+        </View>
       </View>
     );
   }
 
   return (
     <View style={styles.sheet}>
-      <SlideToToggle
-        disabled={disabled}
-        isOnline={isOnline}
-        needsProfileCompletion={needsProfileCompletion}
-        onComplete={onPress}
-      />
+      <View style={styles.row}>
+        <View style={styles.walletCard}>
+          <Text style={styles.walletLabel}>Wallet</Text>
+          <Text style={styles.walletValue}>{walletAmountLabel}</Text>
+        </View>
+        <View style={styles.sliderWrap}>
+          <SlideToToggle
+            disabled={disabled}
+            isOnline={isOnline}
+            needsProfileCompletion={needsProfileCompletion}
+            onComplete={onPress}
+          />
+        </View>
+      </View>
     </View>
   );
 }
@@ -202,6 +217,37 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
     paddingHorizontal: 16,
     paddingVertical: 0,
+  },
+  row: {
+    alignItems: 'stretch',
+    flexDirection: 'row',
+    gap: 10,
+  },
+  walletCard: {
+    backgroundColor: 'rgba(255,255,255,0.96)',
+    borderColor: colors.border,
+    borderRadius: 24,
+    borderWidth: 1,
+    justifyContent: 'center',
+    minHeight: 58,
+    minWidth: 112,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  walletLabel: {
+    color: colors.muted,
+    fontSize: 10,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
+  walletValue: {
+    color: colors.brandDark,
+    fontSize: 16,
+    fontWeight: '900',
+    marginTop: 2,
+  },
+  sliderWrap: {
+    flex: 1,
   },
   sliderTrack: {
     alignItems: 'center',
@@ -249,6 +295,7 @@ const styles = StyleSheet.create({
     borderColor: '#f9a8d4',
     borderRadius: 24,
     borderWidth: 1,
+    flex: 1,
     height: 58,
     flexDirection: 'row',
     gap: 8,

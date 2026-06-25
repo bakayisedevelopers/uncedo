@@ -10,14 +10,14 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
 * **Common References**: "Firebase backend", "functions backend", "cloud functions", "API functions".
 * **Purpose**: Houses all server-side logic, third-party integrations (Paystack, Resend, Gemini), and secure endpoints.
 * **Key Files & Logic**:
-  * [functions/index.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/index.js): Main entry point declaring all Cloud Functions, including service-request matching, marketplace pricing quotes, billing completion, and customer recommendation event aggregation.
+  * [functions/index.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/index.js): Main entry point declaring all Cloud Functions, including service-request matching, marketplace pricing quotes, billing completion, customer recommendation event aggregation, helper payout breakdown persistence, and weekly payout automation for tutors and helpers.
   * [functions/pricingEngine.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/pricingEngine.js): Core logic for estimation, price quotes, and billing snapshots.
   * [functions/serviceMarketplacePricing.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/serviceMarketplacePricing.js): Dynamic marketplace pricing engine for live services and bundle-style services stored in `serviceCatalog`.
   * [functions/customerServiceAi.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/customerServiceAi.js): LLM processing logic for automated customer service threads.
   * [functions/aiSubjectExtraction.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/aiSubjectExtraction.js): Processes files/images to detect subject areas.
   * [functions/legalAgreements.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/legalAgreements.js): Database interactions, version publishing, and signed-record generation for helper agreements.
   * [functions/helperLegalAgreements.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/helperLegalAgreements.js): Helper-agreement versioning, immutable acceptance records, and signed PDF generation used by the admin and helper apps.
-  * [functions/index.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/index.js): Main function registry for the backend HTTP, Firestore, and scheduler functions, including marketplace pricing, matching, billing, and recommendation aggregation.
+  * [functions/index.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/index.js): Main function registry for the backend HTTP, Firestore, and scheduler functions, including marketplace pricing, matching, billing, helper payout records, and recommendation aggregation.
 
 ---
 
@@ -64,6 +64,7 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
   * [SkillCatalogScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/screens/provider/SkillCatalogScreen.js): Firestore-backed helper service catalog browser that replaces the hard-coded skill list and includes admin-created bundle services.
   * [SkillDetailsScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/screens/provider/SkillDetailsScreen.js): Helper service detail and submission flow with multi-image uploads, pending approval, bundle-image inheritance, and service-photo management.
   * [src/components/app/HelperHomeMap.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/components/app/HelperHomeMap.js): Dedicated helper home map with a live location marker and 50 km service radius, separate from the active-job route map.
+  * [src/services/helperPayoutService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/services/helperPayoutService.js): Subscribes to backend `helperWeeklyPayouts` records so the helper wallet, weekly payment status, and payout history reflect scheduler-written payout states.
   * [src/services/legalAgreementService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/services/legalAgreementService.js): Calls helper-agreement Cloud Functions to fetch the active contract bundle and submit signed acceptances.
   * [src/services/serviceCatalogService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/services/serviceCatalogService.js): Reads the live Firestore service catalog for helper browsing and onboarding.
 
