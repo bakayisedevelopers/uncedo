@@ -190,22 +190,27 @@ function getNavigationFocusCoordinates(routeCoordinates, currentCoordinate, dest
 }
 
 function AvatarMarker({ initials, photoUri, isCurrentUser = false, heading = null }) {
+  if (isCurrentUser) {
+    const rotation = typeof heading === 'number' ? heading : 0;
+    return (
+      <View style={styles.navigationArrowContainer}>
+        <View style={{ transform: [{ rotate: `${rotation - 45}deg` }] }}>
+          <Ionicons name="navigation" size={24} color="#3b82f6" />
+        </View>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.markerRoot}>
-      <View style={[styles.markerAvatar, isCurrentUser && styles.markerAvatarCurrent]}>
+      <View style={styles.markerAvatar}>
         {photoUri ? (
           <Image source={{ uri: photoUri }} style={styles.markerImage} />
         ) : (
           <Text style={styles.markerInitials}>{getInitials(initials)}</Text>
         )}
       </View>
-      {isCurrentUser && typeof heading === 'number' ? (
-        <View style={[styles.directionArrowContainer, { transform: [{ rotate: `${heading}deg` }] }]}>
-          <Ionicons name="navigation" size={16} color={colors.brand} style={{ transform: [{ rotate: '45deg' }] }} />
-        </View>
-      ) : (
-        <View style={[styles.markerPin, isCurrentUser && styles.markerPinCurrent]} />
-      )}
+      <View style={styles.markerPin} />
     </View>
   );
 }
@@ -644,21 +649,20 @@ const styles = StyleSheet.create({
   markerPinCurrent: {
     backgroundColor: '#7c3aed',
   },
-  directionArrowContainer: {
+  navigationArrowContainer: {
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#ffffff',
-    borderRadius: 12,
-    width: 24,
-    height: 24,
-    borderWidth: 2,
-    borderColor: colors.brand,
-    marginTop: -2,
+    borderRadius: 22,
+    width: 44,
+    height: 44,
+    borderWidth: 3,
+    borderColor: '#3b82f6',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 3,
-    elevation: 3,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.22,
+    shadowRadius: 4,
+    elevation: 5,
   },
   controls: {
     gap: 8,

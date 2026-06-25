@@ -23,7 +23,14 @@ const socialButtons = [
   { label: 'Facebook', icon: 'logo-facebook' },
 ];
 
-export function HomeScreen() {
+function getSocialIconColor(iconName) {
+  const name = String(iconName || '').toLowerCase();
+  if (name.includes('google')) return '#ea4335';
+  if (name.includes('facebook')) return '#1877f2';
+  return '#000000'; // apple or default
+}
+
+export function HomeScreen({ navigate }) {
   const { login, signup } = useAuth();
   const { height } = useWindowDimensions();
   const [mode, setMode] = useState('login');
@@ -35,10 +42,8 @@ export function HomeScreen() {
   const [notice, setNotice] = useState('');
 
   const isSignup = mode === 'signup';
-  const title = isSignup ? 'Create account' : 'Welcome';
-  const subtitle = isSignup
-    ? 'Welcome to Uncedo. Create your account and request trusted local help when you need it.'
-    : 'Sign in to continue your requests, quotes, and service updates.';
+  const title = isSignup ? 'Create Account' : 'Welcome Back!';
+  const subtitle = isSignup ? 'Join our community today' : 'Sign in with your account';
   const canSubmit = isSignup
     ? name.trim() && email.trim() && password.length >= 6
     : email.trim() && password.trim();
@@ -77,41 +82,20 @@ export function HomeScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       style={styles.screen}
     >
-      <View style={styles.sky} />
-      <View style={[styles.waveBack, { top: Math.max(360, height * 0.48) }]} />
-      <View style={[styles.waveMid, { top: Math.max(430, height * 0.57) }]} />
-      <View style={[styles.waveFront, { top: Math.max(560, height * 0.74) }]} />
+      {/* Dark purple/indigo background gradient effect with ambient glowing blurs */}
+      <View style={styles.background} />
+      <View style={styles.glow1} />
+      <View style={styles.glow2} />
 
       <ScrollView
-        contentContainerStyle={[styles.content, { minHeight: height }]}
+        contentContainerStyle={[styles.scrollContent, { minHeight: height }]}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
-        <View style={styles.brandWrap}>
-          <Text style={styles.brand}>Uncedo</Text>
-          <Text style={styles.brandCopy}>Customer app</Text>
-        </View>
-
-        <View style={styles.panel}>
-          <View style={styles.panelGlow} />
-          <Text style={styles.title}>{title}</Text>
-          <Text style={styles.subtitle}>{subtitle}</Text>
-
-          <View style={styles.modeSwitch}>
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => switchMode('login')}
-              style={[styles.modeButton, !isSignup && styles.modeButtonActive]}
-            >
-              <Text style={[styles.modeLabel, !isSignup && styles.modeLabelActive]}>Login</Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => switchMode('signup')}
-              style={[styles.modeButton, isSignup && styles.modeButtonActive]}
-            >
-              <Text style={[styles.modeLabel, isSignup && styles.modeLabelActive]}>Sign up</Text>
-            </Pressable>
+        <View style={styles.container}>
+          <View style={styles.header}>
+            <Text style={styles.title}>{title}</Text>
+            <Text style={styles.subtitle}>{subtitle}</Text>
           </View>
 
           <View style={styles.form}>
@@ -129,25 +113,22 @@ export function HomeScreen() {
             {isSignup ? (
               <AuthInput
                 autoCapitalize="words"
-                icon="person-outline"
                 onChangeText={setName}
-                placeholder="Full name"
+                placeholder="Full Name"
                 value={name}
               />
             ) : null}
             <AuthInput
               autoCapitalize="none"
-              icon="mail-outline"
               keyboardType="email-address"
               onChangeText={setEmail}
-              placeholder="Email address"
+              placeholder="Email Address"
               value={email}
             />
             <AuthInput
               autoCapitalize="none"
-              icon="lock-closed-outline"
               onChangeText={setPassword}
-              placeholder={isSignup ? 'Password, minimum 6 characters' : 'Password'}
+              placeholder={isSignup ? 'Create Password' : 'Password'}
               secureTextEntry
               value={password}
             />
@@ -159,37 +140,60 @@ export function HomeScreen() {
               style={[styles.primaryButton, (!canSubmit || busy) && styles.primaryButtonDisabled]}
             >
               <Text style={styles.primaryButtonText}>
-                {busy ? (isSignup ? 'Creating account...' : 'Signing in...') : (isSignup ? 'Create account' : 'Login')}
+                {busy ? 'Please wait...' : isSignup ? 'Sign Up' : 'Login'}
               </Text>
-              <Ionicons color="#ffffff" name="arrow-forward" size={18} />
             </Pressable>
 
-            {!isSignup ? (
-              <Pressable
-                accessibilityRole="button"
-                onPress={() => setNotice('Password recovery is coming soon.')}
-                style={styles.forgotButton}
-              >
-                <Text style={styles.forgotText}>Forgot password?</Text>
-              </Pressable>
-            ) : null}
-          </View>
-
-          <View style={styles.socialSection}>
-            <Text style={styles.socialHeading}>Continue with</Text>
-            <View style={styles.socialRow}>
-              {socialButtons.map((button) => (
+            {isSignup ? (
+              <View style={styles.footerLinkContainer}>
                 <Pressable
                   accessibilityRole="button"
-                  key={button.label}
-                  onPress={() => null}
-                  style={styles.socialButton}
+                  onPress={() => switchMode('login')}
+                  style={styles.footerLinkButton}
                 >
-                  <Ionicons color="#ffffff" name={button.icon} size={18} />
-                  <Text style={styles.socialLabel}>{button.label}</Text>
+                  <Text style={styles.footerLinkText}>
+                    Already have an account? <Text style={styles.footerLinkHighlight}>Log In</Text>
+                  </Text>
                 </Pressable>
-              ))}
-            </View>
+              </View>
+            ) : (
+              <View style={styles.footerLinkContainer}>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => switchMode('signup')}
+                  style={styles.footerLinkButton}
+                >
+                  <Text style={styles.footerLinkText}>
+                    Don't have any account? <Text style={styles.footerLinkHighlight}>Sign Up</Text>
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => setNotice('Password recovery is coming soon.')}
+                  style={styles.footerLinkButton}
+                >
+                  <Text style={styles.footerLinkText}>Forgot Password?</Text>
+                </Pressable>
+              </View>
+            )}
+          </View>
+
+          <View style={styles.socialRow}>
+            {socialButtons.map((button) => (
+              <Pressable
+                accessibilityRole="button"
+                key={button.label}
+                onPress={() => setNotice(`${button.label} sign-${isSignup ? 'up' : 'in'} is coming soon.`)}
+                style={styles.socialButton}
+              >
+                <Ionicons
+                  color={getSocialIconColor(button.icon)}
+                  name={button.icon}
+                  size={26}
+                />
+              </Pressable>
+            ))}
           </View>
 
           <Text style={styles.legalText}>
@@ -204,278 +208,212 @@ export function HomeScreen() {
   );
 }
 
-function AuthInput({ icon, style, ...props }) {
+function AuthInput({ style, ...props }) {
+  const [secureText, setSecureText] = useState(props.secureTextEntry);
+  const isPasswordField = props.secureTextEntry;
+
   return (
     <View style={[styles.inputWrap, style]}>
-      <Ionicons color="rgba(255,255,255,0.78)" name={icon} size={18} />
       <TextInput
-        placeholderTextColor="rgba(255,255,255,0.74)"
-        style={styles.input}
+        placeholderTextColor="#9ca3af"
+        style={[styles.input, isPasswordField && { paddingRight: 40 }]}
         {...props}
+        secureTextEntry={secureText}
       />
+      {isPasswordField ? (
+        <Pressable onPress={() => setSecureText(!secureText)} style={styles.eyeButton}>
+          <Ionicons name={secureText ? 'eye-off-outline' : 'eye-outline'} size={20} color="#6b7280" />
+        </Pressable>
+      ) : null}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   screen: {
-    backgroundColor: '#3520a8',
     flex: 1,
+    backgroundColor: '#1b0227', // Dark purple/indigo base color
   },
-  sky: {
+  background: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: '#3520a8',
+    backgroundColor: '#12011b', // Very dark purple/black
   },
-  waveBack: {
-    backgroundColor: 'rgba(244,63,184,0.78)',
-    borderTopLeftRadius: 220,
-    borderTopRightRadius: 260,
-    height: 360,
-    left: -120,
+  glow1: {
     position: 'absolute',
-    right: -80,
-    transform: [{ rotate: '-7deg' }],
+    width: 320,
+    height: 320,
+    borderRadius: 160,
+    backgroundColor: '#a21caf', // BrandDark glow
+    opacity: 0.22,
+    top: '20%',
+    left: '-20%',
   },
-  waveMid: {
-    backgroundColor: 'rgba(168,85,247,0.82)',
-    borderTopLeftRadius: 280,
-    borderTopRightRadius: 190,
-    height: 330,
-    left: -160,
+  glow2: {
     position: 'absolute',
-    right: -180,
-    transform: [{ rotate: '8deg' }],
-  },
-  waveFront: {
-    backgroundColor: 'rgba(236,72,153,0.86)',
-    borderTopLeftRadius: 260,
-    borderTopRightRadius: 220,
+    width: 280,
     height: 280,
-    left: -110,
-    position: 'absolute',
-    right: -130,
-    transform: [{ rotate: '5deg' }],
+    borderRadius: 140,
+    backgroundColor: '#d946ef', // Brand glow
+    opacity: 0.18,
+    bottom: '25%',
+    right: '-15%',
   },
-  content: {
+  scrollContent: {
+    flexGrow: 1,
     justifyContent: 'center',
-    padding: 20,
-    paddingBottom: 30,
-    paddingTop: 32,
+    paddingHorizontal: 28,
+    paddingVertical: 40,
   },
-  brandWrap: {
-    alignItems: 'center',
-    marginBottom: 18,
-  },
-  brand: {
-    color: '#ffffff',
-    fontSize: 18,
-    fontWeight: '900',
-  },
-  brandCopy: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 12,
-    fontWeight: '800',
-    marginTop: 4,
-    textTransform: 'uppercase',
-  },
-  panel: {
-    alignSelf: 'center',
-    backgroundColor: 'rgba(255,255,255,0.20)',
-    borderColor: 'rgba(255,255,255,0.26)',
-    borderRadius: 38,
-    borderWidth: 1,
-    maxWidth: 430,
-    minHeight: 660,
-    overflow: 'hidden',
-    padding: 24,
-    shadowColor: '#0f172a',
-    shadowOffset: { width: 0, height: 22 },
-    shadowOpacity: 0.25,
-    shadowRadius: 34,
+  container: {
     width: '100%',
-    elevation: 18,
+    alignSelf: 'center',
+    maxWidth: 380,
   },
-  panelGlow: {
-    backgroundColor: 'rgba(255,255,255,0.14)',
-    borderRadius: 220,
-    height: 250,
-    left: -40,
-    position: 'absolute',
-    right: -40,
-    top: -80,
+  header: {
+    alignItems: 'center',
+    marginBottom: 36,
   },
   title: {
     color: '#ffffff',
-    fontSize: 38,
+    fontSize: 34,
     fontWeight: '900',
-    marginTop: 28,
     textAlign: 'center',
+    letterSpacing: -0.5,
   },
   subtitle: {
-    color: 'rgba(255,255,255,0.78)',
-    fontSize: 14,
-    lineHeight: 20,
-    marginTop: 10,
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 15,
+    marginTop: 6,
     textAlign: 'center',
-  },
-  modeSwitch: {
-    alignSelf: 'center',
-    backgroundColor: 'rgba(255,255,255,0.16)',
-    borderColor: 'rgba(255,255,255,0.2)',
-    borderRadius: 999,
-    borderWidth: 1,
-    flexDirection: 'row',
-    gap: 6,
-    marginTop: 28,
-    padding: 5,
-  },
-  modeButton: {
-    borderRadius: 999,
-    minWidth: 112,
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-  },
-  modeButtonActive: {
-    backgroundColor: '#ffffff',
-  },
-  modeLabel: {
-    color: 'rgba(255,255,255,0.78)',
-    fontSize: 14,
-    fontWeight: '900',
-    textAlign: 'center',
-  },
-  modeLabelActive: {
-    color: colors.brandDark,
+    fontWeight: '600',
   },
   form: {
-    gap: 14,
-    marginTop: 30,
+    gap: 16,
   },
   inputWrap: {
-    alignItems: 'center',
-    backgroundColor: 'rgba(217,70,239,0.74)',
-    borderColor: 'rgba(255,255,255,0.24)',
-    borderRadius: 999,
-    borderWidth: 1,
+    width: '100%',
+    height: 54,
+    borderRadius: 24,
+    backgroundColor: '#ffffff',
     flexDirection: 'row',
-    gap: 10,
-    minHeight: 56,
-    paddingHorizontal: 18,
-    shadowColor: '#1e1b4b',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.18,
-    shadowRadius: 14,
-    elevation: 5,
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 3,
+    elevation: 2,
   },
   input: {
-    color: '#ffffff',
     flex: 1,
-    fontSize: 15,
-    fontWeight: '800',
-    minHeight: 52,
+    color: '#18181b',
+    fontSize: 16,
+    fontWeight: '600',
+    height: '100%',
+  },
+  eyeButton: {
+    position: 'absolute',
+    right: 18,
+    height: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   primaryButton: {
-    alignItems: 'center',
-    alignSelf: 'center',
-    backgroundColor: colors.brandDark,
-    borderRadius: 999,
-    flexDirection: 'row',
-    gap: 8,
+    backgroundColor: '#ccff00', // Neon yellow/lime-green button
+    borderRadius: 24,
+    height: 54,
     justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 6,
+    elevation: 4,
     marginTop: 8,
-    minHeight: 52,
-    minWidth: 188,
-    paddingHorizontal: 24,
   },
   primaryButtonDisabled: {
-    opacity: 0.58,
+    opacity: 0.55,
   },
   primaryButtonText: {
-    color: '#ffffff',
-    fontSize: 16,
+    color: '#000000',
+    fontSize: 17,
     fontWeight: '900',
+    letterSpacing: 0.3,
   },
-  forgotButton: {
-    alignSelf: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+  footerLinkContainer: {
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 8,
   },
-  forgotText: {
-    color: 'rgba(255,255,255,0.86)',
-    fontSize: 13,
-    fontWeight: '800',
+  footerLinkButton: {
+    paddingVertical: 4,
+  },
+  footerLinkText: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  footerLinkHighlight: {
+    fontWeight: '900',
     textDecorationLine: 'underline',
-  },
-  socialSection: {
-    marginTop: 24,
-  },
-  socialHeading: {
-    color: 'rgba(255,255,255,0.76)',
-    fontSize: 12,
-    fontWeight: '900',
-    textAlign: 'center',
-    textTransform: 'uppercase',
   },
   socialRow: {
     flexDirection: 'row',
-    gap: 10,
-    marginTop: 12,
+    justifyContent: 'center',
+    gap: 16,
+    marginTop: 24,
   },
   socialButton: {
-    alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.14)',
-    borderColor: 'rgba(255,255,255,0.22)',
-    borderRadius: 18,
-    borderWidth: 1,
-    flex: 1,
-    gap: 6,
-    minHeight: 62,
+    width: 54,
+    height: 54,
+    borderRadius: 12,
+    backgroundColor: '#ffffff',
     justifyContent: 'center',
-    paddingHorizontal: 8,
-  },
-  socialLabel: {
-    color: '#ffffff',
-    fontSize: 11,
-    fontWeight: '900',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 3,
+    elevation: 2,
   },
   legalText: {
-    color: 'rgba(255,255,255,0.74)',
+    color: 'rgba(255,255,255,0.6)',
     fontSize: 12,
     lineHeight: 18,
-    marginTop: 20,
+    marginTop: 24,
     textAlign: 'center',
   },
   legalLink: {
     color: '#ffffff',
-    fontWeight: '900',
+    fontWeight: '700',
     textDecorationLine: 'underline',
   },
   messageError: {
-    backgroundColor: 'rgba(255,241,242,0.16)',
-    borderColor: 'rgba(254,205,211,0.32)',
-    borderRadius: 16,
+    backgroundColor: 'rgba(239, 68, 68, 0.12)',
     borderWidth: 1,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    borderColor: 'rgba(239, 68, 68, 0.28)',
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
   },
   messageErrorText: {
-    color: '#ffffff',
-    fontSize: 12,
-    fontWeight: '800',
-    lineHeight: 18,
+    color: '#fca5a5',
+    fontSize: 13,
+    fontWeight: '700',
+    textAlign: 'center',
   },
   messageInfo: {
-    backgroundColor: 'rgba(255,255,255,0.12)',
-    borderColor: 'rgba(255,255,255,0.24)',
-    borderRadius: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
     borderWidth: 1,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
   },
   messageInfoText: {
     color: '#ffffff',
-    fontSize: 12,
-    fontWeight: '800',
-    lineHeight: 18,
+    fontSize: 13,
+    fontWeight: '700',
+    textAlign: 'center',
   },
 });
