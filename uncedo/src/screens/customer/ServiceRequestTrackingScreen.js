@@ -737,7 +737,7 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
 
     try {
       const updatedRequest = await cancelServiceRequestByCustomer({
-        requestId: request.id,
+        requestId: request?.id || requestId,
         reason: cancelReason,
       });
       setCancelReason('');
