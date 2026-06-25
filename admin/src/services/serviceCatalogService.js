@@ -1,5 +1,4 @@
 import { deleteObject, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { getAdminCatalogSkills } from '../constants/serviceCatalog';
 import { getAdminQuestionPreset } from '../constants/serviceQuestionPresets';
 import { getFirebaseClients } from '../firebase/config';
 
@@ -84,26 +83,14 @@ export function normalizeServiceCatalogEntry(entry = {}, fallback = null) {
 }
 
 export function buildServiceCatalogView(entries = []) {
-  const entryMap = new Map(entries.map((entry) => [entry.id, entry]));
-  const seededSkillIds = new Set(getAdminCatalogSkills().map((seedItem) => seedItem.id));
-  const seededEntries = getAdminCatalogSkills().map((seedItem) => {
-    const existing = entryMap.get(seedItem.id);
-    return normalizeServiceCatalogEntry({
-      ...seedItem,
-      ...(existing || {}),
-      id: seedItem.id,
-      persisted: Boolean(existing),
-      active: existing ? existing.active !== false : false,
-      approved: existing ? existing.approved !== false : false,
-    }, seedItem);
-  });
-
-  const customEntries = entries
-    .filter((entry) => !seededSkillIds.has(entry.id))
+  return (Array.isArray(entries) ? entries : [])
     .map((entry) => normalizeServiceCatalogEntry(entry))
-    .filter(Boolean);
-
-  return [...seededEntries, ...customEntries];
+    .filter(Boolean)
+    .sort((left, right) => {
+      const categoryCompare = String(left.categoryName || '').localeCompare(String(right.categoryName || ''));
+      if (categoryCompare !== 0) return categoryCompare;
+      return String(left.label || '').localeCompare(String(right.label || ''));
+    });
 }
 
 export async function subscribeToServiceCatalog(callback, onError) {

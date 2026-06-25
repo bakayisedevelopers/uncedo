@@ -37,7 +37,6 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import {
   appendCustomerServiceTranscript,
-  buildServicePricingSnapshot,
   createCustomerServiceRequest,
   deriveTimingDetails,
   finalizeCustomerServiceRequest,
@@ -740,12 +739,6 @@ export function CustomerServiceCallScreen({ route, navigate, goBack, systemInset
 
     setQuoteLoading(true);
     try {
-      const fallbackPricingSnapshot = buildServicePricingSnapshot({
-        categoryId: nextStructuredState.categoryId,
-        serviceIds: nextStructuredState.serviceIds,
-        structuredAnswers: nextStructuredState.structuredAnswers,
-        aiUsageSnapshot,
-      });
       const nextQuotePreview = await saveCustomerServiceQuotePreview({
         requestId: requestIdRef.current,
         categoryId: nextStructuredState.categoryId,
@@ -757,7 +750,7 @@ export function CustomerServiceCallScreen({ route, navigate, goBack, systemInset
       });
 
       quotePresentedRef.current = true;
-      setQuotePreview(nextQuotePreview || { pricingSnapshot: fallbackPricingSnapshot });
+      setQuotePreview(nextQuotePreview || null);
       setQuoteAwaitingApproval(true);
 
       submitAppInstruction([

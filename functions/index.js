@@ -7879,17 +7879,20 @@ exports.cancelCustomerServiceRequest = onRequest({ cors: true, secrets: [UNCEDO_
   );
   const travelledKm = Math.max(0, distanceTravelledMeters / 1000);
 
-  let billingRule = 'booking_fee_only';
+  let billingRule = 'no_charge_before_driving';
+  let bookingCharge = 0;
   let travelCharge = 0;
   if (['driving', 'en_route', 'buying_resources'].includes(status)) {
     billingRule = 'travelled_distance_plus_booking_fee';
+    bookingCharge = bookingFee;
     travelCharge = toRand(travelledKm * SERVICE_TRAVEL_RATE_PER_KM);
   } else if (['arrived', 'work_started'].includes(status)) {
     billingRule = 'travel_fee_plus_booking_fee';
+    bookingCharge = bookingFee;
     travelCharge = toRand(travelFee);
   }
 
-  const cancellationAmount = toRand(travelCharge + bookingFee);
+  const cancellationAmount = toRand(travelCharge + bookingCharge);
   const customerRef = db.collection('users').doc(request.customerId);
   const customerSnap = await customerRef.get();
   const customerData = customerSnap.data() || {};
@@ -7945,7 +7948,7 @@ exports.cancelCustomerServiceRequest = onRequest({ cors: true, secrets: [UNCEDO_
       ...(request.pricingSnapshot || {}),
       subtotal: getServiceQuoteSubtotal(request),
       travelFee,
-      bookingFee,
+      bookingFee: bookingCharge,
       bookingFeeRate: SERVICE_BOOKING_FEE_RATE,
       bookingFeeCap: SERVICE_BOOKING_FEE_CAP,
       cancellationAmount,

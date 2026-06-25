@@ -460,22 +460,11 @@ export async function saveCustomerServiceQuotePreview({
     throw new Error('Service request id is required.');
   }
 
-  let pricingSnapshot = null;
-  try {
-    pricingSnapshot = await fetchServicePricingQuote({
-      categoryId,
-      serviceIds,
-      structuredAnswers,
-    });
-  } catch (_error) {
-    pricingSnapshot = buildServicePricingSnapshot({
-      categoryId,
-      serviceIds,
-      structuredAnswers,
-      serviceOverrides,
-      aiUsageSnapshot,
-    });
-  }
+  const pricingSnapshot = await fetchServicePricingQuote({
+    categoryId,
+    serviceIds,
+    structuredAnswers,
+  });
 
   const { db } = getFirebaseClients();
   const requestRef = doc(db, 'serviceRequests', requestId);
@@ -550,22 +539,11 @@ export async function finalizeCustomerServiceRequest({
   referenceAttachments = [],
   serviceOverrides = {},
 }) {
-  let pricingSnapshot = null;
-  try {
-    pricingSnapshot = await fetchServicePricingQuote({
-      categoryId,
-      serviceIds,
-      structuredAnswers,
-    });
-  } catch (_error) {
-    pricingSnapshot = buildServicePricingSnapshot({
-      categoryId,
-      serviceIds,
-      structuredAnswers,
-      serviceOverrides,
-      aiUsageSnapshot,
-    });
-  }
+  const pricingSnapshot = await fetchServicePricingQuote({
+    categoryId,
+    serviceIds,
+    structuredAnswers,
+  });
   const timingDetails = deriveTimingDetails(structuredAnswers);
   const categoryLabel = getCustomerServiceCategoryById(categoryId)?.label || 'Service request';
   const serviceLabels = serviceIds
