@@ -415,7 +415,7 @@ export function RootNavigator() {
     if (activeRequest) {
       setLastActiveRequestId(activeRequest.id);
       const isCollecting = String(activeRequest.status || '').toLowerCase() === 'collecting_details';
-      const targetKey = isCollecting ? 'CustomerServiceCall' : 'ServiceRequestTracking';
+      const targetKey = isCollecting ? 'ServiceRequestDetails' : 'ServiceRequestTracking';
       if (activeRoute.key !== targetKey || activeRoute.params?.requestId !== activeRequest.id) {
         openRoute({
           key: targetKey,

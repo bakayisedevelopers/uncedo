@@ -6,6 +6,7 @@ import HelperDetailsPage from './pages/HelperDetailsPage';
 import HelperAgreementsPage from './pages/HelperAgreementsPage';
 import LoginPage from './pages/LoginPage';
 import HelpersPage from './pages/ProvidersPage';
+import ServiceBulkImagesPage from './pages/ServiceBulkImagesPage';
 import ServiceDetailsPage from './pages/ServiceDetailsPage';
 import ServicesPage from './pages/ServicesPage';
 import CustomersPage from './pages/CustomersPage';
@@ -27,6 +28,7 @@ export default function App() {
         <Route path="/helpers" element={<HelpersPage />} />
         <Route path="/helpers/:helperId" element={<HelperDetailsPage />} />
         <Route path="/services" element={<ServicesPage />} />
+        <Route path="/services/bulk-images" element={<ServiceBulkImagesPage />} />
         <Route path="/services/:serviceId" element={<ServiceDetailsPage />} />
         <Route path="/customers" element={<CustomersPage />} />
         <Route path="/helper-agreements" element={<HelperAgreementsPage />} />
