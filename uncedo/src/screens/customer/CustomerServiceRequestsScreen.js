@@ -134,14 +134,12 @@ export function CustomerServiceRequestsScreen({ navigate }) {
       ) : filteredRequests.map((request) => {
         const statusMeta = getServiceRequestStatusMeta(request.status);
         const toneStyle = getServiceRequestToneStyle(request.status);
-        const openHistory = () => {
+        const openDetails = () => {
           navigate({
-            key: 'CustomerServiceCall',
+            key: 'ServiceRequestDetails',
             params: {
               requestId: request.id,
               parentTab: 'Requests',
-              historyOnly: true,
-              location: request.location || null,
             },
           });
         };
@@ -154,11 +152,10 @@ export function CustomerServiceRequestsScreen({ navigate }) {
               const status = String(request.status || '').toLowerCase();
               if (status === 'collecting_details') {
                 navigate({
-                  key: 'CustomerServiceCall',
+                  key: 'ServiceRequestDetails',
                   params: {
                     requestId: request.id,
                     parentTab: 'Requests',
-                    location: request.location || null,
                   },
                 });
               } else if (['completed', 'canceled', 'cancelled', 'scheduled_pending', 'expired'].includes(status)) {
@@ -225,11 +222,11 @@ export function CustomerServiceRequestsScreen({ navigate }) {
                 hitSlop={8}
                 onPress={(event) => {
                   event?.stopPropagation?.();
-                  openHistory();
+                  openDetails();
                 }}
                 style={styles.historyButton}
               >
-                <Ionicons color={colors.brandDark} name="time-outline" size={18} />
+                <Ionicons color={colors.brandDark} name="document-text-outline" size={18} />
               </Pressable>
               <Ionicons color={colors.muted} name="chevron-forward" size={18} />
             </View>
