@@ -16,6 +16,10 @@ export function CustomerPaymentsScreen({ navigate }) {
   const [message, setMessage] = useState('');
   const walletBalance = Number(wallet?.balance || 0);
   const hasOutstandingBalance = walletBalance < 0;
+  const formatMoney = (value) => {
+    const normalized = Math.round(Number(value || 0));
+    return Number.isFinite(normalized) ? `R${normalized}` : 'R0';
+  };
 
   useEffect(() => subscribeToCustomerWallet(user?.uid, setWallet, (nextError) => setError(nextError.message)), [user?.uid]);
 
@@ -37,11 +41,11 @@ export function CustomerPaymentsScreen({ navigate }) {
       <Card style={styles.sectionCard}>
         <Text style={styles.sectionTitle}>Outstanding balance</Text>
         <Text style={[styles.balance, hasOutstandingBalance ? styles.balanceDanger : styles.balancePositive]}>
-          R{walletBalance.toFixed(2)}
+          {formatMoney(walletBalance)}
         </Text>
         <Text style={[styles.copy, hasOutstandingBalance ? styles.outstandingCopy : null]}>
           {hasOutstandingBalance
-            ? `Outstanding amount owed to Uncedo: R${Math.abs(walletBalance).toFixed(2)}.`
+            ? `Outstanding amount owed to Uncedo: ${formatMoney(Math.abs(walletBalance))}.`
             : 'No outstanding balance.'}
         </Text>
       </Card>

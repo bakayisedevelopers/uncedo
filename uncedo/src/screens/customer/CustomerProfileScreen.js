@@ -1,8 +1,10 @@
+import { useEffect, useState } from 'react';
 import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import appConfig from '../../../app.json';
 import { useAuth } from '../../context/AuthContext';
 import { getCustomerOnboardingStatus } from '../../utils/onboarding';
+import { getCurrentCustomerLocation, requestCustomerLocationPermission } from '../../services/nearbyHelpersMapService';
 import { colors } from '../../theme/colors';
 
 function getInitials(name = '') {
@@ -59,7 +61,7 @@ function ProfileRow({ icon, title, description, onPress, tone = 'default' }) {
 }
 
 export function CustomerProfileScreen({ navigate }) {
-  const { logout, user } = useAuth();
+  const { logout, setHomeLocation, user } = useAuth();
   const currentUser = user || {};
   const onboardingStatus = getCustomerOnboardingStatus(currentUser);
   const fullName = String(currentUser?.fullName || currentUser?.displayName || 'Customer').trim();
@@ -67,6 +69,36 @@ export function CustomerProfileScreen({ navigate }) {
   const photoUri = String(currentUser?.profilePhoto || currentUser?.selfieUrl || '').trim();
   const rating = getAverageRating(currentUser);
   const version = appConfig?.expo?.version || '0.1.0';
+  const savedAddress = String(currentUser?.customerProfile?.serviceAddress || '').trim() || 'Add your saved address';
+  const [liveLocation, setLiveLocation] = useState(null);
+  const [loadingLocation, setLoadingLocation] = useState(false);
+
+  const liveLocationText = liveLocation
+    ? `${Number(liveLocation.latitude).toFixed(5)}, ${Number(liveLocation.longitude).toFixed(5)}`
+    : 'Tap refresh to capture the device location.';
+
+  const refreshCurrentLocation = async () => {
+    setLoadingLocation(true);
+    try {
+      const permissionGranted = await requestCustomerLocationPermission().catch(() => false);
+      if (!permissionGranted) {
+        setLiveLocation(null);
+        return;
+      }
+
+      const nextLocation = await getCurrentCustomerLocation().catch(() => null);
+      if (nextLocation) {
+        setLiveLocation(nextLocation);
+        setHomeLocation(nextLocation);
+      }
+    } finally {
+      setLoadingLocation(false);
+    }
+  };
+
+  useEffect(() => {
+    refreshCurrentLocation().catch(() => null);
+  }, []);
 
   const openDetails = () => navigate('CustomerDetails');
   const openOnboarding = () => navigate('Onboarding');
@@ -105,6 +137,24 @@ export function CustomerProfileScreen({ navigate }) {
         <View style={styles.statusPill}>
           <Ionicons color={onboardingStatus.complete ? '#a21caf' : '#b45309'} name={onboardingStatus.complete ? 'checkmark-circle' : 'alert-circle'} size={16} />
           <Text style={styles.statusText}>{onboardingStatus.complete ? 'Profile complete' : onboardingStatus.message}</Text>
+        </View>
+
+        <View style={styles.locationCard}>
+          <View style={styles.locationRow}>
+            <Ionicons color={colors.brandDark} name="home-outline" size={16} />
+            <Text style={styles.locationLabel}>Saved address</Text>
+          </View>
+          <Text style={styles.locationValue}>{savedAddress}</Text>
+
+          <View style={styles.locationRow}>
+            <Ionicons color={colors.brandDark} name="navigate-outline" size={16} />
+            <Text style={styles.locationLabel}>Current live location</Text>
+          </View>
+          <Text style={styles.locationValue}>{liveLocationText}</Text>
+
+          <Pressable accessibilityRole="button" onPress={() => refreshCurrentLocation().catch(() => null)} style={styles.locationAction}>
+            <Text style={styles.locationActionText}>{loadingLocation ? 'Refreshing...' : 'Refresh device location'}</Text>
+          </Pressable>
         </View>
       </View>
 
@@ -262,6 +312,43 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 12,
     fontWeight: '700',
+  },
+  locationCard: {
+    backgroundColor: '#ffffff',
+    borderColor: colors.border,
+    borderRadius: 20,
+    borderWidth: 1,
+    gap: 8,
+    padding: 14,
+  },
+  locationRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 6,
+  },
+  locationLabel: {
+    color: colors.brandDark,
+    fontSize: 11,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
+  locationValue: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  locationAction: {
+    alignSelf: 'flex-start',
+    backgroundColor: colors.brandSoft,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  locationActionText: {
+    color: colors.brandDark,
+    fontSize: 12,
+    fontWeight: '800',
   },
   section: {
     gap: 12,

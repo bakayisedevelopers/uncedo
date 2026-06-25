@@ -21,6 +21,10 @@ export const FIREBASE_PUBLIC_CONFIG = {
   messagingSenderId: readPublicEnv(process.env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID, DEFAULT_FIREBASE_CONFIG.messagingSenderId),
   appId: readPublicEnv(process.env.EXPO_PUBLIC_FIREBASE_APP_ID, DEFAULT_FIREBASE_CONFIG.appId),
   measurementId: readPublicEnv(process.env.EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID, DEFAULT_FIREBASE_CONFIG.measurementId),
+  databaseURL: readPublicEnv(
+    process.env.EXPO_PUBLIC_FIREBASE_DATABASE_URL,
+    `https://${readPublicEnv(process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID, DEFAULT_FIREBASE_CONFIG.projectId)}-default-rtdb.firebaseio.com`,
+  ),
 };
 
 export const GOOGLE_MAPS_API_KEY = readPublicEnv(

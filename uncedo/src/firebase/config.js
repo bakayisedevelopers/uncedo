@@ -17,6 +17,15 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
+import {
+  connectDatabaseEmulator,
+  getDatabase,
+  onValue,
+  ref,
+  remove,
+  set,
+  update,
+} from 'firebase/database';
 import { connectStorageEmulator, getStorage } from 'firebase/storage';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
@@ -51,11 +60,13 @@ export function getFirebaseClients() {
   const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
   const auth = getFirebaseAuth(app);
   const db = getFirestore(app);
+  const realtimeDb = getDatabase(app);
   const storage = getStorage(app);
 
   if (USE_FIREBASE_EMULATORS && !emulatorsConnected) {
     connectAuthEmulator(auth, `http://${FIREBASE_EMULATOR_HOST}:9099`, { disableWarnings: true });
     connectFirestoreEmulator(db, FIREBASE_EMULATOR_HOST, 8080);
+    connectDatabaseEmulator(realtimeDb, FIREBASE_EMULATOR_HOST, 9000);
     connectStorageEmulator(storage, FIREBASE_EMULATOR_HOST, 9199);
     emulatorsConnected = true;
   }
@@ -64,6 +75,7 @@ export function getFirebaseClients() {
     app,
     auth,
     db,
+    realtimeDb,
     storage,
     firestoreModule: {
       collection,
@@ -80,6 +92,13 @@ export function getFirebaseClients() {
       updateDoc,
       where,
       writeBatch,
+    },
+    realtimeDbModule: {
+      onValue,
+      ref,
+      remove,
+      set,
+      update,
     },
   };
 }
