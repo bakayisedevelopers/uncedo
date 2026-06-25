@@ -228,7 +228,7 @@ function PricingBreakdown({ lines, total }) {
 
 // ─── Main screen ─────────────────────────────────────────────────────────────
 
-export function ServiceRequestDetailsScreen({ route, goBack, navigate }) {
+export function ServiceRequestDetailsScreen({ route, goBack }) {
   const requestId = route?.params?.requestId || '';
   const parentTab = route?.params?.parentTab || 'Requests';
   const [request, setRequest] = useState(null);
@@ -336,23 +336,6 @@ export function ServiceRequestDetailsScreen({ route, goBack, navigate }) {
 
         {/* ── Hero banner ── */}
         <HeroBanner request={request} statusMeta={statusMeta} toneStyle={toneStyle} />
-
-        <Pressable
-          accessibilityRole="button"
-          onPress={() => navigate({
-            key: 'CustomerServiceCall',
-            params: {
-              requestId,
-              parentTab,
-              historyOnly: true,
-              location: request.location || null,
-            },
-          })}
-          style={({ pressed }) => [styles.historyButton, pressed && styles.historyButtonPressed]}
-        >
-          <Ionicons color={colors.brandDark} name="time-outline" size={18} />
-          <Text style={styles.historyButtonText}>Open chat history</Text>
-        </Pressable>
 
         {/* ── Progress stepper ── */}
         <View style={styles.sectionCard}>

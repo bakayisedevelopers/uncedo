@@ -195,7 +195,7 @@ function AvatarMarker({ initials, photoUri, isCurrentUser = false, heading = nul
     return (
       <View style={styles.navigationArrowContainer}>
         <View style={{ transform: [{ rotate: `${rotation - 45}deg` }] }}>
-          <Ionicons name="navigation" size={24} color="#3b82f6" />
+          <View style={styles.navigationArrowShape} />
         </View>
       </View>
     );
@@ -651,9 +651,9 @@ const styles = StyleSheet.create({
   },
   navigationArrowContainer: {
     alignItems: 'center',
-    justifyContent: 'center',
     backgroundColor: '#ffffff',
     borderRadius: 22,
+    justifyContent: 'center',
     width: 44,
     height: 44,
     borderWidth: 3,
@@ -663,6 +663,16 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.22,
     shadowRadius: 4,
     elevation: 5,
+  },
+  navigationArrowShape: {
+    width: 0,
+    height: 0,
+    borderLeftWidth: 10,
+    borderRightWidth: 10,
+    borderBottomWidth: 22,
+    borderLeftColor: 'transparent',
+    borderRightColor: 'transparent',
+    borderBottomColor: '#3b82f6',
   },
   controls: {
     gap: 8,

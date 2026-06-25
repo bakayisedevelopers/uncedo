@@ -29,6 +29,19 @@ function normalizeImage(image) {
   };
 }
 
+function dedupeImages(images = []) {
+  const seen = new Set();
+  return (Array.isArray(images) ? images : [])
+    .map(normalizeImage)
+    .filter((image) => {
+      if (!image) return false;
+      const key = String(image.objectPath || image.uri || image.id || '').trim();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
 export function normalizeServiceCatalogEntry(entry = {}, fallback = null) {
   const fallbackItem = fallback || null;
   const serviceId = String(entry.id || entry.serviceId || fallbackItem?.id || '').trim();
@@ -136,11 +149,13 @@ export async function saveServiceCatalogEntry(serviceId, updates = {}) {
   const refDoc = doc(db, 'serviceCatalog', normalizedId);
   const existing = await getDoc(refDoc);
   const current = existing.exists() ? existing.data() : {};
+  const mergedImages = updates.images ? dedupeImages([...(Array.isArray(current.images) ? current.images : []), ...updates.images]) : current.images;
 
   await setDoc(refDoc, {
     ...current,
     ...updates,
     id: normalizedId,
+    images: mergedImages,
     persisted: true,
     updatedAt: serverTimestamp(),
     createdAt: current.createdAt || serverTimestamp(),
@@ -177,6 +192,77 @@ export async function uploadServiceCatalogImages({ serviceId, files = [] }) {
   }
 
   return uploads;
+}
+
+export async function uploadSharedServiceCatalogImages({ assignments = [], servicesById = {} }) {
+  const clients = await getFirebaseClients();
+  if (!clients || !Array.isArray(assignments) || !assignments.length) {
+    return [];
+  }
+
+  const { db, storage, firestoreModule } = clients;
+  const { doc, getDoc, serverTimestamp, setDoc } = firestoreModule;
+  const results = [];
+
+  for (const assignment of assignments) {
+    const file = assignment?.file;
+    const serviceIds = [...new Set((Array.isArray(assignment?.serviceIds) ? assignment.serviceIds : []).map((item) => String(item || '').trim()).filter(Boolean))];
+    if (!file || !serviceIds.length) continue;
+
+    const safeName = String(file.name || `service_${Date.now()}.jpg`).replace(/[^a-zA-Z0-9._-]/g, '_');
+    const objectPath = `service-catalog/shared/${Date.now()}-${safeName}`;
+    const storageRef = ref(storage, objectPath);
+
+    await uploadBytes(storageRef, file, {
+      contentType: file.type || 'image/jpeg',
+      cacheControl: 'public,max-age=3600',
+    });
+
+    const image = {
+      id: `img_${Math.random().toString(36).slice(2, 10)}`,
+      uri: await getDownloadURL(storageRef),
+      objectPath,
+      uploadedAt: new Date().toISOString(),
+    };
+
+    for (const serviceId of serviceIds) {
+      const serviceMeta = servicesById?.[serviceId] || {};
+      const refDoc = doc(db, 'serviceCatalog', serviceId);
+      const existing = await getDoc(refDoc);
+      const current = existing.exists() ? existing.data() : {};
+
+      await setDoc(refDoc, {
+        ...current,
+        id: serviceId,
+        categoryId: String(current.categoryId || serviceMeta.categoryId || '').trim(),
+        categoryName: String(current.categoryName || serviceMeta.categoryName || '').trim(),
+        label: String(current.label || current.skillName || serviceMeta.label || serviceMeta.skillName || serviceId).trim(),
+        promptLabel: String(
+          current.promptLabel
+          || current.label
+          || serviceMeta.promptLabel
+          || serviceMeta.label
+          || serviceMeta.skillName
+          || serviceId
+        ).trim(),
+        description: String(current.description || serviceMeta.description || '').trim(),
+        kind: String(current.kind || serviceMeta.kind || 'service').trim().toLowerCase(),
+        active: current.active !== false,
+        approved: current.approved !== false,
+        persisted: true,
+        images: dedupeImages([...(Array.isArray(current.images) ? current.images : []), image]),
+        updatedAt: serverTimestamp(),
+        createdAt: current.createdAt || serverTimestamp(),
+      }, { merge: true });
+    }
+
+    results.push({
+      image,
+      serviceIds,
+    });
+  }
+
+  return results;
 }
 
 export async function deleteServiceCatalogImage(objectPath = '') {
