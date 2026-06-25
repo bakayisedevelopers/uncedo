@@ -156,13 +156,14 @@ export function mapServiceRequestToHistoryItem(request) {
     statusDetail: request.statusDetail || '',
     totalAmount: mapPricingTotal(request.pricingSnapshot),
     startedAt: request.helperAssignment?.acceptedAt || request.updatedAt || request.createdAt || null,
-    completedAt: request.completedAt || request.updatedAt || request.createdAt || null,
+    completedAt: request.completedAt || request.canceledAt || request.endedAt || request.updatedAt || request.createdAt || null,
     createdAt: request.createdAt || null,
     updatedAt: request.updatedAt || null,
     address: request.requestPayload?.serviceAddress || request.serviceAddress || 'Location pending',
     helperAssignment: request.helperAssignment || null,
     requestPayload: request.requestPayload || {},
     pricingSnapshot: request.pricingSnapshot || null,
+    helperPayoutBreakdown: request.helperPayoutBreakdown || null,
     raw: request,
   };
 }
@@ -283,7 +284,6 @@ export async function acceptServiceRequestOffer({
     }
 
     const acceptedAt = new Date().toISOString();
-    const nextRecentAssignmentsCount = Number(helper?.metrics?.recentAssignmentsCount || 0) + 1;
 
     transaction.update(requestRef, {
       status: 'accepted',
@@ -309,10 +309,6 @@ export async function acceptServiceRequestOffer({
 
     transaction.set(helperRef, {
       activeServiceRequestId: requestId,
-      metrics: {
-        ...(helper.metrics || {}),
-        recentAssignmentsCount: nextRecentAssignmentsCount,
-      },
       updatedAt: serverTimestamp(),
     }, { merge: true });
   });
