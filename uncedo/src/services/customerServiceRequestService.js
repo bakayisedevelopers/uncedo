@@ -555,6 +555,7 @@ export async function finalizeCustomerServiceRequest({
     : timingDetails.timingPreference === 'later'
       ? 'Scheduled for later. Matching will begin closer to the requested time.'
       : 'Searching for a helper.';
+  const matchingStartedAtMs = timingDetails.timingPreference === 'later' ? null : Date.now();
 
   const { db } = getFirebaseClients();
   const requestRef = doc(db, 'serviceRequests', requestId);
@@ -591,6 +592,7 @@ export async function finalizeCustomerServiceRequest({
     lastOfferAt: null,
     offerRevision: 0,
     helperAssignment: null,
+    matchingStartedAtMs,
     serviceAddress,
     location,
     requestPayload: {
