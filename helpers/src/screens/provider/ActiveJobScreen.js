@@ -317,14 +317,10 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
     const destinationBearing = activeJobDestination
       ? getBearingBetweenCoordinates(nextCoordinate, activeJobDestination)
       : null;
-    if (travelBearing !== null) {
+    if (deviceHeading !== null && deviceHeading >= 0) {
+      setNavigationHeading((currentHeading) => smoothHeading(currentHeading ?? deviceHeading, deviceHeading, 0.24));
+    } else if (travelBearing !== null) {
       setNavigationHeading((currentHeading) => smoothHeading(currentHeading ?? travelBearing, travelBearing, 0.24));
-    } else if (deviceHeading !== null) {
-      setNavigationHeading((currentHeading) => (
-        Number.isFinite(currentHeading)
-          ? smoothHeading(currentHeading, deviceHeading, 0.24)
-          : deviceHeading
-      ));
     } else if (destinationBearing !== null) {
       setNavigationHeading((currentHeading) => (Number.isFinite(currentHeading) ? currentHeading : destinationBearing));
     }
@@ -372,34 +368,31 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
 
     const startWatchingLocation = async () => {
       try {
-        locationSubscriptionRef.current = await watchHelperLocation(async (location) => {
-          if (active) {
-            setCurrentLocation(location);
-          }
+        locationSubscriptionRef.current = await watchHelperLocation(
+          async (location) => {
+            if (active) {
+              setCurrentLocation(location);
+            }
 
-          try {
-            const trackingUpdate = await processForegroundActiveTrackingLocation(location);
-            const nextRouteCoordinates = trackingUpdate?.routeSnapshot?.routeCoordinates || [];
-            if (active && nextRouteCoordinates.length > 1) {
-              setRouteCoordinates(nextRouteCoordinates);
-              setRouteDistanceMeters(Number.isFinite(Number(trackingUpdate?.routeSnapshot?.distanceMeters)) ? Number(trackingUpdate.routeSnapshot.distanceMeters) : null);
-              setRouteDurationSeconds(Number.isFinite(Number(trackingUpdate?.routeSnapshot?.durationSeconds)) ? Number(trackingUpdate.routeSnapshot.durationSeconds) : null);
-              setRouteError('');
-            } else if (active && activeJobDestination) {
-              setRouteCoordinates([]);
-              setRouteDistanceMeters(null);
-              setRouteDurationSeconds(null);
-              setRouteError('Route unavailable right now.');
+            try {
+              const trackingUpdate = await processForegroundActiveTrackingLocation(location);
+              const nextRouteCoordinates = trackingUpdate?.routeSnapshot?.routeCoordinates || [];
+              if (active && nextRouteCoordinates.length > 1) {
+                setRouteCoordinates(nextRouteCoordinates);
+                setRouteDistanceMeters(Number.isFinite(Number(trackingUpdate?.routeSnapshot?.distanceMeters)) ? Number(trackingUpdate.routeSnapshot.distanceMeters) : null);
+                setRouteDurationSeconds(Number.isFinite(Number(trackingUpdate?.routeSnapshot?.durationSeconds)) ? Number(trackingUpdate.routeSnapshot.durationSeconds) : null);
+                setRouteError('');
+              }
+            } catch (error) {
+              console.warn('[helpers:active-job-location]', error?.message || error);
             }
-          } catch (error) {
-            if (active && activeJobDestination) {
-              setRouteCoordinates([]);
-              setRouteDistanceMeters(null);
-              setRouteDurationSeconds(null);
-              setRouteError(error?.message || 'Route unavailable right now.');
-            }
+          },
+          {
+            accuracy: Location.Accuracy.BestForNavigation,
+            distanceInterval: 5,
+            timeInterval: 2000,
           }
-        });
+        );
       } catch (error) {
         console.warn('[helpers:active-job-location]', error?.message || error);
       }
@@ -593,16 +586,35 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
         const nextHelperLocation = data.helperLocation || null;
 
         if (nextHelperLocation?.latitude && nextHelperLocation?.longitude) {
-          setCurrentLocation(nextHelperLocation);
+          setCurrentLocation((currentVal) => {
+            if (currentVal === null) {
+              return nextHelperLocation;
+            }
+            return currentVal;
+          });
         }
 
-        setRouteCoordinates(nextRouteCoordinates);
-        setRouteDistanceMeters(nextDistance);
-        setRouteDurationSeconds(nextDuration);
-        if (!nextRouteCoordinates.length && nextHelperLocation?.latitude && nextHelperLocation?.longitude && activeJobDestination) {
-          setRouteError('Route unavailable right now.');
-        } else {
+        if (nextRouteCoordinates.length > 1) {
+          setRouteCoordinates(nextRouteCoordinates);
           setRouteError('');
+        } else {
+          setRouteCoordinates((currentCoords) => {
+            if (!currentCoords || currentCoords.length === 0) {
+              if (nextHelperLocation?.latitude && nextHelperLocation?.longitude && activeJobDestination) {
+                setRouteError('Route unavailable right now.');
+              }
+              return [];
+            }
+            return currentCoords;
+          });
+        }
+
+        if (nextDistance !== null) {
+          setRouteDistanceMeters(nextDistance);
+        }
+
+        if (nextDuration !== null) {
+          setRouteDurationSeconds(nextDuration);
         }
       });
     } catch (error) {
