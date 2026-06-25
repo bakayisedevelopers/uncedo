@@ -435,6 +435,14 @@ const HELPER_PAYOUT_COLLECTION = 'helperWeeklyPayouts';
 const PAYOUT_LOOKBACK_WEEKS = 12;
 const DEFAULT_CANCELLATION_RATE = 0.08;
 const FAIRNESS_WORKLOAD_CAP = 10;
+const HELPER_DISPATCH_MAX_RADIUS_KM = 70;
+const HELPER_DISPATCH_DISTANCE_BANDS = [
+  { key: 'within_5km', minKm: 0, maxKm: 5 },
+  { key: 'within_10km', minKm: 5, maxKm: 10 },
+  { key: 'within_20km', minKm: 10, maxKm: 20 },
+  { key: 'within_30km', minKm: 20, maxKm: 30 },
+  { key: 'within_70km', minKm: 30, maxKm: HELPER_DISPATCH_MAX_RADIUS_KM },
+];
 const TUTOR_STATS_MAX_EVENTS = 100;
 const TUTOR_STATS_ROLLING_DAYS = 30;
 const TUTOR_STATS_RECENT_ASSIGNMENT_DAYS = 7;
@@ -486,6 +494,14 @@ const ACTIVE_SERVICE_REQUEST_STATUSES = new Set([
   SERVICE_REQUEST_STATUS.MATCHING,
   SERVICE_REQUEST_STATUS.HELPER_FOUND,
   SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE,
+]);
+const HELPER_BUSY_REQUEST_STATUSES = new Set([
+  SERVICE_REQUEST_STATUS.ACCEPTED,
+  SERVICE_REQUEST_STATUS.EN_ROUTE,
+  'driving',
+  'buying_resources',
+  SERVICE_REQUEST_STATUS.ARRIVED,
+  'work_started',
 ]);
 let visionClient = null;
 const GEMINI_FLASH_EXTRACTION_SOURCE = 'gemini_2_5_flash_after_tutor_accept';
@@ -1496,11 +1512,16 @@ function buildActiveServiceCatalogIndex(entries = []) {
     .filter((entry) => entry.active !== false && entry.approved !== false);
 
   const byCategoryId = new Map();
+  const byId = new Map();
   const activeCatalogIds = new Set();
   const activeTokens = new Set();
 
   activeEntries.forEach((entry) => {
-    activeCatalogIds.add(normalizeServiceToken(entry.id));
+    const entryIdToken = normalizeServiceToken(entry.id);
+    activeCatalogIds.add(entryIdToken);
+    if (entryIdToken) {
+      byId.set(entryIdToken, entry);
+    }
     [entry.id, entry.label, entry.categoryId, entry.categoryName].forEach((value) => {
       const token = normalizeServiceToken(value);
       if (token) activeTokens.add(token);
@@ -1519,16 +1540,29 @@ function buildActiveServiceCatalogIndex(entries = []) {
     activeEntries,
     activeCatalogIds,
     activeTokens,
+    byId,
     byCategoryId,
   };
 }
 
-function expandRequestedServiceTokens(requestServiceIds = []) {
+function expandRequestedServiceTokens(requestServiceIds = [], serviceCatalogIndex = buildActiveServiceCatalogIndex([])) {
   const tokens = new Set();
   (Array.isArray(requestServiceIds) ? requestServiceIds : []).forEach((serviceId) => {
     const normalized = normalizeServiceToken(serviceId);
     if (!normalized) return;
     tokens.add(normalized);
+    const catalogEntry = serviceCatalogIndex.byId?.get(normalized) || null;
+    if (catalogEntry) {
+      tokens.add(normalizeServiceToken(catalogEntry.label));
+      (Array.isArray(catalogEntry.includedServiceIds) ? catalogEntry.includedServiceIds : []).forEach((includedId) => {
+        const includedToken = normalizeServiceToken(includedId);
+        if (includedToken) {
+          tokens.add(includedToken);
+        }
+      });
+      return;
+    }
+
     const aliases = REQUEST_SERVICE_ALIASES[normalized] || [];
     aliases.forEach((alias) => {
       const aliasToken = normalizeServiceToken(alias);
@@ -1581,56 +1615,53 @@ function helperSupportsCategory(helper = {}, categoryId = '', requestServiceIds 
     return false;
   }
 
-  const supportedServiceIds = [
-    ...(HELPER_CATEGORY_SERVICE_MAP[String(categoryId || '').trim().toLowerCase()] || []),
-    categoryToken,
-  ].filter(Boolean);
-  const requestedTokens = expandRequestedServiceTokens(requestServiceIds);
+  const requestedTokens = expandRequestedServiceTokens(requestServiceIds, catalogIndex);
   const helperServices = Array.isArray(helper.services) ? helper.services : [];
+  const activeCategorySkills = helperServices.flatMap((entry) => {
+    const serviceIdToken = normalizeServiceToken(entry?.serviceId || '');
+    return (Array.isArray(entry?.skills) ? entry.skills : [])
+      .filter((skill) => {
+        if (skill?.active === false || String(skill?.status || '').toLowerCase() !== 'approved') {
+          return false;
+        }
+        if (!skillBelongsToActiveCatalog(skill, catalogIndex)) {
+          return false;
+        }
 
-  return helperServices.some((entry) => {
-    const serviceId = String(entry?.serviceId || '').trim().toLowerCase();
-    if (!supportedServiceIds.includes(serviceId)) return false;
-
-    const allSkillTokens = Array.isArray(entry?.skills)
-      ? entry.skills.flatMap((skill) => {
-        const nameToken = normalizeServiceToken(skill?.name || '');
         const catalogToken = normalizeServiceToken(skill?.catalogId || skill?.serviceCatalogId || '');
-        return [nameToken, catalogToken].filter(Boolean);
-      }).filter(Boolean)
-      : [];
-    const activeSkills = Array.isArray(entry?.skills)
-      ? entry.skills.filter((skill) => (
-        skill?.active !== false
-          && String(skill?.status || '').toLowerCase() === 'approved'
-          && skillBelongsToActiveCatalog(skill, catalogIndex)
-          && (
-            (Array.isArray(skill?.pictures) && skill.pictures.length > 0)
-            || categoryEntries.some((catalogEntry) => (
-              String(catalogEntry.kind || '').toLowerCase() === 'bundle'
-              && normalizeServiceToken(catalogEntry.id) === normalizeServiceToken(skill?.catalogId || skill?.serviceCatalogId || '')
-            ))
+        const catalogEntry = catalogIndex.byId?.get(catalogToken) || null;
+        const skillCategoryToken = normalizeServiceToken(
+          catalogEntry?.categoryId || catalogEntry?.categoryName || serviceIdToken,
+        );
+        if (skillCategoryToken !== categoryToken) {
+          return false;
+        }
+
+        return (
+          (Array.isArray(skill?.pictures) && skill.pictures.length > 0)
+          || (
+            catalogEntry
+            && String(catalogEntry.kind || '').toLowerCase() === 'bundle'
+            && catalogEntry.inheritBundleImages !== false
           )
-      ))
-      : [];
-
-    if (!activeSkills.length) return false;
-    if (!requestedTokens.length) return true;
-
-    const helperSkillTokens = activeSkills
-      .flatMap((skill) => {
-        const nameToken = normalizeServiceToken(skill?.name || '');
-        const catalogToken = normalizeServiceToken(skill?.catalogId || skill?.serviceCatalogId || '');
-        return [nameToken, catalogToken].filter(Boolean);
+        );
       })
-      .filter(Boolean);
-    const hasExactConfiguredMatch = requestedTokens.some((token) => allSkillTokens.includes(token));
-    if (hasExactConfiguredMatch) {
-      return requestedTokens.some((token) => helperSkillTokens.includes(token));
-    }
-
-    return true;
+      .map((skill) => ({
+        ...skill,
+        _catalogToken: normalizeServiceToken(skill?.catalogId || skill?.serviceCatalogId || ''),
+        _nameToken: normalizeServiceToken(skill?.name || ''),
+      }));
   });
+
+  if (!activeCategorySkills.length) {
+    return false;
+  }
+  if (!requestedTokens.length) {
+    return true;
+  }
+
+  const helperSkillTokens = activeCategorySkills.flatMap((skill) => [skill._catalogToken, skill._nameToken]).filter(Boolean);
+  return requestedTokens.some((token) => helperSkillTokens.includes(token));
 }
 
 const CUSTOMER_RECOMMENDATION_EVENT_WEIGHTS = {
@@ -1963,6 +1994,30 @@ function getHelperRecentAssignmentsCount(helper = {}) {
   return normalizePositiveNumber(helper?.metrics?.recentAssignmentsCount, 0);
 }
 
+function getServiceRequestLocationSnapshot(request = {}) {
+  const directLocation = request?.location || {};
+  const payloadLocation = request?.requestPayload?.location || {};
+  const latitude = normalizeCoordinate(directLocation.latitude ?? payloadLocation.latitude);
+  const longitude = normalizeCoordinate(directLocation.longitude ?? payloadLocation.longitude);
+
+  if (latitude === null || longitude === null) {
+    return null;
+  }
+
+  return { latitude, longitude };
+}
+
+function getDispatchDistanceBand(distanceKm) {
+  const normalizedDistance = Number(distanceKm);
+  if (!Number.isFinite(normalizedDistance) || normalizedDistance < 0) {
+    return null;
+  }
+
+  return HELPER_DISPATCH_DISTANCE_BANDS.find((band) => (
+    normalizedDistance >= band.minKm && normalizedDistance <= band.maxKm
+  )) || null;
+}
+
 function rankHelpersWithFairness(candidates = []) {
   const remaining = [...candidates]
     .map((helper) => ({
@@ -2014,11 +2069,7 @@ async function getHelperQueueForServiceRequest(request = {}) {
       .where('onlineStatus', '==', 'online')
       .get(),
     db.collection('serviceRequests')
-      .where('status', 'in', [
-        SERVICE_REQUEST_STATUS.ACCEPTED,
-        SERVICE_REQUEST_STATUS.EN_ROUTE,
-        SERVICE_REQUEST_STATUS.ARRIVED,
-      ])
+      .where('status', 'in', [...HELPER_BUSY_REQUEST_STATUSES])
       .get(),
     getLiveServiceCatalogEntries(),
   ]);
@@ -2039,8 +2090,81 @@ async function getHelperQueueForServiceRequest(request = {}) {
     .map((item) => ({ uid: item.id, ...item.data() }))
     .filter((helper) => !busyHelperIds.has(helper.uid))
     .filter((helper) => isHelperDispatchEligible(helper, categoryId, requestServiceIds, catalogIndex));
+  const requestLocation = getServiceRequestLocationSnapshot(request);
 
-  return rankHelpersWithFairness(eligibleHelpers);
+  if (!requestLocation) {
+    return rankHelpersWithFairness(eligibleHelpers);
+  }
+
+  const helpersByBand = new Map(HELPER_DISPATCH_DISTANCE_BANDS.map((band) => [band.key, []]));
+
+  eligibleHelpers.forEach((helper) => {
+    const helperLocation = getLiveLocationSnapshot(helper);
+    if (!helperLocation) {
+      return;
+    }
+
+    const distanceKm = computeDistanceKm(requestLocation, helperLocation);
+    if (!Number.isFinite(distanceKm) || distanceKm > HELPER_DISPATCH_MAX_RADIUS_KM) {
+      return;
+    }
+
+    const band = getDispatchDistanceBand(distanceKm);
+    if (!band) {
+      return;
+    }
+
+    helpersByBand.get(band.key)?.push({
+      ...helper,
+      dispatchDistanceKm: Number(distanceKm.toFixed(3)),
+      dispatchDistanceBand: band.key,
+    });
+  });
+
+  return HELPER_DISPATCH_DISTANCE_BANDS.flatMap((band) => {
+    const bandHelpers = helpersByBand.get(band.key) || [];
+    if (!bandHelpers.length) {
+      return [];
+    }
+
+    return rankHelpersWithFairness(bandHelpers);
+  });
+}
+
+function mergePreservedHelperQueue({
+  preservedQueue = [],
+  rebuiltQueue = [],
+  excludeHelperIds = [],
+}) {
+  const excludedIds = new Set(
+    (Array.isArray(excludeHelperIds) ? excludeHelperIds : [])
+      .map((value) => String(value || '').trim())
+      .filter(Boolean),
+  );
+  const rebuiltIdSet = new Set(
+    (Array.isArray(rebuiltQueue) ? rebuiltQueue : [])
+      .map((value) => String(value || '').trim())
+      .filter(Boolean),
+  );
+  const merged = [];
+  const seen = new Set();
+
+  const pushId = (value) => {
+    const normalized = String(value || '').trim();
+    if (!normalized || seen.has(normalized) || excludedIds.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    merged.push(normalized);
+  };
+
+  (Array.isArray(preservedQueue) ? preservedQueue : [])
+    .filter((value) => rebuiltIdSet.has(String(value || '').trim()))
+    .forEach(pushId);
+
+  (Array.isArray(rebuiltQueue) ? rebuiltQueue : []).forEach(pushId);
+
+  return merged;
 }
 
 exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{requestId}', async (event) => {
@@ -2072,10 +2196,13 @@ exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{reques
       return;
     }
 
-    let queue = Array.isArray(candidateQueue) ? [...candidateQueue] : [];
-    if (request.status === SERVICE_REQUEST_STATUS.HELPER_FOUND && request.currentOfferHelperId) {
-      queue = queue.filter((id) => id !== request.currentOfferHelperId);
-    }
+    const queue = mergePreservedHelperQueue({
+      preservedQueue: request.helperQueue,
+      rebuiltQueue: candidateQueue,
+      excludeHelperIds: request.status === SERVICE_REQUEST_STATUS.HELPER_FOUND && request.currentOfferHelperId
+        ? [request.currentOfferHelperId]
+        : [],
+    });
 
     if (!queue.length) {
       transaction.update(requestRef, {
@@ -2194,6 +2321,19 @@ exports.trackHelperRequestStats = onDocumentWritten('serviceRequests/{requestId}
       || Number(before?.offerRevision || 0) !== offerRevision;
 
     if (didChangeOffer) {
+      await createUserNotification({
+        userId: afterOfferHelperId,
+        title: 'New helper request',
+        message: `A ${after.topic || after.subject || 'service'} request is waiting for your response.`,
+        type: 'helper_offer',
+        requestId,
+        targetPath: '/app/helper',
+        metadata: {
+          offerRevision,
+          offerExpiresAt: after.offerExpiresAt || null,
+        },
+      });
+
       await recordHelperOfferLifecycleEvent({
         helperId: afterOfferHelperId,
         requestId,
@@ -8233,6 +8373,46 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
   });
 });
 
+function buildServiceRequestIdCandidates(rawRequestId = '') {
+  const directValue = String(rawRequestId || '').trim();
+  if (!directValue) {
+    return [];
+  }
+
+  const decodedValue = (() => {
+    try {
+      return decodeURIComponent(directValue);
+    } catch (error) {
+      return directValue;
+    }
+  })();
+  const pathSegment = decodedValue
+    .split('/')
+    .map((part) => String(part || '').trim())
+    .filter(Boolean)
+    .pop() || '';
+
+  return [...new Set([directValue, decodedValue, pathSegment].filter(Boolean))];
+}
+
+async function resolveServiceRequestSnapshot(rawRequestId = '') {
+  const requestIdCandidates = buildServiceRequestIdCandidates(rawRequestId);
+
+  for (const requestId of requestIdCandidates) {
+    const requestRef = db.collection('serviceRequests').doc(requestId);
+    const requestSnap = await requestRef.get();
+    if (requestSnap.exists) {
+      return { requestId, requestRef, requestSnap };
+    }
+  }
+
+  return {
+    requestId: String(rawRequestId || '').trim(),
+    requestRef: null,
+    requestSnap: null,
+  };
+}
+
 exports.cancelCustomerServiceRequest = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRETS] }, async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, message: 'Method not allowed' });
@@ -8251,16 +8431,16 @@ exports.cancelCustomerServiceRequest = onRequest({ cors: true, secrets: [UNCEDO_
     return;
   }
 
-  const requestId = String(req.body?.requestId || '').trim();
+  const rawRequestId = String(req.body?.requestId || '').trim();
   const canceledReason = String(req.body?.reason || '').trim();
-  if (!requestId) {
+  if (!rawRequestId) {
     res.status(400).json({ success: false, message: 'Missing requestId.' });
     return;
   }
 
-  const requestRef = db.collection('serviceRequests').doc(requestId);
-  const requestSnap = await requestRef.get();
-  if (!requestSnap.exists) {
+  const resolvedRequest = await resolveServiceRequestSnapshot(rawRequestId);
+  const { requestId, requestRef, requestSnap } = resolvedRequest;
+  if (!requestRef || !requestSnap?.exists) {
     res.status(404).json({ success: false, message: 'Service request not found.' });
     return;
   }
