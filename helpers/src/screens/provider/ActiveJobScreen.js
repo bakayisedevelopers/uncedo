@@ -18,8 +18,9 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
-import { doc, onSnapshot } from 'firebase/firestore';
+import { doc, serverTimestamp, updateDoc } from 'firebase/firestore';
 import { HelperMapPlaceholder } from '../../components/app/HelperMapPlaceholder';
 import { useAuth } from '../../context/AuthContext';
 import { useHelpersApp } from '../../context/HelpersAppContext';
@@ -35,6 +36,8 @@ import {
 import { watchHelperLocation } from '../../services/helperLocationService';
 import { decodePolyline } from '../../services/routingService';
 import { submitServiceRequestRating } from '../../services/serviceRequestService';
+import { subscribeToLiveTracking } from '../../services/liveTrackingRealtimeService';
+import { uploadLocalFile } from '../../services/storageService';
 import { colors } from '../../theme/colors';
 import { formatCurrency } from '../../utils/payouts';
 
@@ -255,6 +258,8 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
   const [ratingComment, setRatingComment] = useState('');
   const [ratingTarget, setRatingTarget] = useState(null);
   const [submittingRating, setSubmittingRating] = useState(false);
+  const [proofPhotos, setProofPhotos] = useState([]);
+  const [uploadingProof, setUploadingProof] = useState(false);
   const [nowTime, setNowTime] = useState(Date.now());
   const locationSubscriptionRef = useRef(null);
   const previousNavigationLocationRef = useRef(null);
@@ -272,7 +277,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
     () => normalizeCoordinate(activeJob?.location),
     [activeJob?.location],
   );
-  const activeJobDestination = activeJobCoordinate || resolvedCustomerLocation || null;
+  const activeJobDestination = resolvedCustomerLocation || activeJobCoordinate || null;
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
   const topInset = Math.max(0, Number(systemInsets?.top || 0));
@@ -309,6 +314,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
         distanceMeters: null,
         durationSeconds: null,
       };
+      setProofPhotos([]);
       return;
     }
 
@@ -324,6 +330,11 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
       setRouteDurationSeconds(null);
       setRouteError('');
       setTrackingDocument(null);
+      setShowCompletionModal(false);
+      setShowRatingModal(false);
+      setProofPhotos([]);
+      setRating(5);
+      setRatingComment('');
     }
   }, [activeJob?.id]);
 
@@ -450,6 +461,46 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
       locationSubscriptionRef.current = null;
     };
   }, [activeJob?.requestId, activeJobDestination]);
+
+  useEffect(() => {
+    if (!activeJob?.requestId) {
+      setTrackingDocument(null);
+      return () => {};
+    }
+
+    let cancelled = false;
+    let unsubscribe = null;
+
+    subscribeToLiveTracking(activeJob.requestId, (data) => {
+      if (cancelled) return;
+      setTrackingDocument(data || null);
+
+      const nextHelperLocation = normalizeCoordinate(data?.helperLocation || null);
+      if (nextHelperLocation) {
+        setCurrentLocation((currentVal) => currentVal || nextHelperLocation);
+      }
+
+      const nextCustomerLocation = normalizeCoordinate(data?.customerLocation || data?.routeSnapshot?.lastDestination || null);
+      if (nextCustomerLocation) {
+        setResolvedCustomerLocation(nextCustomerLocation);
+      }
+    }, (error) => {
+      if (cancelled) return;
+      console.warn('[helpers:active-job-live]', error?.message || error);
+    })
+      .then((nextUnsubscribe) => {
+        unsubscribe = nextUnsubscribe;
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.warn('[helpers:active-job-live]', error?.message || error);
+      });
+
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
+  }, [activeJob?.requestId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -606,79 +657,6 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
       setRouteDurationSeconds(null);
       setRouteError('');
       setTrackingDocument(null);
-      return () => {};
-    }
-
-    setRouteError('');
-    setTrackingDocument(null);
-
-    try {
-      const { db } = getFirebaseClients();
-      return onSnapshot(doc(db, 'serviceRequests', activeJob.id, 'tracking', 'live'), (snapshot) => {
-        if (!snapshot.exists()) {
-          return;
-        }
-
-        const data = snapshot.data() || {};
-        setTrackingDocument(data);
-        const encodedPolyline = String(
-          data.routePolylineEncoded
-          || data.routePolylineOverviewEncoded
-          || ''
-        ).trim();
-        const nextRouteCoordinates = encodedPolyline ? decodePolyline(encodedPolyline) : [];
-        const nextDistance = Number.isFinite(Number(data.distanceMeters)) ? Number(data.distanceMeters) : null;
-        const nextDuration = Number.isFinite(Number(data.durationSeconds)) ? Number(data.durationSeconds) : null;
-        const nextHelperLocation = data.helperLocation || null;
-
-        if (nextHelperLocation?.latitude && nextHelperLocation?.longitude) {
-          setCurrentLocation((currentVal) => {
-            if (currentVal === null) {
-              return nextHelperLocation;
-            }
-            return currentVal;
-          });
-        }
-
-        if (nextRouteCoordinates.length > 1) {
-          lastStableRouteSnapshotRef.current = {
-            routeCoordinates: nextRouteCoordinates,
-            distanceMeters: nextDistance ?? lastStableRouteSnapshotRef.current.distanceMeters,
-            durationSeconds: nextDuration ?? lastStableRouteSnapshotRef.current.durationSeconds,
-          };
-          setRouteCoordinates(nextRouteCoordinates);
-          setRouteDistanceMeters(lastStableRouteSnapshotRef.current.distanceMeters);
-          setRouteDurationSeconds(lastStableRouteSnapshotRef.current.durationSeconds);
-          setRouteError('');
-        } else {
-          setRouteCoordinates((currentCoords) => {
-            if (!currentCoords || currentCoords.length === 0) {
-              if (nextHelperLocation?.latitude && nextHelperLocation?.longitude && activeJobDestination) {
-                setRouteError('Route unavailable right now.');
-              }
-              return [];
-            }
-            return currentCoords;
-          });
-        }
-        if (nextDistance !== null) {
-          lastStableRouteSnapshotRef.current = {
-            ...lastStableRouteSnapshotRef.current,
-            distanceMeters: nextDistance,
-          };
-          setRouteDistanceMeters(nextDistance);
-        }
-
-        if (nextDuration !== null) {
-          lastStableRouteSnapshotRef.current = {
-            ...lastStableRouteSnapshotRef.current,
-            durationSeconds: nextDuration,
-          };
-          setRouteDurationSeconds(nextDuration);
-        }
-      });
-    } catch (error) {
-      console.warn('[helpers:active-job-tracking]', error?.message || error);
       return () => {};
     }
   }, [activeJob?.id, activeJobDestination]);
@@ -890,8 +868,114 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
     }
   };
 
+  const normalizeProofAsset = (asset = {}) => ({
+    uri: String(asset?.uri || '').trim(),
+    fileName: String(asset?.fileName || asset?.uri?.split('/').pop() || `job-proof-${Date.now()}.jpg`).trim(),
+    mimeType: String(asset?.mimeType || 'image/jpeg').trim(),
+    width: Number(asset?.width || 0),
+    height: Number(asset?.height || 0),
+  });
+
+  const appendProofAssets = (assets = []) => {
+    const nextAssets = assets
+      .map(normalizeProofAsset)
+      .filter((asset) => asset.uri)
+      .slice(0, 10);
+
+    if (!nextAssets.length) return;
+
+    setProofPhotos((current) => [...current, ...nextAssets].slice(0, 10));
+  };
+
+  const handlePickProofFromLibrary = async () => {
+    try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (permission?.status !== 'granted') {
+        Alert.alert('Photos required', 'Gallery access is required to attach work proof photos.');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        allowsMultipleSelection: true,
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 0.8,
+        selectionLimit: 10,
+      });
+
+      if (result.canceled) return;
+      appendProofAssets(result.assets || []);
+    } catch (error) {
+      Alert.alert('Photo selection failed', error.message || 'Unable to open the gallery right now.');
+    }
+  };
+
+  const handleCaptureProofPhoto = async () => {
+    try {
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      if (permission?.status !== 'granted') {
+        Alert.alert('Camera required', 'Camera access is required to capture work proof photos.');
+        return;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        cameraType: ImagePicker.CameraType.back,
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 0.8,
+      });
+
+      if (result.canceled) return;
+      appendProofAssets(result.assets || []);
+    } catch (error) {
+      Alert.alert('Camera failed', error.message || 'Unable to open the camera right now.');
+    }
+  };
+
+  const removeProofPhoto = (uri) => {
+    setProofPhotos((current) => current.filter((photo) => photo.uri !== uri));
+  };
+
+  const uploadCompletionProofPhotos = async () => {
+    if (!activeJob?.requestId || !user?.uid || !proofPhotos.length) {
+      throw new Error('Add at least one proof photo before finalizing this job.');
+    }
+
+    setUploadingProof(true);
+    try {
+      const uploads = [];
+      for (const [index, photo] of proofPhotos.entries()) {
+        const upload = await uploadLocalFile({
+          userId: user.uid,
+          fileUri: photo.uri,
+          fileName: photo.fileName || `job-proof-${index + 1}.jpg`,
+          mimeType: photo.mimeType || 'image/jpeg',
+          pathPrefix: 'helper-completion-proof',
+          objectPath: `helper-completion-proof/${user.uid}/${activeJob.requestId}/${Date.now()}-${index + 1}-${photo.fileName || 'proof.jpg'}`,
+        });
+        uploads.push(upload);
+      }
+
+      const { db } = getFirebaseClients();
+      await updateDoc(doc(db, 'serviceRequests', activeJob.requestId), {
+        completionProofAttachments: uploads,
+        completionProofCount: uploads.length,
+        completionProofCapturedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      return uploads;
+    } finally {
+      setUploadingProof(false);
+    }
+  };
+
   const handleCompleteJob = async () => {
     try {
+      if (!proofPhotos.length) {
+        Alert.alert('Proof required', 'Please add at least one photo before finalizing this job.');
+        return;
+      }
+
+      await uploadCompletionProofPhotos();
       const success = await actions.completeActiveJobWithBilling();
       if (!success) {
         Alert.alert('Completion failed', 'Unable to complete this job right now.');
@@ -899,6 +983,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
       }
 
       setShowCompletionModal(false);
+      setProofPhotos([]);
       setShowRatingModal(true);
     } catch (error) {
       Alert.alert('Error', error.message || 'Unable to complete this job.');
@@ -906,11 +991,14 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
   };
 
   const renderRatingModal = () => (
-    <Modal visible={showRatingModal} transparent animationType="slide">
-      <View style={styles.modalBg}>
-        <View style={styles.modalCard}>
-          <Text style={styles.modalTitle}>Rate {ratingTarget?.customerName || 'customer'}</Text>
-          <Text style={styles.modalText}>Leave quick feedback about this job experience.</Text>
+    <Modal visible={showRatingModal} animationType="fade">
+      <View style={styles.ratingOverlay}>
+        <Pressable accessibilityRole="button" onPress={dismissRatingModal} style={styles.ratingCloseButton}>
+          <Ionicons color={colors.text} name="close" size={26} />
+        </Pressable>
+        <View style={styles.ratingCard}>
+          <Text style={styles.ratingTitle}>Rate {ratingTarget?.customerName || 'customer'}</Text>
+          <Text style={styles.ratingCopy}>Leave quick feedback about this job experience.</Text>
           <View style={styles.starRow}>
             {[1, 2, 3, 4, 5].map((star) => (
               <Pressable key={star} onPress={() => setRating(star)}>
@@ -1317,24 +1405,66 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
         </View>
       </Modal>
 
-      <Modal visible={showCompletionModal} transparent animationType="slide">
-        <View style={styles.modalBg}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Job completed</Text>
-            <Text style={styles.modalText}>Confirm that the work is finished and billing should be finalized.</Text>
-
-            {saving ? (
-              <ActivityIndicator color={colors.brand} size="large" style={{ marginVertical: 20 }} />
-            ) : (
-              <View style={styles.modalButtonRow}>
-                <Pressable style={styles.secondaryAction} onPress={() => setShowCompletionModal(false)}>
-                  <Text style={styles.secondaryActionText}>Back</Text>
-                </Pressable>
-                <Pressable style={styles.primaryAction} onPress={handleCompleteJob}>
-                  <Text style={styles.primaryActionText}>Done</Text>
-                </Pressable>
+      <Modal visible={showCompletionModal} animationType="fade">
+        <View style={styles.ratingOverlay}>
+          <View style={styles.completionCard}>
+            <View style={styles.completionHeader}>
+              <View>
+                <Text style={styles.ratingTitle}>Job completed</Text>
+                <Text style={styles.ratingCopy}>Add proof photos before billing is finalized.</Text>
               </View>
-            )}
+              <Pressable accessibilityRole="button" onPress={() => setShowCompletionModal(false)} style={styles.ratingCloseButton}>
+                <Ionicons color={colors.text} name="close" size={24} />
+              </Pressable>
+            </View>
+
+            <View style={styles.photoActions}>
+              <Pressable style={styles.photoPickerAction} onPress={handleCaptureProofPhoto} disabled={uploadingProof || saving}>
+                <Ionicons name="camera-outline" size={24} color={colors.brandDark} />
+                <Text style={styles.photoPickerLabel}>Camera</Text>
+              </Pressable>
+              <Pressable style={styles.photoPickerAction} onPress={handlePickProofFromLibrary} disabled={uploadingProof || saving}>
+                <Ionicons name="images-outline" size={24} color={colors.brandDark} />
+                <Text style={styles.photoPickerLabel}>Gallery</Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.completionPreviewWrap}>
+              {proofPhotos.length ? (
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.completionPreviewList}>
+                  {proofPhotos.map((photo) => (
+                    <View key={photo.uri} style={styles.completionPhotoCard}>
+                      <Image source={{ uri: photo.uri }} style={styles.completionPhotoPreview} />
+                      <Pressable style={styles.completionPhotoRemove} onPress={() => removeProofPhoto(photo.uri)}>
+                        <Ionicons color="#ffffff" name="close" size={14} />
+                      </Pressable>
+                    </View>
+                  ))}
+                </ScrollView>
+              ) : (
+                <View style={styles.completionEmptyProof}>
+                  <Ionicons color={colors.muted} name="images-outline" size={24} />
+                  <Text style={styles.completionEmptyProofText}>Capture or select at least one photo.</Text>
+                </View>
+              )}
+            </View>
+
+            {saving || uploadingProof ? (
+              <ActivityIndicator color={colors.brand} size="large" style={{ marginVertical: 12 }} />
+            ) : null}
+
+            <View style={styles.modalButtonRow}>
+              <Pressable style={styles.secondaryAction} onPress={() => setShowCompletionModal(false)} disabled={uploadingProof || saving}>
+                <Text style={styles.secondaryActionText}>Back</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.primaryAction, (!proofPhotos.length || uploadingProof || saving) && styles.disabledAction]}
+                onPress={handleCompleteJob}
+                disabled={!proofPhotos.length || uploadingProof || saving}
+              >
+                <Text style={styles.primaryActionText}>{uploadingProof || saving ? 'Finalizing...' : 'Done'}</Text>
+              </Pressable>
+            </View>
 
             {saveError ? <Text style={styles.errorText}>{saveError}</Text> : null}
           </View>
@@ -1770,6 +1900,97 @@ const styles = StyleSheet.create({
   feeBanner: {
     backgroundColor: '#fef2f2',
     borderColor: '#fecaca',
+  },
+  ratingOverlay: {
+    flex: 1,
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 24,
+    paddingTop: 28,
+    paddingBottom: 28,
+  },
+  ratingCloseButton: {
+    alignSelf: 'flex-end',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    borderRadius: 999,
+    height: 42,
+    justifyContent: 'center',
+    marginBottom: 16,
+    width: 42,
+  },
+  ratingCard: {
+    flex: 1,
+    justifyContent: 'center',
+    gap: 16,
+  },
+  ratingTitle: {
+    color: colors.text,
+    fontSize: 24,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  ratingCopy: {
+    color: colors.muted,
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: 'center',
+  },
+  completionCard: {
+    flex: 1,
+    gap: 18,
+  },
+  completionHeader: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    gap: 12,
+    justifyContent: 'space-between',
+  },
+  completionPreviewWrap: {
+    flex: 1,
+    minHeight: 140,
+    justifyContent: 'center',
+  },
+  completionPreviewList: {
+    gap: 12,
+    paddingVertical: 4,
+  },
+  completionPhotoCard: {
+    borderRadius: 16,
+    height: 120,
+    overflow: 'hidden',
+    position: 'relative',
+    width: 120,
+  },
+  completionPhotoPreview: {
+    height: '100%',
+    width: '100%',
+  },
+  completionPhotoRemove: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    borderRadius: 999,
+    height: 24,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 8,
+    top: 8,
+    width: 24,
+  },
+  completionEmptyProof: {
+    alignItems: 'center',
+    borderColor: colors.border,
+    borderRadius: 20,
+    borderStyle: 'dashed',
+    borderWidth: 1,
+    gap: 8,
+    justifyContent: 'center',
+    minHeight: 140,
+    padding: 20,
+  },
+  completionEmptyProofText: {
+    color: colors.muted,
+    fontSize: 13,
+    textAlign: 'center',
   },
   modalBg: {
     flex: 1,

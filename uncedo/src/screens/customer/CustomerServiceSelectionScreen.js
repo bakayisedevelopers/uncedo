@@ -10,6 +10,8 @@ import {
   View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { getCurrentCustomerLocation, requestCustomerLocationPermission } from '../../services/nearbyHelpersMapService';
+import { updateLiveTracking } from '../../services/liveTrackingRealtimeService';
 import { Button } from '../../components/ui/Button';
 import { ErrorState } from '../../components/ui/States';
 import {
@@ -99,7 +101,7 @@ function QuestionField({ question, value, onChange }) {
 }
 
 export function CustomerServiceSelectionScreen({ route, navigate, goBack, systemInsets = {} }) {
-  const { setUser, user, homeLocation } = useAuth();
+  const { setHomeLocation, setUser, user } = useAuth();
   const item = route?.params?.item || null;
   const parentTab = route?.params?.parentTab || 'CustomerHome';
   const topInset = Platform.OS === 'ios' ? 54 : Math.max(24, Number(systemInsets?.top || 0) + 18);
@@ -237,16 +239,33 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
     setError('');
 
     try {
+      const serviceAddressTarget = String(structuredAnswers?.service_address_target || '').trim().toLowerCase();
+      let requestLocation = null;
+
+      if (serviceAddressTarget === 'current_location') {
+        const permissionGranted = await requestCustomerLocationPermission().catch(() => false);
+        if (!permissionGranted) {
+          throw new Error('Location access is required to use your current location. Please allow it or choose your saved address.');
+        }
+
+        requestLocation = await getCurrentCustomerLocation().catch(() => null);
+        if (!requestLocation) {
+          throw new Error('Unable to read your current location. Please try again.');
+        }
+
+        setHomeLocation(requestLocation);
+      }
+
       const requestId = await createCustomerServiceRequest({
         user,
-        location: homeLocation || route?.params?.location || null,
+        location: requestLocation,
         initialDraft: {
           categoryId,
           serviceIds,
           selectedPackageId,
           structuredAnswers,
           serviceAddress: String(user?.customerProfile?.serviceAddress || '').trim(),
-          serviceAddressTarget: String(structuredAnswers?.service_address_target || '').trim(),
+          serviceAddressTarget,
         },
       });
 
@@ -257,6 +276,16 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
         serviceIds,
         structuredAnswers,
       });
+
+      if (requestLocation) {
+        await updateLiveTracking(requestId, {
+          requestId,
+          customerLocation: requestLocation,
+          updatedAtMs: Date.now(),
+        }).catch((error) => {
+          console.warn('[uncedo:request-location]', error?.message || error);
+        });
+      }
 
       navigate({
         key: 'ServiceRequestTracking',
