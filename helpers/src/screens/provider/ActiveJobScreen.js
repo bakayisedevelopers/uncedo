@@ -262,6 +262,12 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
   const latestTrackedStatusRef = useRef('');
   const keepLocationSharingEnabledRef = useRef(false);
   const scrollOffsetYRef = useRef(0);
+  const lastStableRouteSnapshotRef = useRef({
+    routeCoordinates: [],
+    distanceMeters: null,
+    durationSeconds: null,
+  });
+  const lastActiveJobIdRef = useRef(null);
   const activeJobCoordinate = useMemo(
     () => normalizeCoordinate(activeJob?.location),
     [activeJob?.location],
@@ -296,6 +302,32 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
   }, [activeJob?.requestId]);
 
   useEffect(() => {
+    if (!activeJob?.id) {
+      lastActiveJobIdRef.current = null;
+      lastStableRouteSnapshotRef.current = {
+        routeCoordinates: [],
+        distanceMeters: null,
+        durationSeconds: null,
+      };
+      return;
+    }
+
+    if (lastActiveJobIdRef.current !== activeJob.id) {
+      lastActiveJobIdRef.current = activeJob.id;
+      lastStableRouteSnapshotRef.current = {
+        routeCoordinates: [],
+        distanceMeters: null,
+        durationSeconds: null,
+      };
+      setRouteCoordinates([]);
+      setRouteDistanceMeters(null);
+      setRouteDurationSeconds(null);
+      setRouteError('');
+      setTrackingDocument(null);
+    }
+  }, [activeJob?.id]);
+
+  useEffect(() => {
     if (!currentLocation) {
       previousNavigationLocationRef.current = null;
       setNavigationHeading(null);
@@ -317,10 +349,10 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
     const destinationBearing = activeJobDestination
       ? getBearingBetweenCoordinates(nextCoordinate, activeJobDestination)
       : null;
-    if (deviceHeading !== null && deviceHeading >= 0) {
-      setNavigationHeading((currentHeading) => smoothHeading(currentHeading ?? deviceHeading, deviceHeading, 0.24));
-    } else if (travelBearing !== null) {
+    if (travelBearing !== null) {
       setNavigationHeading((currentHeading) => smoothHeading(currentHeading ?? travelBearing, travelBearing, 0.24));
+    } else if (deviceHeading !== null && deviceHeading >= 0) {
+      setNavigationHeading((currentHeading) => smoothHeading(currentHeading ?? deviceHeading, deviceHeading, 0.24));
     } else if (destinationBearing !== null) {
       setNavigationHeading((currentHeading) => (Number.isFinite(currentHeading) ? currentHeading : destinationBearing));
     }
@@ -377,10 +409,22 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
             try {
               const trackingUpdate = await processForegroundActiveTrackingLocation(location);
               const nextRouteCoordinates = trackingUpdate?.routeSnapshot?.routeCoordinates || [];
+              const nextDistance = Number.isFinite(Number(trackingUpdate?.routeSnapshot?.distanceMeters))
+                ? Number(trackingUpdate.routeSnapshot.distanceMeters)
+                : null;
+              const nextDuration = Number.isFinite(Number(trackingUpdate?.routeSnapshot?.durationSeconds))
+                ? Number(trackingUpdate.routeSnapshot.durationSeconds)
+                : null;
+
               if (active && nextRouteCoordinates.length > 1) {
-                setRouteCoordinates(nextRouteCoordinates);
-                setRouteDistanceMeters(Number.isFinite(Number(trackingUpdate?.routeSnapshot?.distanceMeters)) ? Number(trackingUpdate.routeSnapshot.distanceMeters) : null);
-                setRouteDurationSeconds(Number.isFinite(Number(trackingUpdate?.routeSnapshot?.durationSeconds)) ? Number(trackingUpdate.routeSnapshot.durationSeconds) : null);
+                lastStableRouteSnapshotRef.current = {
+                  routeCoordinates: nextRouteCoordinates,
+                  distanceMeters: nextDistance ?? lastStableRouteSnapshotRef.current.distanceMeters,
+                  durationSeconds: nextDuration ?? lastStableRouteSnapshotRef.current.durationSeconds,
+                };
+                setRouteCoordinates(lastStableRouteSnapshotRef.current.routeCoordinates);
+                setRouteDistanceMeters(lastStableRouteSnapshotRef.current.distanceMeters);
+                setRouteDurationSeconds(lastStableRouteSnapshotRef.current.durationSeconds);
                 setRouteError('');
               }
             } catch (error) {
@@ -552,6 +596,11 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
 
   useEffect(() => {
     if (!activeJob?.id) {
+      lastStableRouteSnapshotRef.current = {
+        routeCoordinates: [],
+        distanceMeters: null,
+        durationSeconds: null,
+      };
       setRouteCoordinates([]);
       setRouteDistanceMeters(null);
       setRouteDurationSeconds(null);
@@ -560,9 +609,6 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
       return () => {};
     }
 
-    setRouteCoordinates([]);
-    setRouteDistanceMeters(null);
-    setRouteDurationSeconds(null);
     setRouteError('');
     setTrackingDocument(null);
 
@@ -595,7 +641,14 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
         }
 
         if (nextRouteCoordinates.length > 1) {
+          lastStableRouteSnapshotRef.current = {
+            routeCoordinates: nextRouteCoordinates,
+            distanceMeters: nextDistance ?? lastStableRouteSnapshotRef.current.distanceMeters,
+            durationSeconds: nextDuration ?? lastStableRouteSnapshotRef.current.durationSeconds,
+          };
           setRouteCoordinates(nextRouteCoordinates);
+          setRouteDistanceMeters(lastStableRouteSnapshotRef.current.distanceMeters);
+          setRouteDurationSeconds(lastStableRouteSnapshotRef.current.durationSeconds);
           setRouteError('');
         } else {
           setRouteCoordinates((currentCoords) => {
@@ -608,12 +661,19 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
             return currentCoords;
           });
         }
-
         if (nextDistance !== null) {
+          lastStableRouteSnapshotRef.current = {
+            ...lastStableRouteSnapshotRef.current,
+            distanceMeters: nextDistance,
+          };
           setRouteDistanceMeters(nextDistance);
         }
 
         if (nextDuration !== null) {
+          lastStableRouteSnapshotRef.current = {
+            ...lastStableRouteSnapshotRef.current,
+            durationSeconds: nextDuration,
+          };
           setRouteDurationSeconds(nextDuration);
         }
       });
@@ -1034,7 +1094,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
           <Text style={[styles.metricValue, { color: toneStyles.badgeText }]}>{formatDistanceValue(distance)}</Text>
         </View>
         <View style={[styles.metricChip, { backgroundColor: toneStyles.badgeBg, borderColor: toneStyles.badgeBg }]}>
-          <Text style={[styles.metricValue, { color: toneStyles.badgeText }]}>{etaMinutes ? `${etaMinutes} min` : 'Waiting'}</Text>
+          <Text style={[styles.metricValue, { color: toneStyles.badgeText }]}>{etaMinutes !== null ? `${etaMinutes} min` : 'Waiting'}</Text>
         </View>
         <View style={[styles.metricChip, { backgroundColor: toneStyles.badgeBg, borderColor: toneStyles.badgeBg }]}>
           <Text style={[styles.statusBadgeText, { color: toneStyles.badgeText }]}>
