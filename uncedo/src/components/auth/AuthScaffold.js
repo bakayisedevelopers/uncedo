@@ -1,6 +1,14 @@
+import React, { useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { colors } from '../../theme/colors';
+
+function getSocialIconColor(iconName) {
+  const name = String(iconName || '').toLowerCase();
+  if (name.includes('google')) return '#ea4335';
+  if (name.includes('facebook')) return '#1877f2';
+  return '#000000'; // apple or default
+}
 
 export function AuthScaffold({
   mode = 'login',
@@ -17,113 +25,106 @@ export function AuthScaffold({
   legalContent = null,
   children,
 }) {
-  const isAccentBody = mode === 'signup';
-  const isWelcome = mode === 'welcome';
+  const isSignup = mode === 'signup';
+  const resolvedTitle = title || (isSignup ? 'Create Account' : 'Welcome Back!');
+  const resolvedSubtitle = subtitle || (isSignup ? 'Join our community today' : 'Sign in with your account');
 
   return (
-    <ScrollView
-      contentContainerStyle={styles.page}
-      keyboardShouldPersistTaps="handled"
-      showsVerticalScrollIndicator={false}
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      style={styles.screen}
     >
-      <View style={styles.shell}>
-        <View style={styles.device}>
-          <View style={[styles.hero, isAccentBody && styles.heroSignup, isWelcome && styles.heroWelcome]}>
-            <View style={[styles.heroAccentTop, isAccentBody && styles.heroAccentTopSignup]} />
-            <View style={[styles.heroAccentSide, isAccentBody && styles.heroAccentSideSignup]} />
-            <View style={[styles.heroAccentCurve, isAccentBody && styles.heroAccentCurveSignup]} />
+      {/* Dark purple/indigo background gradient effect with ambient glowing blurs */}
+      <View style={styles.background} />
+      <View style={styles.glow1} />
+      <View style={styles.glow2} />
 
-            {onBack ? (
-              <Pressable accessibilityRole="button" onPress={onBack} style={styles.backButton}>
-                <Ionicons color="#ffffff" name="chevron-back" size={18} />
-                <Text style={styles.backLabel}>{backLabel}</Text>
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.container}>
+          {onBack ? (
+            <Pressable accessibilityRole="button" onPress={onBack} style={styles.backButton}>
+              <Ionicons color="rgba(255,255,255,0.8)" name="chevron-back" size={20} />
+              <Text style={styles.backLabel}>{backLabel}</Text>
+            </Pressable>
+          ) : null}
+
+          <View style={styles.header}>
+            {brandName ? <Text style={styles.brandName}>{brandName}</Text> : null}
+            <Text style={styles.title}>{resolvedTitle}</Text>
+            <Text style={styles.subtitle}>{resolvedSubtitle}</Text>
+          </View>
+
+          <View style={styles.formContainer}>
+            {children}
+
+            {primaryLabel ? (
+              <Pressable
+                accessibilityRole="button"
+                disabled={primaryDisabled}
+                onPress={onPrimaryPress}
+                style={[styles.primaryButton, primaryDisabled && styles.primaryButtonDisabled]}
+              >
+                <Text style={styles.primaryButtonText}>{primaryLabel}</Text>
               </Pressable>
             ) : null}
 
-            <View style={styles.heroCopy}>
-              <Text style={styles.brandName}>{brandName}</Text>
-              <Text style={styles.title}>{title}</Text>
-              {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
-            </View>
-          </View>
-
-          <View style={[styles.body, isAccentBody && styles.bodySignup]}>
-            {isAccentBody ? <View style={styles.bodyCutout} /> : null}
-
-            <View style={styles.bodyContent}>
-              {children}
-
-              {primaryLabel ? (
-                <View style={styles.primaryRow}>
-                  <Text style={[styles.primaryLabel, isAccentBody && styles.primaryLabelSignup]}>
-                    {primaryLabel}
-                  </Text>
-                  <Pressable
-                    accessibilityRole="button"
-                    disabled={primaryDisabled}
-                    onPress={onPrimaryPress}
-                    style={[styles.primaryButton, primaryDisabled && styles.primaryButtonDisabled]}
-                  >
-                    <Ionicons color="#ffffff" name="arrow-forward" size={22} />
-                  </Pressable>
-                </View>
-              ) : null}
-
-              {footerLinks.length ? (
-                <View style={styles.footerLinkRow}>
-                  {footerLinks.map((link) => (
+            {footerLinks.length ? (
+              <View style={styles.footerLinkContainer}>
+                {footerLinks.map((link) => {
+                  const isModeToggle = link.label.toLowerCase().includes('sign up') || link.label.toLowerCase().includes('sign in');
+                  return (
                     <Pressable
                       accessibilityRole="button"
                       key={link.label}
                       onPress={link.onPress}
-                      style={styles.footerLinkWrap}
+                      style={styles.footerLinkButton}
                     >
-                      <Text style={[styles.footerLink, isAccentBody && styles.footerLinkSignup]}>
-                        {link.label}
+                      <Text style={styles.footerLinkText}>
+                        {isModeToggle ? (
+                          isSignup ? (
+                            <Text>Already have an account? <Text style={styles.footerLinkHighlight}>Log In</Text></Text>
+                          ) : (
+                            <Text>Don't have any account? <Text style={styles.footerLinkHighlight}>Sign Up</Text></Text>
+                          )
+                        ) : (
+                          link.label
+                        )}
                       </Text>
                     </Pressable>
-                  ))}
-                </View>
-              ) : null}
+                  );
+                })}
+              </View>
+            ) : null}
 
-              {socialButtons.length ? (
-                <View style={styles.socialSection}>
-                  <Text style={[styles.socialHeading, isAccentBody && styles.socialHeadingSignup]}>
-                    Or continue with
-                  </Text>
-                  <View style={styles.socialRow}>
-                    {socialButtons.map((button) => (
-                      <Pressable
-                        accessibilityRole="button"
-                        disabled={button.disabled}
-                        key={button.label}
-                        onPress={button.onPress}
-                        style={[
-                          styles.socialButton,
-                          isAccentBody && styles.socialButtonSignup,
-                          button.disabled && styles.socialButtonDisabled,
-                        ]}
-                      >
-                        <Ionicons
-                          color={isAccentBody ? '#ffffff' : colors.text}
-                          name={button.icon}
-                          size={18}
-                        />
-                        <Text style={[styles.socialLabel, isAccentBody && styles.socialLabelSignup]}>
-                          {button.label}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </View>
-                </View>
-              ) : null}
+            {socialButtons.length ? (
+              <View style={styles.socialRow}>
+                {socialButtons.map((button) => (
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={button.disabled}
+                    key={button.label}
+                    onPress={button.onPress}
+                    style={[styles.socialButton, button.disabled && styles.socialButtonDisabled]}
+                  >
+                    <Ionicons
+                      color={getSocialIconColor(button.icon)}
+                      name={button.icon}
+                      size={26}
+                    />
+                  </Pressable>
+                ))}
+              </View>
+            ) : null}
 
-              {legalContent ? <View style={styles.legalWrap}>{legalContent}</View> : null}
-            </View>
+            {legalContent ? <View style={styles.legalWrap}>{legalContent}</View> : null}
           </View>
         </View>
-      </View>
-    </ScrollView>
+      </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -134,19 +135,25 @@ export function AuthField({
   style,
   ...props
 }) {
+  const [secureText, setSecureText] = useState(props.secureTextEntry);
+  const isPasswordField = props.secureTextEntry;
+
   return (
     <View style={styles.fieldWrap}>
-      <Text style={[styles.fieldLabel, inverted && styles.fieldLabelSignup]}>{label}</Text>
-      <TextInput
-        placeholderTextColor={inverted ? 'rgba(255,255,255,0.78)' : colors.muted}
-        style={[
-          styles.fieldInput,
-          inverted ? styles.fieldInputSignup : styles.fieldInputLight,
-          error ? styles.fieldInputError : null,
-          style,
-        ]}
-        {...props}
-      />
+      {label ? <Text style={styles.fieldLabel}>{label}</Text> : null}
+      <View style={[styles.inputContainer, error ? styles.inputContainerError : null]}>
+        <TextInput
+          placeholderTextColor="#9ca3af"
+          style={[styles.fieldInput, isPasswordField && { paddingRight: 40 }, style]}
+          {...props}
+          secureTextEntry={secureText}
+        />
+        {isPasswordField ? (
+          <Pressable onPress={() => setSecureText(!secureText)} style={styles.eyeButton}>
+            <Ionicons name={secureText ? 'eye-off-outline' : 'eye-outline'} size={20} color="#6b7280" />
+          </Pressable>
+        ) : null}
+      </View>
       {error ? <Text style={styles.fieldError}>{error}</Text> : null}
     </View>
   );
@@ -157,20 +164,8 @@ export function AuthMessage({ text, tone = 'error', inverted = false }) {
 
   const isInfo = tone === 'info';
   return (
-    <View
-      style={[
-        styles.message,
-        isInfo ? styles.messageInfo : styles.messageError,
-        inverted && (isInfo ? styles.messageInfoSignup : styles.messageErrorSignup),
-      ]}
-    >
-      <Text
-        style={[
-          styles.messageText,
-          isInfo ? styles.messageTextInfo : styles.messageTextError,
-          inverted && styles.messageTextSignup,
-        ]}
-      >
+    <View style={[styles.message, isInfo ? styles.messageInfo : styles.messageError]}>
+      <Text style={[styles.messageText, isInfo ? styles.messageTextInfo : styles.messageTextError]}>
         {text}
       </Text>
     </View>
@@ -178,308 +173,228 @@ export function AuthMessage({ text, tone = 'error', inverted = false }) {
 }
 
 const styles = StyleSheet.create({
-  page: {
+  screen: {
+    flex: 1,
+    backgroundColor: '#1b0227', // Dark purple/indigo base color
+  },
+  background: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#12011b', // Very dark purple/black
+  },
+  glow1: {
+    position: 'absolute',
+    width: 320,
+    height: 320,
+    borderRadius: 160,
+    backgroundColor: '#a21caf', // BrandDark glow
+    opacity: 0.22,
+    top: '20%',
+    left: '-20%',
+  },
+  glow2: {
+    position: 'absolute',
+    width: 280,
+    height: 280,
+    borderRadius: 140,
+    backgroundColor: '#d946ef', // Brand glow
+    opacity: 0.18,
+    bottom: '25%',
+    right: '-15%',
+  },
+  scrollContent: {
     flexGrow: 1,
     justifyContent: 'center',
-    padding: 16,
-    backgroundColor: '#f7f1f8',
-  },
-  shell: {
-    alignItems: 'center',
-  },
-  device: {
-    backgroundColor: '#ffffff',
-    borderRadius: 34,
-    minHeight: 760,
-    maxWidth: 430,
-    overflow: 'hidden',
-    width: '100%',
-    shadowColor: 'rgba(15,23,42,0.18)',
-    shadowOffset: { width: 0, height: 20 },
-    shadowOpacity: 1,
-    shadowRadius: 32,
-    elevation: 16,
-  },
-  hero: {
-    backgroundColor: '#313745',
-    minHeight: 286,
-    overflow: 'hidden',
     paddingHorizontal: 28,
-    paddingTop: 24,
-    paddingBottom: 44,
+    paddingVertical: 40,
   },
-  heroWelcome: {
-    minHeight: 318,
-  },
-  heroSignup: {
-    minHeight: 262,
-  },
-  heroAccentTop: {
-    backgroundColor: '#f9a63d',
-    borderBottomRightRadius: 76,
-    height: 138,
-    left: 0,
-    position: 'absolute',
-    top: 0,
-    width: 122,
-  },
-  heroAccentTopSignup: {
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderBottomRightRadius: 96,
-    height: 126,
-    width: 118,
-  },
-  heroAccentSide: {
-    backgroundColor: colors.brand,
-    borderTopLeftRadius: 128,
-    borderBottomLeftRadius: 128,
-    bottom: -12,
-    height: 248,
-    position: 'absolute',
-    right: -54,
-    width: 182,
-  },
-  heroAccentSideSignup: {
-    bottom: -92,
-    height: 246,
-    right: -44,
-    width: 224,
-  },
-  heroAccentCurve: {
-    backgroundColor: '#313745',
-    borderBottomLeftRadius: 120,
-    borderBottomRightRadius: 128,
-    borderTopRightRadius: 120,
-    height: 238,
-    left: 42,
-    position: 'absolute',
-    top: -12,
-    width: 230,
-  },
-  heroAccentCurveSignup: {
-    borderBottomRightRadius: 160,
-    height: 244,
-    left: 0,
-    top: 0,
+  container: {
     width: '100%',
+    alignSelf: 'center',
+    maxWidth: 380,
   },
   backButton: {
     alignItems: 'center',
     alignSelf: 'flex-start',
     flexDirection: 'row',
-    gap: 6,
-    zIndex: 2,
+    gap: 4,
+    marginBottom: 20,
   },
   backLabel: {
-    color: 'rgba(255,255,255,0.88)',
-    fontSize: 13,
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 14,
     fontWeight: '700',
-  },
-  heroCopy: {
-    gap: 10,
-    marginTop: 48,
-    maxWidth: 240,
-    zIndex: 2,
   },
   brandName: {
     color: 'rgba(255,255,255,0.72)',
     fontSize: 12,
     fontWeight: '800',
-    letterSpacing: 1.4,
+    letterSpacing: 1.2,
+    marginBottom: 10,
+    textAlign: 'center',
     textTransform: 'uppercase',
+  },
+  header: {
+    alignItems: 'center',
+    marginBottom: 36,
   },
   title: {
     color: '#ffffff',
-    fontSize: 42,
+    fontSize: 34,
     fontWeight: '900',
-    lineHeight: 46,
+    textAlign: 'center',
+    letterSpacing: -0.5,
   },
   subtitle: {
-    color: 'rgba(255,255,255,0.78)',
+    color: 'rgba(255,255,255,0.7)',
     fontSize: 15,
-    lineHeight: 22,
-  },
-  body: {
-    backgroundColor: '#ffffff',
-    flex: 1,
-    paddingHorizontal: 28,
-    paddingTop: 30,
-    paddingBottom: 26,
-  },
-  bodySignup: {
-    backgroundColor: colors.brand,
-  },
-  bodyCutout: {
-    backgroundColor: '#ffffff',
-    borderTopLeftRadius: 120,
-    bottom: -36,
-    height: 198,
-    position: 'absolute',
-    right: -46,
-    width: 198,
-  },
-  bodyContent: {
-    gap: 18,
-    zIndex: 2,
-  },
-  fieldWrap: {
-    gap: 8,
-  },
-  fieldLabel: {
-    color: '#444857',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  fieldLabelSignup: {
-    color: 'rgba(255,255,255,0.92)',
-  },
-  fieldInput: {
-    fontSize: 17,
-    minHeight: 42,
-    paddingBottom: 10,
-  },
-  fieldInputLight: {
-    borderBottomColor: '#e7e5e4',
-    borderBottomWidth: 1,
-    color: colors.text,
-  },
-  fieldInputSignup: {
-    borderBottomColor: 'rgba(255,255,255,0.35)',
-    borderBottomWidth: 1,
-    color: '#ffffff',
-  },
-  fieldInputError: {
-    borderBottomColor: '#fecaca',
-  },
-  fieldError: {
-    color: '#be123c',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  message: {
-    borderRadius: 18,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-  },
-  messageError: {
-    backgroundColor: '#fff1f2',
-    borderColor: '#fecdd3',
-    borderWidth: 1,
-  },
-  messageInfo: {
-    backgroundColor: '#faf5ff',
-    borderColor: '#f0abfc',
-    borderWidth: 1,
-  },
-  messageErrorSignup: {
-    backgroundColor: 'rgba(255,241,242,0.14)',
-    borderColor: 'rgba(254,205,211,0.28)',
-  },
-  messageInfoSignup: {
-    backgroundColor: 'rgba(255,255,255,0.12)',
-    borderColor: 'rgba(255,255,255,0.22)',
-  },
-  messageText: {
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  messageTextError: {
-    color: '#be123c',
-    fontWeight: '700',
-  },
-  messageTextInfo: {
-    color: colors.brandDark,
-    fontWeight: '700',
-  },
-  messageTextSignup: {
-    color: '#ffffff',
-  },
-  primaryRow: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
     marginTop: 6,
+    textAlign: 'center',
+    fontWeight: '600',
   },
-  primaryLabel: {
-    color: colors.text,
-    fontSize: 20,
-    fontWeight: '900',
-  },
-  primaryLabelSignup: {
-    color: '#ffffff',
+  formContainer: {
+    gap: 16,
   },
   primaryButton: {
-    alignItems: 'center',
-    backgroundColor: '#313745',
-    borderRadius: 999,
-    height: 66,
+    backgroundColor: '#ccff00', // Vibrant neon lime-green button
+    borderRadius: 24,
+    height: 54,
     justifyContent: 'center',
-    width: 66,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 6,
+    elevation: 4,
+    marginTop: 8,
   },
   primaryButtonDisabled: {
     opacity: 0.55,
   },
-  footerLinkRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+  primaryButtonText: {
+    color: '#000000',
+    fontSize: 17,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+  },
+  footerLinkContainer: {
+    alignItems: 'center',
     gap: 12,
+    marginTop: 8,
   },
-  footerLinkWrap: {
-    flex: 1,
+  footerLinkButton: {
+    paddingVertical: 4,
   },
-  footerLink: {
-    color: '#444857',
-    fontSize: 13,
-    fontWeight: '700',
+  footerLinkText: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  footerLinkHighlight: {
+    fontWeight: '900',
     textDecorationLine: 'underline',
-  },
-  footerLinkSignup: {
-    color: 'rgba(255,255,255,0.9)',
-  },
-  socialSection: {
-    gap: 12,
-    marginTop: 6,
-  },
-  socialHeading: {
-    color: colors.muted,
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  socialHeadingSignup: {
-    color: 'rgba(255,255,255,0.84)',
   },
   socialRow: {
     flexDirection: 'row',
-    gap: 10,
+    justifyContent: 'center',
+    gap: 16,
+    marginTop: 24,
   },
   socialButton: {
-    alignItems: 'center',
+    width: 54,
+    height: 54,
+    borderRadius: 12,
     backgroundColor: '#ffffff',
-    borderColor: '#ebe5ec',
-    borderRadius: 18,
-    borderWidth: 1,
-    flex: 1,
-    gap: 6,
-    minHeight: 64,
     justifyContent: 'center',
-    paddingHorizontal: 8,
-  },
-  socialButtonSignup: {
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderColor: 'rgba(255,255,255,0.22)',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 3,
+    elevation: 2,
   },
   socialButtonDisabled: {
     opacity: 0.55,
   },
-  socialLabel: {
-    color: colors.text,
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  socialLabelSignup: {
-    color: '#ffffff',
-  },
   legalWrap: {
-    marginTop: 6,
+    marginTop: 12,
+    alignItems: 'center',
+  },
+  fieldWrap: {
+    gap: 8,
+    width: '100%',
+  },
+  fieldLabel: {
+    color: 'rgba(255,255,255,0.88)',
+    fontSize: 13,
+    fontWeight: '700',
+    marginLeft: 12,
+  },
+  inputContainer: {
+    width: '100%',
+    height: 54,
+    borderRadius: 24,
+    backgroundColor: '#ffffff',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  inputContainerError: {
+    borderWidth: 1,
+    borderColor: '#fca5a5',
+  },
+  fieldInput: {
+    flex: 1,
+    color: '#18181b', // uncedo text colors
+    fontSize: 16,
+    fontWeight: '600',
+    height: '100%',
+  },
+  eyeButton: {
+    position: 'absolute',
+    right: 18,
+    height: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  fieldError: {
+    color: '#f87171',
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: 4,
+    marginLeft: 12,
+  },
+  message: {
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    width: '100%',
+  },
+  messageError: {
+    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.28)',
+  },
+  messageInfo: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  messageText: {
+    fontSize: 13,
+    lineHeight: 18,
+    textAlign: 'center',
+  },
+  messageTextError: {
+    color: '#fca5a5',
+    fontWeight: '700',
+  },
+  messageTextInfo: {
+    color: '#ffffff',
+    fontWeight: '700',
   },
 });
