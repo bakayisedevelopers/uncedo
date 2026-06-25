@@ -306,6 +306,42 @@ function buildPayoutDocId(weekKey, tutorId) {
   return `${weekKey}_${tutorId}`;
 }
 
+function buildHelperPayoutDocId(weekKey, helperId) {
+  return `${weekKey}_${helperId}`;
+}
+
+function computeStoredHelperPayoutBreakdown(request = {}) {
+  if (request?.helperPayoutBreakdown && typeof request.helperPayoutBreakdown === 'object') {
+    return request.helperPayoutBreakdown;
+  }
+
+  const status = String(request.status || '').trim().toLowerCase();
+  if (status === 'completed') {
+    return getServiceHelperPayoutBreakdown(request, {
+      closureType: 'completed',
+      waitingCost: Number(request.waitingCost || request?.pricingSnapshot?.waitingCost || 0),
+      travelFeeAmount: getServiceTravelFee(request),
+      bookingFeeAmount: Number(request?.pricingSnapshot?.bookingFee || getServiceBookingFee(request)),
+    });
+  }
+
+  if (status === 'canceled') {
+    return getServiceHelperPayoutBreakdown(request, {
+      closureType: 'canceled',
+      billingRule: request?.pricingSnapshot?.cancellationBillingRule || 'booking_fee_only',
+      travelledKm: Number(request?.pricingSnapshot?.cancellationDistanceKm || 0),
+      travelFeeAmount: Number(
+        request?.pricingSnapshot?.cancellationTravelCharge
+        || request?.pricingSnapshot?.travelFee
+        || getServiceTravelFee(request),
+      ),
+      bookingFeeAmount: Number(request?.pricingSnapshot?.bookingFee || getServiceBookingFee(request)),
+    });
+  }
+
+  return null;
+}
+
 function computeFullSessionAmounts(session = {}) {
   const totalAmount = Number(
     session.originalPrice
@@ -395,12 +431,16 @@ const DELETABLE_CLASS_UPLOAD_PREFIXES = [
   'request-attachment-crops/',
 ];
 const PAYOUT_COLLECTION = 'tutorWeeklyPayouts';
+const HELPER_PAYOUT_COLLECTION = 'helperWeeklyPayouts';
 const PAYOUT_LOOKBACK_WEEKS = 12;
 const DEFAULT_CANCELLATION_RATE = 0.08;
 const FAIRNESS_WORKLOAD_CAP = 10;
 const TUTOR_STATS_MAX_EVENTS = 100;
 const TUTOR_STATS_ROLLING_DAYS = 30;
 const TUTOR_STATS_RECENT_ASSIGNMENT_DAYS = 7;
+const HELPER_STATS_MAX_EVENTS = 100;
+const HELPER_STATS_ROLLING_DAYS = 30;
+const HELPER_STATS_RECENT_ASSIGNMENT_DAYS = 7;
 const DEFAULT_STUDENT_FREE_MINUTES = 30;
 const REFERRAL_REWARD_MINUTES = 15;
 const REQUEST_STATUS = {
@@ -752,6 +792,166 @@ async function recordTutorSessionLifecycleEvent({
   });
 
   return computeTutorDerivedStats(tutorId);
+}
+
+function getHelperStatsCollections(uid) {
+  const userRef = db.collection('users').doc(uid);
+  return {
+    userRef,
+    offerEventsRef: userRef.collection('helperStatsOfferEvents'),
+  };
+}
+
+function buildHelperStatsSummary(existingMetrics = {}, rollups = {}, helperData = {}) {
+  const ratingsAverage = Number(helperData?.ratings?.asHelper?.average || existingMetrics.overallRating || helperData?.rating || 0);
+  return {
+    acceptanceRate: rollups.acceptanceRate ?? existingMetrics.acceptanceRate ?? 0,
+    completionRate: rollups.completionRate ?? existingMetrics.completionRate ?? 0,
+    overallRating: Number.isFinite(ratingsAverage) ? Number(ratingsAverage.toFixed(2)) : 0,
+    avgResponseMinutes: rollups.avgResponseMinutes ?? existingMetrics.avgResponseMinutes ?? 0,
+    cancellationRate: rollups.cancellationRate ?? existingMetrics.cancellationRate ?? 0,
+    recentAssignmentsCount: rollups.recentAssignmentsCount ?? existingMetrics.recentAssignmentsCount ?? 0,
+    statsWindow: {
+      rollingDays: HELPER_STATS_ROLLING_DAYS,
+      maxEvents: HELPER_STATS_MAX_EVENTS,
+      recentAssignmentsDays: HELPER_STATS_RECENT_ASSIGNMENT_DAYS,
+    },
+    statsUpdatedAt: new Date().toISOString(),
+  };
+}
+
+async function storeHelperStatsEvent({ uid, collectionRef, eventId, payload }) {
+  if (!uid || !collectionRef || !eventId) return;
+  await collectionRef.doc(eventId).set({
+    ...payload,
+    uid,
+    updatedAtMs: Date.now(),
+  }, { merge: true });
+}
+
+async function computeHelperDerivedStats(uid) {
+  if (!uid) return null;
+
+  const { userRef, offerEventsRef } = getHelperStatsCollections(uid);
+  const [userSnap, offerSnap, requestsSnap] = await Promise.all([
+    userRef.get(),
+    offerEventsRef.orderBy('occurredAtMs', 'desc').limit(HELPER_STATS_MAX_EVENTS).get(),
+    db.collection('serviceRequests').where('helperAssignment.helperId', '==', uid).get(),
+  ]);
+
+  const helperData = userSnap.exists ? (userSnap.data() || {}) : {};
+  const existingMetrics = helperData.metrics || {};
+  const thirtyDaysAgo = getTutorStatsWindowStartMs(HELPER_STATS_ROLLING_DAYS);
+  const sevenDaysAgo = getTutorStatsWindowStartMs(HELPER_STATS_RECENT_ASSIGNMENT_DAYS);
+
+  const offerEvents = offerSnap.docs
+    .map((snap) => ({ id: snap.id, ...snap.data() }))
+    .filter((item) => normalizeStatsEventTimestamp(item.closedAtMs || item.occurredAtMs) >= thirtyDaysAgo);
+  const closedOffers = offerEvents.filter((item) => ['accepted', 'declined', 'expired'].includes(String(item.outcome || '').toLowerCase()));
+  const acceptedOffers = closedOffers.filter((item) => String(item.outcome || '').toLowerCase() === 'accepted');
+
+  const offerDenominator = closedOffers.length;
+  const acceptanceRate = offerDenominator > 0
+    ? Number((acceptedOffers.length / offerDenominator).toFixed(4))
+    : null;
+
+  const acceptedResponseMinutes = acceptedOffers
+    .map((item) => Number(item.responseMinutes || 0))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  const avgResponseMinutes = acceptedResponseMinutes.length
+    ? Number((acceptedResponseMinutes.reduce((sum, value) => sum + value, 0) / acceptedResponseMinutes.length).toFixed(2))
+    : null;
+
+  const recentAssignmentsCount = acceptedOffers.filter((item) => normalizeStatsEventTimestamp(item.closedAtMs || item.occurredAtMs) >= sevenDaysAgo).length;
+
+  const helperRequests = requestsSnap.docs
+    .map((snap) => ({ id: snap.id, ...snap.data() }))
+    .filter((request) => {
+      const settledAtMs = normalizeStatsEventTimestamp(
+        request.endedAt
+        || request.completedAt
+        || request.canceledAt
+        || request.updatedAt,
+      );
+      return settledAtMs >= thirtyDaysAgo;
+    });
+
+  const completedRequests = helperRequests.filter((request) => String(request.status || '').toLowerCase() === SERVICE_REQUEST_STATUS.COMPLETED);
+  const helperCanceledRequests = helperRequests.filter((request) => {
+    const status = String(request.status || '').toLowerCase();
+    const canceledBy = String(request.canceledBy || '').toLowerCase();
+    return status === SERVICE_REQUEST_STATUS.CANCELED && (canceledBy === 'helper' || canceledBy === 'helper_user' || canceledBy === 'helper_account');
+  });
+
+  const requestDenominator = completedRequests.length + helperCanceledRequests.length;
+  const completionRate = requestDenominator > 0
+    ? Number((completedRequests.length / requestDenominator).toFixed(4))
+    : null;
+  const cancellationRate = requestDenominator > 0
+    ? Number((helperCanceledRequests.length / requestDenominator).toFixed(4))
+    : null;
+
+  const rollups = {
+    acceptanceRate,
+    completionRate,
+    avgResponseMinutes,
+    cancellationRate,
+    recentAssignmentsCount,
+  };
+  const summary = buildHelperStatsSummary(existingMetrics, rollups, helperData);
+
+  await userRef.set({
+    metrics: {
+      ...existingMetrics,
+      ...summary,
+      statsWindow: summary.statsWindow,
+      statsUpdatedAt: summary.statsUpdatedAt,
+    },
+    rating: summary.overallRating,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  return summary;
+}
+
+async function recordHelperOfferLifecycleEvent({
+  helperId,
+  requestId,
+  offerRevision,
+  categoryId,
+  serviceIds = [],
+  outcome,
+  offeredAtMs,
+  closedAtMs,
+  responseMinutes,
+  sourceStatus,
+}) {
+  if (!helperId || !requestId) return null;
+
+  const { offerEventsRef } = getHelperStatsCollections(helperId);
+  const eventId = `${requestId}_${Number(offerRevision || 0) || 0}`;
+  const payload = {
+    helperId,
+    requestId,
+    offerRevision: Number(offerRevision || 0) || 0,
+    categoryId: String(categoryId || '').trim(),
+    serviceIds: Array.isArray(serviceIds) ? serviceIds : [],
+    outcome: String(outcome || '').trim().toLowerCase(),
+    occurredAtMs: normalizeStatsEventTimestamp(closedAtMs || offeredAtMs) || Date.now(),
+    offeredAtMs: normalizeStatsEventTimestamp(offeredAtMs) || Date.now(),
+    closedAtMs: normalizeStatsEventTimestamp(closedAtMs) || null,
+    responseMinutes: Number.isFinite(Number(responseMinutes)) ? Number(responseMinutes) : null,
+    sourceStatus: String(sourceStatus || '').trim().toLowerCase(),
+  };
+
+  await storeHelperStatsEvent({
+    uid: helperId,
+    collectionRef: offerEventsRef,
+    eventId,
+    payload,
+  });
+
+  return computeHelperDerivedStats(helperId);
 }
 
 function hasCompletedStudentProfile(user = {}) {
@@ -1960,6 +2160,113 @@ exports.syncServiceRequestAssignmentState = onDocumentWritten('serviceRequests/{
       requestId,
       targetPath: `/customer/requests/${requestId}`,
     });
+  }
+});
+
+exports.trackHelperRequestStats = onDocumentWritten('serviceRequests/{requestId}', async (event) => {
+  const before = event.data.before.exists ? event.data.before.data() : null;
+  const after = event.data.after.exists ? event.data.after.data() : null;
+  if (!after) return;
+
+  const requestId = event.params.requestId;
+  const now = Date.now();
+  const beforeStatus = String(before?.status || '').toLowerCase();
+  const afterStatus = String(after?.status || '').toLowerCase();
+  const beforeOfferHelperId = before?.currentOfferHelperId || null;
+  const afterOfferHelperId = after?.currentOfferHelperId || null;
+  const beforeAssignedHelperId = before?.helperAssignment?.helperId || null;
+  const afterAssignedHelperId = after?.helperAssignment?.helperId || null;
+  const helperId = afterAssignedHelperId || beforeAssignedHelperId || afterOfferHelperId || beforeOfferHelperId || null;
+  const offerRevision = Number(after.offerRevision || before?.offerRevision || 0) || 0;
+  const categoryId = after.categoryId || before?.categoryId || '';
+  const serviceIds = Array.isArray(after.serviceIds) ? after.serviceIds : (Array.isArray(before?.serviceIds) ? before.serviceIds : []);
+  const offeredAtMs = normalizeStatsEventTimestamp(
+    after.lastOfferAt
+      || before?.lastOfferAt
+      || after.offerExpiresAt
+      || before?.offerExpiresAt,
+  ) || now;
+
+  if (afterStatus === SERVICE_REQUEST_STATUS.HELPER_FOUND && afterOfferHelperId) {
+    const didChangeOffer =
+      beforeStatus !== SERVICE_REQUEST_STATUS.HELPER_FOUND
+      || beforeOfferHelperId !== afterOfferHelperId
+      || Number(before?.offerRevision || 0) !== offerRevision;
+
+    if (didChangeOffer) {
+      await recordHelperOfferLifecycleEvent({
+        helperId: afterOfferHelperId,
+        requestId,
+        offerRevision,
+        categoryId,
+        serviceIds,
+        outcome: 'offered',
+        offeredAtMs,
+        sourceStatus: afterStatus,
+      });
+    }
+  }
+
+  if (
+    afterStatus === SERVICE_REQUEST_STATUS.ACCEPTED
+    && helperId
+    && (beforeStatus !== SERVICE_REQUEST_STATUS.ACCEPTED || beforeAssignedHelperId !== afterAssignedHelperId)
+  ) {
+    const acceptedAtMs = normalizeStatsEventTimestamp(after?.helperAssignment?.acceptedAt || after.updatedAt) || now;
+    const responseMinutes = Math.max(0, Number(((acceptedAtMs - offeredAtMs) / 60000).toFixed(2)));
+    await recordHelperOfferLifecycleEvent({
+      helperId,
+      requestId,
+      offerRevision,
+      categoryId,
+      serviceIds,
+      outcome: 'accepted',
+      offeredAtMs,
+      closedAtMs: acceptedAtMs,
+      responseMinutes,
+      sourceStatus: afterStatus,
+    });
+    return;
+  }
+
+  const movedOffOffer = beforeStatus === SERVICE_REQUEST_STATUS.HELPER_FOUND
+    && beforeOfferHelperId
+    && (afterOfferHelperId !== beforeOfferHelperId || afterStatus !== SERVICE_REQUEST_STATUS.HELPER_FOUND);
+
+  if (movedOffOffer) {
+    const expiredByTime = normalizeStatsEventTimestamp(before?.offerExpiresAt) > 0
+      && normalizeStatsEventTimestamp(before.offerExpiresAt) <= now;
+    const outcome = afterStatus === SERVICE_REQUEST_STATUS.EXPIRED || expiredByTime
+      ? 'expired'
+      : 'declined';
+
+    if (outcome !== 'declined' || [SERVICE_REQUEST_STATUS.EXPIRED, SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE, SERVICE_REQUEST_STATUS.MATCHING].includes(afterStatus)) {
+      await recordHelperOfferLifecycleEvent({
+        helperId: beforeOfferHelperId,
+        requestId,
+        offerRevision: Number(before?.offerRevision || offerRevision || 0) || 0,
+        categoryId,
+        serviceIds,
+        outcome,
+        offeredAtMs,
+        closedAtMs: now,
+        sourceStatus: afterStatus,
+      });
+      return;
+    }
+  }
+
+  const impactedHelperIds = new Set(
+    [beforeAssignedHelperId, afterAssignedHelperId]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean),
+  );
+
+  if (
+    [SERVICE_REQUEST_STATUS.COMPLETED, SERVICE_REQUEST_STATUS.CANCELED].includes(afterStatus)
+    && beforeStatus !== afterStatus
+  ) {
+    await Promise.all([...impactedHelperIds].map((value) => computeHelperDerivedStats(value)));
   }
 });
 
@@ -3469,6 +3776,8 @@ const SERVICE_BOOKING_FEE_RATE = 0.01;
 const SERVICE_BOOKING_FEE_CAP = 5;
 const SERVICE_TRAVEL_RATE_PER_KM = 4;
 const SERVICE_DEFAULT_TRAVEL_FEE = 35;
+const HELPER_LABOR_PAYOUT_RATE = 0.7;
+const PLATFORM_LABOR_SHARE_RATE = 0.3;
 
 function computeServiceBookingFee(baseAmount = 0) {
   return toRand(Math.min(SERVICE_BOOKING_FEE_CAP, Math.max(0, Number(baseAmount || 0)) * SERVICE_BOOKING_FEE_RATE));
@@ -3504,6 +3813,96 @@ function getServiceQuoteSubtotal(request = {}) {
 function getServiceBookingFee(request = {}) {
   const baseAmount = getServiceQuoteSubtotal(request) + getServiceTravelFee(request);
   return computeServiceBookingFee(baseAmount);
+}
+
+function getServiceHelperPayoutBreakdown(request = {}, options = {}) {
+  const closureType = String(options.closureType || 'completed').trim().toLowerCase();
+  const waitingCost = toRand(options.waitingCost || 0);
+  const travelledKm = Math.max(0, Number(options.travelledKm || 0));
+  const bookingFee = toRand(
+    options.bookingFeeAmount
+    ?? options.bookingFee
+    ?? getServiceBookingFee(request),
+  );
+  const baseTravelFee = toRand(
+    options.travelFeeAmount
+    ?? options.travelFee
+    ?? getServiceTravelFee(request),
+  );
+  const laborAmount = toRand(getServiceQuoteSubtotal(request) + waitingCost);
+
+  if (closureType === 'completed') {
+    const helperLaborAmount = toRand(laborAmount * HELPER_LABOR_PAYOUT_RATE);
+    const platformLaborAmount = toRand(laborAmount * PLATFORM_LABOR_SHARE_RATE);
+    const helperTravelAmount = baseTravelFee;
+    const helperAmount = toRand(helperLaborAmount + helperTravelAmount);
+    const platformBookingAmount = bookingFee;
+    const platformAmount = toRand(platformLaborAmount + platformBookingAmount);
+    const customerChargeAmount = toRand(laborAmount + helperTravelAmount + platformBookingAmount);
+
+    return {
+      version: 'service_request_v1',
+      closureType: 'completed',
+      payoutRule: 'labor_split_plus_travel_and_booking_fee',
+      helperAmount,
+      helperLaborAmount,
+      helperTravelAmount,
+      platformAmount,
+      platformLaborAmount,
+      platformBookingAmount,
+      laborAmount,
+      travelAmount: helperTravelAmount,
+      bookingFeeAmount: platformBookingAmount,
+      waitingCost,
+      travelledKm: Number(travelledKm.toFixed(2)),
+      customerChargeAmount,
+    };
+  }
+
+  const billingRule = String(options.billingRule || 'booking_fee_only').trim().toLowerCase();
+  let helperTravelAmount = 0;
+  let platformBookingAmount = 0;
+  let payoutRule = billingRule;
+
+  switch (billingRule) {
+    case 'travelled_distance_plus_booking_fee':
+      helperTravelAmount = toRand(travelledKm * SERVICE_TRAVEL_RATE_PER_KM);
+      platformBookingAmount = bookingFee;
+      payoutRule = 'travelled_distance_plus_booking_fee';
+      break;
+    case 'travel_fee_plus_booking_fee':
+      helperTravelAmount = baseTravelFee;
+      platformBookingAmount = bookingFee;
+      payoutRule = 'travel_fee_plus_booking_fee';
+      break;
+    case 'booking_fee_only':
+    default:
+      helperTravelAmount = 0;
+      platformBookingAmount = bookingFee;
+      payoutRule = 'booking_fee_only';
+      break;
+  }
+
+  const helperAmount = toRand(helperTravelAmount);
+  const platformAmount = toRand(platformBookingAmount);
+
+  return {
+    version: 'service_request_v1',
+    closureType: 'canceled',
+    payoutRule,
+    helperAmount,
+    helperLaborAmount: 0,
+    helperTravelAmount,
+    platformAmount,
+    platformLaborAmount: 0,
+    platformBookingAmount,
+    laborAmount: 0,
+    travelAmount: helperTravelAmount,
+    bookingFeeAmount: platformBookingAmount,
+    waitingCost: 0,
+    travelledKm: Number(travelledKm.toFixed(2)),
+    customerChargeAmount: toRand(helperAmount + platformAmount),
+  };
 }
 
 function buildNextRatingSummary(currentStats = {}, score = 0) {
@@ -7677,7 +8076,13 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
   const subtotal = getServiceQuoteSubtotal(request);
   const travelFee = getServiceTravelFee(request);
   const bookingFee = getServiceBookingFee(request);
-  const totalAmount = toRand(quoteTotal + waitingCost);
+  const helperPayoutBreakdown = getServiceHelperPayoutBreakdown(request, {
+    closureType: 'completed',
+    waitingCost,
+    travelFeeAmount: travelFee,
+    bookingFeeAmount: bookingFee,
+  });
+  const totalAmount = helperPayoutBreakdown.customerChargeAmount || toRand(quoteTotal + waitingCost + bookingFee);
 
   const customerRef = db.collection('users').doc(request.customerId);
   const customerSnap = await customerRef.get();
@@ -7738,6 +8143,10 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
       finalAmount: totalAmount,
       finalizedAt: new Date(endedAt).toISOString(),
     },
+    helperPayoutBreakdown: {
+      ...helperPayoutBreakdown,
+      finalizedAt: new Date(endedAt).toISOString(),
+    },
     paymentStatus,
     paymentTransactionId: charge.transactionId || null,
     chargedCardLast4: selectedCard?.last4 || null,
@@ -7783,6 +8192,8 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
       paymentStatus,
       totalAmount,
       waitingCost,
+      helperPayoutAmount: helperPayoutBreakdown.helperAmount,
+      platformAmount: helperPayoutBreakdown.platformAmount,
       requestStatus: 'completed',
     },
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -7807,7 +8218,7 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
       createUserNotification({
         userId: helperId,
         title: 'Job completed',
-        message: `Your job for ${request.customerName || 'Customer'} was marked as completed. Earnings will be batched.`,
+        message: `Your job for ${request.customerName || 'Customer'} was marked as completed. Helper earnings recorded: R${helperPayoutBreakdown.helperAmount.toFixed(2)}.`,
         type: 'job_completed',
         requestId,
         targetPath: `/provider/jobs/${requestId}`,
@@ -7879,20 +8290,25 @@ exports.cancelCustomerServiceRequest = onRequest({ cors: true, secrets: [UNCEDO_
   );
   const travelledKm = Math.max(0, distanceTravelledMeters / 1000);
 
-  let billingRule = 'no_charge_before_driving';
-  let bookingCharge = 0;
+  let billingRule = 'booking_fee_only';
+  let bookingCharge = bookingFee;
   let travelCharge = 0;
   if (['driving', 'en_route', 'buying_resources'].includes(status)) {
     billingRule = 'travelled_distance_plus_booking_fee';
-    bookingCharge = bookingFee;
     travelCharge = toRand(travelledKm * SERVICE_TRAVEL_RATE_PER_KM);
   } else if (['arrived', 'work_started'].includes(status)) {
     billingRule = 'travel_fee_plus_booking_fee';
-    bookingCharge = bookingFee;
     travelCharge = toRand(travelFee);
   }
 
-  const cancellationAmount = toRand(travelCharge + bookingCharge);
+  const helperPayoutBreakdown = getServiceHelperPayoutBreakdown(request, {
+    closureType: 'canceled',
+    billingRule,
+    travelledKm,
+    travelFeeAmount: billingRule === 'travelled_distance_plus_booking_fee' ? travelCharge : travelFee,
+    bookingFeeAmount: bookingCharge,
+  });
+  const cancellationAmount = helperPayoutBreakdown.customerChargeAmount;
   const customerRef = db.collection('users').doc(request.customerId);
   const customerSnap = await customerRef.get();
   const customerData = customerSnap.data() || {};
@@ -7957,6 +8373,10 @@ exports.cancelCustomerServiceRequest = onRequest({ cors: true, secrets: [UNCEDO_
       cancellationBillingRule: billingRule,
       finalizedAt: new Date(endedAt).toISOString(),
     },
+    helperPayoutBreakdown: {
+      ...helperPayoutBreakdown,
+      finalizedAt: new Date(endedAt).toISOString(),
+    },
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   }, { merge: true });
 
@@ -7998,6 +8418,8 @@ exports.cancelCustomerServiceRequest = onRequest({ cors: true, secrets: [UNCEDO_
       cancellationAmount,
       cancellationBillingRule: billingRule,
       cancellationDistanceKm: Number(travelledKm.toFixed(2)),
+      helperPayoutAmount: helperPayoutBreakdown.helperAmount,
+      platformAmount: helperPayoutBreakdown.platformAmount,
       requestStatus: 'canceled',
     },
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -8024,7 +8446,7 @@ exports.cancelCustomerServiceRequest = onRequest({ cors: true, secrets: [UNCEDO_
       createUserNotification({
         userId: helperId,
         title: 'Job canceled',
-        message: `${request.customerName || 'The customer'} canceled this job.`,
+        message: `${request.customerName || 'The customer'} canceled this job. Helper earnings recorded: R${helperPayoutBreakdown.helperAmount.toFixed(2)}.`,
         type: 'job_canceled',
         requestId,
         targetPath: `/provider/jobs/${requestId}`,
@@ -8758,6 +9180,266 @@ exports.processWeeklyTutorPayouts = onSchedule({
   }
 
   logger.info('weekly_tutor_payouts_processed', {
+    syncedCount: syncedRecords.length,
+    paidCount,
+    failedCount,
+    skippedCount,
+  });
+});
+
+async function syncBackendHelperWeeklyPayoutRecords() {
+  const startWindow = Date.now() - (PAYOUT_LOOKBACK_WEEKS * 7 * 24 * 60 * 60 * 1000);
+  const currentWeekStart = getWeekRange(new Date()).weekStart.getTime();
+  const [completedSnap, canceledSnap] = await Promise.all([
+    db.collection('serviceRequests').where('status', '==', 'completed').limit(1000).get(),
+    db.collection('serviceRequests').where('status', '==', 'canceled').limit(1000).get(),
+  ]);
+
+  const grouped = new Map();
+  [...completedSnap.docs, ...canceledSnap.docs].forEach((requestDoc) => {
+    const request = { id: requestDoc.id, ...(requestDoc.data() || {}) };
+    const helperId = String(request?.helperAssignment?.helperId || '').trim();
+    if (!helperId) return;
+
+    const settledAtMs = timestampToMillis(
+      request.endedAt
+      || request.completedAt
+      || request.canceledAt
+      || request.updatedAt,
+    );
+    if (!settledAtMs || settledAtMs < startWindow || settledAtMs >= currentWeekStart) return;
+
+    const payoutBreakdown = computeStoredHelperPayoutBreakdown(request);
+    if (!payoutBreakdown) return;
+
+    const settledDate = new Date(settledAtMs);
+    const weekKey = getWeekKey(settledDate);
+    const { weekStart, weekEnd } = getWeekRange(settledDate);
+    const groupId = buildHelperPayoutDocId(weekKey, helperId);
+    const existing = grouped.get(groupId) || {
+      helperId,
+      helperName: request?.helperAssignment?.helperName || '',
+      helperEmail: request?.helperAssignment?.helperEmail || '',
+      weekKey,
+      weekStart: weekStart.toISOString(),
+      weekEnd: weekEnd.toISOString(),
+      totalJobs: 0,
+      completedJobs: 0,
+      canceledJobs: 0,
+      grossAmount: 0,
+      helperAmount: 0,
+      platformAmount: 0,
+      requestIds: [],
+    };
+
+    const normalizedStatus = String(request.status || '').trim().toLowerCase();
+    existing.totalJobs += 1;
+    if (normalizedStatus === 'completed') existing.completedJobs += 1;
+    if (normalizedStatus === 'canceled') existing.canceledJobs += 1;
+    existing.grossAmount = Number((existing.grossAmount + Number(payoutBreakdown.customerChargeAmount || 0)).toFixed(2));
+    existing.helperAmount = Number((existing.helperAmount + Number(payoutBreakdown.helperAmount || 0)).toFixed(2));
+    existing.platformAmount = Number((existing.platformAmount + Number(payoutBreakdown.platformAmount || 0)).toFixed(2));
+    existing.requestIds.push(request.id);
+    if (!existing.helperName && request?.helperAssignment?.helperName) existing.helperName = request.helperAssignment.helperName;
+    if (!existing.helperEmail && request?.helperAssignment?.helperEmail) existing.helperEmail = request.helperAssignment.helperEmail;
+
+    grouped.set(groupId, existing);
+  });
+
+  const upserted = [];
+  for (const [docId, record] of grouped.entries()) {
+    const payoutRef = db.collection(HELPER_PAYOUT_COLLECTION).doc(docId);
+    const existingSnap = await payoutRef.get();
+    const existing = existingSnap.exists ? (existingSnap.data() || {}) : {};
+    if (existing.status === 'paid') {
+      upserted.push({ id: docId, ...existing });
+      continue;
+    }
+
+    await payoutRef.set({
+      ...record,
+      status: existing.status || 'unpaid',
+      paidAt: existing.paidAt || null,
+      paidBy: existing.paidBy || null,
+      notes: existing.notes || '',
+      failureReason: existing.failureReason || null,
+      transferAttempts: existing.transferAttempts || 0,
+      createdAt: existing.createdAt || admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    const saved = await payoutRef.get();
+    upserted.push({ id: saved.id, ...saved.data() });
+  }
+
+  return upserted;
+}
+
+exports.processWeeklyHelperPayouts = onSchedule({
+  schedule: '0 0 * * 1',
+  timeZone: 'Africa/Johannesburg',
+  secrets: [UNCEDO_PAYMENTS_SECRETS],
+}, async () => {
+  let paymentsSecrets;
+  try {
+    paymentsSecrets = getPaymentsSecrets();
+  } catch (error) {
+    logger.error('weekly_helper_payouts_missing_payment_config', { error: error.message });
+    return;
+  }
+
+  const syncedRecords = await syncBackendHelperWeeklyPayoutRecords();
+  let paidCount = 0;
+  let failedCount = 0;
+  let skippedCount = 0;
+
+  for (const payout of syncedRecords) {
+    const status = String(payout.status || 'unpaid').toLowerCase();
+    if (!['unpaid', 'unsuccessful', 'failed'].includes(status)) {
+      skippedCount += 1;
+      continue;
+    }
+
+    const amount = Number(payout.helperAmount || 0);
+    const payoutRef = db.collection(HELPER_PAYOUT_COLLECTION).doc(payout.id);
+    if (!amount || amount <= 0) {
+      await payoutRef.set({
+        status: 'paid',
+        paidAt: admin.firestore.FieldValue.serverTimestamp(),
+        paidBy: { system: 'automatic', reason: 'zero_amount' },
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      await createUserNotification({
+        userId: payout.helperId,
+        title: 'Helper payout completed',
+        message: `Your ${payout.weekKey || 'weekly'} payout was marked paid. Amount: R0.00.`,
+        type: 'helper_payout_paid',
+        targetPath: '/provider/earnings',
+        metadata: {
+          payoutId: payout.id,
+          payoutStatus: 'paid',
+          amount: 0,
+        },
+      });
+      paidCount += 1;
+      continue;
+    }
+
+    const helperSnap = await db.collection('users').doc(payout.helperId).get();
+    const helperData = helperSnap.exists ? (helperSnap.data() || {}) : {};
+    const payoutDetails = helperData?.payout || {};
+    const recipientCode = String(payoutDetails.recipientCode || '').trim();
+    const payoutVerificationStatus = String(payoutDetails.verificationStatus || '').toLowerCase();
+    const isPayoutVerified = payoutVerificationStatus === 'verified';
+    const nextTransferAttempt = Number(payout.transferAttempts || 0) + 1;
+    if (!recipientCode || !isPayoutVerified) {
+      await payoutRef.set({
+        status: 'unsuccessful',
+        failureReason: 'Helper payout account is not verified.',
+        transferAttempts: nextTransferAttempt,
+        lastTransferAttemptAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      await createUserNotification({
+        userId: payout.helperId,
+        title: 'Helper payout unsuccessful',
+        message: 'Your helper payout could not be processed because your payout account is not verified.',
+        type: 'helper_payout_failed',
+        targetPath: '/provider/earnings',
+        metadata: {
+          payoutId: payout.id,
+          payoutStatus: 'unsuccessful',
+          amount,
+          failureReason: 'Helper payout account is not verified.',
+        },
+      });
+      failedCount += 1;
+      continue;
+    }
+
+    const reference = `uncedo-helper-${payout.weekKey}-${payout.helperId}-${Date.now()}`.replace(/[^a-zA-Z0-9-_]/g, '-').slice(0, 100);
+    await payoutRef.set({
+      status: 'processing',
+      transferReference: reference,
+      transferAttempts: nextTransferAttempt,
+      lastTransferAttemptAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    await createUserNotification({
+      userId: payout.helperId,
+      title: 'Helper payout processing',
+      message: `Your ${payout.weekKey || 'weekly'} payout is being processed. Amount: R${amount.toFixed(2)}.`,
+      type: 'helper_payout_processing',
+      targetPath: '/provider/earnings',
+      metadata: {
+        payoutId: payout.id,
+        payoutStatus: 'processing',
+        amount,
+        transferReference: reference,
+      },
+    });
+
+    try {
+      const transfer = await initiatePaystackTransfer({
+        paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY,
+        amount,
+        recipientCode,
+        reason: `Uncedo helper payout ${payout.weekKey}`,
+        reference,
+      });
+
+      await payoutRef.set({
+        status: 'paid',
+        paidAt: admin.firestore.FieldValue.serverTimestamp(),
+        paidBy: { system: 'automatic', provider: 'paystack' },
+        transferReference: reference,
+        transferCode: transfer.transfer_code || null,
+        transferId: transfer.id ? String(transfer.id) : null,
+        transferStatus: transfer.status || null,
+        failureReason: null,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      await createUserNotification({
+        userId: payout.helperId,
+        title: 'Helper payout paid',
+        message: `Your ${payout.weekKey || 'weekly'} payout was paid successfully. Amount: R${amount.toFixed(2)}.`,
+        type: 'helper_payout_paid',
+        targetPath: '/provider/earnings',
+        metadata: {
+          payoutId: payout.id,
+          payoutStatus: 'paid',
+          amount,
+          transferReference: reference,
+          transferStatus: transfer.status || null,
+        },
+      });
+      paidCount += 1;
+    } catch (error) {
+      await payoutRef.set({
+        status: 'unsuccessful',
+        failureReason: error.message || 'Paystack transfer failed.',
+        transferReference: reference,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      await createUserNotification({
+        userId: payout.helperId,
+        title: 'Helper payout unsuccessful',
+        message: `Your ${payout.weekKey || 'weekly'} payout could not be completed. ${error.message || 'Paystack transfer failed.'}`,
+        type: 'helper_payout_failed',
+        targetPath: '/provider/earnings',
+        metadata: {
+          payoutId: payout.id,
+          payoutStatus: 'unsuccessful',
+          amount,
+          transferReference: reference,
+          failureReason: error.message || 'Paystack transfer failed.',
+        },
+      });
+      failedCount += 1;
+    }
+  }
+
+  logger.info('weekly_helper_payouts_processed', {
     syncedCount: syncedRecords.length,
     paidCount,
     failedCount,
