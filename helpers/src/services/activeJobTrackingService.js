@@ -9,6 +9,10 @@ import {
   getRerouteReason,
   normalizeCoordinate,
 } from './routingService';
+import {
+  clearLiveTracking,
+  updateLiveTracking,
+} from './liveTrackingRealtimeService';
 import { logError, logInfo } from './logger';
 
 export const ACTIVE_JOB_LOCATION_TASK = 'uncedo-helper-active-job-location';
@@ -207,36 +211,17 @@ async function writeTrackingDocuments(session, helperLocation, routeSnapshot, so
     return;
   }
 
-  const { db } = getFirebaseClients();
-  const trackingRef = doc(db, 'serviceRequests', session.requestId, 'tracking', 'live');
-  const requestRef = doc(db, 'serviceRequests', session.requestId);
-  const helperRef = doc(db, 'users', session.helperId);
   const normalizedLocation = normalizeHelperLocation(helperLocation);
   const payload = buildTrackingPayload(session, normalizedLocation, routeSnapshot);
 
-  await Promise.all([
-    setDoc(trackingRef, payload, { merge: true }),
-    setDoc(requestRef, {
-      travelTracking: {
-        distanceTravelledMeters: payload.distanceTravelledMeters,
-        status: payload.status,
-        updatedAt: serverTimestamp(),
-        updatedAtMs: payload.updatedAtMs,
-      },
-      updatedAt: serverTimestamp(),
-    }, { merge: true }),
-    setDoc(helperRef, {
-      liveLocation: normalizedLocation
-        ? {
-            ...normalizedLocation,
-            updatedAt: serverTimestamp(),
-          }
-        : null,
-      locationSharingEnabled: true,
-      activeServiceRequestId: session.requestId,
-      updatedAt: serverTimestamp(),
-    }, { merge: true }),
-  ]);
+  await updateLiveTracking(session.requestId, {
+    requestId: session.requestId,
+    helperLocation: normalizedLocation,
+    routeSnapshot,
+    distanceTravelledMeters: payload.distanceTravelledMeters,
+    status: payload.status,
+    updatedAtMs: payload.updatedAtMs,
+  });
 
   logInfo('active-tracking.write', 'Location update written', {
     requestId: session.requestId,
@@ -448,6 +433,16 @@ export async function startActiveJobTracking({ requestId, helperId, customerId, 
   });
 
   try {
+    const { db } = getFirebaseClients();
+    await setDoc(doc(db, 'users', helperId), {
+      activeServiceRequestId: requestId,
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+  } catch (error) {
+    logError('active-tracking.start-user', error);
+  }
+
+  try {
     const currentPosition = await Location.getCurrentPositionAsync({
       accuracy: Location.Accuracy.Balanced,
     });
@@ -467,20 +462,7 @@ export async function stopActiveJobTracking({ finalStatus = '', keepLocationShar
 
   if (session?.requestId && finalStatus) {
     try {
-      const { db } = getFirebaseClients();
-      await setDoc(doc(db, 'serviceRequests', session.requestId, 'tracking', 'live'), {
-        status: normalizeStatus(finalStatus),
-        helperLocation: null,
-        routePolylineEncoded: '',
-        routePolylineOverviewEncoded: '',
-        routeSteps: [],
-        routeCoordinatesLastUpdatedAtMs: 0,
-        distanceMeters: null,
-        durationSeconds: null,
-        routeProvider: '',
-        updatedAt: serverTimestamp(),
-        updatedAtMs: Date.now(),
-      }, { merge: true });
+      await clearLiveTracking(session.requestId);
     } catch (error) {
       logError('active-tracking.stop-status', error);
     }

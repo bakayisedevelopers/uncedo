@@ -35,6 +35,8 @@ import {
   getCustomerServicesForCategory,
 } from '../../constants/serviceCatalog';
 import { useAuth } from '../../context/AuthContext';
+import { getCurrentCustomerLocation, requestCustomerLocationPermission } from '../../services/nearbyHelpersMapService';
+import { updateLiveTracking } from '../../services/liveTrackingRealtimeService';
 import {
   appendCustomerServiceTranscript,
   createCustomerServiceRequest,
@@ -166,7 +168,7 @@ function pruneStructuredAnswers({ currentAnswers = {}, nextCategoryId = '', next
 }
 
 export function CustomerServiceCallScreen({ route, navigate, goBack, systemInsets = {} }) {
-  const { user, homeLocation } = useAuth();
+  const { setHomeLocation, user } = useAuth();
   const scrollViewRef = useRef(null);
   const voiceBridgeRef = useRef(null);
   const attachmentPickerRef = useRef(null);
@@ -176,6 +178,7 @@ export function CustomerServiceCallScreen({ route, navigate, goBack, systemInset
   const quoteDecisionPendingRef = useRef(false);
   const activeAiRequestRef = useRef(null);
   const requestIdRef = useRef('');
+  const requestLocationRef = useRef(null);
   const structuredRequestRef = useRef(null);
   const conversationRef = useRef([]);
 
@@ -209,6 +212,7 @@ export function CustomerServiceCallScreen({ route, navigate, goBack, systemInset
     ? route.params.serviceIds.map((item) => String(item || '').trim()).filter(Boolean)
     : [];
   const initialRouteCategoryId = String(route?.params?.categoryId || '').trim();
+  const initialServiceAddressTarget = String(route?.params?.initialStructuredAnswers?.service_address_target || '').trim().toLowerCase();
   const initialStructuredAnswers = useMemo(() => (
     route?.params?.initialStructuredAnswers && typeof route.params.initialStructuredAnswers === 'object'
       ? Object.entries(route.params.initialStructuredAnswers).reduce((acc, [key, value]) => {
@@ -307,10 +311,9 @@ export function CustomerServiceCallScreen({ route, navigate, goBack, systemInset
   const persistStructuredState = async (nextStructuredState, overrides = {}) => {
     if (!requestIdRef.current) return;
     const nextTiming = deriveTimingDetails(nextStructuredState.structuredAnswers);
-    const requestLocation = requestRecord?.requestPayload?.location
+    const requestLocation = requestLocationRef.current
+      || requestRecord?.requestPayload?.location
       || requestRecord?.location
-      || homeLocation
-      || route?.params?.location
       || null;
     await updateCustomerServiceRequest(requestIdRef.current, {
       categoryId: nextStructuredState.categoryId || '',
@@ -435,6 +438,7 @@ export function CustomerServiceCallScreen({ route, navigate, goBack, systemInset
           if (docSnap.exists() && active) {
             const data = docSnap.data() || {};
             setRequestRecord({ id: existingRequestId, ...data });
+            requestLocationRef.current = data.location || data.requestPayload?.location || route?.params?.location || null;
             if (Array.isArray(data.transcript)) {
               const normalizedTranscript = data.transcript.map((turn, index) => normalizeTranscriptTurn(turn, index));
               setConversation(normalizedTranscript);
@@ -462,18 +466,44 @@ export function CustomerServiceCallScreen({ route, navigate, goBack, systemInset
             }
           }
         } else {
+          let requestLocation = null;
+          if (initialServiceAddressTarget === 'current_location') {
+            const permissionGranted = await requestCustomerLocationPermission().catch(() => false);
+            if (!permissionGranted) {
+              throw new Error('Location access is required to use your current location. Please allow it or choose your saved address.');
+            }
+
+            requestLocation = await getCurrentCustomerLocation().catch(() => null);
+            if (!requestLocation) {
+              throw new Error('Unable to read your current location. Please try again.');
+            }
+
+            setHomeLocation(requestLocation);
+          }
+
+          requestLocationRef.current = requestLocation || route?.params?.location || null;
           nextRequestId = await createCustomerServiceRequest({
             user,
-            location: homeLocation || route?.params?.location || null,
+            location: requestLocation,
             initialDraft: {
               categoryId: initialRouteCategoryId,
               serviceIds: initialRouteServiceIds,
               selectedPackageId: initialSelectedPackageId,
               structuredAnswers: initialStructuredAnswers,
               serviceAddress: String(user?.customerProfile?.serviceAddress || '').trim(),
-              serviceAddressTarget: String(initialStructuredAnswers?.service_address_target || '').trim(),
+              serviceAddressTarget: initialServiceAddressTarget,
             },
           });
+
+          if (requestLocation) {
+            await updateLiveTracking(nextRequestId, {
+              requestId: nextRequestId,
+              customerLocation: requestLocation,
+              updatedAtMs: Date.now(),
+            }).catch((error) => {
+              console.warn('[uncedo:request-location]', error?.message || error);
+            });
+          }
         }
 
         if (!active) return;
@@ -552,6 +582,7 @@ export function CustomerServiceCallScreen({ route, navigate, goBack, systemInset
       (request) => {
         if (!request) return;
         setRequestRecord(request);
+        requestLocationRef.current = request.location || request.requestPayload?.location || requestLocationRef.current;
         if (request.referenceAttachments) {
           setUploadedReferences(Array.isArray(request.referenceAttachments) ? request.referenceAttachments : []);
         }

@@ -11,16 +11,18 @@ import {
   INDIVIDUAL_CUSTOMER_TYPE_OPTIONS,
 } from '../../constants/customer';
 import { useAuth } from '../../context/AuthContext';
+import { getCurrentCustomerLocation, requestCustomerLocationPermission } from '../../services/nearbyHelpersMapService';
 import { getCustomerOnboardingStatus } from '../../utils/onboarding';
 import { getUserProfile, updateUserProfile } from '../../services/userService';
 import { colors } from '../../theme/colors';
 
 export function CustomerDetailsScreen({ navigate }) {
-  const { setUser, user } = useAuth();
+  const { setHomeLocation, setUser, user } = useAuth();
   const onboardingStatus = getCustomerOnboardingStatus(user);
   const hydratedUserIdRef = useRef(null);
   const [message, setMessage] = useState('');
   const [isSaving, setIsSaving] = useState(false);
+  const [liveLocation, setLiveLocation] = useState(null);
   const [form, setForm] = useState({
     fullName: '',
     phoneNumber: '',
@@ -33,6 +35,24 @@ export function CustomerDetailsScreen({ navigate }) {
     businessCategory: '',
     preferredServiceCategories: [],
   });
+
+  const liveLocationText = liveLocation
+    ? `${Number(liveLocation.latitude).toFixed(5)}, ${Number(liveLocation.longitude).toFixed(5)}`
+    : 'Tap refresh to capture the device location.';
+
+  const refreshCurrentLocation = async () => {
+    const permissionGranted = await requestCustomerLocationPermission().catch(() => false);
+    if (!permissionGranted) {
+      setLiveLocation(null);
+      return;
+    }
+
+    const nextLocation = await getCurrentCustomerLocation().catch(() => null);
+    if (nextLocation) {
+      setLiveLocation(nextLocation);
+      setHomeLocation(nextLocation);
+    }
+  };
 
   useEffect(() => {
     if (!user?.uid) return;
@@ -70,6 +90,10 @@ export function CustomerDetailsScreen({ navigate }) {
       cancelled = true;
     };
   }, [setUser, user?.uid]);
+
+  useEffect(() => {
+    refreshCurrentLocation().catch(() => null);
+  }, []);
 
   const isBusinessAccount = form.accountType === 'business';
   const isIndividualAccount = form.accountType === 'individual';
@@ -121,6 +145,23 @@ export function CustomerDetailsScreen({ navigate }) {
       <Card style={styles.statusCard}>
         <Text style={styles.sectionTitle}>{onboardingStatus.title}</Text>
         <Text style={styles.copy}>{onboardingStatus.message}</Text>
+      </Card>
+
+      <Card style={styles.locationCard}>
+        <Text style={styles.sectionTitle}>Location summary</Text>
+        <View style={styles.locationRow}>
+          <Ionicons color={colors.brandDark} name="home-outline" size={16} />
+          <Text style={styles.locationLabel}>Saved address</Text>
+        </View>
+        <Text style={styles.locationValue}>{String(form.serviceAddress || 'Add your saved address').trim() || 'Add your saved address'}</Text>
+        <View style={styles.locationRow}>
+          <Ionicons color={colors.brandDark} name="navigate-outline" size={16} />
+          <Text style={styles.locationLabel}>Current live location</Text>
+        </View>
+        <Text style={styles.locationValue}>{liveLocationText}</Text>
+        <Pressable accessibilityRole="button" onPress={() => refreshCurrentLocation().catch(() => null)} style={styles.locationAction}>
+          <Text style={styles.locationActionText}>Refresh device location</Text>
+        </Pressable>
       </Card>
 
       <ServiceCategoryPicker
@@ -274,6 +315,9 @@ const styles = StyleSheet.create({
   statusCard: {
     gap: 8,
   },
+  locationCard: {
+    gap: 10,
+  },
   sectionTitle: {
     color: colors.text,
     fontSize: 18,
@@ -286,6 +330,35 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 14,
     fontWeight: '700',
+  },
+  locationRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 6,
+  },
+  locationLabel: {
+    color: colors.brandDark,
+    fontSize: 11,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
+  locationValue: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  locationAction: {
+    alignSelf: 'flex-start',
+    backgroundColor: colors.brandSoft,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  locationActionText: {
+    color: colors.brandDark,
+    fontSize: 12,
+    fontWeight: '800',
   },
   fieldGroup: {
     gap: 8,
