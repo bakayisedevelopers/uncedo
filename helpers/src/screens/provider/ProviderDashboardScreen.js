@@ -4,6 +4,7 @@ import { HelperHomeCallToActionSheet } from '../../components/app/HelperHomeCall
 import { HelperHomeMap } from '../../components/app/HelperHomeMap';
 import { useAuth } from '../../context/AuthContext';
 import { useHelpersApp } from '../../context/HelpersAppContext';
+import { formatCurrency } from '../../utils/payouts';
 import {
   getCurrentHelperLocation,
   requestHelperMapLocationPermission,
@@ -18,7 +19,7 @@ export function ProviderDashboardScreen({
 }) {
   const { user } = useAuth();
   const { height: windowHeight } = useWindowDimensions();
-  const { profile, onboardingStatus, actions, saveError, saving, activeJob, homeLocation, setHomeLocation } = useHelpersApp();
+  const { profile, onboardingStatus, actions, saveError, saving, activeJob, homeLocation, setHomeLocation, paymentSummary } = useHelpersApp();
   const [composerHeight, setComposerHeight] = useState(0);
   const [mapError, setMapError] = useState('');
   const [mapLoading, setMapLoading] = useState(true);
@@ -141,6 +142,7 @@ export function ProviderDashboardScreen({
           needsProfileCompletion={needsProfileCompletion}
           isOnline={isOnline}
           hasActiveJob={!!activeJob}
+          walletAmountLabel={formatCurrency(paymentSummary.unpaidAmount)}
           onPress={handlePrimaryAction}
           onGoToActiveJob={() => navigate('ActiveJob')}
         />

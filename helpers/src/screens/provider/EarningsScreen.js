@@ -9,8 +9,6 @@ import {
   formatDate,
   formatWeekRangeLabel,
   getPayoutTone,
-  HELPER_PAYOUT_RATE,
-  PLATFORM_FEE_RATE,
 } from '../../utils/payouts';
 
 export function EarningsScreen({ goBack }) {
@@ -26,34 +24,45 @@ export function EarningsScreen({ goBack }) {
 
       <View style={styles.header}>
         <Text style={styles.title}>Payment</Text>
-        <Text style={styles.copy}>Track completed jobs by week, helper share, platform fee, and payout status using the same structure as the customer-style app shell.</Text>
+        <Text style={styles.copy}>Track weekly helper earnings, cancellation outcomes, unpaid wallet balance, and payout status from the same request records used for billing.</Text>
       </View>
+
+      <Card style={styles.walletCard}>
+        <SectionHeading
+          title="Wallet"
+          subtitle="This is the total amount currently owed to you and not yet marked as paid."
+        />
+        <Text style={styles.walletAmount}>{formatCurrency(paymentSummary.unpaidAmount)}</Text>
+      </Card>
 
       <Card>
         <SectionHeading
           title="Payment summary"
-          subtitle="Weekly grouping, payout state, and helper share are kept parallel with the original earnings logic."
+          subtitle="Your totals are grouped by payout week and include both completed jobs and customer cancellations."
         />
         <View style={styles.metricGrid}>
           <MetricCard label="Lifetime helper earnings" value={formatCurrency(paymentSummary.lifetimeHelperEarnings)} />
           <MetricCard label="Unpaid amount" value={formatCurrency(paymentSummary.unpaidAmount)} />
           <MetricCard label="Paid amount" value={formatCurrency(paymentSummary.paidAmount)} accent="success" />
           <MetricCard label="Current week amount" value={formatCurrency(paymentSummary.currentWeekAmount)} />
-          <MetricCard label="Platform fee" value={`${Math.round(PLATFORM_FEE_RATE * 100)}%`} helper="Applied to completed helper jobs." />
-          <MetricCard label="Helper share" value={`${Math.round(HELPER_PAYOUT_RATE * 100)}%`} helper="Paid to the verified helper account." />
+        </View>
+        <View style={styles.ruleCard}>
+          <Text style={styles.ruleText}>The platform gets 30% and you as a helper get 70%.</Text>
+          <Text style={styles.ruleText}>The 70% applies to the labor amount only. You also receive the full travel fee for the service.</Text>
+          <Text style={styles.ruleText}>The booking fee belongs to the platform. If a customer cancels before you start traveling, you receive R0 and the booking fee still stays with the platform.</Text>
         </View>
       </Card>
 
       <Card>
         <SectionHeading
           title="Weekly payout breakdown"
-          subtitle="Grouped Monday to Sunday with manual payout tracking status."
+          subtitle="Grouped Monday to Sunday. Each request shows what the customer paid and what belongs to you."
         />
 
         {!weeklyGroups.length ? (
           <EmptyState
-            title="No completed jobs yet"
-            description="Completed helper jobs will appear here and automatically group into payout weeks."
+            title="No settled jobs yet"
+            description="Completed jobs and customer cancellations will appear here once they produce a billing outcome."
           />
         ) : (
           weeklyGroups.map((group) => {
@@ -68,7 +77,7 @@ export function EarningsScreen({ goBack }) {
                   <View style={styles.weekCopy}>
                     <Text style={styles.weekTitle}>{formatWeekRangeLabel(group.weekStart, group.weekEnd)}</Text>
                     <Text style={styles.weekKey}>{group.weekKey}</Text>
-                    <Text style={styles.weekAmount}>Total made: {formatCurrency(group.grossAmount)}</Text>
+                    <Text style={styles.weekAmount}>Customer charges: {formatCurrency(group.grossAmount)}</Text>
                   </View>
                   <StatusBadge label={group.status} tone={getPayoutTone(group.status)} />
                 </Pressable>
@@ -77,7 +86,7 @@ export function EarningsScreen({ goBack }) {
                   <View style={styles.weekExpanded}>
                     <View style={styles.metricGrid}>
                       <MetricCard label="Jobs" value={String(group.totalJobs)} accent="muted" />
-                      <MetricCard label="Gross" value={formatCurrency(group.grossAmount)} accent="muted" />
+                      <MetricCard label="Customer charges" value={formatCurrency(group.grossAmount)} accent="muted" />
                       <MetricCard label="Helper payout" value={formatCurrency(group.helperAmount)} accent="success" />
                       <MetricCard label="Platform amount" value={formatCurrency(group.platformAmount)} accent="muted" />
                     </View>
@@ -93,11 +102,12 @@ export function EarningsScreen({ goBack }) {
                         <View style={styles.jobRowCopy}>
                           <Text style={styles.jobRowTitle}>{job.title}</Text>
                           <Text style={styles.jobRowMeta}>{`${job.customerName} | ${formatDate(job.completedAt)}`}</Text>
+                          <Text style={styles.jobRowMeta}>{job.computedAmounts.summaryLabel}</Text>
                           <Text style={styles.jobRowMeta}>{(job.requestedSkills || []).join(', ')}</Text>
                         </View>
                         <View style={styles.jobRowAmounts}>
-                          <Text style={styles.jobRowTotal}>{formatCurrency(job.computedAmounts.totalAmount)}</Text>
-                          <Text style={styles.jobRowHelper}>{formatCurrency(job.computedAmounts.helperAmount)}</Text>
+                          <Text style={styles.jobRowTotal}>Charged {formatCurrency(job.computedAmounts.totalAmount)}</Text>
+                          <Text style={styles.jobRowHelper}>You get {formatCurrency(job.computedAmounts.helperAmount)}</Text>
                         </View>
                       </View>
                     ))}
@@ -141,10 +151,31 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
   },
+  walletCard: {
+    backgroundColor: '#fff8fc',
+  },
+  walletAmount: {
+    color: colors.brandDark,
+    fontSize: 32,
+    fontWeight: '900',
+  },
   metricGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 10,
+  },
+  ruleCard: {
+    backgroundColor: '#fff8fc',
+    borderColor: colors.border,
+    borderRadius: 18,
+    borderWidth: 1,
+    gap: 8,
+    padding: 14,
+  },
+  ruleText: {
+    color: colors.text,
+    fontSize: 13,
+    lineHeight: 19,
   },
   weekCard: {
     borderColor: colors.border,

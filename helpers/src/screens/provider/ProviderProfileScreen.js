@@ -6,6 +6,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useHelpersApp } from '../../context/HelpersAppContext';
 import { getCurrentHelperLocation, reverseGeocodeLocation, requestHelperMapLocationPermission } from '../../services/nearbyCustomersMapService';
 import { colors } from '../../theme/colors';
+import { formatCurrency } from '../../utils/payouts';
 
 function getInitials(name = '') {
   const parts = String(name || '')
@@ -44,7 +45,7 @@ function ProfileRow({ icon, title, description, onPress, tone = 'default' }) {
 
 export function ProviderProfileScreen({ navigate }) {
   const { logout, user } = useAuth();
-  const { profile, onboardingStatus } = useHelpersApp();
+  const { profile, onboardingStatus, paymentSummary } = useHelpersApp();
   const [deviceLocation, setDeviceLocation] = useState(null);
   const [liveAddress, setLiveAddress] = useState('');
   const fullName = String(profile?.fullName || user?.displayName || 'Helper').trim();
@@ -147,9 +148,15 @@ export function ProviderProfileScreen({ navigate }) {
           </View>
         </View>
 
-        <View style={styles.statusPill}>
-          <Ionicons color={onboardingStatus.complete ? colors.success : colors.warning} name={onboardingStatus.complete ? 'checkmark-circle' : 'alert-circle'} size={16} />
-          <Text style={styles.statusText}>{onboardingStatus.complete ? 'Profile complete' : onboardingStatus.message}</Text>
+        <View style={styles.statusRow}>
+          <View style={styles.statusPill}>
+            <Ionicons color={onboardingStatus.complete ? colors.success : colors.warning} name={onboardingStatus.complete ? 'checkmark-circle' : 'alert-circle'} size={16} />
+            <Text style={styles.statusText}>{onboardingStatus.complete ? 'Profile complete' : onboardingStatus.message}</Text>
+          </View>
+          <View style={styles.walletPill}>
+            <Text style={styles.walletPillLabel}>Wallet</Text>
+            <Text style={styles.walletPillValue}>{formatCurrency(paymentSummary.unpaidAmount)}</Text>
+          </View>
         </View>
 
         <View style={styles.locationCard}>
@@ -324,9 +331,13 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     textTransform: 'lowercase',
   },
+  statusRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
   statusPill: {
     alignItems: 'center',
-    alignSelf: 'flex-start',
     backgroundColor: 'rgba(236,72,153,0.08)',
     borderRadius: 999,
     flexDirection: 'row',
@@ -338,6 +349,27 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 12,
     fontWeight: '700',
+  },
+  walletPill: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#ffffff',
+    borderColor: colors.border,
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  walletPillLabel: {
+    color: colors.muted,
+    fontSize: 10,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
+  walletPillValue: {
+    color: colors.brandDark,
+    fontSize: 13,
+    fontWeight: '900',
+    marginTop: 1,
   },
   locationCard: {
     backgroundColor: colors.surface,

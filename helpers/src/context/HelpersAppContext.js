@@ -4,8 +4,9 @@ import { useAuth } from './AuthContext';
 import { updateHelperProfile } from '../services/userService';
 import { logError } from '../services/logger';
 import { deleteUploadedFile, uploadLocalFile } from '../services/storageService';
-import { groupCompletedJobsByWeek, HELPER_PAYOUT_RATE, PLATFORM_FEE_RATE } from '../utils/payouts';
+import { groupCompletedJobsByWeek, HELPER_PAYOUT_RATE, PLATFORM_FEE_RATE, shouldIncludeJobInPayouts } from '../utils/payouts';
 import { acceptHelperAgreement as acceptHelperAgreementRequest } from '../services/legalAgreementService';
+import { subscribeToHelperWeeklyPayouts } from '../services/helperPayoutService';
 import {
   requestHelperLocationPermission,
   syncHelperCurrentLocation,
@@ -80,20 +81,7 @@ const FALLBACK_PROFILE = {
   },
 };
 
-const INITIAL_WEEKLY_PAYOUTS = [
-  {
-    weekKey: '2026-W23',
-    status: 'processing',
-    notes: 'Current week jobs batch on Friday.',
-    paidAt: null,
-  },
-  {
-    weekKey: '2026-W22',
-    status: 'paid',
-    notes: 'Paid to your verified FNB account.',
-    paidAt: '2026-06-03T08:30:00.000Z',
-  },
-];
+const INITIAL_WEEKLY_PAYOUTS = [];
 
 function createPicture(uri) {
   const normalizedUri = typeof uri === 'string' ? uri : uri?.uri;
@@ -427,6 +415,23 @@ export function HelpersAppProvider({ children }) {
   }, [user?.uid]);
 
   useEffect(() => {
+    if (!user?.uid) {
+      setWeeklyPayouts([]);
+      return () => {};
+    }
+
+    return subscribeToHelperWeeklyPayouts(
+      user.uid,
+      (items) => {
+        setWeeklyPayouts(items);
+      },
+      (error) => {
+        logError('HelpersAppContext.weeklyPayouts', error);
+      },
+    );
+  }, [user?.uid]);
+
+  useEffect(() => {
     let active = true;
 
     const stopWatchingLocation = () => {
@@ -547,12 +552,12 @@ export function HelpersAppProvider({ children }) {
   const helperSkills = useMemo(() => buildHelperSkillsList(profile.services || []), [profile.services]);
 
   const completedJobs = useMemo(
-    () => serviceRequests.filter((item) => ['completed', 'canceled'].includes(String(item.status || '').toLowerCase())),
+    () => serviceRequests.filter((item) => shouldIncludeJobInPayouts(item)),
     [serviceRequests],
   );
 
   const weeklyGroups = useMemo(
-    () => groupCompletedJobsByWeek(completedJobs.filter((item) => String(item.status || '').toLowerCase() === 'completed'), weeklyPayouts),
+    () => groupCompletedJobsByWeek(completedJobs, weeklyPayouts),
     [completedJobs, weeklyPayouts],
   );
 
@@ -667,13 +672,6 @@ export function HelpersAppProvider({ children }) {
       keepLocationSharingEnabled: profile.onlineStatus === 'online',
     }).catch((error) => logError('HelpersAppContext.completeActiveJob.stopTracking', error));
 
-    const completedAt = new Date().toISOString();
-    setWeeklyPayouts((current) => {
-      const completedJob = { ...activeJob, status: 'completed', completedAt };
-      const weekKey = groupCompletedJobsByWeek([completedJob], [])[0]?.weekKey;
-      if (!weekKey || current.some((item) => item.weekKey === weekKey)) return current;
-      return [{ weekKey, status: 'unpaid', notes: 'Awaiting payout batch.', paidAt: null }, ...current];
-    });
     return true;
   };
 
