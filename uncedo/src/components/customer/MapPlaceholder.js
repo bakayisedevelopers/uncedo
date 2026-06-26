@@ -245,9 +245,10 @@ export function MapPlaceholder({
     }
 
     const timer = setTimeout(() => {
-      const next = buildBoundsRegion(coords, mapCenter);
-      setRegion(next);
-      mapRef.current?.animateToRegion?.(next, 420);
+      mapRef.current?.fitToCoordinates?.(coords, {
+        edgePadding: { top: 128, right: 84, bottom: floatingBottomInset + 132, left: 84 },
+        animated: true,
+      });
     }, 250);
 
     return () => clearTimeout(timer);
@@ -276,9 +277,10 @@ export function MapPlaceholder({
       return;
     }
 
-    const next = buildBoundsRegion(coords, mapCenter);
-    setRegion(next);
-    mapRef.current?.animateToRegion?.(next, 350);
+    mapRef.current?.fitToCoordinates?.(coords, {
+      edgePadding: { top: 128, right: 84, bottom: floatingBottomInset + 132, left: 84 },
+      animated: true,
+    });
   };
 
   const zoom = (factor) => {
