@@ -217,6 +217,7 @@ async function writeTrackingDocuments(session, helperLocation, routeSnapshot, so
   await updateLiveTracking(session.requestId, {
     requestId: session.requestId,
     helperLocation: normalizedLocation,
+    customerLocation: session.destination || null,
     routeSnapshot,
     distanceTravelledMeters: payload.distanceTravelledMeters,
     status: payload.status,

@@ -8668,7 +8668,12 @@ exports.cancelCustomerServiceRequest = onRequest({ cors: true, secrets: [UNCEDO_
         targetPath: `/provider/jobs/${requestId}`,
       }),
     ] : []),
-  ]);
+  ]).catch((error) => {
+    logger.error('Service cancellation notification failed.', {
+      requestId,
+      error: error?.message || error,
+    });
+  });
 
   res.status(200).json({
     success: true,

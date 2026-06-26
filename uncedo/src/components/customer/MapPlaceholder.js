@@ -98,14 +98,41 @@ function buildRouteFocusCoordinates({ helperCoordinate = null, customerCoordinat
   return focusCoordinates;
 }
 
+function buildBoundsRegion(coordinates = [], fallback = DEFAULT_REGION) {
+  const normalized = (Array.isArray(coordinates) ? coordinates : [])
+    .map((coordinate) => normalizeCoordinate(coordinate))
+    .filter(Boolean);
+
+  if (!normalized.length) {
+    return buildRegion(fallback, 5);
+  }
+
+  const latitudes = normalized.map((coordinate) => coordinate.latitude);
+  const longitudes = normalized.map((coordinate) => coordinate.longitude);
+  const minLatitude = Math.min(...latitudes);
+  const maxLatitude = Math.max(...latitudes);
+  const minLongitude = Math.min(...longitudes);
+  const maxLongitude = Math.max(...longitudes);
+  const latitudeDelta = Math.max(0.018, (maxLatitude - minLatitude) * 1.55);
+  const longitudeDelta = Math.max(0.018, (maxLongitude - minLongitude) * 1.55);
+
+  return {
+    latitude: (minLatitude + maxLatitude) / 2,
+    longitude: (minLongitude + maxLongitude) / 2,
+    latitudeDelta,
+    longitudeDelta,
+  };
+}
+
 function AvatarMarker({ initials, photoUri, isCurrentUser = false, heading = null }) {
+  const markerIcon = isCurrentUser ? 'home' : 'car-sport';
   return (
     <View style={styles.markerRoot}>
       <View style={[styles.markerAvatar, isCurrentUser && styles.markerAvatarCurrent]}>
         {photoUri ? (
           <Image source={{ uri: photoUri }} style={styles.markerImage} />
         ) : (
-          <Text style={styles.markerInitials}>{getInitials(initials)}</Text>
+          <Ionicons name={markerIcon} size={18} color="#ffffff" />
         )}
       </View>
       {!isCurrentUser && typeof heading === 'number' ? (
@@ -218,10 +245,9 @@ export function MapPlaceholder({
     }
 
     const timer = setTimeout(() => {
-      mapRef.current?.fitToCoordinates?.(coords, {
-        edgePadding: { top: 128, right: 84, bottom: floatingBottomInset + 132, left: 84 },
-        animated: true,
-      });
+      const next = buildBoundsRegion(coords, mapCenter);
+      setRegion(next);
+      mapRef.current?.animateToRegion?.(next, 420);
     }, 250);
 
     return () => clearTimeout(timer);
@@ -229,7 +255,11 @@ export function MapPlaceholder({
 
   const recenter = () => {
     const coords = mode === 'route' && normalizedRouteCoordinates.length > 1
-      ? normalizedRouteCoordinates
+      ? buildRouteFocusCoordinates({
+          helperCoordinate,
+          customerCoordinate,
+          routeCoordinates: normalizedRouteCoordinates,
+        })
       : [helperCoordinate, customerCoordinate].filter(Boolean);
 
     if (!coords.length) {
@@ -246,10 +276,9 @@ export function MapPlaceholder({
       return;
     }
 
-    mapRef.current?.fitToCoordinates?.(coords, {
-      edgePadding: { top: 128, right: 84, bottom: floatingBottomInset + 132, left: 84 },
-      animated: true,
-    });
+    const next = buildBoundsRegion(coords, mapCenter);
+    setRegion(next);
+    mapRef.current?.animateToRegion?.(next, 350);
   };
 
   const zoom = (factor) => {
@@ -337,13 +366,22 @@ export function MapPlaceholder({
         })}
 
         {mode === 'route' && NativePolyline && normalizedRouteCoordinates.length > 1 ? (
-          <NativePolyline
-            coordinates={normalizedRouteCoordinates}
-            strokeColor={colors.brand}
-            strokeWidth={5}
-            lineCap="round"
-            lineJoin="round"
-          />
+          <>
+            <NativePolyline
+              coordinates={normalizedRouteCoordinates}
+              strokeColor="rgba(255,255,255,0.96)"
+              strokeWidth={11}
+              lineCap="round"
+              lineJoin="round"
+            />
+            <NativePolyline
+              coordinates={normalizedRouteCoordinates}
+              strokeColor="#0867f2"
+              strokeWidth={7}
+              lineCap="round"
+              lineJoin="round"
+            />
+          </>
         ) : null}
 
       </NativeMapView>
@@ -407,17 +445,17 @@ const styles = StyleSheet.create({
   },
   markerAvatar: {
     alignItems: 'center',
-    backgroundColor: colors.brand,
+    backgroundColor: '#0867f2',
     borderColor: '#ffffff',
     borderRadius: 999,
     borderWidth: 3,
-    height: 34,
+    height: 42,
     justifyContent: 'center',
     overflow: 'hidden',
-    width: 34,
+    width: 42,
   },
   markerAvatarCurrent: {
-    backgroundColor: '#2563eb',
+    backgroundColor: '#0867f2',
   },
   markerImage: {
     height: '100%',
@@ -429,7 +467,7 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   markerPin: {
-    backgroundColor: colors.brand,
+    backgroundColor: '#0867f2',
     borderBottomLeftRadius: 8,
     borderBottomRightRadius: 8,
     borderTopLeftRadius: 2,
@@ -440,7 +478,7 @@ const styles = StyleSheet.create({
     width: 14,
   },
   markerPinCurrent: {
-    backgroundColor: '#2563eb',
+    backgroundColor: '#0867f2',
   },
   directionArrowContainer: {
     alignItems: 'center',
