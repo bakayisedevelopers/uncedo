@@ -1059,8 +1059,8 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
     return (
       <View style={[styles.emptyContainer, { paddingBottom: bottomInset, paddingTop: topInset }]}>
         <Ionicons name="checkmark-circle-outline" size={64} color={colors.success} />
-        <Text style={styles.emptyTitle}>Job completed</Text>
-        <Text style={styles.emptyCopy}>This active job has already been closed.</Text>
+        <Text style={styles.emptyTitle}>Job closed</Text>
+        <Text style={styles.emptyCopy}>This active job has been completed or canceled.</Text>
         <Pressable style={styles.primaryAction} onPress={() => goBack('Home')}>
           <Text style={styles.primaryActionText}>Back to dashboard</Text>
         </Pressable>
