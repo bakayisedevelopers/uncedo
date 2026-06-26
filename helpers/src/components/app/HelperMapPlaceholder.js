@@ -195,7 +195,10 @@ function AvatarMarker({ initials, photoUri, isCurrentUser = false, heading = nul
     return (
       <View style={styles.navigationCarOuter}>
         <View style={[styles.navigationCarBody, { transform: [{ rotate: `${rotation}deg` }] }]}>
-          <Ionicons name="car-sport" size={30} color="#050505" />
+          <View style={styles.navigationHeadingNose}>
+            <Ionicons name="navigate" size={11} color="#ffffff" />
+          </View>
+          <Ionicons name="car-sport" size={31} color="#050505" />
         </View>
       </View>
     );
@@ -676,6 +679,18 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.28,
     shadowRadius: 7,
     elevation: 8,
+  },
+  navigationHeadingNose: {
+    alignItems: 'center',
+    backgroundColor: colors.brand,
+    borderColor: '#ffffff',
+    borderRadius: 999,
+    borderWidth: 1.5,
+    height: 19,
+    justifyContent: 'center',
+    position: 'absolute',
+    top: -8,
+    width: 19,
   },
   controls: {
     gap: 8,

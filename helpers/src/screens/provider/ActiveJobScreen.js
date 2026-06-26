@@ -779,6 +779,8 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
   }, [activeJob?.status, activeJobDestination, currentLocation, routeCoordinates, routeDistanceMeters, routeSteps]);
   const statusMeta = useMemo(() => getStatusMeta(activeJob?.status), [activeJob?.status]);
   const toneStyles = useMemo(() => getToneStyles(statusMeta.tone), [statusMeta.tone]);
+  const normalizedJobStatus = String(activeJob?.status || '').toLowerCase();
+  const shouldUseNavigationCamera = ['driving', 'en_route', 'buying_resources'].includes(normalizedJobStatus);
   const canCancelJob = String(activeJob?.status || '').toLowerCase() !== 'completed';
   const serviceName = useMemo(
     () => getServiceById(activeJob?.serviceId)?.name || 'Service request',
@@ -1281,7 +1283,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
       <View style={styles.mapLayer}>
         <HelperMapPlaceholder
           mode="route"
-          routeView="navigation"
+          routeView={shouldUseNavigationCamera ? 'navigation' : 'overview'}
           currentUserMarker={currentLocation ? {
             latitude: currentLocation.latitude,
             longitude: currentLocation.longitude,
