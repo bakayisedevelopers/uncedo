@@ -475,9 +475,14 @@ export async function stopActiveJobTracking({ finalStatus = '', keepLocationShar
     }
   }
 
-  const started = await Location.hasStartedLocationUpdatesAsync(ACTIVE_JOB_LOCATION_TASK).catch(() => false);
-  if (started) {
-    await Location.stopLocationUpdatesAsync(ACTIVE_JOB_LOCATION_TASK);
+  let started = false;
+  try {
+    started = await Location.hasStartedLocationUpdatesAsync(ACTIVE_JOB_LOCATION_TASK);
+    if (started) {
+      await Location.stopLocationUpdatesAsync(ACTIVE_JOB_LOCATION_TASK);
+    }
+  } catch (error) {
+    logError('active-tracking.stop-location', error);
   }
 
   if (session?.helperId) {

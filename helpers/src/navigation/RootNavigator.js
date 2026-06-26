@@ -211,9 +211,6 @@ export function RootNavigator() {
     } else {
       if (lastActiveJobId) {
         setLastActiveJobId(null);
-        if (activeRoute.key === 'ActiveJob') {
-          openRoute('Home', { replace: true });
-        }
       }
     }
   }, [activeJob, activeRoute.key, lastActiveJobId, openRoute]);

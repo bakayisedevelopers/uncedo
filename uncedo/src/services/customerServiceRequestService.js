@@ -721,7 +721,7 @@ export async function cancelServiceRequestByCustomer({ requestId, reason }) {
     throw new Error('A request ID is required to cancel.');
   }
 
-  const { auth } = getFirebaseClients();
+  const { auth, db } = getFirebaseClients();
   const idToken = await auth.currentUser?.getIdToken();
   if (!idToken) {
     throw new Error('You must be signed in to cancel this request.');
@@ -741,6 +741,38 @@ export async function cancelServiceRequestByCustomer({ requestId, reason }) {
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || payload?.success === false) {
+    if (response.status === 404) {
+      const requestRef = doc(db, 'serviceRequests', requestId);
+      const requestSnap = await getDoc(requestRef);
+      const request = requestSnap.exists() ? requestSnap.data() || {} : null;
+      const normalizedStatus = String(request?.status || '').toLowerCase();
+      const helperId = String(request?.helperAssignment?.helperId || '').trim();
+      const canCancelLocally = Boolean(
+        request
+        && request.customerId === auth.currentUser?.uid
+        && !helperId
+        && ['collecting_details', 'scheduled_pending', 'matching', 'helper_found', 'no_helper_available'].includes(normalizedStatus),
+      );
+
+      if (canCancelLocally) {
+        await updateDoc(requestRef, {
+          status: 'canceled',
+          statusDetail: 'Customer canceled the service request.',
+          canceledBy: 'customer',
+          canceledReason: reason || '',
+          canceledAt: serverTimestamp(),
+          helperQueue: [],
+          currentOfferHelperId: null,
+          offerExpiresAt: null,
+          offerToken: null,
+          updatedAt: serverTimestamp(),
+        });
+
+        const updatedSnap = await getDoc(requestRef);
+        return updatedSnap.exists() ? { id: updatedSnap.id, ...updatedSnap.data() } : null;
+      }
+    }
+
     throw new Error(payload?.message || 'Unable to cancel this request.');
   }
 
