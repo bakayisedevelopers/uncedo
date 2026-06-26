@@ -193,9 +193,9 @@ function AvatarMarker({ initials, photoUri, isCurrentUser = false, heading = nul
   if (isCurrentUser) {
     const rotation = typeof heading === 'number' ? heading : 0;
     return (
-      <View style={styles.navigationArrowContainer}>
-        <View style={{ transform: [{ rotate: `${rotation - 45}deg` }] }}>
-          <View style={styles.navigationArrowShape} />
+      <View style={styles.navigationCarOuter}>
+        <View style={[styles.navigationCarBody, { transform: [{ rotate: `${rotation}deg` }] }]}>
+          <Ionicons name="car-sport" size={30} color="#050505" />
         </View>
       </View>
     );
@@ -288,16 +288,16 @@ export function HelperMapPlaceholder({
     const heading = Number.isFinite(navigationHeading) ? navigationHeading : 0;
     const distance = Number.isFinite(navigationDistanceMeters) ? navigationDistanceMeters : null;
     const aheadMeters = distance !== null
-      ? (distance < 250 ? 30 : distance < 1000 ? 70 : distance < 3000 ? 120 : 180)
-      : 100;
+      ? (distance < 250 ? 45 : distance < 1000 ? 110 : distance < 3000 ? 180 : 260)
+      : 150;
     const zoom = distance !== null
-      ? (distance < 250 ? 16.4 : distance < 1000 ? 15.6 : distance < 3000 ? 14.9 : 14.2)
-      : 15.1;
+      ? (distance < 250 ? 16.8 : distance < 1000 ? 16.1 : distance < 3000 ? 15.3 : 14.7)
+      : 15.6;
 
     return {
       center: offsetCoordinate(currentCoordinate, heading, aheadMeters),
       heading,
-      pitch: distance !== null && distance < 250 ? 58 : 56,
+      pitch: distance !== null && distance < 250 ? 60 : 58,
       zoom,
     };
   }, [currentCoordinate, navigationDistanceMeters, navigationHeading, navigationMode]);
@@ -541,13 +541,22 @@ export function HelperMapPlaceholder({
         })}
 
         {mode === 'route' && NativePolyline && normalizedRouteCoordinates.length > 1 ? (
-          <NativePolyline
-            coordinates={normalizedRouteCoordinates}
-            strokeColor={colors.brand}
-            strokeWidth={5}
-            lineCap="round"
-            lineJoin="round"
-          />
+          <>
+            <NativePolyline
+              coordinates={normalizedRouteCoordinates}
+              strokeColor="rgba(255,255,255,0.95)"
+              strokeWidth={12}
+              lineCap="round"
+              lineJoin="round"
+            />
+            <NativePolyline
+              coordinates={normalizedRouteCoordinates}
+              strokeColor="#0867f2"
+              strokeWidth={8}
+              lineCap="round"
+              lineJoin="round"
+            />
+          </>
         ) : null}
 
       </NativeMapView>
@@ -649,30 +658,24 @@ const styles = StyleSheet.create({
   markerPinCurrent: {
     backgroundColor: '#7c3aed',
   },
-  navigationArrowContainer: {
+  navigationCarOuter: {
     alignItems: 'center',
-    backgroundColor: '#ffffff',
-    borderRadius: 22,
     justifyContent: 'center',
-    width: 44,
-    height: 44,
-    borderWidth: 3,
-    borderColor: '#3b82f6',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.22,
-    shadowRadius: 4,
-    elevation: 5,
+    width: 50,
+    height: 62,
   },
-  navigationArrowShape: {
-    width: 0,
-    height: 0,
-    borderLeftWidth: 10,
-    borderRightWidth: 10,
-    borderBottomWidth: 22,
-    borderLeftColor: 'transparent',
-    borderRightColor: 'transparent',
-    borderBottomColor: '#3b82f6',
+  navigationCarBody: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.88)',
+    borderRadius: 14,
+    height: 52,
+    justifyContent: 'center',
+    width: 36,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 5 },
+    shadowOpacity: 0.28,
+    shadowRadius: 7,
+    elevation: 8,
   },
   controls: {
     gap: 8,
