@@ -164,6 +164,12 @@ function getStatusMeta(status) {
         detail: 'The service is complete and billing has been finalized.',
         tone: 'success',
       };
+    case 'canceled':
+      return {
+        label: 'Request canceled',
+        detail: 'This service request has been canceled.',
+        tone: 'warning',
+      };
     default:
       return {
         label: 'Live job tracking',
@@ -323,7 +329,7 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
 
     if (
       !['completed', 'canceled'].includes(previousStatus)
-      && ['completed', 'canceled'].includes(currentStatus)
+      && currentStatus === 'completed'
       && request?.helperAssignment?.helperId
       && lastPromptedRequestIdRef.current !== String(request?.id || requestId || '')
     ) {
@@ -360,6 +366,10 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
     subscribeToLiveTracking(requestId, (data) => {
       if (cancelled) return;
       setTrackingDocument(data || null);
+      const nextCustomerLocation = normalizeCoordinate(data?.customerLocation || null);
+      if (nextCustomerLocation) {
+        setResolvedClientLocation(nextCustomerLocation);
+      }
     }, (nextError) => {
       if (cancelled) return;
       console.warn('[uncedo:request-tracking]', nextError?.message || nextError);
@@ -881,16 +891,6 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
       if (updatedRequest) {
         setRequest(updatedRequest);
       }
-      if (updatedRequest?.helperAssignment?.helperId) {
-        setRatingTarget({
-          requestId: updatedRequest.id || request.id || requestId,
-          helperId: updatedRequest.helperAssignment.helperId,
-          helperName: updatedRequest.helperAssignment.helperName || 'helper',
-        });
-        setShowRatingModal(true);
-        return;
-      }
-
       goBack('CustomerHome');
     } catch (nextError) {
       Alert.alert('Error', nextError.message || 'Unable to cancel this request.');

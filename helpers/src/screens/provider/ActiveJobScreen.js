@@ -1284,11 +1284,17 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
 
           {navigationHint ? (
             <View style={styles.topDirectionCard}>
-              <Ionicons color={colors.brandDark} name="navigate-outline" size={16} />
-              <Text style={styles.topDirectionText} numberOfLines={2}>
-                {navigationHint.instruction}
-                {navigationHint.distance ? ` in ${formatDistanceValue(navigationHint.distance)}` : ''}
-              </Text>
+              <Ionicons color="#ffffff" name="return-up-forward-outline" size={30} />
+              <View style={styles.topDirectionCopy}>
+                {navigationHint.distance ? (
+                  <Text style={styles.topDirectionDistance} numberOfLines={1}>
+                    {formatDistanceValue(navigationHint.distance)}
+                  </Text>
+                ) : null}
+                <Text style={styles.topDirectionText} numberOfLines={2}>
+                  {navigationHint.instruction}
+                </Text>
+              </View>
             </View>
           ) : (
             <View style={styles.topDirectionCardSpacer} />
@@ -1600,28 +1606,37 @@ const styles = StyleSheet.create({
   },
   topDirectionCard: {
     alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.96)',
-    borderColor: 'rgba(15,23,42,0.08)',
-    borderRadius: 18,
-    borderWidth: 1,
+    backgroundColor: 'rgba(0,0,0,0.92)',
+    borderRadius: 22,
     flex: 1,
     flexDirection: 'row',
-    gap: 8,
-    justifyContent: 'center',
+    gap: 12,
+    justifyContent: 'flex-start',
     marginHorizontal: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    minHeight: 82,
+    paddingHorizontal: 18,
+    paddingVertical: 14,
   },
   topDirectionCardSpacer: {
     flex: 1,
     marginHorizontal: 8,
   },
-  topDirectionText: {
-    color: colors.brandDark,
+  topDirectionCopy: {
     flex: 1,
-    fontSize: 12,
+    gap: 2,
+  },
+  topDirectionDistance: {
+    color: '#ffffff',
+    fontSize: 24,
     fontWeight: '900',
-    lineHeight: 16,
+    lineHeight: 29,
+  },
+  topDirectionText: {
+    color: '#ffffff',
+    flex: 1,
+    fontSize: 18,
+    fontWeight: '800',
+    lineHeight: 23,
   },
   sheetSubtitle: {
     marginTop: 12,

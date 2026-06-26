@@ -458,6 +458,7 @@ export async function cancelServiceRequest({ requestId, helperId, reason }) {
       statusDetail: 'Helper canceled the session.',
       canceledBy: 'helper',
       canceledReason: reason || '',
+      canceledAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
 
