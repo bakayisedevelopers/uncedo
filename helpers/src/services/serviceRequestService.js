@@ -10,6 +10,12 @@ import {
   where,
 } from 'firebase/firestore';
 import { getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
+import { updateLiveTracking } from './liveTrackingRealtimeService';
+import {
+  buildRouteSnapshot,
+  fetchRouteData,
+  normalizeCoordinate,
+} from './routingService';
 
 const ACTIVE_HELPER_REQUEST_STATUSES = [
   'accepted',
@@ -56,11 +62,74 @@ function normalizeTime(value) {
 function mapPricingTotal(pricingSnapshot = null) {
   return Number(
     pricingSnapshot?.total
+    ?? pricingSnapshot?.totalAmount
     ?? pricingSnapshot?.finalPrice
     ?? pricingSnapshot?.finalAmount
     ?? pricingSnapshot?.basePrice
     ?? 0
   ) || 0;
+}
+
+function buildEmptyRouteSnapshot(origin = null, destination = null) {
+  return {
+    routeCoordinates: [],
+    routeSteps: [],
+    encodedPolyline: '',
+    overviewEncodedPolyline: '',
+    distanceMeters: null,
+    durationSeconds: null,
+    routeProvider: '',
+    lastRouteOrigin: normalizeCoordinate(origin),
+    lastDestination: normalizeCoordinate(destination),
+    lastSuccessfulRouteFetchAtMs: 0,
+  };
+}
+
+async function seedAcceptedLiveTracking({ requestId, request, helperId, helperSnapshot }) {
+  const customerLocation = normalizeCoordinate(request?.location || request?.requestPayload?.location || null);
+  const helperLocation = normalizeCoordinate(helperSnapshot?.liveLocation || null);
+  const acceptedAtMs = Date.parse(request?.helperAssignment?.acceptedAt || '') || Date.now();
+  const routeSnapshot = buildEmptyRouteSnapshot(helperLocation, customerLocation);
+
+  await updateLiveTracking(requestId, {
+    requestId,
+    helperId,
+    customerId: request?.customerId || '',
+    helperLocation,
+    customerLocation,
+    destination: customerLocation,
+    routeSnapshot,
+    distanceTravelledMeters: 0,
+    status: request?.status || 'accepted',
+    acceptedAtMs,
+    startedAtMs: acceptedAtMs,
+    updatedAtMs: Date.now(),
+  });
+
+  if (!helperLocation || !customerLocation) {
+    return;
+  }
+
+  try {
+    const routeData = await fetchRouteData(helperLocation, customerLocation);
+    if (!Array.isArray(routeData.routeCoordinates) || routeData.routeCoordinates.length <= 1) {
+      return;
+    }
+
+    await updateLiveTracking(requestId, {
+      requestId,
+      helperId,
+      customerId: request?.customerId || '',
+      helperLocation,
+      customerLocation,
+      destination: customerLocation,
+      routeSnapshot: buildRouteSnapshot(routeData, helperLocation, customerLocation),
+      status: request?.status || 'accepted',
+      updatedAtMs: Date.now(),
+    });
+  } catch {
+    // The foreground tracking loop will retry routing as soon as the helper screen starts.
+  }
 }
 
 export function getRequestedServiceLabels(categoryId = '', serviceIds = []) {
@@ -313,8 +382,22 @@ export async function acceptServiceRequestOffer({
     }, { merge: true });
   });
 
-  const refreshed = await getDoc(requestRef);
-  return refreshed.exists() ? { id: refreshed.id, ...refreshed.data() } : null;
+  const [refreshed, helperSnapshot] = await Promise.all([
+    getDoc(requestRef),
+    getDoc(helperRef),
+  ]);
+  const acceptedRequest = refreshed.exists() ? { id: refreshed.id, ...refreshed.data() } : null;
+
+  if (acceptedRequest) {
+    await seedAcceptedLiveTracking({
+      requestId,
+      request: acceptedRequest,
+      helperId,
+      helperSnapshot: helperSnapshot.exists() ? helperSnapshot.data() || {} : {},
+    }).catch(() => null);
+  }
+
+  return acceptedRequest;
 }
 
 export async function declineServiceRequestOffer({ requestId, helperId }) {
@@ -451,7 +534,7 @@ export async function cancelServiceRequest({ requestId, helperId, reason }) {
 
   await runTransaction(db, async (transaction) => {
     const requestSnap = await transaction.get(requestRef);
-    if (!requestSnap.exists) return;
+    if (!requestSnap.exists()) return;
 
     transaction.update(requestRef, {
       status: 'canceled',

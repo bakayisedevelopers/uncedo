@@ -10,7 +10,7 @@ import {
   normalizeCoordinate,
 } from './routingService';
 import {
-  clearLiveTracking,
+  closeLiveTracking,
   updateLiveTracking,
 } from './liveTrackingRealtimeService';
 import { logError, logInfo } from './logger';
@@ -216,8 +216,11 @@ async function writeTrackingDocuments(session, helperLocation, routeSnapshot, so
 
   await updateLiveTracking(session.requestId, {
     requestId: session.requestId,
+    helperId: session.helperId,
+    customerId: session.customerId,
     helperLocation: normalizedLocation,
     customerLocation: session.destination || null,
+    destination: session.destination || null,
     routeSnapshot,
     distanceTravelledMeters: payload.distanceTravelledMeters,
     status: payload.status,
@@ -463,7 +466,10 @@ export async function stopActiveJobTracking({ finalStatus = '', keepLocationShar
 
   if (session?.requestId && finalStatus) {
     try {
-      await clearLiveTracking(session.requestId);
+      await closeLiveTracking(session.requestId, {
+        status: finalStatus,
+        reason: finalStatus,
+      });
     } catch (error) {
       logError('active-tracking.stop-status', error);
     }
