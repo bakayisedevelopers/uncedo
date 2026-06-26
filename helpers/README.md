@@ -11,6 +11,7 @@ This folder contains the Expo React Native app for helpers.
 - Availability management and active job handling
 - Helper home map with a dedicated native map, persistent live location marker, and 50 km service radius
 - Route-based active job tracking with in-app travel status updates
+- Accepted jobs seed `liveTracking/serviceRequests/{requestId}` in Realtime Database immediately, then update helper movement, destination, route geometry, and closure status through the same tracking node.
 - Earnings, wallet balance, cancellation-aware payouts, and completed jobs grouped by week
 - Automatic Monday helper payout batching backed by Firestore payout records
 - Map-driven job and route views

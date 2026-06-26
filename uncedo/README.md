@@ -7,6 +7,7 @@ This folder contains the Expo React Native app for the customer experience, with
 - Student authentication and onboarding
 - Class request creation and tracking
 - Customer route-based helper tracking during active service requests
+- Active service tracking reads the Realtime Database `liveTracking/serviceRequests/{requestId}` node as the live map source from helper acceptance through completion or cancellation.
 - Customer service-request chat with voice transcription, media references, and saved chat history for legacy or history flows
 - Customer home discovery feed with ranked service tiles, full-catalog search overlay, helper work photos, and optional category personalization
 - Customer home discovery feed with recommendation ranking from recorded activity, full-catalog search overlay, helper work photos, and optional category personalization

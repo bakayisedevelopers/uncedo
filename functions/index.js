@@ -8245,7 +8245,13 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
     }
   }
 
-  const quoteTotal = toRand(request.pricingSnapshot?.total || 0);
+  const quoteTotal = toRand(
+    request.pricingSnapshot?.total
+    ?? request.pricingSnapshot?.totalAmount
+    ?? request.pricingSnapshot?.finalAmount
+    ?? request.pricingSnapshot?.finalPrice
+    ?? 0,
+  );
   const subtotal = getServiceQuoteSubtotal(request);
   const travelFee = getServiceTravelFee(request);
   const bookingFee = getServiceBookingFee(request);
@@ -8348,6 +8354,16 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
   }
 
   await batch.commit();
+
+  await admin.database().ref(`liveTracking/serviceRequests/${requestId}`).update({
+    status: 'completed',
+    closedReason: 'completed',
+    closedAtMs: endedAt,
+    updatedAtMs: endedAt,
+  }).catch((error) => logger.warn('Unable to close live tracking after service completion.', {
+    requestId,
+    error: error.message,
+  }));
 
   const updatedSnap = await requestRef.get();
   const updatedRequest = { id: updatedSnap.id, ...updatedSnap.data() };
@@ -8616,6 +8632,16 @@ exports.cancelCustomerServiceRequest = onRequest({ cors: true, secrets: [UNCEDO_
   }
 
   await batch.commit();
+
+  await admin.database().ref(`liveTracking/serviceRequests/${requestId}`).update({
+    status: 'canceled',
+    closedReason: 'customer_canceled',
+    closedAtMs: endedAt,
+    updatedAtMs: endedAt,
+  }).catch((error) => logger.warn('Unable to close live tracking after customer cancellation.', {
+    requestId,
+    error: error.message,
+  }));
 
   const updatedSnap = await requestRef.get();
   const updatedRequest = { id: updatedSnap.id, ...updatedSnap.data() };

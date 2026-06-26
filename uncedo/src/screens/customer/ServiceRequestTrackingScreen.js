@@ -100,6 +100,18 @@ function formatCurrency(value) {
   return `R${amount}`;
 }
 
+function getPricingTotal(pricingSnapshot = null) {
+  return Number(
+    pricingSnapshot?.total
+    ?? pricingSnapshot?.totalAmount
+    ?? pricingSnapshot?.finalPrice
+    ?? pricingSnapshot?.finalAmount
+    ?? pricingSnapshot?.finalPayablePrice
+    ?? pricingSnapshot?.basePrice
+    ?? 0
+  ) || 0;
+}
+
 function getInitials(name = '') {
   const parts = String(name || '')
     .trim()
@@ -809,6 +821,7 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
       active,
     };
   }, [nowTime, request]);
+  const quotedTotal = useMemo(() => getPricingTotal(request?.pricingSnapshot), [request?.pricingSnapshot]);
 
   const statusMeta = useMemo(() => getStatusMeta(request?.status), [request?.status]);
   const toneStyles = useMemo(() => getToneStyles(statusMeta.tone), [statusMeta.tone]);
@@ -1034,7 +1047,7 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
             <Text style={styles.metaLabel}>Price summary</Text>
             <View style={styles.pricingRow}>
               <Text style={styles.pricingLabel}>Base quote</Text>
-              <Text style={styles.pricingValue}>{formatCurrency(request.pricingSnapshot?.total)}</Text>
+              <Text style={styles.pricingValue}>{formatCurrency(quotedTotal)}</Text>
             </View>
             {waitInfo.waitFee > 0 ? (
               <View style={styles.pricingRow}>
@@ -1045,7 +1058,7 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
             <View style={[styles.pricingRow, styles.pricingTotalRow]}>
               <Text style={styles.pricingTotalLabel}>Estimated total</Text>
               <Text style={styles.pricingTotalValue}>
-                {formatCurrency((request.pricingSnapshot?.total || 0) + (waitInfo.waitFee || 0))}
+                {formatCurrency(quotedTotal + (waitInfo.waitFee || 0))}
               </Text>
             </View>
           </View>

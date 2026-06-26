@@ -34,7 +34,6 @@ import {
   syncActiveTrackingSession,
 } from '../../services/activeJobTrackingService';
 import { watchHelperLocation } from '../../services/helperLocationService';
-import { decodePolyline } from '../../services/routingService';
 import { submitServiceRequestRating } from '../../services/serviceRequestService';
 import { subscribeToLiveTracking } from '../../services/liveTrackingRealtimeService';
 import { uploadLocalFile } from '../../services/storageService';
@@ -483,6 +482,29 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
       const nextCustomerLocation = normalizeCoordinate(data?.customerLocation || data?.routeSnapshot?.lastDestination || null);
       if (nextCustomerLocation) {
         setResolvedCustomerLocation(nextCustomerLocation);
+      }
+
+      const nextRouteCoordinates = data?.routeSnapshot?.routeCoordinates || [];
+      const nextDistance = Number.isFinite(Number(data?.distanceMeters))
+        ? Number(data.distanceMeters)
+        : null;
+      const nextDuration = Number.isFinite(Number(data?.durationSeconds))
+        ? Number(data.durationSeconds)
+        : null;
+
+      if (nextRouteCoordinates.length > 1) {
+        lastStableRouteSnapshotRef.current = {
+          routeCoordinates: nextRouteCoordinates,
+          distanceMeters: nextDistance ?? lastStableRouteSnapshotRef.current.distanceMeters,
+          durationSeconds: nextDuration ?? lastStableRouteSnapshotRef.current.durationSeconds,
+        };
+        setRouteCoordinates(lastStableRouteSnapshotRef.current.routeCoordinates);
+        setRouteDistanceMeters(lastStableRouteSnapshotRef.current.distanceMeters);
+        setRouteDurationSeconds(lastStableRouteSnapshotRef.current.durationSeconds);
+        setRouteError('');
+      } else if (nextDistance !== null || nextDuration !== null) {
+        setRouteDistanceMeters(nextDistance ?? lastStableRouteSnapshotRef.current.distanceMeters);
+        setRouteDurationSeconds(nextDuration ?? lastStableRouteSnapshotRef.current.durationSeconds);
       }
     }, (error) => {
       if (cancelled) return;
@@ -984,7 +1006,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
 
       setShowCompletionModal(false);
       setProofPhotos([]);
-      setShowRatingModal(true);
+      goBack('Home');
     } catch (error) {
       Alert.alert('Error', error.message || 'Unable to complete this job.');
     }
