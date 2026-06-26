@@ -8455,6 +8455,38 @@ async function resolveServiceRequestSnapshot(rawRequestId = '') {
     }
   }
 
+  for (const candidateId of requestIdCandidates) {
+    const callSnap = await db.collection('serviceCalls').doc(candidateId).get().catch(() => null);
+    const linkedRequestId = callSnap?.exists
+      ? String(callSnap.data()?.requestId || '').trim()
+      : '';
+    if (!linkedRequestId || requestIdCandidates.includes(linkedRequestId)) {
+      continue;
+    }
+
+    const requestRef = db.collection('serviceRequests').doc(linkedRequestId);
+    const requestSnap = await requestRef.get();
+    if (requestSnap.exists) {
+      return { requestId: linkedRequestId, requestRef, requestSnap };
+    }
+  }
+
+  for (const candidateId of requestIdCandidates) {
+    const querySnap = await db.collection('serviceRequests')
+      .where('requestId', '==', candidateId)
+      .limit(1)
+      .get()
+      .catch(() => null);
+    const foundDoc = querySnap?.docs?.[0] || null;
+    if (foundDoc?.exists) {
+      return {
+        requestId: foundDoc.id,
+        requestRef: foundDoc.ref,
+        requestSnap: foundDoc,
+      };
+    }
+  }
+
   return {
     requestId: String(rawRequestId || '').trim(),
     requestRef: null,
