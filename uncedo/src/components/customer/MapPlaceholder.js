@@ -128,20 +128,25 @@ function AvatarMarker({ initials, photoUri, isCurrentUser = false, heading = nul
   const markerIcon = isCurrentUser ? 'home' : 'car-sport';
   return (
     <View style={styles.markerRoot}>
-      <View style={[styles.markerAvatar, isCurrentUser && styles.markerAvatarCurrent]}>
+      <View style={[
+        styles.markerAvatar,
+        isCurrentUser && styles.markerAvatarCurrent,
+        !isCurrentUser && styles.markerAvatarHelper,
+      ]}>
         {photoUri ? (
           <Image source={{ uri: photoUri }} style={styles.markerImage} />
         ) : (
           <Ionicons name={markerIcon} size={18} color="#ffffff" />
         )}
       </View>
-      {!isCurrentUser && typeof heading === 'number' ? (
-        <View style={[styles.directionArrowContainer, { transform: [{ rotate: `${heading}deg` }] }]}>
-          <Ionicons name="navigation" size={16} color={colors.brand} style={{ transform: [{ rotate: '45deg' }] }} />
-        </View>
-      ) : (
+      {isCurrentUser ? (
         <View style={[styles.markerPin, isCurrentUser && styles.markerPinCurrent]} />
-      )}
+      ) : null}
+      {!isCurrentUser && typeof heading === 'number' ? (
+        <View style={[styles.helperHeadingBadge, { transform: [{ rotate: `${heading}deg` }] }]}>
+          <Ionicons name="navigate" size={13} color="#ffffff" />
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -190,21 +195,36 @@ export function MapPlaceholder({
   const [region, setRegion] = useState(() => buildRegion(mapCenter, radiusKm));
   const mapRef = useRef(null);
   const [isMapReady, setIsMapReady] = useState(false);
-  const didInitialFitRef = useRef(false);
 
-  useEffect(() => {
-    if (mode === 'route') {
-      didInitialFitRef.current = false;
+  const fitRouteToMap = (animated = true) => {
+    const coords = mode === 'route' && normalizedRouteCoordinates.length > 1
+      ? buildRouteFocusCoordinates({
+          helperCoordinate,
+          customerCoordinate,
+          routeCoordinates: normalizedRouteCoordinates,
+        })
+      : [helperCoordinate, customerCoordinate].filter(Boolean);
+
+    if (!coords.length || !mapRef.current) return false;
+
+    if (coords.length === 1) {
+      const next = buildRegion(coords[0], mode === 'route' ? 5 : radiusKm);
+      setRegion(next);
+      mapRef.current?.animateToRegion?.(next, animated ? 350 : 1);
+      return true;
     }
-  }, [mode, routeSignature]);
+
+    mapRef.current?.fitToCoordinates?.(coords, {
+      edgePadding: { top: 128, right: 84, bottom: floatingBottomInset + 132, left: 84 },
+      animated,
+    });
+    return true;
+  };
 
   useEffect(() => {
     if (!mapRef.current || !isMapReady) return;
 
-    if (!customerCoordinate && !helperCoordinate) {
-      didInitialFitRef.current = false;
-      return;
-    }
+    if (!customerCoordinate && !helperCoordinate) return;
 
     if (mode === 'nearby') {
       const coords = [customerCoordinate, helperCoordinate].filter(Boolean);
@@ -224,63 +244,24 @@ export function MapPlaceholder({
       return;
     }
 
-    if (didInitialFitRef.current) return;
+    const timer = setTimeout(() => {
+      fitRouteToMap(true);
+    }, 450);
 
-    const coords = normalizedRouteCoordinates.length > 1
-      ? buildRouteFocusCoordinates({
-          helperCoordinate,
-          customerCoordinate,
-          routeCoordinates: normalizedRouteCoordinates,
-        })
-      : [helperCoordinate, customerCoordinate].filter(Boolean);
+    return () => clearTimeout(timer);
+  }, [customerCoordinate, floatingBottomInset, helperCoordinate, isMapReady, mode, radiusKm, routeSignature]);
 
-    if (!coords.length) return;
-
-    didInitialFitRef.current = true;
-    if (coords.length === 1) {
-      const next = buildRegion(coords[0], 5);
-      setRegion(next);
-      mapRef.current.animateToRegion?.(next, 350);
+  const recenter = () => {
+    if (fitRouteToMap(true)) {
       return;
     }
 
-    const timer = setTimeout(() => {
-      mapRef.current?.fitToCoordinates?.(coords, {
-        edgePadding: { top: 128, right: 84, bottom: floatingBottomInset + 132, left: 84 },
-        animated: true,
-      });
-    }, 250);
-
-    return () => clearTimeout(timer);
-  }, [customerCoordinate, floatingBottomInset, helperCoordinate, isMapReady, mode, normalizedRouteCoordinates, radiusKm]);
-
-  const recenter = () => {
-    const coords = mode === 'route' && normalizedRouteCoordinates.length > 1
-      ? buildRouteFocusCoordinates({
-          helperCoordinate,
-          customerCoordinate,
-          routeCoordinates: normalizedRouteCoordinates,
-        })
-      : [helperCoordinate, customerCoordinate].filter(Boolean);
-
-    if (!coords.length) {
+    if (!customerCoordinate && !helperCoordinate) {
       const next = buildRegion(mapCenter, radiusKm);
       setRegion(next);
       mapRef.current?.animateToRegion?.(next, 350);
       return;
     }
-
-    if (coords.length === 1) {
-      const next = buildRegion(coords[0], mode === 'route' ? 5 : radiusKm);
-      setRegion(next);
-      mapRef.current?.animateToRegion?.(next, 350);
-      return;
-    }
-
-    mapRef.current?.fitToCoordinates?.(coords, {
-      edgePadding: { top: 128, right: 84, bottom: floatingBottomInset + 132, left: 84 },
-      animated: true,
-    });
   };
 
   const zoom = (factor) => {
@@ -321,7 +302,11 @@ export function MapPlaceholder({
         ref={mapRef}
         customMapStyle={MAP_STYLE}
         initialRegion={region}
-        onMapReady={() => setIsMapReady(true)}
+        onMapReady={() => {
+          setIsMapReady(true);
+          setTimeout(() => fitRouteToMap(false), 350);
+          setTimeout(() => fitRouteToMap(true), 900);
+        }}
         onRegionChangeComplete={mode === 'route' ? undefined : setRegion}
         pointerEvents={interactive ? 'auto' : 'none'}
         provider={PROVIDER_GOOGLE || undefined}
@@ -459,6 +444,9 @@ const styles = StyleSheet.create({
   markerAvatarCurrent: {
     backgroundColor: '#0867f2',
   },
+  markerAvatarHelper: {
+    backgroundColor: '#0f172a',
+  },
   markerImage: {
     height: '100%',
     width: '100%',
@@ -482,16 +470,18 @@ const styles = StyleSheet.create({
   markerPinCurrent: {
     backgroundColor: '#0867f2',
   },
-  directionArrowContainer: {
+  helperHeadingBadge: {
+    position: 'absolute',
+    right: -3,
+    top: -3,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#ffffff',
-    borderRadius: 12,
-    width: 24,
-    height: 24,
+    backgroundColor: colors.brand,
+    borderRadius: 999,
+    width: 22,
+    height: 22,
     borderWidth: 2,
-    borderColor: colors.brand,
-    marginTop: -2,
+    borderColor: '#ffffff',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.15,
