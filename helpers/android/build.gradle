@@ -20,5 +20,13 @@ allprojects {
   }
 }
 
+subprojects { subproject ->
+  subproject.tasks.withType(Exec).configureEach { task ->
+    if (task.name == "createExpoConfig") {
+      task.environment "NODE_ENV", System.getenv("NODE_ENV") ?: "production"
+    }
+  }
+}
+
 apply plugin: "expo-root-project"
 apply plugin: "com.facebook.react.rootproject"

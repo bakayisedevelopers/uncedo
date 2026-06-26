@@ -51,8 +51,11 @@ function normalizeLiveTrackingSnapshot(snapshot = {}) {
 
   return {
     requestId: String(snapshot.requestId || '').trim(),
+    helperId: String(snapshot.helperId || '').trim(),
+    customerId: String(snapshot.customerId || '').trim(),
     helperLocation: normalizeCoordinate(snapshot.helperLocation),
     customerLocation: normalizeCoordinate(snapshot.customerLocation),
+    destination: normalizeCoordinate(snapshot.destination),
     routeSnapshot,
     routeSteps: Array.isArray(routeSnapshot?.routeSteps) ? routeSnapshot.routeSteps : [],
     routePolylineEncoded: String(routeSnapshot?.encodedPolyline || '').trim(),
@@ -67,18 +70,33 @@ function normalizeLiveTrackingSnapshot(snapshot = {}) {
       ? Number(snapshot.distanceTravelledMeters)
       : 0,
     status: String(snapshot.status || '').trim(),
+    acceptedAtMs: Number.isFinite(Number(snapshot.acceptedAtMs)) ? Number(snapshot.acceptedAtMs) : 0,
+    startedAtMs: Number.isFinite(Number(snapshot.startedAtMs)) ? Number(snapshot.startedAtMs) : 0,
+    closedAtMs: Number.isFinite(Number(snapshot.closedAtMs)) ? Number(snapshot.closedAtMs) : 0,
+    closedReason: String(snapshot.closedReason || '').trim(),
     updatedAtMs: Number.isFinite(Number(snapshot.updatedAtMs)) ? Number(snapshot.updatedAtMs) : 0,
   };
 }
 
 const writeQueues = new Map();
-const closedTrackingPaths = new Set();
 
 function sanitizePatch(patch = {}) {
   const nextPatch = {};
 
   if (patch.requestId !== undefined) nextPatch.requestId = String(patch.requestId || '').trim();
+  if (patch.helperId !== undefined) nextPatch.helperId = String(patch.helperId || '').trim();
+  if (patch.customerId !== undefined) nextPatch.customerId = String(patch.customerId || '').trim();
   if (patch.status !== undefined) nextPatch.status = String(patch.status || '').trim();
+  if (patch.acceptedAtMs !== undefined) {
+    nextPatch.acceptedAtMs = Number.isFinite(Number(patch.acceptedAtMs)) ? Number(patch.acceptedAtMs) : Date.now();
+  }
+  if (patch.startedAtMs !== undefined) {
+    nextPatch.startedAtMs = Number.isFinite(Number(patch.startedAtMs)) ? Number(patch.startedAtMs) : Date.now();
+  }
+  if (patch.closedAtMs !== undefined) {
+    nextPatch.closedAtMs = Number.isFinite(Number(patch.closedAtMs)) ? Number(patch.closedAtMs) : Date.now();
+  }
+  if (patch.closedReason !== undefined) nextPatch.closedReason = String(patch.closedReason || '').trim();
   if (patch.updatedAtMs !== undefined) {
     nextPatch.updatedAtMs = Number.isFinite(Number(patch.updatedAtMs)) ? Number(patch.updatedAtMs) : Date.now();
   }
@@ -89,16 +107,13 @@ function sanitizePatch(patch = {}) {
   }
   if (patch.helperLocation !== undefined) nextPatch.helperLocation = normalizeCoordinate(patch.helperLocation);
   if (patch.customerLocation !== undefined) nextPatch.customerLocation = normalizeCoordinate(patch.customerLocation);
+  if (patch.destination !== undefined) nextPatch.destination = normalizeCoordinate(patch.destination);
   if (patch.routeSnapshot !== undefined) nextPatch.routeSnapshot = normalizeRouteSnapshot(patch.routeSnapshot);
 
   return nextPatch;
 }
 
 async function enqueueLatestWrite(path, writeFn, patch) {
-  if (closedTrackingPaths.has(path)) {
-    return null;
-  }
-
   const existing = writeQueues.get(path) || { inFlight: false, pending: null, promise: null };
   existing.pending = {
     ...(existing.pending || {}),
@@ -113,11 +128,6 @@ async function enqueueLatestWrite(path, writeFn, patch) {
   existing.inFlight = true;
   existing.promise = (async () => {
     while (existing.pending) {
-      if (closedTrackingPaths.has(path)) {
-        existing.pending = null;
-        return;
-      }
-
       const nextPatch = existing.pending;
       existing.pending = null;
       await writeFn(nextPatch);
@@ -169,11 +179,20 @@ export async function clearLiveTracking(requestId) {
     await existing.promise.catch(() => {});
   }
 
-  closedTrackingPaths.add(path);
-
   const { realtimeDb, realtimeDbModule } = getFirebaseClients();
   await realtimeDbModule.remove(realtimeDbModule.ref(realtimeDb, path));
   writeQueues.delete(path);
+}
+
+export async function closeLiveTracking(requestId, { status = '', reason = '' } = {}) {
+  const requestKey = String(requestId || '').trim();
+  if (!requestKey) return null;
+
+  return updateLiveTracking(requestKey, {
+    status,
+    closedReason: reason,
+    closedAtMs: Date.now(),
+  });
 }
 
 export async function subscribeToLiveTracking(requestId, callback, onError) {
