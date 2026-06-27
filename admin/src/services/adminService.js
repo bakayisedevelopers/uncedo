@@ -1,10 +1,22 @@
 import { getFirebaseClients } from '../firebase/config';
 
+const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID || 'bakayise-uncedo';
+const useFirebaseEmulators = import.meta.env.VITE_USE_FIREBASE_EMULATORS === 'true';
+const firebaseEmulatorHost = import.meta.env.VITE_FIREBASE_EMULATOR_HOST || 'localhost';
+
 const ROLE_GROUPS = {
   helper: new Set(['helper', 'tutor', 'provider']),
   customer: new Set(['customer', 'student']),
   admin: new Set(['admin']),
 };
+
+function getFunctionEndpoint(functionName) {
+  if (useFirebaseEmulators) {
+    return `http://${firebaseEmulatorHost}:5001/${projectId}/us-central1/${functionName}`;
+  }
+
+  return `https://us-central1-${projectId}.cloudfunctions.net/${functionName}`;
+}
 
 function normalizeRole(value) {
   return String(value || '').trim().toLowerCase();
@@ -108,12 +120,56 @@ function normalizeSkill(skill = {}, serviceId = '') {
     status: String(skill.status || 'pending').trim().toLowerCase(),
     active: skill.active !== false,
     verified: skill.verified !== false,
+    approvalSource: String(skill.approvalSource || '').trim().toLowerCase(),
+    derivedFromBundleIds: [...new Set((Array.isArray(skill.derivedFromBundleIds) ? skill.derivedFromBundleIds : [])
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter(Boolean))],
+    derivedFromServiceIds: [...new Set((Array.isArray(skill.derivedFromServiceIds) ? skill.derivedFromServiceIds : [])
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter(Boolean))],
     createdAt: skill.createdAt || null,
     updatedAt: skill.updatedAt || null,
     pictures: (Array.isArray(skill.pictures) ? skill.pictures : [])
       .map(normalizePictureEntry)
       .filter(Boolean),
   };
+}
+
+async function getAuthToken() {
+  const clients = await getFirebaseClients();
+  return clients?.auth?.currentUser?.getIdToken?.() || '';
+}
+
+async function authorizedFunctionFetch(functionName, options = {}) {
+  const token = await getAuthToken();
+  if (!token) {
+    throw new Error('You must be signed in before managing helper approvals.');
+  }
+
+  const response = await fetch(getFunctionEndpoint(functionName), {
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || !result?.success) {
+    throw new Error(result?.message || 'Unable to complete the helper approval request.');
+  }
+  return result;
+}
+
+async function syncHelperServiceApprovals(uid) {
+  if (!uid) return null;
+
+  return authorizedFunctionFetch('syncHelperServiceApprovals', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ uid }),
+  });
 }
 
 function normalizeService(service = {}) {
@@ -269,6 +325,12 @@ export async function updateHelperServiceStatus({ uid, serviceId, skillId, updat
     throw new Error('Helper profile not found.');
   }
 
+  const normalizedStatus = String(updates.status || '').trim().toLowerCase();
+  const nextUpdates = {
+    ...updates,
+    ...(normalizedStatus === 'approved' && !('approvalSource' in updates) ? { approvalSource: 'manual' } : {}),
+  };
+
   const nextServices = (Array.isArray(profile.services) ? profile.services : []).map((service) => {
     if (service.serviceId !== serviceId) return service;
 
@@ -278,17 +340,19 @@ export async function updateHelperServiceStatus({ uid, serviceId, skillId, updat
         if (skill.id !== skillId && skill.name !== skillId) return skill;
         return {
           ...skill,
-          ...updates,
+          ...nextUpdates,
           updatedAt: new Date().toISOString(),
         };
       }),
     };
   });
 
-  return saveUserProfile(uid, {
+  await saveUserProfile(uid, {
     ...profile,
     services: nextServices,
   });
+  await syncHelperServiceApprovals(uid);
+  return getUserProfile(uid);
 }
 
 export async function removeHelperSkill({ uid, serviceId, skillId }) {
@@ -307,10 +371,12 @@ export async function removeHelperSkill({ uid, serviceId, skillId }) {
     })
     .filter((service) => (Array.isArray(service.skills) ? service.skills.length : 0) > 0);
 
-  return saveUserProfile(uid, {
+  await saveUserProfile(uid, {
     ...profile,
     services: nextServices,
   });
+  await syncHelperServiceApprovals(uid);
+  return getUserProfile(uid);
 }
 
 export function flattenProviderServices(profiles = []) {
