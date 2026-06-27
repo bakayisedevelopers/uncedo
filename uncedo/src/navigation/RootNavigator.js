@@ -389,8 +389,10 @@ export function RootNavigator() {
 
     const activeStatuses = [
       'collecting_details',
+      'scheduled_pending',
       'matching',
       'helper_found',
+      'no_helper_available',
       'accepted',
       'en_route',
       'driving',
