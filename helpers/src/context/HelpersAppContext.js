@@ -338,9 +338,29 @@ export function HelpersAppProvider({ children }) {
   const [serviceCatalogResolved, setServiceCatalogResolved] = useState(false);
   const helperLocationWatchRef = useRef(null);
   const activeJobCleanupPromiseRef = useRef(null);
+  const pendingServicesSignatureRef = useRef('');
+
+  const getServicesSignature = (services = []) => JSON.stringify(normalizeServices(services));
 
   useEffect(() => {
-    setProfile(normalizeProfile(user));
+    const normalizedUserProfile = normalizeProfile(user);
+    const incomingServicesSignature = getServicesSignature(normalizedUserProfile.services || []);
+
+    setProfile((current) => {
+      if (pendingServicesSignatureRef.current) {
+        if (incomingServicesSignature === pendingServicesSignatureRef.current) {
+          pendingServicesSignatureRef.current = '';
+          return normalizedUserProfile;
+        }
+
+        return withServiceMetadata({
+          ...normalizedUserProfile,
+          services: current?.services || [],
+        });
+      }
+
+      return normalizedUserProfile;
+    });
   }, [user]);
 
   useEffect(() => {
@@ -575,9 +595,15 @@ export function HelpersAppProvider({ children }) {
 
   const applyProfileUpdate = async (updater) => {
     const nextProfile = withServiceMetadata(updater(profile));
+    const currentServicesSignature = getServicesSignature(profile.services || []);
+    const nextServicesSignature = getServicesSignature(nextProfile.services || []);
+    if (currentServicesSignature !== nextServicesSignature) {
+      pendingServicesSignatureRef.current = nextServicesSignature;
+    }
     setProfile(nextProfile);
     const result = await persistProfileUpdate(nextProfile);
     if (!result.success) {
+      pendingServicesSignatureRef.current = '';
       setProfile(normalizeProfile(user));
     }
     return result;
@@ -934,10 +960,12 @@ export function HelpersAppProvider({ children }) {
         ...nextProfile,
         services: existingServices,
       });
+      pendingServicesSignatureRef.current = getServicesSignature(persistedProfile.services || []);
 
       setProfile(persistedProfile);
       const result = await persistProfileUpdate(persistedProfile);
       if (!result.success) {
+        pendingServicesSignatureRef.current = '';
         setProfile(normalizeProfile(user));
         return result;
       }
