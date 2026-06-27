@@ -49,6 +49,8 @@ export function CustomerHomeScreen({
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const lastImpressionKeyRef = useRef('');
+  const feedSessionSeedRef = useRef(`feed_${Date.now()}`);
+  const frozenOrderRef = useRef([]);
 
   const preferredCategoryIds = useMemo(() => (
     Array.isArray(user?.customerProfile?.preferredServiceCategories)
@@ -63,6 +65,7 @@ export function CustomerHomeScreen({
   useEffect(() => {
     if (!user?.uid) {
       setCards([]);
+      frozenOrderRef.current = [];
       return () => {};
     }
 
@@ -76,6 +79,8 @@ export function CustomerHomeScreen({
   useEffect(() => {
     if (!user?.uid) {
       setRecommendationProfile(null);
+      frozenOrderRef.current = [];
+      feedSessionSeedRef.current = `feed_${Date.now()}`;
       return () => {};
     }
 
@@ -90,13 +95,35 @@ export function CustomerHomeScreen({
     );
   }, [user?.uid]);
 
-  const rankedCards = useMemo(() => (
+  useEffect(() => {
+    frozenOrderRef.current = [];
+    feedSessionSeedRef.current = `feed_${user?.uid || 'guest'}_${Date.now()}`;
+    lastImpressionKeyRef.current = '';
+  }, [user?.uid]);
+
+  const liveRankedCards = useMemo(() => (
     rankCustomerServiceItems(cards, {
       customerId: user?.uid || '',
       recommendationProfile: recommendationProfile || {},
       preferredCategoryIds,
+      sessionSeed: feedSessionSeedRef.current,
     })
   ), [cards, preferredCategoryIds, recommendationProfile, user?.uid]);
+
+  const rankedCards = useMemo(() => {
+    const currentItemsById = new Map(liveRankedCards.map((item) => [item.id, item]));
+    const nextOrder = frozenOrderRef.current
+      .filter((itemId) => currentItemsById.has(itemId));
+
+    liveRankedCards.forEach((item) => {
+      if (!nextOrder.includes(item.id)) {
+        nextOrder.push(item.id);
+      }
+    });
+
+    frozenOrderRef.current = nextOrder;
+    return nextOrder.map((itemId) => currentItemsById.get(itemId)).filter(Boolean);
+  }, [liveRankedCards]);
 
   useEffect(() => {
     if (typeof onBottomNavVisibilityChange === 'function' && !bottomNavVisible) {
