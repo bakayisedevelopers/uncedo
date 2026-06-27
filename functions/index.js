@@ -1835,23 +1835,14 @@ function reconcileHelperServiceApprovals({
     const existingApprovalSource = String(existingSkill?.approvalSource || '').toLowerCase();
     const isManualApproved = existingSkill && existingApprovalSource !== 'bundle_sync' && isApprovedHelperSkill(existingSkill);
     const shouldPreserveManualStatus = Boolean(isManualApproved);
-    const derivedActiveDefault = sourceType === 'service'
-      ? (derivedState.serviceIds || []).every((serviceId) => {
-        const match = findSkillByCatalogId(reconciledServices, serviceId);
-        return match?.skill?.active !== false;
-      })
-      : (derivedState.bundleIds || []).some((bundleId) => {
-        const match = findSkillByCatalogId(reconciledServices, bundleId);
-        return match?.skill?.active !== false;
-      });
-    const nextSkill = normalizeHelperSkill({
+    const nextSkillPayload = {
       ...(existingSkill || {}),
       id: existingSkill?.id || `${targetService.serviceId}_${normalizedCatalogId}`,
       catalogId: normalizedCatalogId,
       name: existingSkill?.name || catalogEntry.label || normalizedCatalogId,
       status: 'approved',
       verified: true,
-      active: existingSkill?.active === false ? false : derivedActiveDefault,
+      active: existingSkill?.active !== false,
       approvalSource: shouldPreserveManualStatus ? existingApprovalSource || 'manual' : 'bundle_sync',
       derivedFromBundleIds: sourceType === 'bundle'
         ? mergeDerivedIds(existingSkill?.derivedFromBundleIds, derivedState.bundleIds)
@@ -1859,10 +1850,17 @@ function reconcileHelperServiceApprovals({
       derivedFromServiceIds: sourceType === 'service'
         ? mergeDerivedIds(existingSkill?.derivedFromServiceIds, derivedState.serviceIds)
         : normalizeCatalogIdList(existingSkill?.derivedFromServiceIds),
-      updatedAt: nowIso,
+      updatedAt: existingSkill?.updatedAt || existingSkill?.createdAt || nowIso,
       createdAt: existingSkill?.createdAt || nowIso,
       pictures: Array.isArray(existingSkill?.pictures) ? existingSkill.pictures : [],
-    }, targetService.serviceId);
+    };
+    const nextSkill = normalizeHelperSkill(nextSkillPayload, targetService.serviceId);
+    const existingNormalizedSkill = existingSkill ? normalizeHelperSkill(existingSkill, targetService.serviceId) : null;
+    if (existingNormalizedSkill && JSON.stringify(existingNormalizedSkill) === JSON.stringify(nextSkill)) {
+      return;
+    }
+
+    nextSkill.updatedAt = nowIso;
 
     const skills = Array.isArray(targetService.skills) ? targetService.skills : [];
     const targetIndex = skills.findIndex((skill) => skill.catalogId === normalizedCatalogId);
