@@ -131,6 +131,13 @@ function normalizeSkillEntry(skill = {}, serviceId = '') {
     status: String(skill.status || 'approved').trim().toLowerCase() || 'approved',
     active: skill.active !== false,
     verified: skill.verified !== false,
+    approvalSource: String(skill.approvalSource || '').trim().toLowerCase(),
+    derivedFromBundleIds: [...new Set((Array.isArray(skill.derivedFromBundleIds) ? skill.derivedFromBundleIds : [])
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter(Boolean))],
+    derivedFromServiceIds: [...new Set((Array.isArray(skill.derivedFromServiceIds) ? skill.derivedFromServiceIds : [])
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter(Boolean))],
     createdAt: skill.createdAt || null,
     updatedAt: skill.updatedAt || skill.createdAt || null,
     pictures: (Array.isArray(skill.pictures) ? skill.pictures : [])
@@ -329,6 +336,7 @@ export function HelpersAppProvider({ children }) {
   const [serviceCatalog, setServiceCatalog] = useState([]);
   const [serviceCatalogResolved, setServiceCatalogResolved] = useState(false);
   const helperLocationWatchRef = useRef(null);
+  const activeJobCleanupPromiseRef = useRef(null);
 
   useEffect(() => {
     setProfile(normalizeProfile(user));
@@ -502,10 +510,8 @@ export function HelpersAppProvider({ children }) {
         return;
       }
 
-      await stopActiveJobTracking({
-        finalStatus: activeJob?.status || (!user?.uid ? 'signed_out' : 'inactive'),
-        keepLocationSharingEnabled: profile.onlineStatus === 'online',
-      }).catch((error) => logError('HelpersAppContext.stopStaleTrackingSession', error));
+      await finalizeActiveJobCleanup(activeJob?.status || (!user?.uid ? 'signed_out' : 'inactive'))
+        .catch((error) => logError('HelpersAppContext.stopStaleTrackingSession', error));
     };
 
     stopStaleTrackingSession();
@@ -533,6 +539,25 @@ export function HelpersAppProvider({ children }) {
     } finally {
       setSaving(false);
     }
+  };
+
+  const finalizeActiveJobCleanup = async (finalStatus) => {
+    if (activeJobCleanupPromiseRef.current) {
+      return activeJobCleanupPromiseRef.current;
+    }
+
+    const cleanupPromise = stopActiveJobTracking({
+      finalStatus,
+      keepLocationSharingEnabled: profile.onlineStatus === 'online',
+    }).catch((error) => {
+      logError('HelpersAppContext.finalizeActiveJobCleanup', error);
+      throw error;
+    }).finally(() => {
+      activeJobCleanupPromiseRef.current = null;
+    });
+
+    activeJobCleanupPromiseRef.current = cleanupPromise;
+    return cleanupPromise;
   };
 
   const applyProfileUpdate = async (updater) => {
@@ -636,10 +661,7 @@ export function HelpersAppProvider({ children }) {
         status: nextStatus,
       });
       if (['completed', 'canceled', 'rejected', 'inactive'].includes(String(nextStatus || '').toLowerCase())) {
-        await stopActiveJobTracking({
-          finalStatus: nextStatus,
-          keepLocationSharingEnabled: profile.onlineStatus === 'online',
-        });
+        await finalizeActiveJobCleanup(nextStatus);
       }
       return true;
     } catch (error) {
@@ -667,10 +689,7 @@ export function HelpersAppProvider({ children }) {
       return false;
     }
 
-    await stopActiveJobTracking({
-      finalStatus: 'completed',
-      keepLocationSharingEnabled: profile.onlineStatus === 'online',
-    }).catch((error) => logError('HelpersAppContext.completeActiveJob.stopTracking', error));
+    await finalizeActiveJobCleanup('completed').catch((error) => logError('HelpersAppContext.completeActiveJob.stopTracking', error));
 
     return true;
   };
@@ -685,10 +704,7 @@ export function HelpersAppProvider({ children }) {
         helperId: user.uid,
         reason,
       });
-      await stopActiveJobTracking({
-        finalStatus: 'canceled',
-        keepLocationSharingEnabled: profile.onlineStatus === 'online',
-      });
+      await finalizeActiveJobCleanup('canceled');
       return true;
     } catch (error) {
       logError('HelpersAppContext.cancelActiveJob', error);
@@ -707,10 +723,7 @@ export function HelpersAppProvider({ children }) {
       const result = await finalizeServiceRequestBilling({
         requestId: activeJob.requestId,
       });
-      await stopActiveJobTracking({
-        finalStatus: 'completed',
-        keepLocationSharingEnabled: profile.onlineStatus === 'online',
-      }).catch((error) => logError('HelpersAppContext.completeActiveJobWithBilling.stopTracking', error));
+      await finalizeActiveJobCleanup('completed').catch((error) => logError('HelpersAppContext.completeActiveJobWithBilling.stopTracking', error));
       return result || true;
     } catch (error) {
       logError('HelpersAppContext.completeActiveJobWithBilling', error);

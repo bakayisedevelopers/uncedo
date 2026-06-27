@@ -139,6 +139,12 @@ function getStatusMeta(status) {
         detail: 'A helper has been found and is reviewing your request now.',
         tone: 'info',
       };
+    case 'no_helper_available':
+      return {
+        label: 'No helpers available',
+        detail: 'No helper is currently available for this request. We will retry when availability changes.',
+        tone: 'warning',
+      };
     case 'accepted':
       return {
         label: 'Helper accepted',
@@ -354,6 +360,23 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
       setShowRatingModal(true);
     }
   }, [request, requestId]);
+
+  useEffect(() => {
+    const currentStatus = String(request?.status || '').toLowerCase();
+    if (currentStatus !== 'canceled') {
+      return;
+    }
+
+    setShowCancelModal(false);
+    setShowSafetyModal(false);
+    setShowRatingModal(false);
+
+    const timeout = setTimeout(() => {
+      goBack('CustomerHome');
+    }, 250);
+
+    return () => clearTimeout(timeout);
+  }, [goBack, request?.status]);
 
   useEffect(() => {
     lastPromptedRequestIdRef.current = '';
@@ -1026,7 +1049,9 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
           <Text style={styles.waitingCardText}>
             {String(request?.status || '').toLowerCase() === 'matching'
               ? 'Searching for a helper.'
-              : 'Waiting for a helper to accept the request.'}
+              : String(request?.status || '').toLowerCase() === 'no_helper_available'
+                ? 'No helper is currently available.'
+                : 'Waiting for a helper to accept the request.'}
           </Text>
         </View>
       )}

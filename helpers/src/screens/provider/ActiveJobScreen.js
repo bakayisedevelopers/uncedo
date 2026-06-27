@@ -314,6 +314,9 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
         durationSeconds: null,
       };
       setProofPhotos([]);
+      setShowCancelModal(false);
+      setShowCompletionModal(false);
+      setShowRatingModal(false);
       return;
     }
 
@@ -857,7 +860,8 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
     if (success) {
       setShowCancelModal(false);
       setCancelReason('');
-      setShowRatingModal(true);
+      setShowCompletionModal(false);
+      goBack('Home');
       return;
     }
 
@@ -1064,7 +1068,6 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
         <Pressable style={styles.primaryAction} onPress={() => goBack('Home')}>
           <Text style={styles.primaryActionText}>Back to dashboard</Text>
         </Pressable>
-        {renderRatingModal()}
       </View>
     );
   }
@@ -1500,8 +1503,6 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
           </View>
         </View>
       </Modal>
-
-      {renderRatingModal()}
     </View>
   );
 }

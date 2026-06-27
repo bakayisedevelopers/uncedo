@@ -31,6 +31,8 @@ const ACTIVE_TRAVEL_STATUSES = new Set([
   'en_route',
   'buying_resources',
 ]);
+let activeStopTrackingPromise = null;
+let activeStopTrackingRequestId = '';
 
 function normalizeStatus(status) {
   return String(status || '').trim().toLowerCase();
@@ -388,6 +390,10 @@ export async function syncActiveTrackingSession(patch = {}) {
 }
 
 export async function startActiveJobTracking({ requestId, helperId, customerId, destination, status }) {
+  if (activeStopTrackingPromise) {
+    await activeStopTrackingPromise.catch(() => {});
+  }
+
   const session = await writeTrackingSession({
     requestId,
     helperId,
@@ -463,47 +469,63 @@ export async function startActiveJobTracking({ requestId, helperId, customerId, 
 
 export async function stopActiveJobTracking({ finalStatus = '', keepLocationSharingEnabled = true } = {}) {
   const session = await readTrackingSession();
+  const requestId = String(session?.requestId || '').trim();
 
-  if (session?.requestId && finalStatus) {
+  if (activeStopTrackingPromise && (!requestId || activeStopTrackingRequestId === requestId)) {
+    return activeStopTrackingPromise;
+  }
+
+  activeStopTrackingRequestId = requestId;
+  const stopPromise = (async () => {
+    if (session?.requestId && finalStatus) {
+      try {
+        await closeLiveTracking(session.requestId, {
+          status: finalStatus,
+          reason: finalStatus,
+        });
+      } catch (error) {
+        logError('active-tracking.stop-status', error);
+      }
+    }
+
     try {
-      await closeLiveTracking(session.requestId, {
-        status: finalStatus,
-        reason: finalStatus,
+      let started = false;
+      try {
+        started = await Location.hasStartedLocationUpdatesAsync(ACTIVE_JOB_LOCATION_TASK);
+        if (started) {
+          await Location.stopLocationUpdatesAsync(ACTIVE_JOB_LOCATION_TASK);
+        }
+      } catch (error) {
+        logError('active-tracking.stop-location', error);
+      }
+
+      if (session?.helperId) {
+        try {
+          const { db } = getFirebaseClients();
+          await setDoc(doc(db, 'users', session.helperId), {
+            locationSharingEnabled: keepLocationSharingEnabled,
+            activeServiceRequestId: null,
+            updatedAt: serverTimestamp(),
+          }, { merge: true });
+        } catch (error) {
+          logError('active-tracking.stop-user', error);
+        }
+      }
+
+      await clearTrackingSession();
+      logInfo('active-tracking.stop', 'Background tracking stopped', {
+        requestId: session?.requestId || '',
+        finalStatus: normalizeStatus(finalStatus),
+        started,
       });
-    } catch (error) {
-      logError('active-tracking.stop-status', error);
+    } finally {
+      activeStopTrackingPromise = null;
+      activeStopTrackingRequestId = '';
     }
-  }
+  })();
 
-  let started = false;
-  try {
-    started = await Location.hasStartedLocationUpdatesAsync(ACTIVE_JOB_LOCATION_TASK);
-    if (started) {
-      await Location.stopLocationUpdatesAsync(ACTIVE_JOB_LOCATION_TASK);
-    }
-  } catch (error) {
-    logError('active-tracking.stop-location', error);
-  }
-
-  if (session?.helperId) {
-    try {
-      const { db } = getFirebaseClients();
-      await setDoc(doc(db, 'users', session.helperId), {
-        locationSharingEnabled: keepLocationSharingEnabled,
-        activeServiceRequestId: null,
-        updatedAt: serverTimestamp(),
-      }, { merge: true });
-    } catch (error) {
-      logError('active-tracking.stop-user', error);
-    }
-  }
-
-  await clearTrackingSession();
-  logInfo('active-tracking.stop', 'Background tracking stopped', {
-    requestId: session?.requestId || '',
-    finalStatus: normalizeStatus(finalStatus),
-    started,
-  });
+  activeStopTrackingPromise = stopPromise;
+  return stopPromise;
 }
 
 export async function stopActiveJobTrackingForSignOut() {

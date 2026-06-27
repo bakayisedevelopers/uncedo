@@ -414,6 +414,7 @@ const DEFAULT_STUN_URLS = ['stun:stun.l.google.com:19302'];
 const DEFAULT_TURN_TTL_SECONDS = 600;
 const MATCHING_TIMEOUT_MS = 3 * 60 * 1000;
 const OFFER_TIMEOUT_MS = 30 * 1000;
+const HELPER_REOFFER_COOLDOWN_MS = OFFER_TIMEOUT_MS * 2;
 const DISPATCH_SCORE_WEIGHTS = {
   acceptanceRate: 0.20,
   completionRate: 0.20,
@@ -497,6 +498,21 @@ const ACTIVE_SERVICE_REQUEST_STATUSES = new Set([
   SERVICE_REQUEST_STATUS.HELPER_FOUND,
   SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE,
 ]);
+const PRE_ASSIGNMENT_SERVICE_REQUEST_STATUSES = new Set([
+  SERVICE_REQUEST_STATUS.COLLECTING_DETAILS,
+  SERVICE_REQUEST_STATUS.SCHEDULED_PENDING,
+  SERVICE_REQUEST_STATUS.MATCHING,
+  SERVICE_REQUEST_STATUS.HELPER_FOUND,
+  SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE,
+]);
+const POST_ASSIGNMENT_SERVICE_REQUEST_STATUSES = new Set([
+  SERVICE_REQUEST_STATUS.ACCEPTED,
+  'driving',
+  SERVICE_REQUEST_STATUS.EN_ROUTE,
+  'buying_resources',
+  SERVICE_REQUEST_STATUS.ARRIVED,
+  'work_started',
+]);
 const HELPER_BUSY_REQUEST_STATUSES = new Set([
   SERVICE_REQUEST_STATUS.ACCEPTED,
   SERVICE_REQUEST_STATUS.EN_ROUTE,
@@ -541,6 +557,26 @@ function isRequestExpired(request) {
   const createdAtMs = normalizeMillis(request?.createdAt);
   if (!createdAtMs) return false;
   return Date.now() - createdAtMs >= MATCHING_TIMEOUT_MS;
+}
+
+function normalizeHelperIdList(values = []) {
+  return [...new Set(
+    (Array.isArray(values) ? values : [])
+      .map((value) => String(value || '').trim())
+      .filter(Boolean),
+  )];
+}
+
+function getServiceRequestExcludedHelperIds(request = {}) {
+  return normalizeHelperIdList(request.offerCycleExcludedHelperIds);
+}
+
+function isPreAssignmentServiceRequestStatus(status) {
+  return PRE_ASSIGNMENT_SERVICE_REQUEST_STATUSES.has(String(status || '').trim().toLowerCase());
+}
+
+function isPostAssignmentServiceRequestStatus(status) {
+  return POST_ASSIGNMENT_SERVICE_REQUEST_STATUSES.has(String(status || '').trim().toLowerCase());
 }
 
 function getTutorScore(tutor = {}) {
@@ -1510,6 +1546,353 @@ function normalizeServiceToken(value = '') {
     .replace(/^_+|_+$/g, '');
 }
 
+function normalizeCatalogIdList(values = []) {
+  return [...new Set(
+    (Array.isArray(values) ? values : [])
+      .map((value) => normalizeServiceToken(value))
+      .filter(Boolean),
+  )];
+}
+
+function normalizeHelperSkill(skill = {}, serviceId = '') {
+  const catalogId = normalizeServiceToken(skill?.catalogId || skill?.serviceCatalogId || skill?.name || '');
+  const name = String(skill?.name || skill?.skillName || catalogId).trim();
+  if (!catalogId || !name) {
+    return null;
+  }
+
+  return {
+    ...skill,
+    id: String(skill?.id || `${serviceId}_${catalogId}`).trim() || `${serviceId}_${catalogId}`,
+    catalogId,
+    name,
+    status: String(skill?.status || 'pending').trim().toLowerCase() || 'pending',
+    active: skill?.active !== false,
+    verified: skill?.verified !== false,
+    approvalSource: String(skill?.approvalSource || '').trim().toLowerCase() || '',
+    derivedFromBundleIds: normalizeCatalogIdList(skill?.derivedFromBundleIds),
+    derivedFromServiceIds: normalizeCatalogIdList(skill?.derivedFromServiceIds),
+    pictures: Array.isArray(skill?.pictures) ? skill.pictures.filter(Boolean) : [],
+    createdAt: skill?.createdAt || null,
+    updatedAt: skill?.updatedAt || null,
+  };
+}
+
+function normalizeHelperServicesForApprovalSync(services = []) {
+  return (Array.isArray(services) ? services : [])
+    .map((service) => {
+      const serviceId = String(service?.serviceId || '').trim();
+      if (!serviceId) {
+        return null;
+      }
+
+      return {
+        ...service,
+        serviceId,
+        serviceName: String(service?.serviceName || service?.name || serviceId).trim(),
+        description: String(service?.description || '').trim(),
+        skills: (Array.isArray(service?.skills) ? service.skills : [])
+          .map((skill) => normalizeHelperSkill(skill, serviceId))
+          .filter(Boolean),
+      };
+    })
+    .filter(Boolean)
+    .filter((service) => Array.isArray(service.skills) && service.skills.length > 0);
+}
+
+function isApprovedHelperSkill(skill = {}) {
+  return String(skill?.status || '').trim().toLowerCase() === 'approved';
+}
+
+function isHelperUserRecord(user = {}) {
+  const roles = new Set(
+    [
+      user?.role,
+      user?.activeRole,
+      ...(Array.isArray(user?.roles) ? user.roles : []),
+    ]
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter(Boolean),
+  );
+
+  return roles.has('helper') || roles.has('provider') || roles.has('tutor');
+}
+
+function mergeDerivedIds(existing = [], additions = []) {
+  return [...new Set([
+    ...normalizeCatalogIdList(existing),
+    ...normalizeCatalogIdList(additions),
+  ])];
+}
+
+function cloneHelperServicesForApprovalSync(services = []) {
+  return normalizeHelperServicesForApprovalSync(services).map((service) => ({
+    ...service,
+    skills: (service.skills || []).map((skill) => ({ ...skill })),
+  }));
+}
+
+function findSkillByCatalogId(services = [], catalogId = '') {
+  const normalizedCatalogId = normalizeServiceToken(catalogId);
+  if (!normalizedCatalogId) {
+    return null;
+  }
+
+  for (const service of services) {
+    for (const skill of (Array.isArray(service?.skills) ? service.skills : [])) {
+      if (normalizeServiceToken(skill?.catalogId || skill?.serviceCatalogId || '') === normalizedCatalogId) {
+        return { service, skill };
+      }
+    }
+  }
+
+  return null;
+}
+
+function skillHasBundleBackedPortfolio(skill = {}, helperServices = [], catalogIndex = buildActiveServiceCatalogIndex([])) {
+  const derivedBundleIds = normalizeCatalogIdList(skill?.derivedFromBundleIds);
+  if (!derivedBundleIds.length) {
+    return false;
+  }
+
+  return derivedBundleIds.some((bundleId) => {
+    const bundleSkillEntry = findSkillByCatalogId(helperServices, bundleId);
+    const bundleSkill = bundleSkillEntry?.skill || null;
+    if (!bundleSkill || bundleSkill.active === false || !isApprovedHelperSkill(bundleSkill)) {
+      return false;
+    }
+
+    const bundleCatalogEntry = catalogIndex.byId?.get(bundleId) || null;
+    return (
+      (Array.isArray(bundleSkill?.pictures) && bundleSkill.pictures.length > 0)
+      || (
+        bundleCatalogEntry
+        && String(bundleCatalogEntry.kind || '').toLowerCase() === 'bundle'
+        && bundleCatalogEntry.inheritBundleImages !== false
+      )
+    );
+  });
+}
+
+function skillMeetsPortfolioRequirement(skill = {}, helperServices = [], catalogEntry = null, catalogIndex = buildActiveServiceCatalogIndex([])) {
+  if (Array.isArray(skill?.pictures) && skill.pictures.length > 0) {
+    return true;
+  }
+
+  if (
+    catalogEntry
+    && String(catalogEntry.kind || '').toLowerCase() === 'bundle'
+    && catalogEntry.inheritBundleImages !== false
+  ) {
+    return true;
+  }
+
+  return skillHasBundleBackedPortfolio(skill, helperServices, catalogIndex);
+}
+
+function reconcileHelperServiceApprovals({
+  services = [],
+  serviceCatalogEntries = [],
+}) {
+  const normalizedServices = normalizeHelperServicesForApprovalSync(services);
+  const catalogIndex = buildActiveServiceCatalogIndex(serviceCatalogEntries);
+  const catalogById = catalogIndex.byId || new Map();
+  const autoSkillStateByCatalogId = new Map();
+
+  normalizedServices.forEach((service) => {
+    (service.skills || []).forEach((skill) => {
+      if (String(skill.approvalSource || '').toLowerCase() === 'bundle_sync') {
+        autoSkillStateByCatalogId.set(skill.catalogId, {
+          serviceId: service.serviceId,
+          serviceName: service.serviceName,
+          description: service.description,
+          skill: { ...skill },
+        });
+      }
+    });
+  });
+
+  const baselineServices = normalizedServices
+    .map((service) => ({
+      ...service,
+      skills: (service.skills || [])
+        .filter((skill) => String(skill.approvalSource || '').toLowerCase() !== 'bundle_sync')
+        .map((skill) => ({ ...skill })),
+    }))
+    .filter((service) => service.skills.length > 0);
+
+  const requiredIndividualApprovals = new Map();
+  const requiredBundleApprovals = new Map();
+  const effectiveApprovedCatalogIds = new Set();
+
+  baselineServices.forEach((service) => {
+    (service.skills || []).forEach((skill) => {
+      if (isApprovedHelperSkill(skill)) {
+        effectiveApprovedCatalogIds.add(skill.catalogId);
+      }
+    });
+  });
+
+  let changed = true;
+  let safetyCounter = 0;
+  while (changed && safetyCounter < 20) {
+    changed = false;
+    safetyCounter += 1;
+
+    for (const catalogEntry of catalogIndex.activeEntries) {
+      const bundleId = normalizeServiceToken(catalogEntry.id);
+      const includedServiceIds = normalizeCatalogIdList(catalogEntry.includedServiceIds);
+      if (String(catalogEntry.kind || '').toLowerCase() !== 'bundle' || !bundleId || !includedServiceIds.length) {
+        continue;
+      }
+
+      if (effectiveApprovedCatalogIds.has(bundleId)) {
+        for (const includedId of includedServiceIds) {
+          const current = requiredIndividualApprovals.get(includedId) || { bundleIds: [] };
+          const nextBundleIds = mergeDerivedIds(current.bundleIds, [bundleId]);
+          if (nextBundleIds.length !== current.bundleIds.length) {
+            requiredIndividualApprovals.set(includedId, { bundleIds: nextBundleIds });
+            changed = true;
+          }
+          if (!effectiveApprovedCatalogIds.has(includedId)) {
+            effectiveApprovedCatalogIds.add(includedId);
+            changed = true;
+          }
+        }
+      }
+
+      const hasEveryComponent = includedServiceIds.every((includedId) => effectiveApprovedCatalogIds.has(includedId));
+      if (hasEveryComponent) {
+        const current = requiredBundleApprovals.get(bundleId) || { serviceIds: [] };
+        const nextServiceIds = mergeDerivedIds(current.serviceIds, includedServiceIds);
+        if (nextServiceIds.length !== current.serviceIds.length) {
+          requiredBundleApprovals.set(bundleId, { serviceIds: nextServiceIds });
+          changed = true;
+        }
+        if (!effectiveApprovedCatalogIds.has(bundleId)) {
+          effectiveApprovedCatalogIds.add(bundleId);
+          changed = true;
+        }
+      }
+    }
+  }
+
+  const reconciledServices = cloneHelperServicesForApprovalSync(baselineServices);
+  const nowIso = new Date().toISOString();
+
+  function ensureServiceContainer(catalogEntry = {}, fallbackState = null) {
+    const targetServiceId = String(
+      fallbackState?.serviceId
+      || catalogEntry?.categoryId
+      || catalogEntry?.categoryName
+      || catalogEntry?.id
+      || 'services'
+    ).trim();
+    const existing = reconciledServices.find((service) => service.serviceId === targetServiceId);
+    if (existing) {
+      if (!existing.serviceName) {
+        existing.serviceName = String(
+          fallbackState?.serviceName
+          || catalogEntry?.categoryName
+          || targetServiceId
+        ).trim();
+      }
+      if (!existing.description && fallbackState?.description) {
+        existing.description = String(fallbackState.description || '').trim();
+      }
+      return existing;
+    }
+
+    const created = {
+      serviceId: targetServiceId,
+      serviceName: String(
+        fallbackState?.serviceName
+        || catalogEntry?.categoryName
+        || targetServiceId
+      ).trim(),
+      description: String(fallbackState?.description || '').trim(),
+      skills: [],
+    };
+    reconciledServices.push(created);
+    return created;
+  }
+
+  function applyDerivedApproval(catalogId, derivedState = {}, sourceType = 'bundle') {
+    const normalizedCatalogId = normalizeServiceToken(catalogId);
+    const catalogEntry = catalogById.get(normalizedCatalogId) || null;
+    if (!normalizedCatalogId || !catalogEntry) {
+      return;
+    }
+
+    const existing = findSkillByCatalogId(reconciledServices, normalizedCatalogId);
+    const fallbackAutoState = autoSkillStateByCatalogId.get(normalizedCatalogId) || null;
+    const targetService = ensureServiceContainer(catalogEntry, fallbackAutoState);
+    const existingSkill = existing?.skill || fallbackAutoState?.skill || null;
+    const existingApprovalSource = String(existingSkill?.approvalSource || '').toLowerCase();
+    const isManualApproved = existingSkill && existingApprovalSource !== 'bundle_sync' && isApprovedHelperSkill(existingSkill);
+    const shouldPreserveManualStatus = Boolean(isManualApproved);
+    const derivedActiveDefault = sourceType === 'service'
+      ? (derivedState.serviceIds || []).every((serviceId) => {
+        const match = findSkillByCatalogId(reconciledServices, serviceId);
+        return match?.skill?.active !== false;
+      })
+      : (derivedState.bundleIds || []).some((bundleId) => {
+        const match = findSkillByCatalogId(reconciledServices, bundleId);
+        return match?.skill?.active !== false;
+      });
+    const nextSkill = normalizeHelperSkill({
+      ...(existingSkill || {}),
+      id: existingSkill?.id || `${targetService.serviceId}_${normalizedCatalogId}`,
+      catalogId: normalizedCatalogId,
+      name: existingSkill?.name || catalogEntry.label || normalizedCatalogId,
+      status: 'approved',
+      verified: true,
+      active: existingSkill?.active === false ? false : derivedActiveDefault,
+      approvalSource: shouldPreserveManualStatus ? existingApprovalSource || 'manual' : 'bundle_sync',
+      derivedFromBundleIds: sourceType === 'bundle'
+        ? mergeDerivedIds(existingSkill?.derivedFromBundleIds, derivedState.bundleIds)
+        : normalizeCatalogIdList(existingSkill?.derivedFromBundleIds),
+      derivedFromServiceIds: sourceType === 'service'
+        ? mergeDerivedIds(existingSkill?.derivedFromServiceIds, derivedState.serviceIds)
+        : normalizeCatalogIdList(existingSkill?.derivedFromServiceIds),
+      updatedAt: nowIso,
+      createdAt: existingSkill?.createdAt || nowIso,
+      pictures: Array.isArray(existingSkill?.pictures) ? existingSkill.pictures : [],
+    }, targetService.serviceId);
+
+    const skills = Array.isArray(targetService.skills) ? targetService.skills : [];
+    const targetIndex = skills.findIndex((skill) => skill.catalogId === normalizedCatalogId);
+    if (targetIndex >= 0) {
+      skills[targetIndex] = nextSkill;
+    } else {
+      skills.push(nextSkill);
+    }
+    targetService.skills = skills;
+  }
+
+  for (const [catalogId, derivedState] of requiredIndividualApprovals.entries()) {
+    applyDerivedApproval(catalogId, derivedState, 'bundle');
+  }
+
+  for (const [catalogId, derivedState] of requiredBundleApprovals.entries()) {
+    applyDerivedApproval(catalogId, derivedState, 'service');
+  }
+
+  const finalServices = reconciledServices
+    .map((service) => ({
+      ...service,
+      skills: (Array.isArray(service.skills) ? service.skills : [])
+        .map((skill) => normalizeHelperSkill(skill, service.serviceId))
+        .filter(Boolean),
+    }))
+    .filter((service) => service.skills.length > 0);
+
+  return {
+    changed: JSON.stringify(normalizedServices) !== JSON.stringify(finalServices),
+    services: finalServices,
+  };
+}
+
 function normalizeServiceCatalogEntry(entry = {}) {
   return normalizeMarketplaceServiceCatalogEntry(entry);
 }
@@ -1646,14 +2029,7 @@ function helperSupportsCategory(helper = {}, categoryId = '', requestServiceIds 
           return false;
         }
 
-        return (
-          (Array.isArray(skill?.pictures) && skill.pictures.length > 0)
-          || (
-            catalogEntry
-            && String(catalogEntry.kind || '').toLowerCase() === 'bundle'
-            && catalogEntry.inheritBundleImages !== false
-          )
-        );
+        return skillMeetsPortfolioRequirement(skill, helperServices, catalogEntry, catalogIndex);
       })
       .map((skill) => ({
         ...skill,
@@ -2176,6 +2552,54 @@ function mergePreservedHelperQueue({
   return merged;
 }
 
+function resolveNextServiceHelperSelection(request = {}, candidateQueue = [], now = Date.now()) {
+  const excludedHelperIds = getServiceRequestExcludedHelperIds(request);
+  const queue = mergePreservedHelperQueue({
+    preservedQueue: request.helperQueue,
+    rebuiltQueue: candidateQueue,
+    excludeHelperIds: [
+      ...excludedHelperIds,
+      ...(request.status === SERVICE_REQUEST_STATUS.HELPER_FOUND && request.currentOfferHelperId
+        ? [request.currentOfferHelperId]
+        : []),
+    ],
+  });
+
+  if (queue.length) {
+    return {
+      queue,
+      selectedHelperId: queue[0],
+      excludedHelperIds,
+      resetExcludedHelperIds: false,
+      reofferAfterCooldown: false,
+    };
+  }
+
+  const lastOfferAtMs = normalizeMillis(request.lastOfferAt);
+  const cooldownElapsed = candidateQueue.length > 0
+    && excludedHelperIds.length > 0
+    && lastOfferAtMs > 0
+    && (now - lastOfferAtMs) >= HELPER_REOFFER_COOLDOWN_MS;
+
+  if (cooldownElapsed) {
+    return {
+      queue: [...candidateQueue],
+      selectedHelperId: candidateQueue[0] || '',
+      excludedHelperIds,
+      resetExcludedHelperIds: true,
+      reofferAfterCooldown: true,
+    };
+  }
+
+  return {
+    queue: [],
+    selectedHelperId: '',
+    excludedHelperIds,
+    resetExcludedHelperIds: false,
+    reofferAfterCooldown: false,
+  };
+}
+
 exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{requestId}', async (event) => {
   const afterData = event.data.after.exists ? event.data.after.data() : null;
   if (!afterData) return;
@@ -2192,6 +2616,7 @@ exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{reques
     const snap = await transaction.get(requestRef);
     if (!snap.exists) return;
     const request = snap.data() || {};
+    const now = Date.now();
 
     if (!ACTIVE_SERVICE_REQUEST_STATUSES.has(request.status) || request?.helperAssignment?.helperId) {
       return;
@@ -2205,23 +2630,19 @@ exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{reques
       return;
     }
 
-    const queue = mergePreservedHelperQueue({
-      preservedQueue: request.helperQueue,
-      rebuiltQueue: candidateQueue,
-      excludeHelperIds: request.status === SERVICE_REQUEST_STATUS.HELPER_FOUND && request.currentOfferHelperId
-        ? [request.currentOfferHelperId]
-        : [],
-    });
+    const selection = resolveNextServiceHelperSelection(request, candidateQueue, now);
+    const { queue, selectedHelperId } = selection;
 
     if (!queue.length) {
-      if (request.status !== SERVICE_REQUEST_STATUS.MATCHING) {
+      if (request.status !== SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE) {
         transaction.update(requestRef, {
-          status: SERVICE_REQUEST_STATUS.MATCHING,
-          statusDetail: 'No helper accepted yet. Matching will continue as helpers come online.',
+          status: SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE,
+          statusDetail: 'No helpers are currently available for this request.',
           helperQueue: [],
           currentOfferHelperId: null,
           offerExpiresAt: null,
           offerToken: null,
+          offerCycleExcludedHelperIds: selection.excludedHelperIds,
           matchingStartedAtMs: getRequestMatchingStartedAtMs(request) || Date.now(),
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
@@ -2229,19 +2650,21 @@ exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{reques
       return;
     }
 
-    const selectedHelperId = queue[0];
     const selectedHelperRef = db.collection('users').doc(selectedHelperId);
     const offerRevision = nextOfferRevision(request);
 
     transaction.update(requestRef, {
       status: SERVICE_REQUEST_STATUS.HELPER_FOUND,
-      statusDetail: 'Helper notified. Waiting for acceptance.',
+      statusDetail: selection.reofferAfterCooldown
+        ? 'Retrying the available helper after cooldown.'
+        : 'Helper notified. Waiting for acceptance.',
       helperQueue: queue,
       currentOfferHelperId: selectedHelperId,
-      offerExpiresAt: Date.now() + OFFER_TIMEOUT_MS,
-      lastOfferAt: Date.now(),
+      offerExpiresAt: now + OFFER_TIMEOUT_MS,
+      lastOfferAt: now,
       offerRevision,
       offerToken: randomUUID(),
+      offerCycleExcludedHelperIds: selection.resetExcludedHelperIds ? [] : selection.excludedHelperIds,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
     transaction.set(selectedHelperRef, {
@@ -2293,8 +2716,8 @@ exports.syncServiceRequestAssignmentState = onDocumentWritten('serviceRequests/{
   if (afterStatus === SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE && beforeStatus !== SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE) {
     await createUserNotification({
       userId: after.customerId || before?.customerId || null,
-      title: 'Still matching helpers',
-      message: 'No helper has accepted yet. We will keep matching as more helpers become available.',
+      title: 'No helpers available',
+      message: 'No helper is currently available for this request. We will retry when availability changes.',
       type: 'matching_update',
       requestId,
       targetPath: `/customer/requests/${requestId}`,
@@ -2583,12 +3006,21 @@ exports.reconcileServiceRequestOffers = onSchedule('every 1 minutes', async () =
     }
 
     if (status === SERVICE_REQUEST_STATUS.HELPER_FOUND && offerExpiresAt > 0 && offerExpiresAt <= now) {
+      const expiredHelperId = String(request.currentOfferHelperId || '').trim();
+      const excludedHelperIds = normalizeHelperIdList([
+        ...getServiceRequestExcludedHelperIds(request),
+        expiredHelperId,
+      ]);
       batch.update(docSnap.ref, {
         status: SERVICE_REQUEST_STATUS.MATCHING,
         statusDetail: 'Helper offer expired. Matching the next helper.',
+        helperQueue: Array.isArray(request.helperQueue)
+          ? request.helperQueue.filter((helperId) => String(helperId || '').trim() !== expiredHelperId)
+          : [],
         currentOfferHelperId: null,
         offerExpiresAt: null,
         offerToken: null,
+        offerCycleExcludedHelperIds: excludedHelperIds,
         matchingStartedAtMs: matchingStartedAtMs || now,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
@@ -3484,6 +3916,33 @@ exports.updateGlobalSubjects = onDocumentWritten('users/{uid}', async (event) =>
 
 exports.refreshGlobalSubjectsOnTutorChange = exports.updateGlobalSubjects;
 
+exports.syncHelperBundleApprovals = onDocumentWritten('users/{uid}', async (event) => {
+  const before = event.data.before.exists ? event.data.before.data() : null;
+  const after = event.data.after.exists ? event.data.after.data() : null;
+  if (!after || !isHelperUserRecord(after)) return;
+
+  const beforeServices = normalizeHelperServicesForApprovalSync(before?.services || []);
+  const afterServices = normalizeHelperServicesForApprovalSync(after?.services || []);
+  if (JSON.stringify(beforeServices) === JSON.stringify(afterServices)) {
+    return;
+  }
+
+  const catalogEntries = await getLiveServiceCatalogEntries();
+  const reconciliation = reconcileHelperServiceApprovals({
+    services: afterServices,
+    serviceCatalogEntries: catalogEntries,
+  });
+
+  if (!reconciliation.changed) {
+    return;
+  }
+
+  await db.collection('users').doc(event.params.uid).set({
+    services: reconciliation.services,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+});
+
 exports.syncStudentReferralRewardsOnUserWrite = onDocumentWritten('users/{uid}', async (event) => {
   const after = event.data.after.exists ? event.data.after.data() : null;
   if (!after) return;
@@ -3912,6 +4371,20 @@ function isAdminToken(decoded = {}) {
       || decoded?.isAdmin === true
       || isAllowlistedAdminEmail(decoded?.email),
   );
+}
+
+function isAdminUserRecord(user = {}) {
+  const roles = new Set(
+    [
+      user?.role,
+      user?.activeRole,
+      ...(Array.isArray(user?.roles) ? user.roles : []),
+    ]
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter(Boolean),
+  );
+
+  return roles.has('admin');
 }
 
 function getRequestMetadata(req = {}) {
@@ -5406,6 +5879,81 @@ exports.publishHelperAgreementVersion = onRequest({ cors: true }, async (req, re
       message: error.message,
     });
     res.status(400).json({ success: false, message: error.message || 'Unable to publish version.' });
+  }
+});
+
+exports.syncHelperServiceApprovals = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') {
+    res.status(405).json({ success: false, message: 'Method not allowed' });
+    return;
+  }
+
+  const token = getBearerToken(req);
+  if (!token) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+
+  const decoded = await admin.auth().verifyIdToken(token).catch(() => null);
+  if (!decoded?.uid) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+
+  const actorSnap = await db.collection('users').doc(decoded.uid).get().catch(() => null);
+  const actorData = actorSnap?.data?.() || {};
+  if (!isAdminToken(decoded) && !isAdminUserRecord(actorData)) {
+    res.status(403).json({ success: false, message: 'Admin access required.' });
+    return;
+  }
+
+  const helperUid = String(req.body?.uid || '').trim();
+  if (!helperUid) {
+    res.status(400).json({ success: false, message: 'uid is required.' });
+    return;
+  }
+
+  const helperRef = db.collection('users').doc(helperUid);
+  const helperSnap = await helperRef.get();
+  if (!helperSnap.exists) {
+    res.status(404).json({ success: false, message: 'Helper profile not found.' });
+    return;
+  }
+
+  const helperData = helperSnap.data() || {};
+  if (!isHelperUserRecord(helperData)) {
+    res.status(400).json({ success: false, message: 'The selected user is not a helper profile.' });
+    return;
+  }
+
+  try {
+    const catalogEntries = await getLiveServiceCatalogEntries();
+    const reconciliation = reconcileHelperServiceApprovals({
+      services: helperData.services || [],
+      serviceCatalogEntries: catalogEntries,
+    });
+
+    if (reconciliation.changed) {
+      await helperRef.set({
+        services: reconciliation.services,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+    }
+
+    const refreshedSnap = await helperRef.get();
+    res.json({
+      success: true,
+      changed: reconciliation.changed,
+      uid: helperUid,
+      services: (refreshedSnap.data() || {}).services || reconciliation.services,
+    });
+  } catch (error) {
+    logger.warn('Failed to sync helper service approvals.', {
+      helperUid,
+      actorUid: decoded.uid,
+      message: error.message,
+    });
+    res.status(400).json({ success: false, message: error.message || 'Unable to sync helper service approvals.' });
   }
 });
 
@@ -8540,6 +9088,90 @@ exports.cancelCustomerServiceRequest = onRequest({ cors: true, secrets: [UNCEDO_
   const helperId = String(request.helperAssignment?.helperId || '').trim();
   const status = String(request.status || '').toLowerCase();
   const endedAt = Date.now();
+
+  if (isPreAssignmentServiceRequestStatus(status)) {
+    const batch = db.batch();
+    batch.set(requestRef, {
+      status: 'canceled',
+      statusDetail: 'Customer canceled the service request before helper assignment.',
+      canceledAt: endedAt,
+      canceledBy: 'customer',
+      canceledReason: canceledReason || '',
+      helperAssignment: null,
+      helperQueue: [],
+      currentOfferHelperId: null,
+      offerExpiresAt: null,
+      offerToken: null,
+      offerCycleExcludedHelperIds: [],
+      matchingStartedAtMs: null,
+      paymentStatus: null,
+      paymentTransactionId: null,
+      cancellationFeeAmount: 0,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    await batch.commit();
+
+    await admin.database().ref(`liveTracking/serviceRequests/${requestId}`).update({
+      status: 'canceled',
+      closedReason: 'customer_canceled_pre_assignment',
+      closedAtMs: endedAt,
+      updatedAtMs: endedAt,
+    }).catch((error) => logger.warn('Unable to close pre-assignment live tracking after customer cancellation.', {
+      requestId,
+      error: error.message,
+    }));
+
+    const updatedSnap = await requestRef.get();
+    const updatedRequest = { id: updatedSnap.id, ...updatedSnap.data() };
+    await db.collection('customerServiceEvents').doc(`request_canceled_${requestId}`).set({
+      customerId: request.customerId,
+      eventType: 'request_canceled',
+      serviceId: request.serviceIds?.[0] || request.selectedPackageId || request.categoryId || '',
+      categoryId: request.categoryId || '',
+      serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
+      requestId,
+      source: 'cancelCustomerServiceRequest',
+      metadata: {
+        helperId: '',
+        paymentStatus: 'not_applicable',
+        cancellationAmount: 0,
+        cancellationBillingRule: 'pre_assignment',
+        cancellationDistanceKm: 0,
+        helperPayoutAmount: 0,
+        platformAmount: 0,
+        requestStatus: 'canceled',
+      },
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdAtMs: endedAt,
+      dayBucket: new Date(endedAt).toISOString().slice(0, 10),
+    }, { merge: true });
+
+    await createUserNotification({
+      userId: request.customerId,
+      title: 'Service canceled',
+      message: 'Your service request was canceled.',
+      type: 'service_canceled',
+      requestId,
+      targetPath: `/customer/requests/${requestId}`,
+      metadata: {
+        paymentStatus: 'not_applicable',
+        cancellationAmount: 0,
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      request: updatedRequest,
+      charge: { ok: true, reason: null },
+    });
+    return;
+  }
+
+  if (!isPostAssignmentServiceRequestStatus(status)) {
+    res.status(409).json({ success: false, message: 'This request cannot be canceled from its current state.' });
+    return;
+  }
+
   const bookingFee = getServiceBookingFee(request);
   const travelFee = getServiceTravelFee(request);
   const trackingSnap = await requestRef.collection('tracking').doc('live').get().catch(() => null);
