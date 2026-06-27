@@ -332,6 +332,7 @@ export function HelpersAppProvider({ children }) {
   const [weeklyPayouts, setWeeklyPayouts] = useState(INITIAL_WEEKLY_PAYOUTS);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
+  const [offerResponseState, setOfferResponseState] = useState({ offerId: '', action: '' });
   const [homeLocation, setHomeLocation] = useState(null);
   const [serviceCatalog, setServiceCatalog] = useState([]);
   const [serviceCatalogResolved, setServiceCatalogResolved] = useState(false);
@@ -345,6 +346,7 @@ export function HelpersAppProvider({ children }) {
   useEffect(() => {
     if (!user?.uid) {
       setJobOffers([]);
+      setOfferResponseState({ offerId: '', action: '' });
       return () => {};
     }
 
@@ -358,6 +360,17 @@ export function HelpersAppProvider({ children }) {
       },
     );
   }, [user?.uid]);
+
+  useEffect(() => {
+    if (!offerResponseState.offerId) {
+      return;
+    }
+
+    const stillPresent = jobOffers.some((item) => item.id === offerResponseState.offerId);
+    if (!stillPresent) {
+      setOfferResponseState({ offerId: '', action: '' });
+    }
+  }, [jobOffers, offerResponseState.offerId]);
 
   useEffect(() => {
     if (!user?.uid) {
@@ -620,6 +633,7 @@ export function HelpersAppProvider({ children }) {
     if (!offer || !user?.uid) return;
 
     setSaveError('');
+    setOfferResponseState({ offerId, action: 'accept' });
     try {
       await acceptServiceRequestOffer({
         requestId: offer.requestId || offer.id,
@@ -630,6 +644,7 @@ export function HelpersAppProvider({ children }) {
     } catch (error) {
       logError('HelpersAppContext.acceptOffer', error);
       setSaveError(error.message || 'Unable to accept this helper offer right now.');
+      setOfferResponseState({ offerId: '', action: '' });
     }
   };
 
@@ -638,6 +653,7 @@ export function HelpersAppProvider({ children }) {
     if (!offer || !user?.uid) return;
 
     setSaveError('');
+    setOfferResponseState({ offerId, action: 'decline' });
     try {
       await declineServiceRequestOffer({
         requestId: offer.requestId || offer.id,
@@ -646,6 +662,7 @@ export function HelpersAppProvider({ children }) {
     } catch (error) {
       logError('HelpersAppContext.declineOffer', error);
       setSaveError(error.message || 'Unable to decline this helper offer right now.');
+      setOfferResponseState({ offerId: '', action: '' });
     }
   };
 
@@ -1087,6 +1104,7 @@ export function HelpersAppProvider({ children }) {
     helperSkills,
     onboardingStatus,
     jobOffers,
+    offerResponseState,
     activeJob,
     serviceRequests,
     completedJobs,
@@ -1125,6 +1143,7 @@ export function HelpersAppProvider({ children }) {
     helperSkills,
     homeLocation,
     jobOffers,
+    offerResponseState,
     onboardingStatus,
     paymentSummary,
     profile,

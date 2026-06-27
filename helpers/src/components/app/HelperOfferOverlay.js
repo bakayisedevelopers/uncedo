@@ -12,21 +12,24 @@ function getCountdownColor(secondsLeft) {
   return '#22c55e';
 }
 
-export function HelperOfferOverlay() {
+export function HelperOfferOverlay({ bottomSafeInset = 0 }) {
   const { user } = useAuth();
-  const { onboardingStatus, jobOffers, activeJob, actions } = useHelpersApp();
+  const { onboardingStatus, jobOffers, activeJob, offerResponseState, actions } = useHelpersApp();
   const [now, setNow] = useState(Date.now());
   const shimmer = useRef(new Animated.Value(0)).current;
 
   const activeOffer = jobOffers[0] || null;
   const canRespond = Boolean(user?.uid && onboardingStatus.complete && !activeJob);
+  const isProcessingOffer = activeOffer?.id && offerResponseState.offerId === activeOffer.id;
+  const isAccepting = isProcessingOffer && offerResponseState.action === 'accept';
+  const isDeclining = isProcessingOffer && offerResponseState.action === 'decline';
 
   useEffect(() => {
     if (!activeOffer?.offerExpiresAt) {
       return () => {};
     }
 
-    const timer = setInterval(() => setNow(Date.now()), 1000);
+    const timer = setInterval(() => setNow(Date.now()), 100);
     return () => clearInterval(timer);
   }, [activeOffer?.offerExpiresAt]);
 
@@ -114,16 +117,16 @@ export function HelperOfferOverlay() {
 
             <View style={styles.buttonRow}>
               <ActionButton
-                label="Accept"
+                label={isAccepting ? 'Accepting...' : isDeclining ? 'Processing...' : 'Accept'}
                 onPress={() => actions.acceptOffer(activeOffer.id)}
-                disabled={!canRespond || secondsLeft <= 0}
+                disabled={!canRespond || secondsLeft <= 0 || isProcessingOffer}
                 style={styles.buttonFill}
               />
               <ActionButton
-                label="Decline"
+                label={isDeclining ? 'Declining...' : isAccepting ? 'Processing...' : 'Decline'}
                 tone="secondary"
                 onPress={() => actions.declineOffer(activeOffer.id)}
-                disabled={!canRespond || secondsLeft <= 0}
+                disabled={!canRespond || secondsLeft <= 0 || isProcessingOffer}
                 style={styles.buttonFill}
               />
             </View>
@@ -145,13 +148,16 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(15, 23, 42, 0.12)',
   },
   sheetWrap: {
-    paddingBottom: 84,
-    paddingHorizontal: 12,
+    paddingBottom: Math.max(0, Number(bottomSafeInset || 0)),
+    paddingHorizontal: 0,
   },
   sheet: {
     backgroundColor: '#ffffff',
     borderColor: colors.border,
-    borderRadius: 28,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    borderBottomLeftRadius: 0,
+    borderBottomRightRadius: 0,
     borderWidth: 1,
     minHeight: 252,
     overflow: 'hidden',
@@ -219,16 +225,15 @@ const styles = StyleSheet.create({
   },
   statusCard: {
     alignItems: 'flex-start',
-    borderRadius: 18,
+    backgroundColor: 'transparent',
+    borderRadius: 14,
     borderWidth: 1,
-    padding: 12,
+    padding: 10,
   },
   statusCardNow: {
-    backgroundColor: '#dcfce7',
     borderColor: '#86efac',
   },
   statusCardLater: {
-    backgroundColor: '#dcfce7',
     borderColor: '#86efac',
   },
   statusPill: {
@@ -238,10 +243,10 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
   },
   statusPillNow: {
-    backgroundColor: 'rgba(255,255,255,0.14)',
+    backgroundColor: 'transparent',
   },
   statusPillLater: {
-    backgroundColor: 'rgba(255,255,255,0.16)',
+    backgroundColor: 'transparent',
   },
   statusPillText: {
     color: colors.brandDark,

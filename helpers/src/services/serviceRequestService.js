@@ -361,6 +361,7 @@ export async function acceptServiceRequestOffer({
       offerExpiresAt: null,
       offerToken: null,
       offerCycleExcludedHelperIds: [],
+      declinedHelperIds: [],
       helperQueue: Array.isArray(request.helperQueue)
         ? request.helperQueue.filter((item) => item !== helperId)
         : [],
@@ -432,6 +433,11 @@ export async function declineServiceRequestOffer({ requestId, helperId }) {
         .map((item) => String(item || '').trim())
         .filter(Boolean),
     ));
+    const nextDeclinedHelperIds = Array.from(new Set(
+      [...(Array.isArray(request.declinedHelperIds) ? request.declinedHelperIds : []), helperId]
+        .map((item) => String(item || '').trim())
+        .filter(Boolean),
+    ));
 
     transaction.update(requestRef, {
       status: 'matching',
@@ -441,6 +447,7 @@ export async function declineServiceRequestOffer({ requestId, helperId }) {
       offerExpiresAt: null,
       offerToken: null,
       offerCycleExcludedHelperIds: nextExcludedHelperIds,
+      declinedHelperIds: nextDeclinedHelperIds,
       updatedAt: serverTimestamp(),
     });
   });

@@ -304,7 +304,7 @@ export function RootNavigator() {
           </SafeAreaView>
         ) : null}
 
-        <HelperOfferOverlay />
+        <HelperOfferOverlay bottomSafeInset={bottomSystemInset} />
       </View>
     </View>
   );

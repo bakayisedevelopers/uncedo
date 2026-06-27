@@ -142,7 +142,7 @@ function getStatusMeta(status) {
     case 'no_helper_available':
       return {
         label: 'No helpers available',
-        detail: 'No helper is currently available for this request. We will retry when availability changes.',
+        detail: 'No helper is currently available for this request right now.',
         tone: 'warning',
       };
     case 'accepted':

@@ -571,6 +571,10 @@ function getServiceRequestExcludedHelperIds(request = {}) {
   return normalizeHelperIdList(request.offerCycleExcludedHelperIds);
 }
 
+function getServiceRequestDeclinedHelperIds(request = {}) {
+  return normalizeHelperIdList(request.declinedHelperIds);
+}
+
 function isPreAssignmentServiceRequestStatus(status) {
   return PRE_ASSIGNMENT_SERVICE_REQUEST_STATUSES.has(String(status || '').trim().toLowerCase());
 }
@@ -2519,13 +2523,7 @@ async function getHelperQueueForServiceRequest(request = {}) {
 function mergePreservedHelperQueue({
   preservedQueue = [],
   rebuiltQueue = [],
-  excludeHelperIds = [],
 }) {
-  const excludedIds = new Set(
-    (Array.isArray(excludeHelperIds) ? excludeHelperIds : [])
-      .map((value) => String(value || '').trim())
-      .filter(Boolean),
-  );
   const rebuiltIdSet = new Set(
     (Array.isArray(rebuiltQueue) ? rebuiltQueue : [])
       .map((value) => String(value || '').trim())
@@ -2536,7 +2534,7 @@ function mergePreservedHelperQueue({
 
   const pushId = (value) => {
     const normalized = String(value || '').trim();
-    if (!normalized || seen.has(normalized) || excludedIds.has(normalized)) {
+    if (!normalized || seen.has(normalized)) {
       return;
     }
     seen.add(normalized);
@@ -2554,21 +2552,20 @@ function mergePreservedHelperQueue({
 
 function resolveNextServiceHelperSelection(request = {}, candidateQueue = [], now = Date.now()) {
   const excludedHelperIds = getServiceRequestExcludedHelperIds(request);
+  const declinedHelperIdSet = new Set(getServiceRequestDeclinedHelperIds(request));
   const queue = mergePreservedHelperQueue({
     preservedQueue: request.helperQueue,
     rebuiltQueue: candidateQueue,
-    excludeHelperIds: [
-      ...excludedHelperIds,
-      ...(request.status === SERVICE_REQUEST_STATUS.HELPER_FOUND && request.currentOfferHelperId
-        ? [request.currentOfferHelperId]
-        : []),
-    ],
   });
+  const excludedHelperIdSet = new Set(excludedHelperIds);
+  const eligibleQueue = queue.filter((helperId) => !declinedHelperIdSet.has(helperId));
+  const availableQueue = eligibleQueue.filter((helperId) => !excludedHelperIdSet.has(helperId));
+  const deferredQueue = eligibleQueue.filter((helperId) => excludedHelperIdSet.has(helperId));
 
-  if (queue.length) {
+  if (availableQueue.length) {
     return {
-      queue,
-      selectedHelperId: queue[0],
+      queue: [...availableQueue, ...deferredQueue],
+      selectedHelperId: availableQueue[0],
       excludedHelperIds,
       resetExcludedHelperIds: false,
       reofferAfterCooldown: false,
@@ -2576,15 +2573,14 @@ function resolveNextServiceHelperSelection(request = {}, candidateQueue = [], no
   }
 
   const lastOfferAtMs = normalizeMillis(request.lastOfferAt);
-  const cooldownElapsed = candidateQueue.length > 0
-    && excludedHelperIds.length > 0
+  const cooldownElapsed = deferredQueue.length > 0
     && lastOfferAtMs > 0
     && (now - lastOfferAtMs) >= HELPER_REOFFER_COOLDOWN_MS;
 
   if (cooldownElapsed) {
     return {
-      queue: [...candidateQueue],
-      selectedHelperId: candidateQueue[0] || '',
+      queue: [...deferredQueue],
+      selectedHelperId: deferredQueue[0] || '',
       excludedHelperIds,
       resetExcludedHelperIds: true,
       reofferAfterCooldown: true,
@@ -2592,7 +2588,7 @@ function resolveNextServiceHelperSelection(request = {}, candidateQueue = [], no
   }
 
   return {
-    queue: [],
+    queue: [...deferredQueue],
     selectedHelperId: '',
     excludedHelperIds,
     resetExcludedHelperIds: false,
@@ -2633,16 +2629,17 @@ exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{reques
     const selection = resolveNextServiceHelperSelection(request, candidateQueue, now);
     const { queue, selectedHelperId } = selection;
 
-    if (!queue.length) {
+    if (!selectedHelperId) {
       if (request.status !== SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE) {
         transaction.update(requestRef, {
           status: SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE,
           statusDetail: 'No helpers are currently available for this request.',
-          helperQueue: [],
+          helperQueue: queue,
           currentOfferHelperId: null,
           offerExpiresAt: null,
           offerToken: null,
           offerCycleExcludedHelperIds: selection.excludedHelperIds,
+          declinedHelperIds: getServiceRequestDeclinedHelperIds(request),
           matchingStartedAtMs: getRequestMatchingStartedAtMs(request) || Date.now(),
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
@@ -2665,6 +2662,7 @@ exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{reques
       offerRevision,
       offerToken: randomUUID(),
       offerCycleExcludedHelperIds: selection.resetExcludedHelperIds ? [] : selection.excludedHelperIds,
+      declinedHelperIds: getServiceRequestDeclinedHelperIds(request),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
     transaction.set(selectedHelperRef, {
@@ -2717,7 +2715,7 @@ exports.syncServiceRequestAssignmentState = onDocumentWritten('serviceRequests/{
     await createUserNotification({
       userId: after.customerId || before?.customerId || null,
       title: 'No helpers available',
-      message: 'No helper is currently available for this request. We will retry when availability changes.',
+      message: 'No helper is currently available for this request right now.',
       type: 'matching_update',
       requestId,
       targetPath: `/customer/requests/${requestId}`,
@@ -2981,7 +2979,7 @@ exports.reconcileServiceRequestOffers = onSchedule('every 1 minutes', async () =
   const batch = db.batch();
   let updatesCount = 0;
 
-  snapshot.docs.forEach((docSnap) => {
+  for (const docSnap of snapshot.docs) {
     const request = docSnap.data() || {};
     const status = String(request.status || '').toLowerCase();
     const offerExpiresAt = normalizeMillis(request.offerExpiresAt);
@@ -2998,6 +2996,7 @@ exports.reconcileServiceRequestOffers = onSchedule('every 1 minutes', async () =
         currentOfferHelperId: null,
         offerExpiresAt: null,
         offerToken: null,
+        declinedHelperIds: [],
         matchingStartedAtMs: null,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
@@ -3011,16 +3010,21 @@ exports.reconcileServiceRequestOffers = onSchedule('every 1 minutes', async () =
         ...getServiceRequestExcludedHelperIds(request),
         expiredHelperId,
       ]);
+      const nextQueue = normalizeHelperIdList([
+        ...(Array.isArray(request.helperQueue)
+          ? request.helperQueue.filter((helperId) => String(helperId || '').trim() !== expiredHelperId)
+          : []),
+        expiredHelperId,
+      ]);
       batch.update(docSnap.ref, {
         status: SERVICE_REQUEST_STATUS.MATCHING,
         statusDetail: 'Helper offer expired. Matching the next helper.',
-        helperQueue: Array.isArray(request.helperQueue)
-          ? request.helperQueue.filter((helperId) => String(helperId || '').trim() !== expiredHelperId)
-          : [],
+        helperQueue: nextQueue,
         currentOfferHelperId: null,
         offerExpiresAt: null,
         offerToken: null,
         offerCycleExcludedHelperIds: excludedHelperIds,
+        declinedHelperIds: getServiceRequestDeclinedHelperIds(request),
         matchingStartedAtMs: matchingStartedAtMs || now,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
@@ -3029,19 +3033,43 @@ exports.reconcileServiceRequestOffers = onSchedule('every 1 minutes', async () =
     }
 
     if (status === SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE) {
-      batch.update(docSnap.ref, {
-        status: SERVICE_REQUEST_STATUS.MATCHING,
-        statusDetail: 'Retrying helper matching.',
-        currentOfferHelperId: null,
-        offerExpiresAt: null,
-        offerToken: null,
-        matchingStartedAtMs: matchingStartedAtMs || now,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-      updatesCount += 1;
-      return;
+      const candidateQueue = await getHelperQueueForServiceRequest(request);
+      const selection = resolveNextServiceHelperSelection(request, candidateQueue, now);
+      if (selection.reofferAfterCooldown && selection.selectedHelperId) {
+        batch.update(docSnap.ref, {
+          status: SERVICE_REQUEST_STATUS.MATCHING,
+          statusDetail: 'Retrying the available helper after cooldown.',
+          helperQueue: selection.queue,
+          currentOfferHelperId: null,
+          offerExpiresAt: null,
+          offerToken: null,
+          offerCycleExcludedHelperIds: [],
+          declinedHelperIds: getServiceRequestDeclinedHelperIds(request),
+          matchingStartedAtMs: matchingStartedAtMs || now,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        updatesCount += 1;
+        return;
+      }
+
+      if (selection.selectedHelperId) {
+        batch.update(docSnap.ref, {
+          status: SERVICE_REQUEST_STATUS.MATCHING,
+          statusDetail: 'A helper became available. Matching the next helper.',
+          helperQueue: selection.queue,
+          currentOfferHelperId: null,
+          offerExpiresAt: null,
+          offerToken: null,
+          offerCycleExcludedHelperIds: selection.excludedHelperIds,
+          declinedHelperIds: getServiceRequestDeclinedHelperIds(request),
+          matchingStartedAtMs: matchingStartedAtMs || now,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        updatesCount += 1;
+        return;
+      }
     }
-  });
+  }
 
   if (updatesCount) {
     await batch.commit();
@@ -9103,6 +9131,7 @@ exports.cancelCustomerServiceRequest = onRequest({ cors: true, secrets: [UNCEDO_
       offerExpiresAt: null,
       offerToken: null,
       offerCycleExcludedHelperIds: [],
+      declinedHelperIds: [],
       matchingStartedAtMs: null,
       paymentStatus: null,
       paymentTransactionId: null,
