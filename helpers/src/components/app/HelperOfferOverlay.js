@@ -72,9 +72,9 @@ export function HelperOfferOverlay({ bottomSafeInset = 0 }) {
   if (!activeOffer || !canRespond) return null;
 
   return (
-    <View pointerEvents="box-none" style={styles.portal}>
+      <View pointerEvents="box-none" style={styles.portal}>
       <View pointerEvents="none" style={styles.backdrop} />
-      <View style={styles.sheetWrap}>
+      <View style={[styles.sheetWrap, { paddingBottom: Math.max(0, Number(bottomSafeInset || 0)) }]}>
         <View style={styles.sheet}>
           <View style={[styles.countdownFill, { width: `${countdownRatio * 100}%`, backgroundColor: countdownColor }]} />
           <Animated.View
@@ -148,7 +148,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(15, 23, 42, 0.12)',
   },
   sheetWrap: {
-    paddingBottom: Math.max(0, Number(bottomSafeInset || 0)),
     paddingHorizontal: 0,
   },
   sheet: {
