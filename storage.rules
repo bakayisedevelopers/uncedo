@@ -1,0 +1,11 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Local emulator development only. Replace with least-privilege rules
+    // before deploying rules to a real Firebase project.
+    match /{allPaths=**} {
+      allow read, write: if true;
+    }
+  }
+}

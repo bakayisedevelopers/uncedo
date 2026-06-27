@@ -1,0 +1,52 @@
+[
+  {
+    "name": "maths_paper",
+    "text": "Mathematics Paper 1\nQuestion 1\nSolve the equation 2x + 3 = 11. (4 marks)\n1.1 Factorise x^2 - 5x + 6\nSECTION B\nQuestion 2\nDraw the graph of y = x^2",
+    "expectSubject": "mathematics"
+  },
+  {
+    "name": "maths_lit_paper",
+    "text": "Mathematical Literacy Paper 1\nQuestion 1\nA household budget has income and expenditure. Calculate profit or loss.\nQuestion 2\nInterpret the graph and probability from the table.",
+    "expectSubject": "mathematical_literacy"
+  },
+  {
+    "name": "physical_sciences_paper",
+    "text": "Physical Sciences Grade 12\nQuestion 1\nCalculate velocity and acceleration of a projectile.\nQuestion 2\nBalance the redox reaction and calculate moles.",
+    "expectSubject": "physical_sciences"
+  },
+  {
+    "name": "english_comprehension",
+    "text": "English FAL\nRead the passage below and answer the questions that follow.\nQuestion 1\nWhy did the author leave home? (2)\nQuestion 2\nSummarise the main idea in your own words.",
+    "expectSubject": "english"
+  },
+  {
+    "name": "life_sciences_paper",
+    "text": "Life Sciences Grade 12\nQuestion 1\nExplain meiosis and human reproduction.\nQuestion 2\nDiscuss genetics, inheritance and evolution through natural selection.",
+    "expectSubject": "life_sciences"
+  },
+  {
+    "name": "agriculture_paper",
+    "text": "Agricultural Sciences\nQuestion 2 Animal Nutrition\nCalculate digestibility coefficient and nutritive ratio.\nQuestion 3 Animal Production, Protection and Control.",
+    "expectSubject": "agricultural_sciences"
+  },
+  {
+    "name": "accounting_paper",
+    "text": "Accounting Grade 12 Paper 1\nPrepare the Income Statement and Statement of Financial Position for a company.\nCalculate financial indicators and comment on liquidity.",
+    "expectSubject": "accounting"
+  },
+  {
+    "name": "business_studies_paper",
+    "text": "Business Studies Grade 12\nDiscuss business environments and strategies.\nExplain human resources and quality of performance.\nEvaluate leadership and corporate social responsibility.",
+    "expectSubject": "business_studies"
+  },
+  {
+    "name": "economics_paper",
+    "text": "Economics Grade 12\nPaper 1: Circular flow, business cycles, public sector, foreign exchange.\nPaper 2: Market failures, inflation and environmental sustainability.",
+    "expectSubject": "economics"
+  },
+  {
+    "name": "unstructured_random",
+    "text": "photo screenshot blurry words line one maybe answer maybe table maybe figure no labels scattered content",
+    "expectNeedsReview": true
+  }
+]

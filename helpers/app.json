@@ -1,0 +1,57 @@
+{
+  "expo": {
+    "name": "Helpers",
+    "slug": "helpers",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "platforms": [
+      "android",
+      "ios",
+      "web"
+    ],
+    "android": {
+      "package": "com.bakayisedevelopers.helpers",
+      "permissions": [
+        "CAMERA",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION"
+      ]
+    },
+    "ios": {
+      "bundleIdentifier": "com.bakayisedevelopers.helpers",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Uncedo Helpers uses your location while you are travelling to active jobs.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Uncedo Helpers uses your location during active jobs so customers can track your arrival.",
+        "NSLocationAlwaysUsageDescription": "Uncedo Helpers uses your location during active jobs so customers can track your arrival.",
+        "NSCameraUsageDescription": "Helpers uses the camera so you can capture a profile selfie for verification.",
+        "NSPhotoLibraryUsageDescription": "Helpers uses your photo library so you can upload work pictures for your helper skills.",
+        "UIBackgroundModes": [
+          "location"
+        ]
+      },
+      "supportsTablet": false
+    },
+    "extra": {
+      "eas": {
+        "projectId": "577bc9b1-d455-47e6-a086-160b633ee7ce"
+      }
+    },
+    "owner": "bakayisedevelopers",
+    "plugins": [
+      "expo-font",
+      "expo-image-picker",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Uncedo Helpers uses your location during active jobs so customers can track your arrival.",
+          "locationWhenInUsePermission": "Uncedo Helpers uses your location while you are travelling to active jobs.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isIosBackgroundLocationEnabled": true
+        }
+      ]
+    ]
+  }
+}

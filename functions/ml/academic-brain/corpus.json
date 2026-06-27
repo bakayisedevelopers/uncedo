@@ -1,0 +1,19 @@
+{
+  "Mathematics": [
+    "solve equation algebra calculus trigonometry theorem graph probability statistics",
+    "Solve simultaneous equations with substitution and elimination.",
+    "Differentiate polynomial functions and apply gradient rules."
+  ],
+  "Physics": [
+    "force motion acceleration newton mechanics voltage current wave frequency optics",
+    "Use Ohms law to solve electric circuit current and voltage."
+  ],
+  "Chemistry": [
+    "atoms molecules reactions moles stoichiometry acids bases equilibrium oxidation",
+    "Discuss chemical equilibrium and Le Chatelier principle."
+  ],
+  "Biology": [
+    "cell dna genetics mitosis evolution ecosystem respiration photosynthesis anatomy",
+    "Describe inheritance patterns and genotype phenotype ratios."
+  ]
+}
