@@ -28,7 +28,7 @@ import { uploadUserFile } from './storageService';
 import { recordCustomerServiceEvent } from './customerRecommendationService';
 import { getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
 
-const ACTIVE_SERVICE_REQUEST_STATUSES = ['collecting_details', 'scheduled_pending', 'matching', 'helper_found', 'accepted', 'en_route', 'arrived', 'no_helper_available'];
+const ACTIVE_SERVICE_REQUEST_STATUSES = ['collecting_details', 'scheduled_pending', 'matching', 'helper_found', 'accepted', 'driving', 'en_route', 'buying_resources', 'arrived', 'work_started', 'no_helper_available'];
 const CATEGORY_ENGINE_LOOKUP = {
   cleaning: cleaningPricingEngine,
   yard_maintenance: yardMaintenancePricingEngine,
@@ -310,6 +310,7 @@ export async function createCustomerServiceRequest({ user, location, initialDraf
     currentOfferHelperId: null,
     offerExpiresAt: null,
     offerToken: null,
+    offerCycleExcludedHelperIds: [],
     offerRevision: 0,
     lastOfferAt: null,
     transcript: [],
@@ -496,6 +497,7 @@ export async function saveCustomerServiceQuotePreview({
     currentOfferHelperId: null,
     offerExpiresAt: null,
     offerToken: null,
+    offerCycleExcludedHelperIds: [],
     lastOfferAt: null,
     serviceAddress,
     location,
@@ -589,6 +591,7 @@ export async function finalizeCustomerServiceRequest({
     currentOfferHelperId: null,
     offerExpiresAt: null,
     offerToken: null,
+    offerCycleExcludedHelperIds: [],
     lastOfferAt: null,
     offerRevision: 0,
     helperAssignment: null,
@@ -741,36 +744,37 @@ export async function cancelServiceRequestByCustomer({ requestId, reason }) {
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || payload?.success === false) {
-    if (response.status === 404) {
-      const requestRef = doc(db, 'serviceRequests', requestId);
-      const requestSnap = await getDoc(requestRef);
-      const request = requestSnap.exists() ? requestSnap.data() || {} : null;
-      const normalizedStatus = String(request?.status || '').toLowerCase();
-      const helperId = String(request?.helperAssignment?.helperId || '').trim();
-      const canCancelLocally = Boolean(
-        request
-        && request.customerId === auth.currentUser?.uid
-        && !helperId
-        && ['collecting_details', 'scheduled_pending', 'matching', 'helper_found', 'no_helper_available'].includes(normalizedStatus),
-      );
+    const requestRef = doc(db, 'serviceRequests', requestId);
+    const requestSnap = await getDoc(requestRef).catch(() => null);
+    const request = requestSnap?.exists() ? requestSnap.data() || {} : null;
+    const normalizedStatus = String(request?.status || '').toLowerCase();
+    const helperId = String(request?.helperAssignment?.helperId || '').trim();
+    const canCancelLocally = Boolean(
+      request
+      && request.customerId === auth.currentUser?.uid
+      && !helperId
+      && ['collecting_details', 'scheduled_pending', 'matching', 'helper_found', 'no_helper_available'].includes(normalizedStatus),
+    );
 
-      if (canCancelLocally) {
-        await updateDoc(requestRef, {
-          status: 'canceled',
-          statusDetail: 'Customer canceled the service request.',
-          canceledBy: 'customer',
-          canceledReason: reason || '',
-          canceledAt: serverTimestamp(),
-          helperQueue: [],
-          currentOfferHelperId: null,
-          offerExpiresAt: null,
-          offerToken: null,
-          updatedAt: serverTimestamp(),
-        });
+    if (canCancelLocally) {
+      await updateDoc(requestRef, {
+        status: 'canceled',
+        statusDetail: 'Customer canceled the service request.',
+        canceledBy: 'customer',
+        canceledReason: reason || '',
+        canceledAt: serverTimestamp(),
+        helperAssignment: null,
+        helperQueue: [],
+        currentOfferHelperId: null,
+        offerExpiresAt: null,
+        offerToken: null,
+        offerCycleExcludedHelperIds: [],
+        matchingStartedAtMs: null,
+        updatedAt: serverTimestamp(),
+      });
 
-        const updatedSnap = await getDoc(requestRef);
-        return updatedSnap.exists() ? { id: updatedSnap.id, ...updatedSnap.data() } : null;
-      }
+      const updatedSnap = await getDoc(requestRef);
+      return updatedSnap.exists() ? { id: updatedSnap.id, ...updatedSnap.data() } : null;
     }
 
     throw new Error(payload?.message || 'Unable to cancel this request.');
