@@ -174,7 +174,12 @@ function scoreCustomerServiceItem(item = {}, profile = {}, context = {}, categor
   ).toFixed(6));
 }
 
-export function rankCustomerServiceItems(items = [], { customerId = '', recommendationProfile = {}, preferredCategoryIds = [] } = {}) {
+export function rankCustomerServiceItems(items = [], {
+  customerId = '',
+  recommendationProfile = {},
+  preferredCategoryIds = [],
+  sessionSeed = '',
+} = {}) {
   const normalizedProfile = normalizeRecommendationProfile(recommendationProfile);
   const remaining = (Array.isArray(items) ? items : [])
     .map((item) => ({
@@ -194,7 +199,7 @@ export function rankCustomerServiceItems(items = [], { customerId = '', recommen
     remaining.forEach((entry, index) => {
       const categoryId = normalizeText(entry.item.categoryId || '');
       const adjustedScore = entry.baseScore - (categoryUsage[categoryId] || 0) * 0.35;
-      const tieBreak = seededNoise(`${customerId}|${entry.item.entityId || entry.item.id || ''}|${ordered.length}`);
+      const tieBreak = seededNoise(`${customerId}|${sessionSeed || dayBucket()}|${entry.item.entityId || entry.item.id || ''}|${ordered.length}`);
       const finalScore = adjustedScore + (tieBreak * 0.02);
       if (finalScore > bestScore) {
         bestScore = finalScore;

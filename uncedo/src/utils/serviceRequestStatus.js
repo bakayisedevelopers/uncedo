@@ -28,11 +28,11 @@ const STATUS_META = {
     description: 'We found a suitable helper and are waiting for a response.',
   },
   no_helper_available: {
-    label: 'Searching for helper',
-    badge: 'Still matching',
+    label: 'No helpers available',
+    badge: 'Availability update',
     tone: 'warning',
-    title: 'Still searching for a helper',
-    description: 'No helper accepted yet. We will continue matching as more helpers become available.',
+    title: 'No helpers are currently available',
+    description: 'There is no helper available for this request right now. We will retry as availability changes.',
   },
   accepted: {
     label: 'Accepted',
