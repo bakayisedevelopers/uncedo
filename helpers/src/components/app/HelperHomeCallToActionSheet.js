@@ -21,7 +21,7 @@ function getSlideTone(isOnline, needsProfileCompletion) {
       trackBackground: colors.brandSoft,
       fillBackground: colors.brand,
       borderColor: '#f9a8d4',
-      textColor: colors.brandDark,
+      textColor: '#ffffff',
       thumbBackground: '#ffffff',
       thumbColor: colors.brandDark,
       glowColor: 'rgba(236,72,153,0.18)',
@@ -70,7 +70,9 @@ function SlideToToggle({
 
   const panResponder = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: () => !disabled,
+    onStartShouldSetPanResponderCapture: () => !disabled,
     onMoveShouldSetPanResponder: (_, gestureState) => Math.abs(gestureState.dx) > 5,
+    onMoveShouldSetPanResponderCapture: (_, gestureState) => Math.abs(gestureState.dx) > 3,
     onPanResponderGrant: () => {
       startXRef.current = isOnline ? maxTranslate : 0;
     },
@@ -112,6 +114,7 @@ function SlideToToggle({
 
   return (
     <View
+      {...panResponder.panHandlers}
       onLayout={(event) => {
         setLayoutWidth(event.nativeEvent.layout.width);
       }}
@@ -120,7 +123,7 @@ function SlideToToggle({
         { backgroundColor: tone.trackBackground, borderColor: tone.borderColor },
       ]}
     >
-      <View style={styles.sliderFillWrap}>
+      <View pointerEvents="none" style={styles.sliderFillWrap}>
         <Animated.View
           style={[
             styles.sliderFill,
@@ -136,12 +139,12 @@ function SlideToToggle({
         />
       </View>
 
-      <View style={styles.sliderContent}>
+      <View pointerEvents="none" style={styles.sliderContent}>
         <Text style={[styles.sliderLabel, { color: tone.textColor }]}>{promptText}</Text>
       </View>
 
       <Animated.View
-        {...panResponder.panHandlers}
+        pointerEvents="none"
         style={[
           styles.sliderThumb,
           {
@@ -176,7 +179,6 @@ export function HelperHomeCallToActionSheet({
       <View style={styles.sheet}>
         <View style={styles.row}>
           <View style={styles.walletCard}>
-            <Text style={styles.walletLabel}>Wallet</Text>
             <Text style={styles.walletValue}>{walletAmountLabel}</Text>
           </View>
           <Pressable
@@ -196,7 +198,6 @@ export function HelperHomeCallToActionSheet({
     <View style={styles.sheet}>
       <View style={styles.row}>
         <View style={styles.walletCard}>
-          <Text style={styles.walletLabel}>Wallet</Text>
           <Text style={styles.walletValue}>{walletAmountLabel}</Text>
         </View>
         <View style={styles.sliderWrap}>
@@ -224,27 +225,22 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   walletCard: {
+    alignItems: 'center',
+    alignSelf: 'center',
     backgroundColor: 'rgba(255,255,255,0.96)',
     borderColor: colors.border,
     borderRadius: 24,
     borderWidth: 1,
     justifyContent: 'center',
     minHeight: 58,
-    minWidth: 112,
     paddingHorizontal: 14,
     paddingVertical: 10,
-  },
-  walletLabel: {
-    color: colors.muted,
-    fontSize: 10,
-    fontWeight: '800',
-    textTransform: 'uppercase',
   },
   walletValue: {
     color: colors.brandDark,
     fontSize: 16,
     fontWeight: '900',
-    marginTop: 2,
+    textAlign: 'center',
   },
   sliderWrap: {
     flex: 1,
@@ -285,6 +281,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     position: 'absolute',
     top: 6,
+    zIndex: 2,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.18,
     shadowRadius: 8,

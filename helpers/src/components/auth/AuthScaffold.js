@@ -45,13 +45,6 @@ export function AuthScaffold({
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.container}>
-          {onBack ? (
-            <Pressable accessibilityRole="button" onPress={onBack} style={styles.backButton}>
-              <Ionicons color="rgba(255,255,255,0.8)" name="chevron-back" size={20} />
-              <Text style={styles.backLabel}>{backLabel}</Text>
-            </Pressable>
-          ) : null}
-
           <View style={styles.header}>
             {brandName ? <Text style={styles.brandName}>{brandName}</Text> : null}
             <Text style={styles.title}>{resolvedTitle}</Text>
@@ -175,19 +168,19 @@ export function AuthMessage({ text, tone = 'error', inverted = false }) {
 const styles = StyleSheet.create({
   screen: {
     flex: 1,
-    backgroundColor: '#2e0215', // Dark burgundy/pink base color
+    backgroundColor: colors.background,
   },
   background: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: '#250111', // Very dark pink/black
+    backgroundColor: colors.background,
   },
   glow1: {
     position: 'absolute',
     width: 320,
     height: 320,
     borderRadius: 160,
-    backgroundColor: '#be185d', // BrandDark glow
-    opacity: 0.22,
+    backgroundColor: colors.brandDark,
+    opacity: 0.05,
     top: '20%',
     left: '-20%',
   },
@@ -196,8 +189,8 @@ const styles = StyleSheet.create({
     width: 280,
     height: 280,
     borderRadius: 140,
-    backgroundColor: '#ec4899', // Brand glow
-    opacity: 0.18,
+    backgroundColor: colors.brand,
+    opacity: 0.04,
     bottom: '25%',
     right: '-15%',
   },
@@ -212,20 +205,8 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     maxWidth: 380,
   },
-  backButton: {
-    alignItems: 'center',
-    alignSelf: 'flex-start',
-    flexDirection: 'row',
-    gap: 4,
-    marginBottom: 20,
-  },
-  backLabel: {
-    color: 'rgba(255,255,255,0.8)',
-    fontSize: 14,
-    fontWeight: '700',
-  },
   brandName: {
-    color: 'rgba(255,255,255,0.72)',
+    color: colors.brandDark,
     fontSize: 12,
     fontWeight: '800',
     letterSpacing: 1.2,
@@ -238,14 +219,14 @@ const styles = StyleSheet.create({
     marginBottom: 36,
   },
   title: {
-    color: '#ffffff',
+    color: colors.text,
     fontSize: 34,
     fontWeight: '900',
     textAlign: 'center',
     letterSpacing: -0.5,
   },
   subtitle: {
-    color: 'rgba(255,255,255,0.7)',
+    color: colors.muted,
     fontSize: 15,
     marginTop: 6,
     textAlign: 'center',
@@ -255,14 +236,14 @@ const styles = StyleSheet.create({
     gap: 16,
   },
   primaryButton: {
-    backgroundColor: '#ccff00', // Vibrant neon lime-green button
+    backgroundColor: colors.brand,
     borderRadius: 24,
     height: 54,
     justifyContent: 'center',
     alignItems: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
+    shadowOpacity: 0.12,
     shadowRadius: 6,
     elevation: 4,
     marginTop: 8,
@@ -271,7 +252,7 @@ const styles = StyleSheet.create({
     opacity: 0.55,
   },
   primaryButtonText: {
-    color: '#000000',
+    color: '#ffffff',
     fontSize: 17,
     fontWeight: '900',
     letterSpacing: 0.3,
@@ -285,13 +266,14 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   footerLinkText: {
-    color: 'rgba(255,255,255,0.8)',
+    color: colors.muted,
     fontSize: 14,
     fontWeight: '600',
   },
   footerLinkHighlight: {
     fontWeight: '900',
     textDecorationLine: 'underline',
+    color: colors.brandDark,
   },
   socialRow: {
     flexDirection: 'row',
@@ -308,9 +290,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.12,
+    shadowOpacity: 0.06,
     shadowRadius: 3,
     elevation: 2,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   socialButtonDisabled: {
     opacity: 0.55,
@@ -324,7 +308,7 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   fieldLabel: {
-    color: 'rgba(255,255,255,0.88)',
+    color: colors.text,
     fontSize: 13,
     fontWeight: '700',
     marginLeft: 12,
@@ -339,17 +323,19 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
+    shadowOpacity: 0.05,
     shadowRadius: 3,
     elevation: 2,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   inputContainerError: {
     borderWidth: 1,
-    borderColor: '#fca5a5',
+    borderColor: colors.danger,
   },
   fieldInput: {
     flex: 1,
-    color: '#1f1724',
+    color: colors.text,
     fontSize: 16,
     fontWeight: '600',
     height: '100%',
@@ -362,7 +348,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   fieldError: {
-    color: '#f87171',
+    color: colors.danger,
     fontSize: 12,
     fontWeight: '700',
     marginTop: 4,
@@ -375,14 +361,14 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   messageError: {
-    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+    backgroundColor: 'rgba(220, 38, 38, 0.05)',
     borderWidth: 1,
-    borderColor: 'rgba(239, 68, 68, 0.28)',
+    borderColor: 'rgba(220, 38, 38, 0.15)',
   },
   messageInfo: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: 'rgba(236, 72, 153, 0.05)',
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
+    borderColor: 'rgba(236, 72, 153, 0.15)',
   },
   messageText: {
     fontSize: 13,
@@ -390,11 +376,11 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   messageTextError: {
-    color: '#fca5a5',
+    color: colors.danger,
     fontWeight: '700',
   },
   messageTextInfo: {
-    color: '#ffffff',
+    color: colors.brandDark,
     fontWeight: '700',
   },
 });

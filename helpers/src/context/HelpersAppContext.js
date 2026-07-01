@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState } from 
 import { getServiceById } from '../constants/serviceCatalog';
 import { useAuth } from './AuthContext';
 import { updateHelperProfile } from '../services/userService';
-import { logError } from '../services/logger';
+import { logError, logInfo } from '../services/logger';
 import { deleteUploadedFile, uploadLocalFile } from '../services/storageService';
 import { groupCompletedJobsByWeek, HELPER_PAYOUT_RATE, PLATFORM_FEE_RATE, shouldIncludeJobInPayouts } from '../utils/payouts';
 import { acceptHelperAgreement as acceptHelperAgreementRequest } from '../services/legalAgreementService';
@@ -120,18 +120,49 @@ function normalizePictureEntry(picture) {
   };
 }
 
-function normalizeSkillEntry(skill = {}, serviceId = '') {
+function resolveSkillCatalogId(skill = {}) {
+  return String(skill.catalogId || skill.serviceCatalogId || slugify(skill.name || '')).trim().toLowerCase();
+}
+
+function normalizeCatalogIdList(values = []) {
+  return [...new Set(
+    (Array.isArray(values) ? values : [])
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter(Boolean),
+  )];
+}
+
+function findExistingSkillEntry(existingSkills = [], skill = {}) {
+  const targetId = String(skill.id || '').trim();
+  const targetCatalogId = resolveSkillCatalogId(skill);
+  const targetName = String(skill.name || '').trim();
+
+  return (Array.isArray(existingSkills) ? existingSkills : []).find((entry) => (
+    (targetId && String(entry?.id || '').trim() === targetId)
+    || (targetCatalogId && resolveSkillCatalogId(entry) === targetCatalogId)
+    || (targetName && String(entry?.name || '').trim() === targetName)
+  )) || null;
+}
+
+function normalizeSkillEntry(skill = {}, serviceId = '', existingSkill = null) {
   const skillName = String(skill.name || '').trim();
   if (!skillName) return null;
 
+  const explicitStatus = String(skill.status || '').trim().toLowerCase();
+  const fallbackStatus = String(existingSkill?.status || '').trim().toLowerCase();
+
   return {
     id: String(skill.id || `skill_${serviceId}_${slugify(skillName)}`),
-    catalogId: String(skill.catalogId || skill.serviceCatalogId || slugify(skillName)).trim().toLowerCase(),
+    catalogId: resolveSkillCatalogId(skill),
     name: skillName,
-    status: String(skill.status || 'approved').trim().toLowerCase() || 'approved',
-    active: skill.active !== false,
-    verified: skill.verified !== false,
-    approvalSource: String(skill.approvalSource || '').trim().toLowerCase(),
+    status: explicitStatus || fallbackStatus || 'pending',
+    active: typeof skill.active === 'boolean'
+      ? skill.active
+      : (typeof existingSkill?.active === 'boolean' ? existingSkill.active : true),
+    verified: typeof skill.verified === 'boolean'
+      ? skill.verified
+      : (typeof existingSkill?.verified === 'boolean' ? existingSkill.verified : true),
+    approvalSource: String(skill.approvalSource || existingSkill?.approvalSource || '').trim().toLowerCase(),
     derivedFromBundleIds: [...new Set((Array.isArray(skill.derivedFromBundleIds) ? skill.derivedFromBundleIds : [])
       .map((value) => String(value || '').trim().toLowerCase())
       .filter(Boolean))],
@@ -146,7 +177,7 @@ function normalizeSkillEntry(skill = {}, serviceId = '') {
   };
 }
 
-function normalizeServiceEntry(entry = {}) {
+function normalizeServiceEntry(entry = {}, existingEntry = null) {
   const serviceId = String(entry.serviceId || '').trim();
   if (!serviceId) return null;
 
@@ -158,14 +189,17 @@ function normalizeServiceEntry(entry = {}) {
     description: serviceMeta?.description || entry.description || '',
     catalogId: String(entry.catalogId || '').trim().toLowerCase(),
     skills: (Array.isArray(entry.skills) ? entry.skills : [])
-      .map((skill) => normalizeSkillEntry(skill, serviceId))
+      .map((skill) => normalizeSkillEntry(skill, serviceId, findExistingSkillEntry(existingEntry?.skills || [], skill)))
       .filter(Boolean),
   };
 }
 
-function normalizeServices(services = []) {
+function normalizeServices(services = [], existingServices = []) {
   return (Array.isArray(services) ? services : [])
-    .map(normalizeServiceEntry)
+    .map((entry) => normalizeServiceEntry(
+      entry,
+      (Array.isArray(existingServices) ? existingServices : []).find((service) => String(service?.serviceId || '').trim() === String(entry?.serviceId || '').trim()) || null,
+    ))
     .filter(Boolean)
     .filter((entry) => Array.isArray(entry.skills) && entry.skills.length > 0);
 }
@@ -183,15 +217,15 @@ function buildHelperSkillsList(services = []) {
   ));
 }
 
-function withServiceMetadata(profile) {
+function withServiceMetadata(profile, existingProfile = null) {
   return {
     ...profile,
-    services: normalizeServices(profile.services || []),
+    services: normalizeServices(profile.services || [], existingProfile?.services || []),
   };
 }
 
-function normalizeProfile(user) {
-  if (!user) return withServiceMetadata(FALLBACK_PROFILE);
+function normalizeProfile(user, existingProfile = null) {
+  if (!user) return withServiceMetadata(FALLBACK_PROFILE, existingProfile);
 
   const fullName = String(user.fullName || user.displayName || '').trim();
   const firstName = String(user.firstName || '').trim();
@@ -216,7 +250,48 @@ function normalizeProfile(user) {
       ...(user.metrics || {}),
     },
     services: Array.isArray(user.services) ? user.services : [],
-  });
+  }, existingProfile);
+}
+
+function getStablePictureSignature(picture = {}) {
+  return {
+    id: String(picture?.id || '').trim(),
+    uri: String(picture?.uri || picture?.downloadUrl || '').trim(),
+    objectPath: String(picture?.objectPath || '').trim(),
+  };
+}
+
+function getStableSkillSignature(skill = {}) {
+  return {
+    id: String(skill?.id || '').trim(),
+    catalogId: String(skill?.catalogId || skill?.serviceCatalogId || '').trim().toLowerCase(),
+    name: String(skill?.name || '').trim(),
+    status: String(skill?.status || '').trim().toLowerCase(),
+    active: skill?.active === true,
+    verified: skill?.verified === true,
+    approvalSource: String(skill?.approvalSource || '').trim().toLowerCase(),
+    derivedFromBundleIds: normalizeCatalogIdList(skill?.derivedFromBundleIds),
+    derivedFromServiceIds: normalizeCatalogIdList(skill?.derivedFromServiceIds),
+    pictures: (Array.isArray(skill?.pictures) ? skill.pictures : []).map(getStablePictureSignature),
+  };
+}
+
+function getStableServiceSignature(service = {}) {
+  return {
+    serviceId: String(service?.serviceId || '').trim(),
+    serviceName: String(service?.serviceName || '').trim(),
+    description: String(service?.description || '').trim(),
+    catalogId: String(service?.catalogId || '').trim().toLowerCase(),
+    skills: (Array.isArray(service?.skills) ? service.skills : []).map(getStableSkillSignature),
+  };
+}
+
+function getServicesSignature(services = []) {
+  return JSON.stringify(
+    (Array.isArray(services) ? services : [])
+      .map(getStableServiceSignature)
+      .filter((service) => service.serviceId),
+  );
 }
 
 function getHelperOnboardingStatus(profile, { serviceCatalog = [], serviceCatalogResolved = false } = {}) {
@@ -340,13 +415,11 @@ export function HelpersAppProvider({ children }) {
   const activeJobCleanupPromiseRef = useRef(null);
   const pendingServicesSignatureRef = useRef('');
 
-  const getServicesSignature = (services = []) => JSON.stringify(normalizeServices(services));
-
   useEffect(() => {
-    const normalizedUserProfile = normalizeProfile(user);
-    const incomingServicesSignature = getServicesSignature(normalizedUserProfile.services || []);
-
     setProfile((current) => {
+      const normalizedUserProfile = normalizeProfile(user, current);
+      const incomingServicesSignature = getServicesSignature(normalizedUserProfile.services || []);
+
       if (pendingServicesSignatureRef.current) {
         if (incomingServicesSignature === pendingServicesSignatureRef.current) {
           pendingServicesSignatureRef.current = '';
@@ -373,7 +446,15 @@ export function HelpersAppProvider({ children }) {
     return subscribeToHelperAvailableServiceRequests(
       user.uid,
       (items) => {
-        setJobOffers(items.map(mapServiceRequestToOffer).filter(Boolean));
+        const mappedOffers = items.map(mapServiceRequestToOffer).filter(Boolean);
+        logInfo('HelpersAppContext.jobOffers', 'Received helper job offers update.', {
+          helperId: user.uid,
+          rawCount: items.length,
+          mappedCount: mappedOffers.length,
+          requestIds: mappedOffers.map((offer) => offer.id),
+          statuses: mappedOffers.map((offer) => offer.status),
+        });
+        setJobOffers(mappedOffers);
       },
       (error) => {
         logError('HelpersAppContext.jobOffers', error);
@@ -554,7 +635,7 @@ export function HelpersAppProvider({ children }) {
     };
   }, [activeJob?.location, activeJob?.requestId, activeJob?.status, activeJobResolved, profile.onlineStatus, user?.uid]);
 
-  const persistProfileUpdate = async (updates) => {
+  const persistProfileUpdate = async (updates, traceLabel = 'helpers:context:persistProfileUpdate') => {
     if (!user?.uid) {
       throw new Error('A helper session is required.');
     }
@@ -563,7 +644,7 @@ export function HelpersAppProvider({ children }) {
     setSaveError('');
 
     try {
-      await updateHelperProfile(user.uid, updates);
+      await updateHelperProfile(user.uid, updates, traceLabel);
       return { success: true };
     } catch (error) {
       logError('HelpersAppContext.persistProfileUpdate', error);
@@ -593,7 +674,7 @@ export function HelpersAppProvider({ children }) {
     return cleanupPromise;
   };
 
-  const applyProfileUpdate = async (updater) => {
+  const applyProfileUpdate = async (updater, traceLabel = 'helpers:context:applyProfileUpdate') => {
     const nextProfile = withServiceMetadata(updater(profile));
     const currentServicesSignature = getServicesSignature(profile.services || []);
     const nextServicesSignature = getServicesSignature(nextProfile.services || []);
@@ -601,10 +682,10 @@ export function HelpersAppProvider({ children }) {
       pendingServicesSignatureRef.current = nextServicesSignature;
     }
     setProfile(nextProfile);
-    const result = await persistProfileUpdate(nextProfile);
+    const result = await persistProfileUpdate(nextProfile, traceLabel);
     if (!result.success) {
       pendingServicesSignatureRef.current = '';
-      setProfile(normalizeProfile(user));
+      setProfile((current) => normalizeProfile(user, current));
     }
     return result;
   };
@@ -651,7 +732,7 @@ export function HelpersAppProvider({ children }) {
       ...current,
       onlineStatus: current.onlineStatus === 'online' ? 'offline' : 'online',
       locationSharingEnabled: current.onlineStatus === 'online' ? false : current.locationSharingEnabled,
-    }));
+    }), 'helpers:context:toggleOnlineStatus');
   };
 
   const acceptOffer = async (offerId) => {
@@ -817,7 +898,7 @@ export function HelpersAppProvider({ children }) {
       }
 
       return { ...current, services: existingServices };
-    }).then((result) => (
+    }, 'helpers:context:addSkillPicture').then((result) => (
       result.success
         ? { success: true, message: `${skillName} added with a linked work photo.` }
         : result
@@ -851,9 +932,9 @@ export function HelpersAppProvider({ children }) {
       });
 
       setProfile(nextProfile);
-      const result = await persistProfileUpdate(nextProfile);
+      const result = await persistProfileUpdate(nextProfile, 'helpers:context:saveProfilePhoto');
       if (!result.success) {
-        setProfile(normalizeProfile(user));
+        setProfile((current) => normalizeProfile(user, current));
         return result;
       }
 
@@ -963,10 +1044,10 @@ export function HelpersAppProvider({ children }) {
       pendingServicesSignatureRef.current = getServicesSignature(persistedProfile.services || []);
 
       setProfile(persistedProfile);
-      const result = await persistProfileUpdate(persistedProfile);
+      const result = await persistProfileUpdate(persistedProfile, 'helpers:context:addSkillWithPhoto');
       if (!result.success) {
         pendingServicesSignatureRef.current = '';
-        setProfile(normalizeProfile(user));
+        setProfile((current) => normalizeProfile(user, current));
         return result;
       }
 
@@ -980,7 +1061,8 @@ export function HelpersAppProvider({ children }) {
     }
   };
 
-  const toggleSkillActive = async ({ serviceId, skillName, active }) => {
+  const toggleSkillActive = async ({ serviceId, skillName, catalogId, active }) => {
+    const normalizedCatalogId = String(catalogId || slugify(skillName)).trim().toLowerCase();
     return applyProfileUpdate((current) => ({
       ...current,
       services: normalizeServices((current.services || []).map((service) => {
@@ -988,7 +1070,7 @@ export function HelpersAppProvider({ children }) {
         return {
           ...service,
           skills: (service.skills || []).map((skill) => (
-            skill.name === skillName
+            skill.name === skillName || resolveSkillCatalogId(skill) === normalizedCatalogId
               ? {
                   ...skill,
                   active: Boolean(active),
@@ -998,7 +1080,7 @@ export function HelpersAppProvider({ children }) {
           )),
         };
       })),
-    }));
+    }), 'helpers:context:toggleSkillActive');
   };
 
   const removeSkill = async ({ serviceId, skillName }) => {
@@ -1024,7 +1106,7 @@ export function HelpersAppProvider({ children }) {
             : service
         ))
         .filter((service) => (service.skills || []).length > 0),
-    }));
+    }), 'helpers:context:removeSkill');
   };
 
   const removeSkillPicture = async ({ serviceId, skillName, pictureId }) => {
@@ -1056,7 +1138,7 @@ export function HelpersAppProvider({ children }) {
           };
         })
         .filter((service) => (service.skills || []).length > 0),
-    }));
+    }), 'helpers:context:removeSkillPicture');
   };
 
   const acceptAgreement = async ({ typedSignatureName, checkboxAccepted = true } = {}) => {
@@ -1094,7 +1176,7 @@ export function HelpersAppProvider({ children }) {
   };
 
   const setVerificationStatus = async (verificationStatus) => {
-    return applyProfileUpdate((current) => ({ ...current, verificationStatus }));
+    return applyProfileUpdate((current) => ({ ...current, verificationStatus }), 'helpers:context:setVerificationStatus');
   };
 
   const updateProfileBasics = async (updates = {}) => {
@@ -1113,7 +1195,7 @@ export function HelpersAppProvider({ children }) {
         next.businessName = '';
       }
       return next;
-    });
+    }, 'helpers:context:updateProfileBasics');
   };
 
   const updatePayoutDetails = async (updates = {}) => {
@@ -1123,7 +1205,7 @@ export function HelpersAppProvider({ children }) {
         ...current.payout,
         ...updates,
       },
-    }));
+    }), 'helpers:context:updatePayoutDetails');
   };
 
   const value = useMemo(() => ({

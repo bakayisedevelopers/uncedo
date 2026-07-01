@@ -140,6 +140,7 @@ export function RootNavigator() {
   const [activeRoute, setActiveRoute] = useState(DEFAULT_ROUTE);
   const [routeHistory, setRouteHistory] = useState([]);
   const [bottomNavVisible, setBottomNavVisible] = useState(true);
+  const [bottomNavHeight, setBottomNavHeight] = useState(BOTTOM_NAV_HEIGHT + bottomSystemInset);
   const [lastActiveJobId, setLastActiveJobId] = useState(null);
   const activeRouteRef = useRef(DEFAULT_ROUTE);
   const routeHistoryRef = useRef([]);
@@ -225,6 +226,12 @@ export function RootNavigator() {
   }, [goBack, user?.uid]);
 
   useEffect(() => {
+    if (bottomNavVisible) {
+      setBottomNavHeight((currentHeight) => Math.max(currentHeight, BOTTOM_NAV_HEIGHT + bottomSystemInset));
+    }
+  }, [bottomNavVisible, bottomSystemInset]);
+
+  useEffect(() => {
     if (user?.uid) {
       return;
     }
@@ -234,8 +241,9 @@ export function RootNavigator() {
     setRouteHistory([]);
     setActiveRoute(DEFAULT_ROUTE);
     setBottomNavVisible(true);
+    setBottomNavHeight(BOTTOM_NAV_HEIGHT + bottomSystemInset);
     setLastActiveJobId(null);
-  }, [user?.uid]);
+  }, [bottomSystemInset, user?.uid]);
 
   if (initializing) {
     return <LoadingScreen />;
@@ -250,11 +258,12 @@ export function RootNavigator() {
   const isFullscreenRoute = FULLSCREEN_ROUTES.includes(activeRoute.key);
   const showBottomNav = bottomNavVisible && !HIDE_BOTTOM_NAV_ROUTES.includes(activeRoute.key);
   const isScrollableRoute = !isFullscreenRoute;
+  const effectiveBottomInset = showBottomNav ? Math.max(bottomNavHeight, BOTTOM_NAV_HEIGHT + bottomSystemInset) : 0;
   const screenProps = {
     navigate: openRoute,
     goBack,
     route: activeRoute,
-    bottomInset: bottomNavInset,
+    bottomInset: effectiveBottomInset,
     bottomNavVisible,
     systemInsets,
     onBottomNavVisibilityChange: setBottomNavVisible,
@@ -266,7 +275,7 @@ export function RootNavigator() {
         {isScrollableRoute ? (
           <SafeAreaView style={styles.contentSafe}>
             <ScrollView
-              contentContainerStyle={[styles.content, showBottomNav && { paddingBottom: bottomNavInset + 24 }]}
+              contentContainerStyle={[styles.content, showBottomNav && { paddingBottom: effectiveBottomInset + 24 }]}
               showsVerticalScrollIndicator={false}
             >
               <ActiveScreen {...screenProps} />
@@ -277,7 +286,19 @@ export function RootNavigator() {
         )}
 
         {showBottomNav ? (
-          <SafeAreaView pointerEvents="box-none" style={styles.bottomNavSafeArea}>
+          <View
+            onLayout={(event) => {
+              const measuredHeight = Math.max(
+                BOTTOM_NAV_HEIGHT + bottomSystemInset,
+                Math.ceil(event.nativeEvent.layout.height || 0),
+              );
+              setBottomNavHeight((currentHeight) => (
+                currentHeight === measuredHeight ? currentHeight : measuredHeight
+              ));
+            }}
+            pointerEvents="box-none"
+            style={styles.bottomNavSafeArea}
+          >
             <View style={[styles.bottomNav, { minHeight: bottomNavInset, paddingBottom: bottomSystemInset + 14 }]}>
               {rootTabs.map((item) => {
                 const isActive = activeTabKey === item.key;
@@ -301,7 +322,7 @@ export function RootNavigator() {
                 );
               })}
             </View>
-          </SafeAreaView>
+          </View>
         ) : null}
 
         <HelperOfferOverlay bottomSafeInset={bottomSystemInset} />

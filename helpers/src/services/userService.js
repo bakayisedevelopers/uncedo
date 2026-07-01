@@ -67,9 +67,24 @@ export async function getUserProfile(uid) {
   return snapshot.exists() ? { uid: snapshot.id, ...snapshot.data() } : null;
 }
 
-export async function updateHelperProfile(uid, updates) {
+function logUserProfileWrite(traceLabel, uid, updates = {}) {
+  const services = Array.isArray(updates?.services) ? updates.services : [];
+  const serviceCount = services.length;
+  const skillCount = services.reduce((count, service) => count + (Array.isArray(service?.skills) ? service.skills.length : 0), 0);
+
+  console.info('[helpers:user-write]', {
+    traceLabel,
+    uid,
+    serviceCount,
+    skillCount,
+    keys: Object.keys(updates || {}),
+  });
+}
+
+export async function updateHelperProfile(uid, updates, traceLabel = 'helpers:updateHelperProfile') {
   const { db } = getFirebaseClients();
   const ref = doc(db, 'users', uid);
+  logUserProfileWrite(traceLabel, uid, updates);
 
   await setDoc(
     ref,
@@ -86,7 +101,7 @@ export async function updateHelperProfile(uid, updates) {
   return getUserProfile(uid);
 }
 
-export async function upsertHelperProfile({ uid, email, fullName }) {
+export async function upsertHelperProfile({ uid, email, fullName, traceLabel = 'helpers:upsertHelperProfile' }) {
   const { db } = getFirebaseClients();
   const ref = doc(db, 'users', uid);
   const existing = await getDoc(ref);
@@ -98,6 +113,8 @@ export async function upsertHelperProfile({ uid, email, fullName }) {
     agreementDocument?.currentVersionId
     || `helper_agreement_${currentAgreementVersion}`,
   ).trim();
+
+  logUserProfileWrite(traceLabel, uid, base);
 
   await setDoc(
     ref,

@@ -1,7 +1,6 @@
 import * as Location from 'expo-location';
-import { getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
-
-const NEARBY_CUSTOMERS_MAP_ENDPOINT = getFunctionEndpoint('getNearbyActiveCustomersMapData');
+import { collection, doc, getDoc, getDocs, query, where } from 'firebase/firestore';
+import { getFirebaseClients } from '../firebase/config';
 
 function normalizeLocation(coords = {}) {
   const latitude = Number(coords.latitude);
@@ -78,34 +77,89 @@ export async function reverseGeocodeLocation(location) {
 }
 
 export async function fetchNearbyActiveCustomersMapData({ latitude, longitude, radiusKm = 50, limit = 24 }) {
-  const { auth } = getFirebaseClients();
-  const idToken = await auth.currentUser?.getIdToken();
-  if (!idToken) {
+  const { auth, db } = getFirebaseClients();
+  if (!auth.currentUser?.uid) {
     throw new Error('You must be signed in to view nearby customers.');
   }
 
-  const response = await fetch(NEARBY_CUSTOMERS_MAP_ENDPOINT, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      latitude,
-      longitude,
-      radiusKm,
-      limit,
-    }),
-  });
-
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload?.success === false) {
-    throw new Error(payload?.message || 'Unable to load nearby customers right now.');
+  const origin = normalizeLocation({ latitude, longitude });
+  if (!origin) {
+    throw new Error('A valid helper location is required.');
   }
 
+  const activeStatuses = ['matching', 'helper_found', 'accepted', 'driving', 'en_route', 'buying_resources', 'arrived', 'work_started', 'scheduled_pending'];
+  const requestsSnapshot = await getDocs(
+    query(collection(db, 'serviceRequests'), where('status', 'in', activeStatuses)),
+  );
+  const customerIds = [...new Set(
+    requestsSnapshot.docs
+      .map((item) => String(item.data()?.customerId || '').trim())
+      .filter(Boolean),
+  )];
+
+  const customerSnapshots = await Promise.all(customerIds.map((customerId) => getDoc(doc(db, 'users', customerId)).catch(() => null)));
+
+  const customers = customerSnapshots
+    .filter((snapshot) => snapshot?.exists?.())
+    .map((item) => ({ id: item.id, ...item.data() }))
+    .map((customer) => {
+      const location = normalizeLocation(customer?.lastKnownLocation || customer?.homeLocation || null);
+      if (!location) return null;
+      const distanceKm = computeDistanceKm(origin, location);
+      return {
+        id: customer.id,
+        fullName: String(customer.fullName || customer.displayName || 'Customer').trim(),
+        initials: getInitials(customer.fullName || customer.displayName || 'Customer'),
+        customerType: String(customer?.customerProfile?.customerType || customer?.customerProfile?.accountType || '').trim(),
+        distanceKm,
+        lastKnownLocation: {
+          latitude: location.latitude,
+          longitude: location.longitude,
+          updatedAtMs: Number(customer?.lastKnownLocation?.updatedAtMs || 0) || null,
+        },
+      };
+    })
+    .filter((item) => item && Number.isFinite(item.distanceKm) && item.distanceKm <= radiusKm)
+    .sort((left, right) => left.distanceKm - right.distanceKm)
+    .slice(0, limit)
+    .map((item) => ({
+      ...item,
+      distanceKm: Number(item.distanceKm.toFixed(2)),
+    }));
+
   return {
-    currentUser: payload.currentUser || null,
-    customers: Array.isArray(payload.customers) ? payload.customers : [],
-    radiusKm: Number(payload.radiusKm || radiusKm),
+    currentUser: {
+      id: auth.currentUser.uid,
+      latitude: origin.latitude,
+      longitude: origin.longitude,
+    },
+    customers,
+    radiusKm: Number(radiusKm || 50),
   };
+}
+
+function toRadians(value) {
+  return (Number(value || 0) * Math.PI) / 180;
+}
+
+function computeDistanceKm(origin, target) {
+  if (!origin || !target) return Number.POSITIVE_INFINITY;
+  const earthRadiusKm = 6371;
+  const latDelta = toRadians(target.latitude - origin.latitude);
+  const lonDelta = toRadians(target.longitude - origin.longitude);
+  const a = Math.sin(latDelta / 2) ** 2
+    + Math.cos(toRadians(origin.latitude))
+    * Math.cos(toRadians(target.latitude))
+    * Math.sin(lonDelta / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadiusKm * c;
+}
+
+function getInitials(value = '') {
+  return String(value || '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part.charAt(0).toUpperCase())
+    .join('');
 }

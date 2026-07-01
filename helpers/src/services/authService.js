@@ -101,6 +101,7 @@ export function subscribeToAuthChanges(callback, onError) {
           uid: firebaseUser.uid,
           email: firebaseUser.email,
           fullName: firebaseUser.displayName || profile?.fullName || profile?.displayName || '',
+          traceLabel: 'helpers:auth:subscribeToAuthChanges:repairProfile',
         });
         callback(normalizeHelperUser(firebaseUser, repairedProfile || {}));
         return;
@@ -130,6 +131,7 @@ export async function loginWithEmail({ email, password }) {
         uid: credential.user.uid,
         email: credential.user.email,
         fullName: credential.user.displayName || profile?.fullName || profile?.displayName || '',
+        traceLabel: 'helpers:auth:loginWithEmail:seedProfile',
       });
 
   return normalizeHelperUser(credential.user, syncedProfile || {});
@@ -144,6 +146,7 @@ export async function signupWithEmail({ name, email, password }) {
     uid: credential.user.uid,
     email: credential.user.email,
     fullName,
+    traceLabel: 'helpers:auth:signupWithEmail:createProfile',
   });
 
   return normalizeHelperUser(credential.user, profile || {});

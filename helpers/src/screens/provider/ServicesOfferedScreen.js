@@ -88,6 +88,7 @@ export function ServicesOfferedScreen({ navigate, goBack }) {
               onValueChange={(value) => actions.toggleSkillActive({
                 serviceId: skill.serviceId,
                 skillName: skill.name,
+                catalogId: skill.catalogId,
                 active: value,
               })}
               thumbColor="#ffffff"
