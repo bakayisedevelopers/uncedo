@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, StyleSheet, Text, View } from 'react-native';
 import { useAuth } from '../../context/AuthContext';
 import { useHelpersApp } from '../../context/HelpersAppContext';
+import { logInfo } from '../../services/logger';
 import { colors } from '../../theme/colors';
 import { formatCurrency } from '../../utils/payouts';
 import { ActionButton } from './HelperUi';
@@ -18,11 +19,17 @@ export function HelperOfferOverlay({ bottomSafeInset = 0 }) {
   const [now, setNow] = useState(Date.now());
   const shimmer = useRef(new Animated.Value(0)).current;
 
-  const activeOffer = jobOffers[0] || null;
+  const visibleOffers = useMemo(() => (
+    (Array.isArray(jobOffers) ? jobOffers : []).filter((offer) => (
+      !offer?.offerExpiresAt || Number(offer.offerExpiresAt) > now
+    ))
+  ), [jobOffers, now]);
+  const activeOffer = visibleOffers[0] || null;
   const canRespond = Boolean(user?.uid && onboardingStatus.complete && !activeJob);
   const isProcessingOffer = activeOffer?.id && offerResponseState.offerId === activeOffer.id;
   const isAccepting = isProcessingOffer && offerResponseState.action === 'accept';
   const isDeclining = isProcessingOffer && offerResponseState.action === 'decline';
+  const isDeclineInProgress = Boolean(offerResponseState.offerId && offerResponseState.action === 'decline');
 
   useEffect(() => {
     if (!activeOffer?.offerExpiresAt) {
@@ -62,6 +69,7 @@ export function HelperOfferOverlay({ bottomSafeInset = 0 }) {
     ? Math.max(0, Math.min(1, (Number(activeOffer.offerExpiresAt) - now) / 30000))
     : 0;
   const countdownColor = getCountdownColor(secondsLeft);
+  const isExpired = Boolean(activeOffer?.offerExpiresAt) && secondsLeft <= 0;
   const offerTimingLabel = activeOffer?.timingPreference === 'later' ? 'Later' : 'Now';
   const offerPrice = formatCurrency(activeOffer?.payoutEstimate);
   const shimmerTranslate = shimmer.interpolate({
@@ -69,10 +77,42 @@ export function HelperOfferOverlay({ bottomSafeInset = 0 }) {
     outputRange: [-280, 280],
   });
 
-  if (!activeOffer || !canRespond) return null;
+  useEffect(() => {
+    logInfo('HelperOfferOverlay.state', 'Evaluated helper offer overlay state.', {
+      helperId: user?.uid || null,
+      onboardingComplete: Boolean(onboardingStatus.complete),
+      jobOffersCount: Array.isArray(jobOffers) ? jobOffers.length : 0,
+      visibleOffersCount: visibleOffers.length,
+      activeOfferId: activeOffer?.id || null,
+      activeJobId: activeJob?.id || null,
+      canRespond,
+      isProcessingOffer: Boolean(isProcessingOffer),
+      isDeclining: Boolean(isDeclining),
+      isDeclineInProgress: Boolean(isDeclineInProgress),
+      isExpired: Boolean(isExpired),
+      secondsLeft,
+      bottomSafeInset,
+    });
+  }, [
+    activeJob?.id,
+    activeOffer?.id,
+    bottomSafeInset,
+    canRespond,
+    isDeclineInProgress,
+    isDeclining,
+    isExpired,
+    isProcessingOffer,
+    jobOffers,
+    onboardingStatus.complete,
+    secondsLeft,
+    user?.uid,
+    visibleOffers.length,
+  ]);
+
+  if (!activeOffer || isDeclining || isDeclineInProgress || isExpired) return null;
 
   return (
-      <View pointerEvents="box-none" style={styles.portal}>
+    <View pointerEvents="box-none" style={[styles.portal, { paddingBottom: Math.max(0, Number(bottomSafeInset || 0)) }]}>
       <View pointerEvents="none" style={styles.backdrop} />
       <View style={[styles.sheetWrap, { paddingBottom: Math.max(0, Number(bottomSafeInset || 0)) }]}>
         <View style={styles.sheet}>
@@ -141,7 +181,8 @@ const styles = StyleSheet.create({
   portal: {
     ...StyleSheet.absoluteFillObject,
     justifyContent: 'flex-end',
-    zIndex: 45,
+    zIndex: 999,
+    elevation: 999,
   },
   backdrop: {
     ...StyleSheet.absoluteFillObject,

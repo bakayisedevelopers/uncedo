@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Linking, StyleSheet, Text, View } from 'react-native';
 import { AuthField, AuthMessage, AuthScaffold } from '../../components/auth/AuthScaffold';
 import { useAuth } from '../../context/AuthContext';
+import { colors } from '../../theme/colors';
 
 const LEGAL_URLS = {
   terms: 'https://uncedo.com/terms',
@@ -106,11 +107,6 @@ export function ProviderLoginScreen() {
         </Text>
       )}
       mode={isSignup ? 'signup' : 'login'}
-      onBack={() => {
-        setFormError('');
-        setNotice('');
-        setMode('login');
-      }}
       onPrimaryPress={submit}
       primaryDisabled={submitting || !email.trim() || !password.trim() || (isSignup && !name.trim())}
       primaryLabel={submitting ? 'Please wait...' : isSignup ? 'Sign up' : 'Sign in'}
@@ -166,19 +162,19 @@ const styles = StyleSheet.create({
     gap: 16,
   },
   legalText: {
-    color: '#7a667a',
+    color: colors.muted,
     fontSize: 12,
     lineHeight: 18,
   },
   legalTextSignup: {
-    color: 'rgba(255,255,255,0.88)',
+    color: colors.muted,
   },
   legalLink: {
-    color: '#be185d',
+    color: colors.brandDark,
     fontWeight: '800',
     textDecorationLine: 'underline',
   },
   legalLinkSignup: {
-    color: '#ffffff',
+    color: colors.brandDark,
   },
 });

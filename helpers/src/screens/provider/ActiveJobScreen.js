@@ -21,6 +21,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import { doc, serverTimestamp, updateDoc } from 'firebase/firestore';
+import { HelperActiveNavigationMap } from '../../components/app/HelperActiveNavigationMap';
 import { HelperMapPlaceholder } from '../../components/app/HelperMapPlaceholder';
 import { useAuth } from '../../context/AuthContext';
 import { useHelpersApp } from '../../context/HelpersAppContext';
@@ -784,6 +785,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
   const toneStyles = useMemo(() => getToneStyles(statusMeta.tone), [statusMeta.tone]);
   const normalizedJobStatus = String(activeJob?.status || '').toLowerCase();
   const shouldUseNavigationCamera = ['driving', 'en_route', 'buying_resources'].includes(normalizedJobStatus);
+  const useGoogleNavigation = Platform.OS === 'android' && Boolean(activeJobDestination);
   const canCancelJob = String(activeJob?.status || '').toLowerCase() !== 'completed';
   const serviceName = useMemo(
     () => getServiceById(activeJob?.serviceId)?.name || 'Service request',
@@ -866,6 +868,15 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
     }
 
     Alert.alert('Cancel failed', 'Unable to cancel this job right now.');
+  };
+
+  const handleNavigationMetricsChange = ({ distanceMeters: nextDistance, durationSeconds: nextDuration } = {}) => {
+    if (Number.isFinite(Number(nextDistance))) {
+      setRouteDistanceMeters(Number(nextDistance));
+    }
+    if (Number.isFinite(Number(nextDuration))) {
+      setRouteDurationSeconds(Number(nextDuration));
+    }
   };
 
   const dismissRatingModal = () => {
@@ -1284,21 +1295,42 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
   return (
     <View style={styles.container}>
       <View style={styles.mapLayer}>
-        <HelperMapPlaceholder
-          mode="route"
-          routeView={shouldUseNavigationCamera ? 'navigation' : 'overview'}
-          currentUserMarker={currentLocation ? {
-            latitude: currentLocation.latitude,
-            longitude: currentLocation.longitude,
-            heading: navigationHeading ?? currentLocation.heading,
-            initials: 'You',
-          } : null}
-          customerMarkers={customerMarkers}
-          routeCoordinates={routeCoordinates}
-          routeError={routeError}
-          floatingBottomInset={isLandscape ? 24 : collapsedHeight + bottomInset}
-          controlBottomInset={isLandscape ? 24 : collapsedHeight + bottomInset + 24}
-        />
+        {useGoogleNavigation ? (
+          <HelperActiveNavigationMap
+            controlBottomInset={isLandscape ? 24 : collapsedHeight + bottomInset + 24}
+            currentUserMarker={currentLocation ? {
+              latitude: currentLocation.latitude,
+              longitude: currentLocation.longitude,
+              heading: navigationHeading ?? currentLocation.heading,
+              initials: 'You',
+            } : null}
+            customerMarkers={customerMarkers}
+            destinationTitle={activeJob?.customerName || 'Customer'}
+            floatingBottomInset={isLandscape ? 24 : collapsedHeight + bottomInset}
+            navigationEnabled={shouldUseNavigationCamera}
+            onMetricsChange={handleNavigationMetricsChange}
+            routeCoordinates={routeCoordinates}
+            routeError={routeError}
+            routeView={shouldUseNavigationCamera ? 'navigation' : 'overview'}
+            topInset={topInset}
+          />
+        ) : (
+          <HelperMapPlaceholder
+            mode="route"
+            routeView={shouldUseNavigationCamera ? 'navigation' : 'overview'}
+            currentUserMarker={currentLocation ? {
+              latitude: currentLocation.latitude,
+              longitude: currentLocation.longitude,
+              heading: navigationHeading ?? currentLocation.heading,
+              initials: 'You',
+            } : null}
+            customerMarkers={customerMarkers}
+            routeCoordinates={routeCoordinates}
+            routeError={routeError}
+            floatingBottomInset={isLandscape ? 24 : collapsedHeight + bottomInset}
+            controlBottomInset={isLandscape ? 24 : collapsedHeight + bottomInset + 24}
+          />
+        )}
 
         <View style={[styles.topChromeRow, { top: topInset + 16 }]}>
           <Pressable
@@ -1309,7 +1341,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
             <Ionicons name="chevron-back" size={24} color={colors.text} />
           </Pressable>
 
-          {navigationHint ? (
+          {!useGoogleNavigation && navigationHint ? (
             <View style={styles.topDirectionCard}>
               <Ionicons color="#ffffff" name="return-up-forward-outline" size={30} />
               <View style={styles.topDirectionCopy}>

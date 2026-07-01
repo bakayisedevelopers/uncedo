@@ -1,7 +1,6 @@
 import * as Location from 'expo-location';
-import { getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
-
-const UPDATE_HELPER_LOCATION_ENDPOINT = getFunctionEndpoint('updateHelperLiveLocation');
+import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { getFirebaseClients } from '../firebase/config';
 
 function normalizeLocation(coords = {}) {
   const latitude = Number(coords.latitude);
@@ -22,27 +21,22 @@ function normalizeLocation(coords = {}) {
 }
 
 async function postHelperLiveLocation(location) {
-  const { auth } = getFirebaseClients();
-  const idToken = await auth.currentUser?.getIdToken();
-  if (!idToken) {
+  const { auth, db } = getFirebaseClients();
+  const uid = String(auth.currentUser?.uid || '').trim();
+  if (!uid) {
     throw new Error('You must be signed in before sharing helper location.');
   }
 
-  const response = await fetch(UPDATE_HELPER_LOCATION_ENDPOINT, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(location),
-  });
-
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload?.success === false) {
-    throw new Error(payload?.message || 'Unable to update helper live location.');
-  }
-
-  return payload.location || location;
+  const liveLocation = {
+    ...location,
+    updatedAtMs: Date.now(),
+  };
+  await setDoc(doc(db, 'users', uid), {
+    liveLocation,
+    locationSharingEnabled: true,
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
+  return liveLocation;
 }
 
 export async function requestHelperLocationPermission() {

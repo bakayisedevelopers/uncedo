@@ -142,7 +142,12 @@ export function SkillDetailsScreen({ route, goBack }) {
             </View>
             <Switch
               disabled={saving || !canToggleActive}
-              onValueChange={(value) => actions.toggleSkillActive({ serviceId, skillName, active: value })}
+              onValueChange={(value) => actions.toggleSkillActive({
+                serviceId,
+                skillName,
+                catalogId: savedSkill?.catalogId || routeCatalogId,
+                active: value,
+              })}
               thumbColor="#ffffff"
               trackColor={{ false: '#d1d5db', true: '#22c55e' }}
               value={savedSkill.active}

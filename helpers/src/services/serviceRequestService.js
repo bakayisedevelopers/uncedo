@@ -11,6 +11,7 @@ import {
 } from 'firebase/firestore';
 import { getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
 import { updateLiveTracking } from './liveTrackingRealtimeService';
+import { logInfo } from './logger';
 import {
   buildRouteSnapshot,
   fetchRouteData,
@@ -246,16 +247,52 @@ export function subscribeToHelperAvailableServiceRequests(helperId, callback, on
   const { db } = getFirebaseClients();
   const requestsQuery = query(
     collection(db, 'serviceRequests'),
-    where('status', '==', 'helper_found'),
     where('currentOfferHelperId', '==', helperId),
   );
 
   return onSnapshot(
     requestsQuery,
     (snapshot) => {
-      const items = snapshot.docs
-        .map((item) => ({ id: item.id, ...item.data() }))
+      const now = Date.now();
+      const rawItems = snapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
+      logInfo('service-request.offer-subscription-snapshot', 'Received helper offer snapshot.', {
+        helperId,
+        snapshotSize: rawItems.length,
+        requestIds: rawItems.map((item) => item.id),
+        statuses: rawItems.map((item) => String(item.status || '').toLowerCase()),
+        currentOfferHelperIds: rawItems.map((item) => String(item.currentOfferHelperId || '').trim() || null),
+      });
+      const items = rawItems
+        .filter((item) => {
+          const isHelperFound = String(item.status || '').toLowerCase() === 'helper_found';
+          if (!isHelperFound) {
+            logInfo('service-request.offer-subscription-filter', 'Dropped helper offer because status is not helper_found.', {
+              helperId,
+              requestId: item.id,
+              status: String(item.status || '').toLowerCase(),
+            });
+          }
+          return isHelperFound;
+        })
+        .filter((item) => {
+          const offerExpiresAt = normalizeTime(item.offerExpiresAt);
+          const isActive = !offerExpiresAt || offerExpiresAt > now;
+          if (!isActive) {
+            logInfo('service-request.offer-subscription-filter', 'Dropped helper offer because it is already expired.', {
+              helperId,
+              requestId: item.id,
+              offerExpiresAt,
+              now,
+            });
+          }
+          return isActive;
+        })
         .sort((left, right) => normalizeTime(right.updatedAt) - normalizeTime(left.updatedAt));
+      logInfo('service-request.offer-subscription-result', 'Mapped helper offer snapshot after filters.', {
+        helperId,
+        resultSize: items.length,
+        requestIds: items.map((item) => item.id),
+      });
       callback(items);
     },
     onError,
@@ -384,6 +421,12 @@ export async function acceptServiceRequestOffer({
     }, { merge: true });
   });
 
+  logInfo('service-request.accept-helper-write', 'Updated helper assignment state', {
+    helperId,
+    requestId,
+    traceLabel: 'helpers:serviceRequestService:acceptServiceRequestOffer',
+  });
+
   const [refreshed, helperSnapshot] = await Promise.all([
     getDoc(requestRef),
     getDoc(helperRef),
@@ -505,6 +548,11 @@ export async function updateHelperActiveRequestStatus({ requestId, helperId, sta
   await updateDoc(requestRef, updates);
 
   if (normalizedStatus === 'completed') {
+    logInfo('service-request.complete-helper-write', 'Clearing helper active request state', {
+      helperId,
+      requestId,
+      traceLabel: 'helpers:serviceRequestService:updateHelperActiveRequestStatus',
+    });
     await updateDoc(helperRef, {
       activeServiceRequestId: null,
       updatedAt: serverTimestamp(),
@@ -563,6 +611,12 @@ export async function cancelServiceRequest({ requestId, helperId, reason }) {
       activeServiceRequestId: null,
       updatedAt: serverTimestamp(),
     });
+  });
+
+  logInfo('service-request.cancel-helper-write', 'Clearing helper active request state after cancel', {
+    helperId,
+    requestId,
+    traceLabel: 'helpers:serviceRequestService:cancelServiceRequest',
   });
 }
 
