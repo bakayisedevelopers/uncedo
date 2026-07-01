@@ -444,6 +444,11 @@ export async function startActiveJobTracking({ requestId, helperId, customerId, 
 
   try {
     const { db } = getFirebaseClients();
+    logInfo('active-tracking.start-user-write', 'Updating helper tracking state', {
+      helperId,
+      requestId,
+      traceLabel: 'helpers:activeJobTrackingService:startActiveJobTracking',
+    });
     await setDoc(doc(db, 'users', helperId), {
       activeServiceRequestId: requestId,
       updatedAt: serverTimestamp(),
@@ -502,6 +507,11 @@ export async function stopActiveJobTracking({ finalStatus = '', keepLocationShar
       if (session?.helperId) {
         try {
           const { db } = getFirebaseClients();
+          logInfo('active-tracking.stop-user-write', 'Clearing helper tracking state', {
+            helperId: session.helperId,
+            requestId: session?.requestId || '',
+            traceLabel: 'helpers:activeJobTrackingService:stopActiveJobTracking',
+          });
           await setDoc(doc(db, 'users', session.helperId), {
             locationSharingEnabled: keepLocationSharingEnabled,
             activeServiceRequestId: null,
