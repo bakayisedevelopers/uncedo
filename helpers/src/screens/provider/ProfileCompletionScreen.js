@@ -7,14 +7,15 @@ import { colors } from '../../theme/colors';
 
 export function ProfileCompletionScreen({ navigate, goBack }) {
   const { onboardingStatus, profile, saving, saveError, actions } = useHelpersApp();
+  const payout = profile?.payout && typeof profile.payout === 'object' ? profile.payout : {};
   const [firstName, setFirstName] = useState(profile.firstName || '');
   const [lastName, setLastName] = useState(profile.lastName || '');
   const [providerType, setProviderType] = useState(profile.providerType || '');
   const [businessName, setBusinessName] = useState(profile.businessName || '');
-  const [bankName, setBankName] = useState(profile.payout.bankName || '');
-  const [accountHolder, setAccountHolder] = useState(profile.payout.accountHolder || '');
-  const [accountNumber, setAccountNumber] = useState(profile.payout.accountNumber || '');
-  const [recipientCode, setRecipientCode] = useState(profile.payout.recipientCode || '');
+  const [bankName, setBankName] = useState(payout.bankName || '');
+  const [accountHolder, setAccountHolder] = useState(payout.accountHolder || '');
+  const [accountNumber, setAccountNumber] = useState(payout.accountNumber || '');
+  const [recipientCode, setRecipientCode] = useState(payout.recipientCode || '');
   const [message, setMessage] = useState('');
 
   useEffect(() => {
@@ -22,11 +23,11 @@ export function ProfileCompletionScreen({ navigate, goBack }) {
     setLastName(profile.lastName || '');
     setProviderType(profile.providerType || '');
     setBusinessName(profile.businessName || '');
-    setBankName(profile.payout.bankName || '');
-    setAccountHolder(profile.payout.accountHolder || '');
-    setAccountNumber(profile.payout.accountNumber || '');
-    setRecipientCode(profile.payout.recipientCode || '');
-  }, [profile]);
+    setBankName(payout.bankName || '');
+    setAccountHolder(payout.accountHolder || '');
+    setAccountNumber(payout.accountNumber || '');
+    setRecipientCode(payout.recipientCode || '');
+  }, [payout.accountHolder, payout.accountNumber, payout.bankName, payout.recipientCode, profile.businessName, profile.firstName, profile.lastName, profile.providerType]);
 
   const saveBasics = async () => {
     const result = await actions.updateProfileBasics({

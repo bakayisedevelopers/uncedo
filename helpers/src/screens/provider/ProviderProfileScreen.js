@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import appConfig from '../../../app.json';
 import { useAuth } from '../../context/AuthContext';
 import { useHelpersApp } from '../../context/HelpersAppContext';
-import { getCurrentHelperLocation, reverseGeocodeLocation, requestHelperMapLocationPermission } from '../../services/nearbyCustomersMapService';
+import { reverseGeocodeLocation } from '../../services/nearbyCustomersMapService';
 import { colors } from '../../theme/colors';
 import { formatCurrency } from '../../utils/payouts';
 
@@ -45,17 +45,33 @@ function ProfileRow({ icon, title, description, onPress, tone = 'default' }) {
 
 export function ProviderProfileScreen({ navigate }) {
   const { logout, user } = useAuth();
-  const { profile, onboardingStatus, paymentSummary } = useHelpersApp();
-  const [deviceLocation, setDeviceLocation] = useState(null);
+  const { profile, onboardingStatus, paymentSummary, homeLocation } = useHelpersApp();
   const [liveAddress, setLiveAddress] = useState('');
+  const safeMetrics = profile?.metrics && typeof profile.metrics === 'object' ? profile.metrics : {};
+  const safePaymentSummary = paymentSummary && typeof paymentSummary === 'object'
+    ? paymentSummary
+    : { unpaidAmount: 0 };
   const fullName = String(profile?.fullName || user?.displayName || 'Helper').trim();
   const initials = getInitials(fullName);
   const photoUri = String(profile?.profilePhoto || profile?.selfieUrl || '').trim();
   const version = appConfig?.expo?.version || '0.1.0';
   const homeAddress = String(profile?.homeAddress || '').trim() || 'Add your home address';
-  const liveLocation = deviceLocation || profile?.liveLocation || null;
+  const liveLocation = useMemo(() => {
+    const sharedLocation = homeLocation && typeof homeLocation === 'object' ? homeLocation : null;
+    const fallbackLocation = profile?.liveLocation && typeof profile.liveLocation === 'object'
+      ? profile.liveLocation
+      : null;
+    const source = sharedLocation || fallbackLocation;
+    const latitude = Number(source?.latitude);
+    const longitude = Number(source?.longitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      return null;
+    }
+
+    return { latitude, longitude };
+  }, [homeLocation, profile?.liveLocation?.latitude, profile?.liveLocation?.longitude]);
   const liveLocationText = liveAddress || (
-    liveLocation?.latitude && liveLocation?.longitude
+    liveLocation
       ? `${Number(liveLocation.latitude).toFixed(5)}, ${Number(liveLocation.longitude).toFixed(5)}`
       : 'Live location not available'
   );
@@ -63,62 +79,50 @@ export function ProviderProfileScreen({ navigate }) {
     {
       key: 'acceptance',
       label: 'Acceptance',
-      value: `${Math.round(Number(profile?.metrics?.acceptanceRate || 0) * 100)}%`,
+      value: `${Math.round(Number(safeMetrics.acceptanceRate || 0) * 100)}%`,
     },
     {
       key: 'completion',
       label: 'Completion',
-      value: `${Math.round(Number(profile?.metrics?.completionRate || 0) * 100)}%`,
+      value: `${Math.round(Number(safeMetrics.completionRate || 0) * 100)}%`,
     },
     {
       key: 'rating',
       label: 'Rating',
-      value: profile?.metrics?.overallRating > 0 ? Number(profile.metrics.overallRating).toFixed(1) : 'New',
+      value: Number(safeMetrics.overallRating || 0) > 0 ? Number(safeMetrics.overallRating).toFixed(1) : 'New',
     },
     {
       key: 'response',
       label: 'Response',
-      value: `${Number(profile?.metrics?.avgResponseMinutes || 0)} min`,
+      value: `${Number(safeMetrics.avgResponseMinutes || 0)} min`,
     },
   ];
 
   useEffect(() => {
     let active = true;
-    const loadLocation = async () => {
-      const granted = await requestHelperMapLocationPermission().catch(() => false);
-      if (!active || !granted) return;
-      const current = await getCurrentHelperLocation().catch(() => null);
-      if (active && current) {
-        setDeviceLocation(current);
-      }
-    };
-
-    loadLocation();
-
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-    if (!liveLocation?.latitude || !liveLocation?.longitude) {
+    if (!liveLocation) {
       setLiveAddress('');
       return () => {
         active = false;
       };
     }
 
-    reverseGeocodeLocation(liveLocation).then((result) => {
-      if (active) {
-        setLiveAddress(result || '');
-      }
-    });
+    reverseGeocodeLocation(liveLocation)
+      .then((result) => {
+        if (active) {
+          setLiveAddress(result || '');
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setLiveAddress('');
+        }
+      });
 
     return () => {
       active = false;
     };
-  }, [liveLocation?.latitude, liveLocation?.longitude]);
+  }, [liveLocation]);
 
   return (
     <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false}>
@@ -142,7 +146,7 @@ export function ProviderProfileScreen({ navigate }) {
             <Text style={styles.email}>{profile?.email || user?.email || 'No email set'}</Text>
             <View style={styles.ratingRow}>
               <Ionicons color="#f59e0b" name="star" size={16} />
-              <Text style={styles.ratingValue}>{profile?.metrics?.overallRating > 0 ? Number(profile.metrics.overallRating).toFixed(1) : '0.0'}</Text>
+              <Text style={styles.ratingValue}>{Number(safeMetrics.overallRating || 0) > 0 ? Number(safeMetrics.overallRating).toFixed(1) : '0.0'}</Text>
               <Text style={styles.ratingLabel}>helper rating</Text>
             </View>
           </View>
@@ -155,7 +159,7 @@ export function ProviderProfileScreen({ navigate }) {
           </View>
           <View style={styles.walletPill}>
             <Text style={styles.walletPillLabel}>Wallet</Text>
-            <Text style={styles.walletPillValue}>{formatCurrency(paymentSummary.unpaidAmount)}</Text>
+            <Text style={styles.walletPillValue}>{formatCurrency(safePaymentSummary.unpaidAmount)}</Text>
           </View>
         </View>
 

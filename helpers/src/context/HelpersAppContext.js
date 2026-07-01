@@ -579,10 +579,16 @@ export function HelpersAppProvider({ children }) {
         }
 
         setSaveError('');
-        await syncHelperCurrentLocation();
+        const initialLocation = await syncHelperCurrentLocation();
         if (!active) return;
+        setHomeLocation(initialLocation);
 
-        helperLocationWatchRef.current = await watchAndSyncHelperLocation();
+        helperLocationWatchRef.current = await watchAndSyncHelperLocation((nextLocation) => {
+          if (!active) {
+            return;
+          }
+          setHomeLocation(nextLocation);
+        });
       } catch (error) {
         logError('HelpersAppContext.locationSharing', error);
         if (active) {
