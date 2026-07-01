@@ -11,6 +11,7 @@ This folder contains the Expo React Native app for helpers.
 - Availability management and active job handling
 - Helper home map with a dedicated native map, persistent live location marker, and 50 km service radius
 - Route-based active job tracking with in-app travel status updates
+- Android active-job guidance now uses the Google Navigation SDK through the official React Native package, while the existing live-tracking pipeline still keeps customer/helper tracking in sync.
 - Accepted jobs seed `liveTracking/serviceRequests/{requestId}` in Realtime Database immediately, then update helper movement, destination, route geometry, and closure status through the same tracking node.
 - Earnings, wallet balance, cancellation-aware payouts, and completed jobs grouped by week
 - Automatic Monday helper payout batching backed by Firestore payout records
@@ -22,6 +23,7 @@ This folder contains the Expo React Native app for helpers.
 - React Native
 - Firebase client SDK
 - React Native Maps
+- Google Navigation SDK for React Native (Android active-job navigation)
 - Image picking and location helpers
 
 ## Scripts
@@ -35,6 +37,8 @@ npm run web
 ```
 
 `npm run start`, `npm run android`, `npm run ios`, and `npm run web` now auto-run the Google Maps key preparation script before Expo starts so local map builds do not keep the native placeholder key.
+
+The helper Android app now requires React Native new architecture and Android core-library desugaring because the Google Navigation SDK depends on them.
 
 ## Key Folders
 
