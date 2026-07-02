@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Platform, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Platform, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { GoogleMapView, googleNavigationSdkAvailable } from '../../services/googleNavigationSdk';
+import {
+  GoogleNavigationUIEnabledPreference,
+  GoogleNavigationView,
+  googleNavigationSdkAvailable,
+} from '../../services/googleNavigationSdk';
 import { colors } from '../../theme/colors';
 
 const DEFAULT_COORDINATE = {
@@ -39,7 +43,8 @@ export function HelperHomeMap({
 }) {
   const currentCoordinate = useMemo(() => normalizeCoordinate(currentUserMarker), [currentUserMarker]);
   const [mapController, setMapController] = useState(null);
-  const googleMapAvailable = Platform.OS === 'android' && googleNavigationSdkAvailable && Boolean(GoogleMapView);
+  const [isMapReady, setIsMapReady] = useState(false);
+  const googleMapAvailable = Platform.OS === 'android' && googleNavigationSdkAvailable && Boolean(GoogleNavigationView);
   const legendCopy = statusMessage
     || (isLoading
       ? 'Loading your live location and service radius...'
@@ -48,47 +53,67 @@ export function HelperHomeMap({
         : 'Allow location access to show your live location and service radius.'));
 
   useEffect(() => {
-    if (!googleMapAvailable || !mapController) {
+    if (!googleMapAvailable || !mapController || !isMapReady) {
       return;
     }
 
-    mapController.clearMapView();
+    let cancelled = false;
 
-    const target = currentCoordinate || DEFAULT_COORDINATE;
-    mapController.moveCamera({
-      target: {
-        lat: target.latitude,
-        lng: target.longitude,
-      },
-      zoom: getZoomForRadius(radiusKm),
-    });
+    const syncMap = async () => {
+      try {
+        await mapController.clearMapView();
+      } catch (error) {
+        if (__DEV__) {
+          console.warn('Unable to clear helper home map before redraw.', error);
+        }
+      }
 
-    if (!currentCoordinate) {
-      return;
-    }
+      if (cancelled) {
+        return;
+      }
 
-    mapController.addCircle({
-      id: 'service-radius',
-      center: {
-        lat: currentCoordinate.latitude,
-        lng: currentCoordinate.longitude,
-      },
-      radius: Math.max(1000, Number(radiusKm || 50) * 1000),
-      fillColor: 'rgba(124,58,237,0.10)',
-      strokeColor: 'rgba(124,58,237,0.28)',
-      strokeWidth: 2,
-    }).catch(() => {});
+      const target = currentCoordinate || DEFAULT_COORDINATE;
+      mapController.moveCamera({
+        target: {
+          lat: target.latitude,
+          lng: target.longitude,
+        },
+        zoom: getZoomForRadius(radiusKm),
+      });
 
-    mapController.addMarker({
-      id: 'current-user',
-      position: {
-        lat: currentCoordinate.latitude,
-        lng: currentCoordinate.longitude,
-      },
-      title: String(currentUserMarker?.initials || 'You').trim() || 'You',
-      snippet: 'Your live location',
-    }).catch(() => {});
-  }, [currentCoordinate, currentUserMarker?.initials, googleMapAvailable, mapController, radiusKm]);
+      if (!currentCoordinate || cancelled) {
+        return;
+      }
+
+      await mapController.addCircle({
+        id: 'service-radius',
+        center: {
+          lat: currentCoordinate.latitude,
+          lng: currentCoordinate.longitude,
+        },
+        radius: Math.max(1000, Number(radiusKm || 50) * 1000),
+        fillColor: 'rgba(236,72,153,0.10)',
+        strokeColor: 'rgba(190,24,93,0.26)',
+        strokeWidth: 2,
+      }).catch(() => {});
+
+      await mapController.addMarker({
+        id: 'current-user',
+        position: {
+          lat: currentCoordinate.latitude,
+          lng: currentCoordinate.longitude,
+        },
+        title: String(currentUserMarker?.initials || 'You').trim() || 'You',
+        snippet: 'Your live location',
+      }).catch(() => {});
+    };
+
+    syncMap();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentCoordinate, currentUserMarker?.initials, googleMapAvailable, isMapReady, mapController, radiusKm]);
 
   if (!googleMapAvailable) {
     return (
@@ -104,9 +129,10 @@ export function HelperHomeMap({
 
   return (
     <View style={styles.map}>
-      <GoogleMapView
-        buildingsEnabled
+      <GoogleNavigationView
         compassEnabled={false}
+        footerEnabled={false}
+        headerEnabled={false}
         initialCameraPosition={{
           target: {
             lat: currentCoordinate?.latitude || DEFAULT_COORDINATE.latitude,
@@ -117,11 +143,21 @@ export function HelperHomeMap({
         mapToolbarEnabled={false}
         myLocationButtonEnabled={false}
         myLocationEnabled
-        onMapReady={() => {}}
+        navigationUIEnabledPreference={GoogleNavigationUIEnabledPreference.DISABLED}
+        onMapReady={() => setIsMapReady(true)}
         onMapViewControllerCreated={setMapController}
+        reportIncidentButtonEnabled={false}
         style={StyleSheet.absoluteFill}
         zoomControlsEnabled={false}
       />
+      {(isLoading || !isMapReady) ? (
+        <View pointerEvents="none" style={styles.loadingOverlay}>
+          <ActivityIndicator color={colors.brand} size="small" />
+          <Text style={styles.loadingText}>
+            {isLoading ? 'Loading your live location...' : 'Loading map...'}
+          </Text>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -151,5 +187,22 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     marginTop: 8,
     textAlign: 'center',
+  },
+  loadingOverlay: {
+    alignItems: 'center',
+    alignSelf: 'center',
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    borderRadius: 999,
+    bottom: 18,
+    flexDirection: 'row',
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    position: 'absolute',
+  },
+  loadingText: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: '700',
   },
 });
