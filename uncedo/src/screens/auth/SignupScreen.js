@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Linking, StyleSheet, Text, View } from 'react-native';
-import { AuthField, AuthMessage, AuthScaffold } from '../../components/auth/AuthScaffold';
+import { AuthField, AuthMessage, AuthScaffold, authColors } from '../../components/auth/AuthScaffold';
 import { LEGAL_URLS } from '../../constants/legal';
 import { useAuth } from '../../context/AuthContext';
 
@@ -55,7 +55,6 @@ export function SignupScreen({ navigate }) {
         </Text>
       )}
       mode="signup"
-      onBack={() => navigate('Home')}
       onPrimaryPress={submit}
       primaryDisabled={busy || !name.trim() || !email.trim() || password.length < 6}
       primaryLabel={busy ? 'Creating account...' : 'Sign up'}
@@ -107,12 +106,12 @@ const styles = StyleSheet.create({
     gap: 16,
   },
   legalText: {
-    color: 'rgba(255,255,255,0.88)',
+    color: authColors.muted,
     fontSize: 12,
     lineHeight: 18,
   },
   legalLink: {
-    color: '#ffffff',
+    color: authColors.brandDark,
     fontWeight: '800',
     textDecorationLine: 'underline',
   },
