@@ -1,10 +1,9 @@
 import { useState } from 'react';
 import { Linking, StyleSheet, Text, View } from 'react-native';
-import { AuthField, AuthMessage, AuthScaffold } from '../../components/auth/AuthScaffold';
+import { AuthField, AuthMessage, AuthScaffold, authColors } from '../../components/auth/AuthScaffold';
 import { LEGAL_URLS } from '../../constants/legal';
 import { useAuth } from '../../context/AuthContext';
 import { HELPER_LOGIN_BLOCKED_CODE } from '../../services/authService';
-import { colors } from '../../theme/colors';
 
 const socialButtons = [
   { label: 'Apple', icon: 'logo-apple' },
@@ -66,7 +65,6 @@ export function LoginScreen({ navigate }) {
         </Text>
       )}
       mode="login"
-      onBack={() => navigate('Home')}
       onPrimaryPress={submit}
       primaryDisabled={busy || !email.trim() || !password.trim()}
       primaryLabel={busy ? 'Signing in...' : 'Sign in'}
@@ -108,12 +106,12 @@ const styles = StyleSheet.create({
     gap: 16,
   },
   legalText: {
-    color: colors.muted,
+    color: authColors.muted,
     fontSize: 12,
     lineHeight: 18,
   },
   legalLink: {
-    color: colors.brandDark,
+    color: authColors.brandDark,
     fontWeight: '800',
     textDecorationLine: 'underline',
   },
