@@ -37,7 +37,7 @@ This Helper Agreement is entered into between **${LEGAL_ENTITY_NAME}** ("Uncedo"
 
 **2. Helper eligibility and profile accuracy**
 
-- The helper must provide accurate identity, contact, banking, skills, service area, and business information where applicable.
+- The helper must provide accurate identity, contact, banking, offerings, service area, and business information where applicable.
 - The helper must keep their profile information current and accurate at all times.
 - False information, forged documents, or identity misrepresentation may result in immediate suspension or removal.
 
@@ -64,10 +64,10 @@ This Helper Agreement is entered into between **${LEGAL_ENTITY_NAME}** ("Uncedo"
 - The helper is responsible for keeping their availability, location-sharing status, and job progress updates accurate when using live dispatch features.
 - The helper must not falsely mark arrival, work started, job completion, or other operational states.
 
-**7. Skills, photos, and uploaded materials**
+**7. ServiceOfferings, photos, and uploaded materials**
 
-- Skill listings, work photos, and business details submitted to Uncedo must be truthful and owned or lawfully controlled by the helper.
-- The helper grants Uncedo the right to store and display submitted skill and profile materials for platform operations, moderation, and customer discovery.
+- ServiceOffering listings, work photos, and business details submitted to Uncedo must be truthful and owned or lawfully controlled by the helper.
+- The helper grants Uncedo the right to store and display submitted offering and profile materials for platform operations, moderation, and customer discovery.
 
 **8. Payouts and fees**
 

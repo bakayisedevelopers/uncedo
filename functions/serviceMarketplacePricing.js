@@ -125,10 +125,10 @@ function normalizeServiceCatalogEntry(entry = {}) {
     id,
     categoryId: String(entry.categoryId || '').trim().toLowerCase(),
     categoryName: String(entry.categoryName || '').trim(),
-    label: String(entry.label || entry.skillName || id).trim(),
+    label: String(entry.label || entry.serviceName || id).trim(),
     promptLabel: String(entry.promptLabel || entry.label || id).trim(),
     description: String(entry.description || '').trim(),
-    kind: String(entry.kind || 'service').trim().toLowerCase(),
+    type: String(entry.type || 'service').trim().toLowerCase(),
     active: entry.active !== false,
     approved: entry.approved !== false,
     requiresPortfolioSelection: normalizeBoolean(entry.requiresPortfolioSelection, false),
@@ -337,7 +337,7 @@ function computeServiceNode({
     throw new Error(`Circular service bundle detected for ${service.id}.`);
   }
 
-  if (service.kind !== 'bundle' || !service.includedServiceIds.length) {
+  if (service.type !== 'bundle' || !service.includedServiceIds.length) {
     return createLeafQuote(service, structuredAnswers, signalContext);
   }
 

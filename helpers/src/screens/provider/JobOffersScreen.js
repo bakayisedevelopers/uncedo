@@ -30,7 +30,7 @@ export function JobOffersScreen({ goBack }) {
       <Card>
         <SectionHeading
           title="Offer queue"
-          subtitle="Review payout estimate, customer brief, service fit, and requested skills before accepting."
+          subtitle="Review payout estimate, customer brief, service fit, and requested offerings before accepting."
         />
         {!jobOffers.length ? (
           <EmptyState title="No queued offers" description="Go online on the home screen to receive new helper offers." />
@@ -43,7 +43,7 @@ export function JobOffersScreen({ goBack }) {
                 <Text style={styles.offerCopy}>{offer.description}</Text>
                 <Text style={styles.offerMeta}>Customer: {offer.customerName}</Text>
                 <Text style={styles.offerMeta}>Area: {offer.area}</Text>
-                <Text style={styles.offerMeta}>Skills: {(offer.requestedSkills || []).join(', ')}</Text>
+                <Text style={styles.offerMeta}>ServiceOfferings: {(offer.requestedServiceOfferings || []).join(', ')}</Text>
                 <Text style={styles.offerAmount}>{`${formatCurrency(offer.payoutEstimate)} | ${secondsLeft}s remaining`}</Text>
                 <View style={styles.buttonRow}>
                   <ActionButton label="Accept offer" onPress={() => actions.acceptOffer(offer.id)} />

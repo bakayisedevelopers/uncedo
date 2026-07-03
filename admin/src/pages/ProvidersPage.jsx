@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { Badge, Card, EmptyState, LoadingState, SectionTitle } from '../components/ui';
 import { flattenProviderServices, listHelperProfiles } from '../services/adminService';
 import {
-  isPendingSkillStatus,
+  isPendingServiceOfferingStatus,
 } from '../utils/moderationView';
 
 function statusTone(status = '') {
@@ -85,7 +85,7 @@ export default function HelpersPage() {
       })
       .map((profile) => {
         const serviceRows = flattenProviderServices([profile]);
-        const pendingCount = serviceRows.filter((row) => isPendingSkillStatus(row.skillStatus)).length;
+        const pendingCount = serviceRows.filter((row) => isPendingServiceOfferingStatus(row.offeringStatus)).length;
         return {
           profile,
           serviceRows,
@@ -134,7 +134,7 @@ export default function HelpersPage() {
             <p className="mt-2 text-2xl font-bold text-white">{helperCards.length}</p>
           </div>
           <div className="rounded-[22px] border border-white/10 bg-white/5 p-4">
-            <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-ink-300">Pending skills</p>
+            <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-ink-300">Pending offerings</p>
             <p className="mt-2 text-2xl font-bold text-white">{summary.totalPending}</p>
           </div>
           <div className="rounded-[22px] border border-white/10 bg-white/5 p-4">
@@ -177,7 +177,7 @@ export default function HelpersPage() {
                   <Badge tone={statusTone(profile.verificationStatus)}>{helperStateLabel(profile)}</Badge>
                   <Badge tone={profile.suspended ? 'danger' : 'neutral'}>{profile.suspended ? 'Blocked' : 'Active'}</Badge>
                   <Badge tone={pendingCount ? 'warning' : 'success'}>{pendingCount} pending</Badge>
-                  <Badge tone="neutral">{serviceRows.length} skills</Badge>
+                  <Badge tone="neutral">{serviceRows.length} offerings</Badge>
                 </div>
               </button>
             ))}

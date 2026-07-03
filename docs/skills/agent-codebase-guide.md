@@ -61,7 +61,7 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
   * [AgreementScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/screens/provider/AgreementScreen.js): Live helper agreement review and signing screen with full contract text, typed-name acceptance, and signed-version history.
   * [EarningsScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/screens/provider/EarningsScreen.js): Financial summaries, payouts, and historical log charts.
   * [JobDetailsScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/screens/provider/JobDetailsScreen.js): Information overlay for offers, showing client names, locations, and attachment summaries.
-  * [SkillCatalogScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/screens/provider/SkillCatalogScreen.js): Firestore-backed helper service catalog browser that replaces the hard-coded skill list and includes admin-created bundle services.
+  * [SkillCatalogScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/screens/provider/SkillCatalogScreen.js): Firestore-backed helper service catalog browser that replaces the hard-coded service list and includes admin-created bundle services.
   * [SkillDetailsScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/screens/provider/SkillDetailsScreen.js): Helper service detail and submission flow with multi-image uploads, pending approval, bundle-image inheritance, and service-photo management.
   * [src/components/app/HelperHomeMap.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/components/app/HelperHomeMap.js): Dedicated helper home map with a live location marker and 50 km service radius, separate from the active-job route map.
   * [src/services/helperPayoutService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/services/helperPayoutService.js): Subscribes to backend `helperWeeklyPayouts` records so the helper wallet, weekly payment status, and payout history reflect scheduler-written payout states.
@@ -90,7 +90,7 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
 * **Key Files & Logic**:
   * [admin/src/App.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/App.jsx): Admin routing and protected layout wiring.
   * [admin/src/pages/HelperAgreementsPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/pages/HelperAgreementsPage.jsx): Admin contract-management screen for publishing new helper agreement versions and reviewing history.
-  * [admin/src/pages/ProvidersPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/pages/ProvidersPage.jsx): Provider profile review, suspension, verification, and per-skill moderation.
+  * [admin/src/pages/ProvidersPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/pages/ProvidersPage.jsx): Provider profile review, suspension, verification, and per-service-offering moderation.
   * [admin/src/pages/ServicesPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/pages/ServicesPage.jsx): Firestore-backed service catalog management, custom service creation, pricing-input editing, admin image uploads, and helper approval queue.
   * [admin/src/pages/ServiceBulkImagesPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/pages/ServiceBulkImagesPage.jsx): Bulk admin uploader that stages multiple images in local state, assigns each one to one or more services, uploads each file once to Firebase Storage, and reuses the same image reference across selected services.
   * [admin/src/pages/ServiceDetailsPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/pages/ServiceDetailsPage.jsx): Dedicated service detail editor for pricing controls, live intake questions, bundle composition, uploaded images, and helper moderation entry points.
@@ -108,3 +108,9 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
 * **Key Files**:
   * [releases/android/uncedo-release.apk](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/releases/android/uncedo-release.apk): Compiled installer for Uncedo.
   * [releases/android/helpers-release.apk](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/releases/android/helpers-release.apk): Compiled installer for Helpers.
+
+
+## Service offering model note
+
+- Helper service applications are stored in `helperServices/{helperId}_{serviceId}` and use service/offering terminology. Backend matching builds `helperDispatchIndex/{helperId}` from `helperServices`, `users`, and `serviceCatalog`; do not reintroduce nested helper `services[].offerings` or legacy skill terminology for dispatch/admin moderation.
+- `serviceCatalog/{serviceId}` uses `type` (`service`, `bundle`, or `package`) rather than `kind`; bundles/packages expand through `includedServiceIds`.
