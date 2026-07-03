@@ -3,6 +3,7 @@ import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-
 import { Ionicons } from '@expo/vector-icons';
 import { Card } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
+import { StickyScreenHeader } from '../../components/ui/StickyScreenHeader';
 import { useAuth } from '../../context/AuthContext';
 import { colors } from '../../theme/colors';
 
@@ -30,16 +31,13 @@ export function CustomerSecurityScreen({ navigate }) {
   };
 
   return (
-    <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false}>
-      <Pressable accessibilityRole="button" onPress={() => navigate('Profile')} style={styles.backRow}>
-        <Ionicons color={colors.brandDark} name="chevron-back" size={18} />
-        <Text style={styles.backText}>Back to profile</Text>
-      </Pressable>
-
-      <View style={styles.header}>
-        <Text style={styles.title}>Security</Text>
-        <Text style={styles.copy}>Keep your account safe, review safety guidance, and remove your account if needed.</Text>
-      </View>
+    <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false} stickyHeaderIndices={[0]}>
+      <StickyScreenHeader
+        backLabel="Back to profile"
+        onBack={() => navigate('Profile')}
+        subtitle="Keep your account safe, review safety guidance, and remove your account if needed."
+        title="Security"
+      />
 
       <Card style={styles.card}>
         <Text style={styles.sectionTitle}>Safety guidance</Text>
@@ -82,25 +80,6 @@ const styles = StyleSheet.create({
   wrap: {
     gap: 16,
     paddingBottom: 32,
-  },
-  backRow: {
-    alignSelf: 'flex-start',
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 4,
-  },
-  backText: {
-    color: colors.brandDark,
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  header: {
-    gap: 6,
-  },
-  title: {
-    color: colors.text,
-    fontSize: 28,
-    fontWeight: '900',
   },
   copy: {
     color: colors.muted,

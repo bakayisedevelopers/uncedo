@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../../theme/colors';
+import { StickyScreenHeader } from '../../components/ui/StickyScreenHeader';
 import {
   getServiceRequestProgress,
   getServiceRequestStatusMeta,
@@ -281,7 +282,7 @@ export function ServiceRequestDetailsScreen({ route, goBack }) {
     if (!request) return '';
     const status = String(request.status || '').toLowerCase();
     if (status === 'collecting_details') {
-      return 'AI details collection is active. Reconnect to finish setting up your request.';
+      return 'Details collection is still active. Reconnect to finish setting up your request.';
     }
     if (status === 'matching') {
       return 'We are searching for a helper in your area. You will receive a notification as soon as they accept.';
@@ -330,9 +331,15 @@ export function ServiceRequestDetailsScreen({ route, goBack }) {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false}>
+      <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false} stickyHeaderIndices={[0]}>
         {/* ── Back button ── */}
-        <BackButton onPress={() => goBack(parentTab)} parentTab={parentTab} />
+        <StickyScreenHeader
+          backLabel={parentTab === 'Requests' ? 'Back to services' : 'Back to home'}
+          onBack={() => goBack(parentTab)}
+          style={styles.stickyHeader}
+          subtitle={request.statusDetail || statusMeta.description}
+          title={request.subject || request.topic || 'Service request details'}
+        />
 
         {/* ── Hero banner ── */}
         <HeroBanner request={request} statusMeta={statusMeta} toneStyle={toneStyle} />
@@ -412,6 +419,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 12,
     paddingBottom: 36,
+  },
+  stickyHeader: {
+    backgroundColor: '#fff7fd',
   },
   loadingContainer: {
     flex: 1,

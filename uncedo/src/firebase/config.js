@@ -104,40 +104,15 @@ export function getFirebaseClients() {
 }
 
 export function getFunctionEndpoint(functionName) {
-  const directFunctionNames = new Set([
-    'customerServiceAiTurn',
-    'customerServiceMediaSummary',
-  ]);
-
   const hostingRewriteMap = {
     getIceConfig: '/ice-config',
     verifyPaystack: '/verify-paystack',
     finalizeSessionBilling: '/finalize-session-billing',
-    payOutstandingBalance: '/pay-outstanding-balance',
-    deletePaymentMethod: '/delete-payment-method',
-    verifyTutorPayoutAccount: '/verify-tutor-payout-account',
-    listTutorPayoutBanks: '/list-tutor-payout-banks',
-    getPricingQuote: '/pricing-quote',
-    syncStudentGrowth: '/sync-student-growth',
-    extractImageOcr: '/image-ocr',
-    classifySubject: '/classify-subject',
-    extractAttachmentAi: '/extract-attachment-ai',
-    streamAttachmentAi: '/stream-board-extraction',
-    customerServiceAiTurn: '/customer-service-ai-turn',
     mobileWebviewAuth: '/mobile-webview-auth',
-    getTutorAgreement: '/getTutorAgreement',
-    acceptTutorAgreement: '/acceptTutorAgreement',
-    emailSignedTutorAgreement: '/emailSignedTutorAgreement',
-    publishTutorAgreementVersion: '/publishTutorAgreementVersion',
-    saveAcademicBrainFeedback: '/save-academic-brain-feedback',
   };
 
   if (USE_FIREBASE_EMULATORS) {
     return `http://${FIREBASE_EMULATOR_HOST}:5001/${projectId}/us-central1/${functionName}`;
-  }
-
-  if (directFunctionNames.has(functionName)) {
-    return `https://us-central1-${projectId}.cloudfunctions.net/${functionName}`;
   }
 
   if (hostingRewriteMap[functionName]) {

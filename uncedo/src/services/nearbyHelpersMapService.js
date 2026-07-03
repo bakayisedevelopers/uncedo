@@ -1,7 +1,6 @@
 import * as Location from 'expo-location';
-import { getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
-
-const NEARBY_HELPERS_MAP_ENDPOINT = getFunctionEndpoint('getNearbyHelpersMapData');
+import { collection, getDocs, query, where } from 'firebase/firestore';
+import { getFirebaseClients } from '../firebase/config';
 
 function normalizeLocation(coords = {}) {
   const latitude = Number(coords.latitude);
@@ -34,6 +33,55 @@ export async function getCurrentCustomerLocation() {
   return normalizeLocation(current?.coords || {});
 }
 
+function formatAddressParts(address = {}) {
+  const lineOne = [
+    address.name,
+    address.streetNumber,
+    address.street,
+  ]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+
+  const lineTwo = [
+    address.district,
+    address.city,
+    address.subregion,
+    address.region,
+    address.postalCode,
+  ]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .join(', ')
+    .trim();
+
+  const country = String(address.country || '').trim();
+
+  return [lineOne, lineTwo, country]
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+export async function reverseGeocodeCustomerLocation(location = null) {
+  const normalized = normalizeLocation(location);
+  if (!normalized) {
+    return '';
+  }
+
+  try {
+    const results = await Location.reverseGeocodeAsync({
+      latitude: normalized.latitude,
+      longitude: normalized.longitude,
+    });
+    const [firstResult] = Array.isArray(results) ? results : [];
+    return formatAddressParts(firstResult || {});
+  } catch (error) {
+    return '';
+  }
+}
+
 export async function watchCustomerLocation(onLocation) {
   return Location.watchPositionAsync(
     {
@@ -51,34 +99,86 @@ export async function watchCustomerLocation(onLocation) {
 }
 
 export async function fetchNearbyHelpersMapData({ latitude, longitude, radiusKm = 20, limit = 24 }) {
-  const { auth } = getFirebaseClients();
-  const idToken = await auth.currentUser?.getIdToken();
-  if (!idToken) {
+  const { auth, db } = getFirebaseClients();
+  if (!auth.currentUser?.uid) {
     throw new Error('You must be signed in to view nearby helpers.');
   }
 
-  const response = await fetch(NEARBY_HELPERS_MAP_ENDPOINT, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      latitude,
-      longitude,
-      radiusKm,
-      limit,
-    }),
-  });
-
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload?.success === false) {
-    throw new Error(payload?.message || 'Unable to load nearby helpers right now.');
+  const origin = normalizeLocation({ latitude, longitude });
+  if (!origin) {
+    throw new Error('A valid customer location is required.');
   }
 
+  const helpersSnapshot = await getDocs(
+    query(
+      collection(db, 'users'),
+      where('activeRole', '==', 'helper'),
+      where('onlineStatus', '==', 'online'),
+    ),
+  );
+
+  const helpers = helpersSnapshot.docs
+    .map((item) => ({ id: item.id, ...item.data() }))
+    .map((helper) => {
+      const location = normalizeLocation(helper?.liveLocation || null);
+      if (!location) return null;
+      const distanceKm = computeDistanceKm(origin, location);
+      const fullName = String(helper.fullName || helper.displayName || helper.firstName || 'Helper').trim();
+      return {
+        id: helper.id,
+        fullName,
+        initials: getInitials(fullName),
+        profilePhoto: String(helper.profilePhoto || helper.selfieUrl || helper.photoURL || '').trim(),
+        distanceKm,
+        liveLocation: {
+          latitude: location.latitude,
+          longitude: location.longitude,
+          accuracy: location.accuracy,
+          updatedAtMs: Number(helper?.liveLocation?.updatedAtMs || 0) || null,
+        },
+      };
+    })
+    .filter((item) => item && Number.isFinite(item.distanceKm) && item.distanceKm <= radiusKm)
+    .sort((left, right) => left.distanceKm - right.distanceKm)
+    .slice(0, limit)
+    .map((item) => ({
+      ...item,
+      distanceKm: Number(item.distanceKm.toFixed(2)),
+    }));
+
   return {
-    currentUser: payload.currentUser || null,
-    helpers: Array.isArray(payload.helpers) ? payload.helpers : [],
-    radiusKm: Number(payload.radiusKm || radiusKm),
+    currentUser: {
+      id: auth.currentUser.uid,
+      latitude: origin.latitude,
+      longitude: origin.longitude,
+    },
+    helpers,
+    radiusKm: Number(radiusKm || 20),
   };
+}
+
+function toRadians(value) {
+  return (Number(value || 0) * Math.PI) / 180;
+}
+
+function computeDistanceKm(origin, target) {
+  if (!origin || !target) return Number.POSITIVE_INFINITY;
+  const earthRadiusKm = 6371;
+  const latDelta = toRadians(target.latitude - origin.latitude);
+  const lonDelta = toRadians(target.longitude - origin.longitude);
+  const a = Math.sin(latDelta / 2) ** 2
+    + Math.cos(toRadians(origin.latitude))
+    * Math.cos(toRadians(target.latitude))
+    * Math.sin(lonDelta / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadiusKm * c;
+}
+
+function getInitials(value = '') {
+  return String(value || '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part.charAt(0).toUpperCase())
+    .join('');
 }

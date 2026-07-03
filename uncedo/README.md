@@ -8,10 +8,11 @@ This folder contains the Expo React Native app for the customer experience, with
 - Class request creation and tracking
 - Customer route-based helper tracking during active service requests
 - Active service tracking reads the Realtime Database `liveTracking/serviceRequests/{requestId}` node as the live map source from helper acceptance through completion or cancellation.
-- Customer service-request chat with voice transcription, media references, and saved chat history for legacy or history flows
+- Customer service-request chat with guided intake, media references, and saved chat history for legacy or history flows
 - Customer home discovery feed with ranked service tiles, full-catalog search overlay, helper work photos, and optional category personalization
 - Customer home discovery feed with recommendation ranking from recorded activity, full-catalog search overlay, helper work photos, and optional category personalization
 - Customer service selection details flow that collects required answers, calculates the live quote, and then submits directly into helper matching and tracking, with automatic category backfill when a customer selects a service from a new category and live Firestore-backed custom services or bundles
+- Customer-side service cancellation now applies the cancellation rules in-app, updates Firestore and live tracking directly, and calls the backend only for secure post-assignment cancellation billing
 - Session room entry and live session flow
 - Wallet, payment methods, and billing follow-up
 - Student/customer profile, service-category preferences, and notifications

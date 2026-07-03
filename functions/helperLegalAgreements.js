@@ -529,6 +529,11 @@ async function acceptHelperAgreement({
   const acceptanceSnap = await acceptanceRef.get();
   const existingAcceptance = acceptanceSnap.exists ? acceptanceSnap.data() : null;
   if (existingAcceptance?.pdfUrl) {
+    console.info('[helper-agreement-user-write]', {
+      uid: user.uid,
+      traceLabel: 'functions:acceptHelperAgreement:reuseExistingAcceptance',
+      acceptanceId,
+    });
     await db.collection('users').doc(user.uid).set({
       ...buildHelperAgreementSnapshot({
         user,
@@ -597,6 +602,11 @@ async function acceptHelperAgreement({
       pdfUrl,
     }, { merge: true });
 
+    console.info('[helper-agreement-user-write]', {
+      uid: user.uid,
+      traceLabel: 'functions:acceptHelperAgreement:newAcceptance',
+      acceptanceId,
+    });
     transaction.set(
       db.collection('users').doc(user.uid),
       {

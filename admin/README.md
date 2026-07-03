@@ -39,4 +39,5 @@ The app expects the usual `VITE_FIREBASE_*` environment variables that point at 
 - The app reads helper and customer records from the shared `users` collection.
 - Service catalog data is stored in the shared `serviceCatalog` collection, with service images uploaded to Firebase Storage.
 - The services area includes both per-service image uploads and a bulk uploader that stages multiple pictures locally, then assigns each uploaded image to one or more services before saving.
-- Helper agreement publishing is handled through the dedicated helper agreement management screen and Cloud Function endpoints.
+- Helper agreement publishing is handled through the dedicated helper agreement management screen with direct Firestore version publishing and helper re-acceptance invalidation.
+- Admin helper-approval and service-catalog saves now trigger client-side reconciliation nudges for active `serviceRequests`, replacing the removed scheduled backend reconciliation pass.

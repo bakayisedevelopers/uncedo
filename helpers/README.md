@@ -58,4 +58,4 @@ The helper Android app now requires React Native new architecture and Android co
 - Keep this README in sync with helper workflow, screen, or service changes.
 - The helper service catalog is loaded from the shared `serviceCatalog` collection, including admin-created bundle services, and helper submissions stay pending until the admin approves them.
 - Navigation is implemented in `src/navigation/RootNavigator.js`, including the custom route history used for Android hardware back behavior and mobile system-bar insets.
-- The helper agreement flow now loads the live contract text from Cloud Functions and blocks profile completion until the latest published version is signed.
+- The helper agreement flow now reads and writes the live contract records directly in Firebase client-side, including signed acceptance records and the stored acceptance PDF, and blocks profile completion until the latest published version is signed.

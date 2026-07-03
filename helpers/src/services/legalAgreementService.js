@@ -1,27 +1,290 @@
-import { collection, doc, getDoc, getDocs, query, where } from 'firebase/firestore';
-import { getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  runTransaction,
+  serverTimestamp,
+  setDoc,
+  where,
+} from 'firebase/firestore';
+import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
+import { getFirebaseClients } from '../firebase/config';
 
 export const HELPER_AGREEMENT_DOCUMENT_ID = 'helper_agreement';
+const HELPER_AGREEMENT_TITLE = 'Helper Agreement';
+const HELPER_AGREEMENT_DEFAULT_VERSION = '1.0.1';
+const HELPER_AGREEMENT_STAMP_LABEL = 'UNCEDO HELPER AGREEMENT RECORD';
+const HELPER_AGREEMENT_VERSION_PREFIX = 'helper_agreement_';
+const LEGAL_ENTITY_NAME = 'Parakleo, operated by Jabu Msiza';
 
-async function authorizedFetch(functionName, options = {}) {
-  const { auth } = getFirebaseClients();
-  const token = await auth.currentUser?.getIdToken?.();
-  if (!token) {
-    throw new Error('You must be signed in before accessing the Helper Agreement.');
+function normalizeTime(value) {
+  if (!value) return 0;
+  if (typeof value === 'number') return value;
+  if (typeof value?.toMillis === 'function') return value.toMillis();
+  if (typeof value?.seconds === 'number') return value.seconds * 1000;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeVersionInput(version = '') {
+  return String(version || '').trim();
+}
+
+function makeHelperVersionDocId(version) {
+  return `${HELPER_AGREEMENT_VERSION_PREFIX}${normalizeVersionInput(version).replace(/\s+/g, '_')}`;
+}
+
+function normalizeText(value = '') {
+  return String(value || '').replace(/\r\n/g, '\n').trim();
+}
+
+function escapePdfText(value = '') {
+  return String(value || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/\(/g, '\\(')
+    .replace(/\)/g, '\\)');
+}
+
+function stringToBytes(value) {
+  const normalized = String(value || '');
+  if (typeof TextEncoder !== 'undefined') {
+    return new TextEncoder().encode(normalized);
   }
 
-  const response = await fetch(getFunctionEndpoint(functionName), {
-    ...options,
-    headers: {
-      ...(options.headers || {}),
-      Authorization: `Bearer ${token}`,
+  const bytes = new Uint8Array(normalized.length);
+  for (let index = 0; index < normalized.length; index += 1) {
+    bytes[index] = normalized.charCodeAt(index) & 0xff;
+  }
+  return bytes;
+}
+
+function wrapPdfLine(line = '', maxChars = 86) {
+  const normalized = normalizeText(line);
+  if (!normalized) return [''];
+
+  const words = normalized.split(/\s+/);
+  const lines = [];
+  let current = '';
+
+  words.forEach((word) => {
+    const candidate = current ? `${current} ${word}` : word;
+    if (candidate.length <= maxChars) {
+      current = candidate;
+      return;
+    }
+
+    if (current) {
+      lines.push(current);
+    }
+
+    if (word.length <= maxChars) {
+      current = word;
+      return;
+    }
+
+    let remaining = word;
+    while (remaining.length > maxChars) {
+      lines.push(remaining.slice(0, maxChars));
+      remaining = remaining.slice(maxChars);
+    }
+    current = remaining;
+  });
+
+  if (current) {
+    lines.push(current);
+  }
+
+  return lines.length ? lines : [''];
+}
+
+function buildHelperAgreementPdfBytes({
+  title,
+  version,
+  effectiveDate,
+  reviewedAt,
+  nextReviewAt,
+  stampLabel,
+  contentMarkdown,
+  acceptance,
+}) {
+  const paragraphs = normalizeText(contentMarkdown)
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .split(/\n\s*\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  const documentLines = [
+    'Uncedo',
+    title || HELPER_AGREEMENT_TITLE,
+    '',
+    `Version: ${version || HELPER_AGREEMENT_DEFAULT_VERSION}`,
+    `Effective date: ${effectiveDate || 'Not specified'}`,
+    `Reviewed date: ${reviewedAt || 'Not specified'}`,
+    `Next review date: ${nextReviewAt || 'Not specified'}`,
+    `Legal entity: ${LEGAL_ENTITY_NAME}`,
+    `Accepted by: ${acceptance.typedSignatureName || acceptance.acceptedByFullName || 'Unknown'}`,
+    `Accepted by email: ${acceptance.acceptedByEmail || 'Unknown'}`,
+    `User ID: ${acceptance.userId || 'Unknown'}`,
+    `Accepted at: ${acceptance.acceptedAt || ''}`,
+    '',
+    'Accepted contract text',
+    '',
+  ];
+
+  paragraphs.forEach((paragraph) => {
+    wrapPdfLine(paragraph).forEach((line) => documentLines.push(line));
+    documentLines.push('');
+  });
+
+  documentLines.push('Acceptance Information');
+  documentLines.push(`Checkbox accepted: ${acceptance.checkboxAccepted ? 'true' : 'false'}`);
+  documentLines.push(`Typed signature name: ${acceptance.typedSignatureName || ''}`);
+  documentLines.push(`Content hash: ${acceptance.contentHash || ''}`);
+  documentLines.push('');
+  documentLines.push(stampLabel || HELPER_AGREEMENT_STAMP_LABEL);
+  documentLines.push(`Agreement Version: ${version || HELPER_AGREEMENT_DEFAULT_VERSION}`);
+  documentLines.push(`Accepted: ${acceptance.acceptedAt || 'Not specified'}`);
+
+  const pageHeight = 742;
+  const startY = 780;
+  const lineHeight = 14;
+  const maxLinesPerPage = Math.floor((startY - 70) / lineHeight);
+  const pages = [];
+
+  for (let index = 0; index < documentLines.length; index += maxLinesPerPage) {
+    pages.push(documentLines.slice(index, index + maxLinesPerPage));
+  }
+
+  const pageCount = pages.length || 1;
+  const fontObjectNumber = 3 + (pageCount * 2);
+  const pageObjectNumbers = [];
+  const contentObjectNumbers = [];
+  const objects = [];
+
+  for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
+    pageObjectNumbers.push(3 + (pageIndex * 2));
+    contentObjectNumbers.push(4 + (pageIndex * 2));
+  }
+
+  const pageObjects = pages.length ? pages : [[]];
+  pageObjects.forEach((pageLines, pageIndex) => {
+    const streamLines = [
+      'BT',
+      '/F1 11 Tf',
+      `${lineHeight} TL`,
+      `50 ${startY} Td`,
+    ];
+
+    pageLines.forEach((line, lineIndex) => {
+      if (lineIndex === 0) {
+        streamLines.push(`(${escapePdfText(line)}) Tj`);
+      } else {
+        streamLines.push(`T* (${escapePdfText(line)}) Tj`);
+      }
+    });
+    streamLines.push('ET');
+
+    const stream = `${streamLines.join('\n')}\n`;
+    const contentBytes = stringToBytes(stream);
+    objects.push(
+      `${contentObjectNumbers[pageIndex]} 0 obj\n<< /Length ${contentBytes.length} >>\nstream\n${stream}endstream\nendobj`,
+    );
+    objects.push(
+      `${pageObjectNumbers[pageIndex]} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 ${fontObjectNumber} 0 R >> >> /Contents ${contentObjectNumbers[pageIndex]} 0 R >>\nendobj`,
+    );
+  });
+
+  const pagesObject = `2 0 obj\n<< /Type /Pages /Kids [${pageObjectNumbers.map((value) => `${value} 0 R`).join(' ')}] /Count ${pageObjectNumbers.length} >>\nendobj`;
+  const catalogObject = '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj';
+  const fontObject = `${fontObjectNumber} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj`;
+  const pdfObjects = [catalogObject, pagesObject, ...objects, fontObject];
+
+  let pdf = '%PDF-1.4\n';
+  const offsets = [0];
+  pdfObjects.forEach((objectText) => {
+    offsets.push(pdf.length);
+    pdf += `${objectText}\n`;
+  });
+
+  const xrefOffset = pdf.length;
+  pdf += `xref\n0 ${pdfObjects.length + 1}\n`;
+  pdf += '0000000000 65535 f \n';
+  offsets.slice(1).forEach((offset) => {
+    pdf += `${String(offset).padStart(10, '0')} 00000 n \n`;
+  });
+  pdf += `trailer\n<< /Size ${pdfObjects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+
+  return stringToBytes(pdf);
+}
+
+function buildAgreementSnapshot({ userData = {}, activeVersion, acceptanceId, acceptedAt, pdfUrl }) {
+  return {
+    agreement: {
+      ...(userData?.agreement || {}),
+      documentId: HELPER_AGREEMENT_DOCUMENT_ID,
+      title: activeVersion?.title || HELPER_AGREEMENT_TITLE,
+      legalEntityName: LEGAL_ENTITY_NAME,
+      requiredVersion: activeVersion?.version || HELPER_AGREEMENT_DEFAULT_VERSION,
+      requiredVersionId: activeVersion?.id || makeHelperVersionDocId(activeVersion?.version || HELPER_AGREEMENT_DEFAULT_VERSION),
+      currentVersion: activeVersion?.version || HELPER_AGREEMENT_DEFAULT_VERSION,
+      currentVersionId: activeVersion?.id || makeHelperVersionDocId(activeVersion?.version || HELPER_AGREEMENT_DEFAULT_VERSION),
+      currentVersionEffectiveDate: activeVersion?.effectiveDate || '',
+      currentVersionContentHash: activeVersion?.contentHash || '',
+      currentVersionAccepted: true,
+      acceptedCurrentVersion: true,
+      acceptedVersion: activeVersion?.version || HELPER_AGREEMENT_DEFAULT_VERSION,
+      acceptedAt,
+      acceptanceId,
+      latestAcceptedVersion: activeVersion?.version || HELPER_AGREEMENT_DEFAULT_VERSION,
+      latestAcceptedAt: acceptedAt,
+      latestAcceptanceId: acceptanceId,
+      latestAcceptancePdfUrl: pdfUrl || '',
+      acceptedByUserId: userData?.uid || '',
+    },
+  };
+}
+
+async function uploadAgreementPdf({
+  storage,
+  acceptanceId,
+  userId,
+  version,
+  activeVersion,
+  acceptance,
+}) {
+  const storagePath = `helper-agreements/${userId}/${version}/${acceptanceId}.pdf`;
+  const fileRef = ref(storage, storagePath);
+  const pdfBytes = buildHelperAgreementPdfBytes({
+    title: activeVersion?.title || HELPER_AGREEMENT_TITLE,
+    version,
+    effectiveDate: activeVersion?.effectiveDate || '',
+    reviewedAt: activeVersion?.reviewedAt || '',
+    nextReviewAt: activeVersion?.nextReviewAt || '',
+    stampLabel: activeVersion?.stampLabel || HELPER_AGREEMENT_STAMP_LABEL,
+    contentMarkdown: activeVersion?.contentMarkdown || '',
+    acceptance,
+  });
+
+  await uploadBytes(fileRef, pdfBytes, {
+    contentType: 'application/pdf',
+    cacheControl: 'private,max-age=0,no-store',
+    customMetadata: {
+      userId,
+      version,
+      acceptanceId,
+      documentId: HELPER_AGREEMENT_DOCUMENT_ID,
     },
   });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok || !result?.success) {
-    throw new Error(result?.message || 'Unable to complete the Helper Agreement request.');
-  }
-  return result;
+
+  return {
+    pdfUrl: await getDownloadURL(fileRef),
+    pdfStoragePath: storagePath,
+  };
 }
 
 export async function getHelperAgreementBundle() {
@@ -43,7 +306,7 @@ export async function getHelperAgreementBundle() {
     .sort((left, right) => normalizeTime(right.createdAt || right.effectiveDate) - normalizeTime(left.createdAt || left.effectiveDate));
   const activeVersionId = String(documentData?.currentVersionId || '').trim();
   const activeVersion = versions.find((item) => item.id === activeVersionId)
-    || versions.find((item) => String(item.version || '').trim() === String(documentData?.currentVersion || '').trim())
+    || versions.find((item) => item.version === documentData?.currentVersion)
     || versions[0]
     || null;
   const acceptances = acceptancesSnap.docs
@@ -61,16 +324,153 @@ export async function getHelperAgreementBundle() {
 }
 
 export async function acceptHelperAgreement({ typedSignatureName, checkboxAccepted = true } = {}) {
-  return authorizedFetch('acceptHelperAgreement', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      typedSignatureName,
-      checkboxAccepted,
-    }),
+  const { auth, db, storage } = getFirebaseClients();
+  const currentUser = auth.currentUser;
+  const uid = String(currentUser?.uid || '').trim();
+  if (!uid) {
+    throw new Error('You must be signed in before accessing the Helper Agreement.');
+  }
+
+  const userRef = doc(db, 'users', uid);
+  const userSnap = await getDoc(userRef);
+  const userData = userSnap.exists() ? { uid: userSnap.id, ...userSnap.data() } : {};
+  const isHelper = String(userData.activeRole || userData.role || '').trim().toLowerCase() === 'helper';
+  if (!isHelper) {
+    throw new Error('Only helpers can accept the Helper Agreement.');
+  }
+
+  if (!checkboxAccepted) {
+    throw new Error('You must confirm that you accept the Helper Agreement.');
+  }
+
+  const signatureName = String(typedSignatureName || '').trim();
+  if (!signatureName) {
+    throw new Error('Please type your full legal name to sign the Helper Agreement.');
+  }
+
+  const bundle = await getHelperAgreementBundle();
+  const activeVersion = bundle?.activeVersion || null;
+  if (!activeVersion) {
+    throw new Error('The active Helper Agreement is not available right now.');
+  }
+
+  const requiredVersion = normalizeVersionInput(userData?.agreement?.requiredVersion || activeVersion.version);
+  const acceptanceId = `${uid}_${activeVersion.version}`;
+  const acceptanceRef = doc(db, 'userAgreementAcceptances', acceptanceId);
+  const existingAcceptanceSnap = await getDoc(acceptanceRef);
+  const existingAcceptance = existingAcceptanceSnap.exists() ? existingAcceptanceSnap.data() || {} : null;
+
+  if (existingAcceptance?.pdfUrl) {
+    await setDoc(userRef, {
+      ...buildAgreementSnapshot({
+        userData,
+        activeVersion,
+        acceptanceId,
+        acceptedAt: existingAcceptance.acceptedAt || new Date().toISOString(),
+        pdfUrl: existingAcceptance.pdfUrl,
+      }),
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+
+    return {
+      success: true,
+      message: 'Helper Agreement accepted successfully.',
+      acceptanceId,
+      acceptance: {
+        id: acceptanceId,
+        ...existingAcceptance,
+      },
+      pdfUrl: existingAcceptance.pdfUrl,
+      activeVersion,
+      agreement: {
+        ...(userData?.agreement || {}),
+        ...buildAgreementSnapshot({
+          userData,
+          activeVersion,
+          acceptanceId,
+          acceptedAt: existingAcceptance.acceptedAt || new Date().toISOString(),
+          pdfUrl: existingAcceptance.pdfUrl,
+        }).agreement,
+      },
+      verificationStatus: userData?.verificationStatus || 'pending',
+    };
+  }
+
+  const acceptedAt = new Date().toISOString();
+  const acceptance = {
+    userId: uid,
+    documentId: HELPER_AGREEMENT_DOCUMENT_ID,
+    version: activeVersion.version,
+    acceptedAt,
+    acceptedByFullName: String(userData.fullName || userData.displayName || '').trim() || signatureName,
+    acceptedByEmail: String(userData.email || currentUser.email || '').trim(),
+    ipAddress: '',
+    userAgent: String(globalThis?.navigator?.userAgent || 'helper-client').trim(),
+    signatureType: 'checkbox_and_typed_name',
+    typedSignatureName: signatureName,
+    checkboxAccepted: true,
+    requiredVersionAtAcceptance: requiredVersion,
+    requiredVersionMismatchAtAcceptance: normalizeVersionInput(activeVersion.version) !== requiredVersion,
+    legalEntityName: LEGAL_ENTITY_NAME,
+    documentTitle: activeVersion.title || HELPER_AGREEMENT_TITLE,
+    documentEffectiveDate: activeVersion.effectiveDate || '',
+    contentHash: String(activeVersion.contentHash || '').trim(),
+    immutableContentSnapshot: activeVersion.contentMarkdown || '',
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+
+  const uploaded = await uploadAgreementPdf({
+    storage,
+    acceptanceId,
+    userId: uid,
+    version: activeVersion.version,
+    activeVersion,
+    acceptance,
   });
+
+  await runTransaction(db, async (transaction) => {
+    const txnUserSnap = await transaction.get(userRef);
+    const txnUserData = txnUserSnap.exists() ? { uid: txnUserSnap.id, ...txnUserSnap.data() } : userData;
+
+    transaction.set(acceptanceRef, {
+      ...acceptance,
+      pdfUrl: uploaded.pdfUrl,
+      pdfStoragePath: uploaded.pdfStoragePath,
+    }, { merge: true });
+
+    transaction.set(userRef, {
+      ...buildAgreementSnapshot({
+        userData: txnUserData,
+        activeVersion,
+        acceptanceId,
+        acceptedAt,
+        pdfUrl: uploaded.pdfUrl,
+      }),
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+  });
+
+  const refreshedSnap = await getDoc(userRef);
+  const refreshedUser = refreshedSnap.exists() ? refreshedSnap.data() || {} : {};
+
+  return {
+    success: true,
+    message: 'Helper Agreement accepted successfully.',
+    acceptanceId,
+    acceptance: {
+      id: acceptanceId,
+      ...acceptance,
+      createdAt: acceptedAt,
+      updatedAt: acceptedAt,
+      pdfUrl: uploaded.pdfUrl,
+      pdfStoragePath: uploaded.pdfStoragePath,
+    },
+    pdfUrl: uploaded.pdfUrl,
+    activeVersion,
+    agreement: refreshedUser.agreement || {},
+    verificationStatus: refreshedUser.verificationStatus || 'pending',
+  };
 }
 
 export function formatAgreementDate(value) {
@@ -78,13 +478,4 @@ export function formatAgreementDate(value) {
   const parsed = typeof value?.toDate === 'function' ? value.toDate() : new Date(value);
   if (Number.isNaN(parsed.getTime())) return 'Not specified';
   return parsed.toLocaleDateString();
-}
-
-function normalizeTime(value) {
-  if (!value) return 0;
-  if (typeof value === 'number') return value;
-  if (typeof value?.toMillis === 'function') return value.toMillis();
-  if (typeof value?.seconds === 'number') return value.seconds * 1000;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : 0;
 }

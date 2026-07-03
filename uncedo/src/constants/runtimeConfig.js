@@ -34,11 +34,5 @@ export const GOOGLE_MAPS_API_KEY = readPublicEnv(
 export const GOOGLE_WEB_CLIENT_ID = readPublicEnv(process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID);
 export const GOOGLE_ANDROID_CLIENT_ID = readPublicEnv(process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID);
 export const GOOGLE_IOS_CLIENT_ID = readPublicEnv(process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID);
-export const GEMINI_PUBLIC_API_KEY = readPublicEnv(process.env.EXPO_PUBLIC_GEMINI_API_KEY);
-export const GEMINI_TEXT_MODEL = readPublicEnv(process.env.EXPO_PUBLIC_GEMINI_TEXT_MODEL, 'gemini-2.5-flash');
-export const AI_LIVE_PROXY_WS_URL = readPublicEnv(
-  process.env.EXPO_PUBLIC_AI_LIVE_PROXY_WS_URL,
-  WEB_APP_BASE_URL.replace(/^https:\/\//i, 'wss://').replace(/^http:\/\//i, 'ws://'),
-).replace(/\/+$/, '');
 export const FIREBASE_EMULATOR_HOST = readPublicEnv(process.env.EXPO_PUBLIC_FIREBASE_EMULATOR_HOST, '10.0.2.2');
 export const USE_FIREBASE_EMULATORS = readPublicEnv(process.env.EXPO_PUBLIC_USE_FIREBASE_EMULATORS) === 'true';

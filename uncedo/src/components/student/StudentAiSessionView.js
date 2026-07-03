@@ -60,7 +60,7 @@ export function StudentAiSessionView({ authHandoff, onBridgeMessage, sessionId }
               data: JSON.stringify({
                 type: 'ai_state',
                 payload: {
-                  networkError: event?.nativeEvent?.description || 'Unable to load AI session room.',
+                  networkError: event?.nativeEvent?.description || 'Unable to load session room.',
                 },
               }),
             },

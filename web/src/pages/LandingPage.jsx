@@ -1,8 +1,7 @@
 import { motion } from 'motion/react';
-import { ArrowRight, Calendar, CheckCircle2, Download, Globe, ShieldCheck, Sparkles, Zap } from 'lucide-react';
-import { Link, Navigate } from 'react-router-dom';
+import { Calendar, CheckCircle2, Download, Globe, ShieldCheck, Sparkles, Zap } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import MainLayout from '../layouts/MainLayout';
-import { useAuth } from '../hooks/useAuth';
 
 function CTAButton({ children, variant = 'primary', ...props }) {
   const styles =
@@ -34,12 +33,6 @@ function FeatureCard({ icon: Icon, title, description }) {
 }
 
 export default function LandingPage() {
-  const { user, isInitializing, rememberMe } = useAuth();
-
-  if (!isInitializing && user && rememberMe) {
-    return <Navigate to="/app" replace />;
-  }
-
   return (
     <MainLayout>
       <div className="bg-gradient-to-b from-emerald-50 via-zinc-50 to-white pb-20">
@@ -66,18 +59,6 @@ export default function LandingPage() {
                 <Download className="mr-2 h-4 w-4" />
                 Download Uncedo App
               </CTAButton>
-              <Link to="/signup">
-                <CTAButton>
-                  <Zap className="mr-2 h-4 w-4" />
-                  Create Account
-                </CTAButton>
-              </Link>
-              <Link to="/login">
-                <CTAButton variant="secondary">
-                  Login
-                  <ArrowRight className="ml-2 h-4 w-4" />
-                </CTAButton>
-              </Link>
             </div>
 
             <div className="mt-8 grid gap-3 text-sm text-zinc-700 sm:grid-cols-3">
@@ -92,8 +73,7 @@ export default function LandingPage() {
             <p className="mt-6 text-xs text-zinc-600">
               By continuing, you agree to our{' '}
               <Link to="/terms" className="font-bold text-brand underline">Terms of Service</Link>,{' '}
-              <Link to="/privacy-policy" className="font-bold text-brand underline">Privacy Policy</Link>, and{' '}
-              <Link to="/payment-pricing-policy" className="font-bold text-brand underline">Payment Policy</Link>.
+              and <Link to="/privacy-policy" className="font-bold text-brand underline">Privacy Policy</Link>.
             </p>
           </motion.div>
         </section>

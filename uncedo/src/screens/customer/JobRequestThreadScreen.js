@@ -3,6 +3,7 @@ import { Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 
 import { Ionicons } from '@expo/vector-icons';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
+import { StickyScreenHeader } from '../../components/ui/StickyScreenHeader';
 import { PLACEHOLDER_THREAD_QUICK_REPLIES } from '../../constants/customer';
 import { colors } from '../../theme/colors';
 
@@ -44,22 +45,20 @@ export function JobRequestThreadScreen({ goBack, route, systemInsets = {} }) {
     setMessages((prev) => [
       ...prev,
       { id: `c-${prev.length + 1}`, role: 'customer', text: trimmed },
-      { id: `u-${prev.length + 2}`, role: 'system', text: 'Placeholder follow-up saved. Full AI and helper chat will connect here later.' },
+      { id: `u-${prev.length + 2}`, role: 'system', text: 'Placeholder follow-up saved. Full guided intake and helper chat will connect here later.' },
     ]);
     setComposerText('');
   };
 
   return (
     <View style={[styles.screen, { paddingTop: topInset }]}>
-      <View style={styles.header}>
-        <Pressable accessibilityRole="button" onPress={() => goBack('CustomerHome')} style={styles.backButton}>
-          <Ionicons color={colors.text} name="arrow-back" size={20} />
-        </Pressable>
-        <View style={styles.headerCopy}>
-          <Text style={styles.headerTitle}>Job Request</Text>
-          <Text style={styles.headerSubtitle}>Conversation foundation</Text>
-        </View>
-      </View>
+      <StickyScreenHeader
+        backLabel="Back to home"
+        onBack={() => goBack('CustomerHome')}
+        style={styles.header}
+        subtitle="Conversation foundation"
+        title="Job Request"
+      />
 
       <ScrollView contentContainerStyle={[styles.content, { paddingBottom: bottomInset + 118 }]}>
         {draftAttachments.length ? (
@@ -143,37 +142,8 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   header: {
-    alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.98)',
+    backgroundColor: '#f8fafc',
     borderBottomColor: colors.border,
-    borderBottomWidth: 1,
-    flexDirection: 'row',
-    gap: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-  },
-  backButton: {
-    alignItems: 'center',
-    backgroundColor: '#f4f4f5',
-    borderColor: colors.border,
-    borderRadius: 16,
-    borderWidth: 1,
-    height: 40,
-    justifyContent: 'center',
-    width: 40,
-  },
-  headerCopy: {
-    flex: 1,
-  },
-  headerTitle: {
-    color: colors.text,
-    fontSize: 18,
-    fontWeight: '900',
-  },
-  headerSubtitle: {
-    color: colors.muted,
-    fontSize: 12,
-    fontWeight: '700',
   },
   content: {
     gap: 14,

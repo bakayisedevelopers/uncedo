@@ -1,7 +1,3 @@
-import { getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
-
-const IMAGE_OCR_ENDPOINT = getFunctionEndpoint('extractImageOcr');
-
 function getAttachmentFileType(attachment) {
   const mimeType = String(attachment?.type || '').toLowerCase();
   if (mimeType === 'application/pdf') return 'pdf';
@@ -51,47 +47,16 @@ function buildExtractionResult(attachment, payload = {}, overrides = {}) {
 }
 
 export async function extractSingleAttachment(attachment) {
-  const clients = getFirebaseClients();
-  const idToken = await clients?.auth?.currentUser?.getIdToken?.();
-  if (!idToken) {
-    throw new Error('You must be signed in before extracting attachment text.');
-  }
-
-  const body = {
-    imageBase64: getBase64Payload(attachment?.dataUrl),
-    mimeType: attachment?.type || 'application/octet-stream',
-    fileName: attachment?.name || 'attachment',
-  };
-  let response = null;
-  let payload = {};
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    response = await fetch(IMAGE_OCR_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${idToken}`,
-      },
-      body: JSON.stringify(body),
-    }).catch(() => null);
-
-    if (!response) {
-      await new Promise((resolve) => setTimeout(resolve, 350));
-      continue;
-    }
-
-    payload = await response.json().catch(() => ({}));
-    if (response.ok || response.status < 500) break;
-    await new Promise((resolve) => setTimeout(resolve, 350));
-  }
-
-  if (!response || !response.ok) {
-    return buildExtractionResult(attachment, payload, {
-      fileType: getAttachmentFileType(attachment),
-      extractionMethod: 'fallback',
-    });
-  }
-
-  return buildExtractionResult(attachment, payload);
+  return buildExtractionResult(attachment, {
+    success: false,
+    partialSuccess: false,
+    extractedText: '',
+    text: '',
+    textLength: 0,
+  }, {
+    fileType: getAttachmentFileType(attachment),
+    extractionMethod: 'client_placeholder',
+  });
 }
 
 export async function extractAttachments(attachments = [], onProgress) {

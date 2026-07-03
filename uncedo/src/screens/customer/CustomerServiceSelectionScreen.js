@@ -26,6 +26,7 @@ import {
   finalizeCustomerServiceRequest,
 } from '../../services/customerServiceRequestService';
 import { updateUserProfile } from '../../services/userService';
+import { StickyScreenHeader } from '../../components/ui/StickyScreenHeader';
 import { colors } from '../../theme/colors';
 
 function formatCurrency(value) {
@@ -320,11 +321,18 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
 
   return (
     <View style={styles.screen}>
-      <ScrollView contentContainerStyle={[styles.content, { paddingTop: topInset, paddingBottom: 36 }]} showsVerticalScrollIndicator={false}>
-        <Pressable accessibilityRole="button" onPress={() => goBack(parentTab)} style={styles.backButton}>
-          <Ionicons color={colors.text} name="chevron-back" size={18} />
-          <Text style={styles.backButtonText}>Back</Text>
-        </Pressable>
+      <ScrollView
+        contentContainerStyle={[styles.content, { paddingTop: topInset, paddingBottom: 36 }]}
+        showsVerticalScrollIndicator={false}
+        stickyHeaderIndices={[0]}
+      >
+        <StickyScreenHeader
+          backLabel="Back"
+          onBack={() => goBack(parentTab)}
+          style={styles.stickyHeader}
+          subtitle={item.categoryLabel || 'Select a service'}
+          title={item.title}
+        />
 
         <View style={styles.heroCard}>
           {item.imageUri ? (
@@ -427,22 +435,9 @@ const styles = StyleSheet.create({
     gap: 16,
     paddingHorizontal: 16,
   },
-  backButton: {
-    alignItems: 'center',
-    alignSelf: 'flex-start',
-    backgroundColor: 'rgba(255,255,255,0.92)',
-    borderColor: 'rgba(217,70,239,0.14)',
-    borderRadius: 18,
-    borderWidth: 1,
-    flexDirection: 'row',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-  },
-  backButtonText: {
-    color: colors.text,
-    fontSize: 13,
-    fontWeight: '700',
+  stickyHeader: {
+    backgroundColor: '#fff7fd',
+    borderBottomColor: 'rgba(217,70,239,0.10)',
   },
   heroCard: {
     backgroundColor: '#ffffff',

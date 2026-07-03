@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { FormField } from '../../components/ui/FormField';
+import { StickyScreenHeader } from '../../components/ui/StickyScreenHeader';
 import { ServiceCategoryPicker } from '../../components/customer/ServiceCategoryPicker';
 import {
   BUSINESS_CATEGORY_OPTIONS,
@@ -11,7 +12,11 @@ import {
   INDIVIDUAL_CUSTOMER_TYPE_OPTIONS,
 } from '../../constants/customer';
 import { useAuth } from '../../context/AuthContext';
-import { getCurrentCustomerLocation, requestCustomerLocationPermission } from '../../services/nearbyHelpersMapService';
+import {
+  getCurrentCustomerLocation,
+  reverseGeocodeCustomerLocation,
+  requestCustomerLocationPermission,
+} from '../../services/nearbyHelpersMapService';
 import { getCustomerOnboardingStatus } from '../../utils/onboarding';
 import { getUserProfile, updateUserProfile } from '../../services/userService';
 import { colors } from '../../theme/colors';
@@ -23,6 +28,7 @@ export function CustomerDetailsScreen({ navigate }) {
   const [message, setMessage] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [liveLocation, setLiveLocation] = useState(null);
+  const [liveLocationAddress, setLiveLocationAddress] = useState('');
   const [form, setForm] = useState({
     fullName: '',
     phoneNumber: '',
@@ -35,10 +41,6 @@ export function CustomerDetailsScreen({ navigate }) {
     businessCategory: '',
     preferredServiceCategories: [],
   });
-
-  const liveLocationText = liveLocation
-    ? `${Number(liveLocation.latitude).toFixed(5)}, ${Number(liveLocation.longitude).toFixed(5)}`
-    : 'Tap refresh to capture the device location.';
 
   const refreshCurrentLocation = async () => {
     const permissionGranted = await requestCustomerLocationPermission().catch(() => false);
@@ -95,6 +97,34 @@ export function CustomerDetailsScreen({ navigate }) {
     refreshCurrentLocation().catch(() => null);
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!liveLocation) {
+      setLiveLocationAddress('');
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setLiveLocationAddress('Resolving current address...');
+    reverseGeocodeCustomerLocation(liveLocation)
+      .then((address) => {
+        if (!cancelled) {
+          setLiveLocationAddress(address);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setLiveLocationAddress('');
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [liveLocation]);
+
   const isBusinessAccount = form.accountType === 'business';
   const isIndividualAccount = form.accountType === 'individual';
 
@@ -131,16 +161,13 @@ export function CustomerDetailsScreen({ navigate }) {
   };
 
   return (
-    <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false}>
-      <Pressable accessibilityRole="button" onPress={() => navigate('Profile')} style={styles.backRow}>
-        <Ionicons color={colors.brandDark} name="chevron-back" size={18} />
-        <Text style={styles.backText}>Back to profile</Text>
-      </Pressable>
-
-      <View style={styles.header}>
-        <Text style={styles.title}>Personal details</Text>
-        <Text style={styles.copy}>Edit the details you already gave the app. This stays connected to your main profile.</Text>
-      </View>
+    <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false} stickyHeaderIndices={[0]}>
+      <StickyScreenHeader
+        backLabel="Back to profile"
+        onBack={() => navigate('Profile')}
+        subtitle="Edit the details you already gave the app. This stays connected to your main profile."
+        title="Personal details"
+      />
 
       <Card style={styles.statusCard}>
         <Text style={styles.sectionTitle}>{onboardingStatus.title}</Text>
@@ -158,7 +185,11 @@ export function CustomerDetailsScreen({ navigate }) {
           <Ionicons color={colors.brandDark} name="navigate-outline" size={16} />
           <Text style={styles.locationLabel}>Current live location</Text>
         </View>
-        <Text style={styles.locationValue}>{liveLocationText}</Text>
+        <Text style={styles.locationValue}>
+          {liveLocation
+            ? liveLocationAddress || 'Address unavailable for this location.'
+            : 'Tap refresh to capture the device location.'}
+        </Text>
         <Pressable accessibilityRole="button" onPress={() => refreshCurrentLocation().catch(() => null)} style={styles.locationAction}>
           <Text style={styles.locationActionText}>Refresh device location</Text>
         </Pressable>
@@ -287,25 +318,6 @@ const styles = StyleSheet.create({
   wrap: {
     gap: 14,
     paddingBottom: 32,
-  },
-  backRow: {
-    alignSelf: 'flex-start',
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 4,
-  },
-  backText: {
-    color: colors.brandDark,
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  header: {
-    gap: 6,
-  },
-  title: {
-    color: colors.text,
-    fontSize: 28,
-    fontWeight: '900',
   },
   copy: {
     color: colors.muted,

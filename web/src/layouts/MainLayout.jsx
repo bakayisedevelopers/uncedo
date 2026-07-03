@@ -17,13 +17,12 @@ export default function MainLayout({ children }) {
               <h4 className="mb-4 font-bold text-zinc-900">Product</h4>
               <ul className="space-y-2 text-sm text-zinc-600">
                 <li><a href="/#features" className={footerLinkClassName}>Features</a></li>
-                <li><Link to="/helpers" className={footerLinkClassName}>Helpers</Link></li>
               </ul>
             </div>
             <div>
-              <h4 className="mb-4 font-bold text-zinc-900">Company</h4>
+              <h4 className="mb-4 font-bold text-zinc-900">Platform</h4>
               <ul className="space-y-2 text-sm text-zinc-600">
-                <li><Link to="/about" className={footerLinkClassName}>About</Link></li>
+                <li><Link to="/" className={footerLinkClassName}>Landing Page</Link></li>
               </ul>
             </div>
             <div>
@@ -31,8 +30,6 @@ export default function MainLayout({ children }) {
               <ul className="space-y-2 text-sm text-zinc-600">
                 <li><Link to="/privacy-policy" className={footerLinkClassName}>Privacy Policy</Link></li>
                 <li><Link to="/terms" className={footerLinkClassName}>Terms of Service</Link></li>
-                <li><Link to="/refund-policy" className={footerLinkClassName}>Refund Policy</Link></li>
-                <li><Link to="/data-voice-policy" className={footerLinkClassName}>Data and Voice Handling</Link></li>
               </ul>
             </div>
             <div>

@@ -4,11 +4,11 @@ const TRAVEL_RATE_PER_KM = 4;
 const BOOKING_FEE_RATE = 0.01;
 const BOOKING_FEE_CAP = 5;
 const MINIMUM_TRAVEL_FEE = 32;
-const AI_BOOKING_FEE_LABEL = 'Booking fee (AI intake)';
+const INTAKE_BOOKING_FEE_LABEL = 'Booking fee (guided intake)';
 const PRICING_CALIBRATION = {
   region: 'South Africa',
   calibratedFrom: ['SweepSouth market anchors', 'Sorbet salon anchors'],
-  aiPricingSource: 'Google Gemini Live pricing baseline',
+  pricingSource: 'Guided intake pricing baseline',
 };
 
 function roundCurrency(value) {
@@ -141,7 +141,7 @@ function buildAiBookingFeeLine(aiUsageSnapshot = null) {
   const amount = roundCurrency(Number(aiUsageSnapshot?.totalCostZar || 0));
   if (!(amount > 0)) return null;
   return {
-    label: `${AI_BOOKING_FEE_LABEL}`,
+    label: `${INTAKE_BOOKING_FEE_LABEL}`,
     amount,
   };
 }

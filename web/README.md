@@ -1,13 +1,12 @@
 # Uncedo Web App
 
-This folder contains the React + Vite web application for the main portal, tutor portal, and marketing pages.
+This folder contains the reduced React + Vite public website for Uncedo.
 
 ## Purpose
 
-- Student request, session, wallet, profile, and onboarding flows
-- Tutor dashboards
-- Session room and whiteboard entry points
-- Legal, pricing, privacy, and policy pages
+- Public landing page
+- Privacy policy page
+- Terms of service page
 
 ## Stack
 
@@ -29,9 +28,8 @@ npm run preview
 
 ## Environment
 
-The web app uses Firebase client config from `web/src/firebase/config.js` and the usual `VITE_FIREBASE_*` environment variables.
-
-The standalone admin console now lives in `/admin` and uses a separate Firebase Hosting site.
+- No Firebase client configuration is required for the current public-only site.
+- The standalone admin console lives in `/admin` and uses a separate Firebase Hosting site.
 
 ## Agent Notes
 
@@ -39,3 +37,4 @@ The standalone admin console now lives in `/admin` and uses a separate Firebase 
 - Read `../docs/skills/agent-codebase-guide.md` for the repo map.
 - Use `../docs/skills/agent-developer-workflow.md` when changes affect deployment or release flow.
 - Keep this README in sync with major route, service, or shell changes.
+- The old login, signup, tutor, student, admin-in-web, session, payment, and onboarding flows were removed from `web/`.

@@ -4,7 +4,7 @@ const STATUS_META = {
     badge: 'Live intake in progress',
     tone: 'info',
     title: 'Collecting your request details',
-    description: 'Uncedo AI is confirming your category, service, and any details needed for pricing and matching.',
+    description: 'Uncedo is confirming your category, service, and any details needed for pricing and matching.',
   },
   matching: {
     label: 'Searching for helper',
@@ -144,19 +144,19 @@ export function formatMissingRequirementLabel(requirementId) {
 export function getCallStatusMeta(status) {
   const normalized = String(status || '').toLowerCase();
   if (normalized === 'dialing') {
-    return { label: 'Dialing...', detail: 'Starting your live call with Uncedo AI.' };
+    return { label: 'Dialing...', detail: 'Starting your live intake call with Uncedo.' };
   }
   if (normalized === 'connected') {
     return { label: 'Connected', detail: 'The call is live. You can start speaking.' };
   }
   if (normalized === 'listening') {
-    return { label: 'Listening', detail: 'Uncedo AI is listening to your request.' };
+    return { label: 'Listening', detail: 'Uncedo is listening to your request.' };
   }
   if (normalized === 'processing') {
     return { label: 'Processing', detail: 'Uncedo is reviewing what you said and preparing the next response.' };
   }
   if (normalized === 'speaking') {
-    return { label: 'AI speaking', detail: 'Uncedo AI is asking the next question.' };
+    return { label: 'Guided intake', detail: 'Uncedo is asking the next question.' };
   }
   if (normalized === 'searching') {
     return { label: 'Searching for helper...', detail: 'The request is complete and we are starting helper matching.' };

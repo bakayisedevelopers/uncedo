@@ -4,7 +4,11 @@ import { Ionicons } from '@expo/vector-icons';
 import appConfig from '../../../app.json';
 import { useAuth } from '../../context/AuthContext';
 import { getCustomerOnboardingStatus } from '../../utils/onboarding';
-import { getCurrentCustomerLocation, requestCustomerLocationPermission } from '../../services/nearbyHelpersMapService';
+import {
+  getCurrentCustomerLocation,
+  reverseGeocodeCustomerLocation,
+  requestCustomerLocationPermission,
+} from '../../services/nearbyHelpersMapService';
 import { colors } from '../../theme/colors';
 
 function getInitials(name = '') {
@@ -71,11 +75,8 @@ export function CustomerProfileScreen({ navigate }) {
   const version = appConfig?.expo?.version || '0.1.0';
   const savedAddress = String(currentUser?.customerProfile?.serviceAddress || '').trim() || 'Add your saved address';
   const [liveLocation, setLiveLocation] = useState(null);
+  const [liveLocationAddress, setLiveLocationAddress] = useState('');
   const [loadingLocation, setLoadingLocation] = useState(false);
-
-  const liveLocationText = liveLocation
-    ? `${Number(liveLocation.latitude).toFixed(5)}, ${Number(liveLocation.longitude).toFixed(5)}`
-    : 'Tap refresh to capture the device location.';
 
   const refreshCurrentLocation = async () => {
     setLoadingLocation(true);
@@ -99,6 +100,34 @@ export function CustomerProfileScreen({ navigate }) {
   useEffect(() => {
     refreshCurrentLocation().catch(() => null);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!liveLocation) {
+      setLiveLocationAddress('');
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setLiveLocationAddress('Resolving current address...');
+    reverseGeocodeCustomerLocation(liveLocation)
+      .then((address) => {
+        if (!cancelled) {
+          setLiveLocationAddress(address);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setLiveLocationAddress('');
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [liveLocation]);
 
   const openDetails = () => navigate('CustomerDetails');
   const openOnboarding = () => navigate('Onboarding');
@@ -150,7 +179,11 @@ export function CustomerProfileScreen({ navigate }) {
             <Ionicons color={colors.brandDark} name="navigate-outline" size={16} />
             <Text style={styles.locationLabel}>Current live location</Text>
           </View>
-          <Text style={styles.locationValue}>{liveLocationText}</Text>
+          <Text style={styles.locationValue}>
+            {liveLocation
+              ? liveLocationAddress || 'Address unavailable for this location.'
+              : 'Tap refresh to capture the device location.'}
+          </Text>
 
           <Pressable accessibilityRole="button" onPress={() => refreshCurrentLocation().catch(() => null)} style={styles.locationAction}>
             <Text style={styles.locationActionText}>{loadingLocation ? 'Refreshing...' : 'Refresh device location'}</Text>
