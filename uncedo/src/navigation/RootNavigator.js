@@ -43,7 +43,6 @@ const appScreenLoaders = {
   CustomerSecurity: () => require('../screens/customer/CustomerSecurityScreen').CustomerSecurityScreen,
   CustomerLegal: () => require('../screens/customer/CustomerLegalScreen').CustomerLegalScreen,
   Notifications: () => require('../screens/student/NotificationsScreen').NotificationsScreen,
-  CustomerServiceCall: () => require('../screens/customer/CustomerServiceCallScreen').CustomerServiceCallScreen,
   ServiceRequestTracking: () => require('../screens/customer/ServiceRequestTrackingScreen').ServiceRequestTrackingScreen,
   JobRequestThread: () => require('../screens/customer/JobRequestThreadScreen').JobRequestThreadScreen,
   RequestStatus: () => require('../screens/student/RequestStatusScreen').RequestStatusScreen,
@@ -141,10 +140,6 @@ function getParentTab(routeKey, params) {
   }
 
   if (routeKey === 'JobRequestThread') {
-    return 'CustomerHome';
-  }
-
-  if (routeKey === 'CustomerServiceCall') {
     return 'CustomerHome';
   }
 
@@ -427,7 +422,7 @@ export function RootNavigator() {
       if (lastActiveRequestId) {
         setLastActiveRequestId(null);
         if (
-          (activeRoute.key === 'ServiceRequestTracking' || activeRoute.key === 'CustomerServiceCall') &&
+          activeRoute.key === 'ServiceRequestTracking' &&
           activeRoute.params?.requestId === lastActiveRequestId
         ) {
           openRoute('CustomerHome', { replace: true });
@@ -501,7 +496,7 @@ export function RootNavigator() {
 
   const activeTabKey = getParentTab(activeRoute.key, activeRoute.params);
   const ActiveScreen = (appScreenLoaders[activeRoute.key] || appScreenLoaders.CustomerHome)();
-  const isFullscreenRoute = ['CustomerHome', 'CustomerServiceCall', 'CustomerServiceSelection', 'ServiceRequestTracking', 'JobRequestThread', 'SessionRoom', 'ServiceRequestDetails'].includes(activeRoute.key);
+  const isFullscreenRoute = ['CustomerHome', 'CustomerServiceSelection', 'ServiceRequestTracking', 'JobRequestThread', 'SessionRoom', 'ServiceRequestDetails'].includes(activeRoute.key);
   const isScrollableRoute = !isFullscreenRoute;
   const screenProps = {
     navigate: openRoute,
@@ -521,7 +516,7 @@ export function RootNavigator() {
     activeRequest,
   };
 
-  const showBottomNav = bottomNavVisible && !['CustomerServiceCall', 'CustomerServiceSelection', 'ServiceRequestTracking', 'JobRequestThread', 'SessionRoom', 'ServiceRequestDetails'].includes(activeRoute.key);
+  const showBottomNav = bottomNavVisible && !['CustomerServiceSelection', 'ServiceRequestTracking', 'JobRequestThread', 'SessionRoom', 'ServiceRequestDetails'].includes(activeRoute.key);
 
   return (
     <View style={[styles.safe, isFullscreenRoute ? styles.safeFullscreen : null]}>
@@ -540,7 +535,7 @@ export function RootNavigator() {
         )}
 
         {showBottomNav ? (
-          <SafeAreaView pointerEvents="box-none" style={styles.bottomNavSafeArea}>
+          <View pointerEvents="box-none" style={styles.bottomNavSafeArea}>
             <View style={[styles.bottomNav, { minHeight: bottomNavInset, paddingBottom: bottomSystemInset + 14 }]}>
               {bottomNavItems.map((item) => {
                 const isActive = activeTabKey === item.key;
@@ -564,7 +559,7 @@ export function RootNavigator() {
                 );
               })}
             </View>
-          </SafeAreaView>
+          </View>
         ) : null}
 
         <SessionRatingPrompt

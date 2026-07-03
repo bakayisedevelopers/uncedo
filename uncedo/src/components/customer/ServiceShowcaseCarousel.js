@@ -138,9 +138,6 @@ export function ServiceShowcaseCarousel({
                 >
                   <View style={styles.tileTint} />
                   <View style={styles.tileTopRow}>
-                    <View style={styles.kindPill}>
-                      <Text style={styles.kindPillText}>{item.kind === 'package' ? 'Package' : 'Service'}</Text>
-                    </View>
                     <View style={styles.pricePill}>
                       <Text style={styles.pricePillText}>{item.priceLabel}</Text>
                     </View>
@@ -155,9 +152,6 @@ export function ServiceShowcaseCarousel({
                   <View style={styles.fallbackBubbleOne} />
                   <View style={styles.fallbackBubbleTwo} />
                   <View style={styles.tileTopRow}>
-                    <View style={styles.kindPill}>
-                      <Text style={styles.kindPillText}>{item.kind === 'package' ? 'Package' : 'Service'}</Text>
-                    </View>
                     <View style={styles.pricePill}>
                       <Text style={styles.pricePillText}>{item.priceLabel}</Text>
                     </View>
@@ -211,20 +205,7 @@ const styles = StyleSheet.create({
   tileTopRow: {
     alignItems: 'flex-start',
     flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  kindPill: {
-    backgroundColor: 'rgba(255,255,255,0.86)',
-    borderColor: 'rgba(217,70,239,0.40)',
-    borderRadius: 999,
-    borderWidth: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  kindPillText: {
-    color: colors.brandDark,
-    fontSize: 11,
-    fontWeight: '800',
+    justifyContent: 'flex-start',
   },
   pricePill: {
     alignItems: 'center',
@@ -253,7 +234,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   tileTitle: {
-    color: colors.text,
+    color: colors.brandDark,
     fontSize: 13,
     fontWeight: '800',
   },

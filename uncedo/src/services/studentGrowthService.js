@@ -1,4 +1,6 @@
-import { getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
+import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { getFirebaseClients } from '../firebase/config';
+import { getStudentOnboardingStatus } from '../utils/onboarding';
 
 function toPositiveNumber(value, fallback = 0) {
   const numeric = Number(value);
@@ -27,25 +29,45 @@ export function estimateFreeMinutePricing({ originalPrice, requestedDurationMinu
 }
 
 export async function syncCustomerGrowth() {
-  const { auth } = getFirebaseClients();
-  const token = await auth.currentUser?.getIdToken();
-  if (!token) return null;
+  const { auth, db } = getFirebaseClients();
+  const currentUser = auth.currentUser;
+  if (!currentUser?.uid) return null;
 
-  const response = await fetch(getFunctionEndpoint('syncStudentGrowth'), {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
+  await currentUser.reload().catch(() => null);
+  const userRef = doc(db, 'users', currentUser.uid);
+  const userSnap = await getDoc(userRef);
+  const userProfile = userSnap.exists() ? { uid: userSnap.id, ...userSnap.data() } : null;
+  if (!userProfile) return null;
+
+  const onboarding = getStudentOnboardingStatus(userProfile);
+  const emailVerified = Boolean(auth.currentUser?.emailVerified);
+  const referralSlug = String(userProfile.referralSlug || '').trim() || `clx-${currentUser.uid.slice(0, 12)}`;
+
+  const growthPatch = {
+    referralSlug,
+    emailVerified,
+    emailVerifiedAt: emailVerified ? (userProfile.emailVerifiedAt || serverTimestamp()) : null,
+    growth: {
+      ...(userProfile.growth || {}),
+      completionRequirements: {
+        ...((userProfile.growth || {}).completionRequirements || {}),
+        emailVerified,
+        studentProfileComplete: Boolean(onboarding.complete),
+      },
+      lastGrowthSyncedAt: new Date().toISOString(),
     },
-    body: JSON.stringify({}),
-  });
+    updatedAt: serverTimestamp(),
+  };
 
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload?.success === false) {
-    throw new Error(payload?.message || 'Unable to sync customer growth status right now.');
-  }
-
-  return payload?.profile || null;
+  await setDoc(userRef, growthPatch, { merge: true });
+  return {
+    ...userProfile,
+    ...growthPatch,
+    growth: {
+      ...(userProfile.growth || {}),
+      ...(growthPatch.growth || {}),
+    },
+  };
 }
 
 export const syncStudentGrowth = syncCustomerGrowth;

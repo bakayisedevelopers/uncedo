@@ -1267,7 +1267,7 @@ export function getCustomerIntakeQuickReplyOptions(question = {}, context = {}) 
 
   return createQuickReplyOptionsFromLabels([
     ['not_sure_yet', 'Not sure yet'],
-    ['let_ai_help', 'Let AI help'],
+    ['please_suggest', 'Please suggest'],
     ['i_will_type_it', 'I will type it'],
   ]);
 }

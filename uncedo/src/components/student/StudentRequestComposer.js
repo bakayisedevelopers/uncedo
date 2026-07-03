@@ -23,7 +23,6 @@ import {
   buildSubjectClassificationInput,
   classifySubjectFromText,
 } from '../../services/subjectClassificationService';
-import { recordAcademicBrainFeedback } from '../../services/academicBrainFeedbackService';
 import { estimateFreeMinutePricing } from '../../services/studentGrowthService';
 import { uploadUserFile } from '../../services/storageService';
 import { colors } from '../../theme/colors';
@@ -690,38 +689,6 @@ export function StudentRequestComposer({
       setPendingStatusRequestId(requestId);
       openRequestStatus(requestId);
 
-      const predicted = latestClassification?.academicBrainOutput || null;
-      if (predicted) {
-        const selectedTopic = String(reviewTopic || '').trim();
-        const predictedTopic = String(latestClassification?.topic || '').trim();
-        const selectedMinutes = Number(durationMinutes || 0);
-        const predictedMinutes = Number(latestClassification?.estimatedMinutes || estimatedMinutes || 0);
-        const correctionType = [
-          selectedSubject && predicted?.subject?.subjectId && selectedSubject !== predicted.subject.subjectId ? 'subject' : '',
-          selectedTopic && predictedTopic && selectedTopic !== predictedTopic ? 'topic' : '',
-          selectedMinutes && predictedMinutes && selectedMinutes !== predictedMinutes ? 'minutes' : '',
-        ].filter(Boolean).join('|') || 'none';
-
-        recordAcademicBrainFeedback({
-          role: 'student',
-          country: 'ZA',
-          grade: '',
-          selectedSubjectId: selectedSubject,
-          originalOcrText: String(boardPreparationSource?.extractedText || topic || ''),
-          originalOcrBlocks: [],
-          predictedOutput: predicted,
-          correctedOutput: {
-            subjectId: selectedSubject,
-            topic: selectedTopic,
-            estimatedMinutes: selectedMinutes,
-          },
-          correctionType,
-          engineVersion: String(predicted?.engine?.version || '1.0.0'),
-          subjectPackVersions: Array.isArray(predicted?.engine?.subjectPackVersions) ? predicted.engine.subjectPackVersions : [],
-          uploadId: requestId,
-          sessionId: '',
-        }).catch(() => null);
-      }
     } catch (nextError) {
       setError(nextError.message || 'Unable to submit request right now.');
     } finally {

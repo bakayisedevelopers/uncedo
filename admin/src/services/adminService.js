@@ -1,4 +1,5 @@
 import { getFirebaseClients } from '../firebase/config';
+import { reconcileOpenServiceRequests } from './requestReconciliationService';
 
 const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID || 'bakayise-uncedo';
 const useFirebaseEmulators = import.meta.env.VITE_USE_FIREBASE_EMULATORS === 'true';
@@ -160,18 +161,6 @@ async function authorizedFunctionFetch(functionName, options = {}) {
   return result;
 }
 
-async function syncHelperServiceApprovals(uid) {
-  if (!uid) return null;
-
-  return authorizedFunctionFetch('syncHelperServiceApprovals', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ uid }),
-  });
-}
-
 function normalizeService(service = {}) {
   const serviceId = String(service.serviceId || '').trim();
   if (!serviceId) return null;
@@ -234,7 +223,7 @@ export function normalizeAdminProfile(profile = {}) {
   };
 }
 
-async function saveUserProfile(uid, nextProfile) {
+async function saveUserProfile(uid, nextProfile, traceLabel = 'admin:saveUserProfile') {
   const clients = await getFirebaseClients();
   if (!clients) {
     throw new Error('Firebase is not configured for the admin app.');
@@ -245,6 +234,16 @@ async function saveUserProfile(uid, nextProfile) {
   const ref = doc(db, 'users', uid);
   const existing = await getDoc(ref);
   const current = existing.exists() ? existing.data() : {};
+
+  console.info('[admin:user-write]', {
+    traceLabel,
+    uid,
+    keys: Object.keys(nextProfile || {}),
+    serviceCount: Array.isArray(nextProfile?.services) ? nextProfile.services.length : 0,
+    skillCount: Array.isArray(nextProfile?.services)
+      ? nextProfile.services.reduce((count, service) => count + (Array.isArray(service?.skills) ? service.skills.length : 0), 0)
+      : 0,
+  });
 
   await setDoc(
     ref,
@@ -316,7 +315,7 @@ export async function updateHelperModeration(uid, updates = {}) {
   return saveUserProfile(uid, {
     ...profile,
     ...updates,
-  });
+  }, 'admin:updateHelperModeration');
 }
 
 export async function updateHelperServiceStatus({ uid, serviceId, skillId, updates = {} }) {
@@ -350,8 +349,11 @@ export async function updateHelperServiceStatus({ uid, serviceId, skillId, updat
   await saveUserProfile(uid, {
     ...profile,
     services: nextServices,
-  });
-  await syncHelperServiceApprovals(uid);
+  }, 'admin:updateHelperServiceStatus');
+  await reconcileOpenServiceRequests({
+    reason: 'admin_helper_service_status_updated',
+    touchedServiceIds: [serviceId],
+  }).catch(() => null);
   return getUserProfile(uid);
 }
 
@@ -374,8 +376,11 @@ export async function removeHelperSkill({ uid, serviceId, skillId }) {
   await saveUserProfile(uid, {
     ...profile,
     services: nextServices,
-  });
-  await syncHelperServiceApprovals(uid);
+  }, 'admin:removeHelperSkill');
+  await reconcileOpenServiceRequests({
+    reason: 'admin_helper_skill_removed',
+    touchedServiceIds: [serviceId],
+  }).catch(() => null);
   return getUserProfile(uid);
 }
 
