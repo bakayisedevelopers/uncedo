@@ -1,6 +1,7 @@
 import { deleteObject, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { getAdminQuestionPreset } from '../constants/serviceQuestionPresets';
 import { getFirebaseClients } from '../firebase/config';
+import { reconcileOpenServiceRequests } from './requestReconciliationService';
 
 function slugify(value = '') {
   return String(value || '')
@@ -147,6 +148,11 @@ export async function saveServiceCatalogEntry(serviceId, updates = {}) {
     updatedAt: serverTimestamp(),
     createdAt: current.createdAt || serverTimestamp(),
   }, { merge: true });
+
+  await reconcileOpenServiceRequests({
+    reason: 'admin_service_catalog_saved',
+    touchedServiceIds: [normalizedId, String(updates.categoryId || current.categoryId || '').trim()],
+  }).catch(() => null);
 
   const saved = await getDoc(refDoc);
   return saved.exists() ? normalizeServiceCatalogEntry({ id: saved.id, ...saved.data(), persisted: true }) : null;

@@ -6,6 +6,7 @@ import { ServiceCategoryPicker } from '../../components/customer/ServiceCategory
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { FormField } from '../../components/ui/FormField';
+import { StickyScreenHeader } from '../../components/ui/StickyScreenHeader';
 import { StatusBadge } from '../../components/ui/StatusBadge';
 import {
   BUSINESS_CATEGORY_OPTIONS,
@@ -104,16 +105,15 @@ export function CustomerOnboardingScreen({ navigate }) {
   );
 
   return (
-    <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false}>
-      <Pressable accessibilityRole="button" onPress={() => navigate('Profile')} style={styles.backRow}>
-        <Ionicons color={colors.brandDark} name="chevron-back" size={18} />
-        <Text style={styles.backText}>Back to profile</Text>
-      </Pressable>
-
-      <View style={styles.header}>
-        <Text style={styles.title}>Complete your profile</Text>
+    <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false} stickyHeaderIndices={[0]}>
+      <StickyScreenHeader
+        backLabel="Back to profile"
+        onBack={() => navigate('Profile')}
+        subtitle="Complete your details and add a payment card before requesting help."
+        title="Complete your profile"
+      >
         <StatusBadge label={status.complete ? 'Complete' : 'In progress'} tone={status.complete ? 'success' : 'warning'} />
-      </View>
+      </StickyScreenHeader>
       <Text style={styles.copy}>Complete your details and add a payment card before requesting help. You can add service categories now or later when you search for services.</Text>
       <Text style={styles.copy}>{status.message}</Text>
       {message ? <Card><Text style={styles.message}>{message}</Text></Card> : null}
@@ -235,27 +235,6 @@ const styles = StyleSheet.create({
   wrap: {
     gap: 14,
     paddingBottom: 32,
-  },
-  backRow: {
-    alignSelf: 'flex-start',
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 4,
-  },
-  backText: {
-    color: colors.brandDark,
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  header: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  title: {
-    color: colors.text,
-    fontSize: 28,
-    fontWeight: '900',
   },
   copy: {
     color: colors.muted,

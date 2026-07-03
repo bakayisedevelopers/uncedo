@@ -1,6 +1,6 @@
 # Uncedo Codebase Guide
 
-This codebase is structured as a monorepo containing a Firebase Cloud Functions backend, two Expo-based React Native mobile applications (`uncedo` and `helpers`), two React+Vite web applications (`web` and `admin`), and shared configurations.
+This codebase is structured as a monorepo containing a Firebase Cloud Functions backend, two Expo-based React Native mobile applications (`uncedo` and `helpers`), one public React+Vite website (`web`), one React+Vite admin application (`admin`), and shared configurations.
 
 Use the mapping below to find files, logic, and concepts when asked to modify or debug the codebase.
 
@@ -8,22 +8,19 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
 
 ## 1. Firebase Cloud Functions Backend (`/functions`)
 * **Common References**: "Firebase backend", "functions backend", "cloud functions", "API functions".
-* **Purpose**: Houses all server-side logic, third-party integrations (Paystack, Resend, Gemini), and secure endpoints.
+* **Purpose**: Houses server-side logic for customer service-request orchestration, secure payment and email integrations, customer recommendations, and helper payout automation, while helper agreement acceptance/publishing, admin-triggered request reconciliation nudges, and customer-side cancellation state writes now run client-side against shared Firebase data.
 * **Key Files & Logic**:
-  * [functions/index.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/index.js): Main entry point declaring all Cloud Functions, including service-request matching, marketplace pricing quotes, billing completion, customer recommendation event aggregation, helper payout breakdown persistence, and weekly payout automation for tutors and helpers.
+  * [functions/index.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/index.js): Main entry point declaring the retained Cloud Functions for service-request matching, secure service billing and cancellation-charge calculation, customer recommendation event aggregation, email delivery, and weekly helper payout automation.
   * [functions/pricingEngine.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/pricingEngine.js): Core logic for estimation, price quotes, and billing snapshots.
   * [functions/serviceMarketplacePricing.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/serviceMarketplacePricing.js): Dynamic marketplace pricing engine for live services and bundle-style services stored in `serviceCatalog`.
-  * [functions/customerServiceAi.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/customerServiceAi.js): LLM processing logic for automated customer service threads.
-  * [functions/aiSubjectExtraction.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/aiSubjectExtraction.js): Processes files/images to detect subject areas.
   * [functions/legalAgreements.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/legalAgreements.js): Database interactions, version publishing, and signed-record generation for helper agreements.
   * [functions/helperLegalAgreements.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/helperLegalAgreements.js): Helper-agreement versioning, immutable acceptance records, and signed PDF generation used by the admin and helper apps.
-  * [functions/index.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/index.js): Main function registry for the backend HTTP, Firestore, and scheduler functions, including marketplace pricing, matching, billing, helper payout records, and recommendation aggregation.
 
 ---
 
 ## 2. Uncedo Student / Customer Mobile App (`/uncedo`)
 * **Common References**: "Student app", "Student mobile app", "Uncedo app", "Customer app", "Student/customer mobile client".
-* **Purpose**: An Expo React Native application designed for customers to book requests, receive AI assistance, view active track maps, and join WebRTC classroom sessions.
+* **Purpose**: An Expo React Native application designed for customers to book requests, complete guided intake flows, view active track maps, and join WebRTC classroom sessions.
 * **Key Folders & Screens (`/uncedo/src/screens/`)**:
   * **Student Surfaces (`screens/student/`)**:
     * [DashboardScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/screens/student/DashboardScreen.js): Home dashboard featuring request composer, quick suggestions, and navigation drawer access.
@@ -32,8 +29,7 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
     * [WalletScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/screens/student/WalletScreen.js): Shows balance, outstanding debt, and integration with the Paystack WebView credit card addition flow.
   * **Customer Surfaces (`screens/customer/`)**:
     * [CustomerHomeScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/screens/customer/CustomerHomeScreen.js): Customer home surface with the randomized service discovery feed, full-catalog search overlay, helper-photo-backed quick access tiles, and the request CTA that now opens service browsing instead of the free-form chat composer.
-    * [CustomerServiceSelectionScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/screens/customer/CustomerServiceSelectionScreen.js): Customer service review screen that shows the selected tile details, auto-adds the category to the customer profile when needed, collects required answers, calculates a backend marketplace quote, and submits directly into helper matching and tracking.
-    * [CustomerServiceCallScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/screens/customer/CustomerServiceCallScreen.js): Core customer chat screen (formerly support voice call) that now seeds package selections into the AI intake flow.
+    * [CustomerServiceSelectionScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/screens/customer/CustomerServiceSelectionScreen.js): Customer service review screen that shows the selected tile details, auto-adds the category to the customer profile when needed, collects required answers, calculates a client-side marketplace quote, and submits directly into helper matching and tracking.
     * [CustomerOnboardingScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/screens/customer/CustomerOnboardingScreen.js): Customer profile completion flow, including service-category preferences and payment setup.
     * [CustomerDetailsScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/screens/customer/CustomerDetailsScreen.js): Editable customer profile details with service-category preferences.
     * [ServiceRequestTrackingScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/screens/customer/ServiceRequestTrackingScreen.js): Full-screen customer tracking surface with route-based helper travel display, compact bottom sheet status, ETA, wait timer, and cancellation controls.
@@ -45,6 +41,8 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
     * [customerRecommendationService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/services/customerRecommendationService.js): Reads and writes customer recommendation profiles, records service events, and ranks the customer home feed from engagement history.
     * [serviceCatalogService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/services/serviceCatalogService.js): Reads the live Firestore service catalog for customer discovery, request matching, live bundle services, and dynamic intake-question hydration.
     * [liveTrackingRealtimeService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/services/liveTrackingRealtimeService.js): Realtime Database adapter for accepted service request tracking under `liveTracking/serviceRequests/{requestId}`.
+    * [customerServiceRequestService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/services/customerServiceRequestService.js): Customer-side request creation, quote persistence, cancellation routing with direct Firestore/live-tracking mutation plus backend cancellation billing handoff, and direct Firestore service-request rating writes.
+    * [helperRequestStatsService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/services/helperRequestStatsService.js): Client-side helper metrics recomputation used after customer-side cancellation flows now that helper request stats are no longer trigger-driven.
     * [scripts/node-with-production-env.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/scripts/node-with-production-env.js): Android Gradle Node wrapper that sets `NODE_ENV=production` for Expo release bundling while preserving normal development commands.
   * **Key Customer Components (`/uncedo/src/components/customer/`)**:
     * [ServiceShowcaseCarousel.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/components/customer/ServiceShowcaseCarousel.js): Pinterest-style masonry discovery feed for customer service tiles, using helper photos, lightweight card metadata, and fast service/package selection.
@@ -68,18 +66,21 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
   * [src/components/app/HelperHomeMap.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/components/app/HelperHomeMap.js): Dedicated helper home map with a live location marker and 50 km service radius, separate from the active-job route map.
   * [src/services/helperPayoutService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/services/helperPayoutService.js): Subscribes to backend `helperWeeklyPayouts` records so the helper wallet, weekly payment status, and payout history reflect scheduler-written payout states.
   * [src/services/liveTrackingRealtimeService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/services/liveTrackingRealtimeService.js): Realtime Database adapter for accepted-job map tracking, route snapshots, and terminal tracking status.
-  * [src/services/legalAgreementService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/services/legalAgreementService.js): Calls helper-agreement Cloud Functions to fetch the active contract bundle and submit signed acceptances.
+  * [src/services/legalAgreementService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/services/legalAgreementService.js): Reads helper-agreement documents directly from Firestore, records signed acceptances client-side, and uploads the helper acceptance PDF to Firebase Storage.
+  * [src/services/helperRequestStatsService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/services/helperRequestStatsService.js): Client-side replacement for helper offer/stat tracking, including helper-offer notification records and helper metric rollups derived from service-request transitions.
+  * [src/services/serviceRequestService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/services/serviceRequestService.js): Helper-side request offer acceptance/decline, live status changes, billing finalization handoff, and direct Firestore service-request rating writes.
   * [src/services/serviceCatalogService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/services/serviceCatalogService.js): Reads the live Firestore service catalog for helper browsing and onboarding.
   * [scripts/node-with-production-env.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/scripts/node-with-production-env.js): Android Gradle Node wrapper that sets `NODE_ENV=production` for Expo release bundling while preserving normal development commands.
 
 ---
 
 ## 4. Uncedo Web App (`/web`)
-* **Common References**: "Web dashboard", "Uncedo website".
-* **Purpose**: Vite + React web interface containing marketing landing pages and web flows.
+* **Common References**: "Website", "landing page", "privacy page", "terms page".
+* **Purpose**: Vite + React public website containing the landing page plus legal pages only.
 * **Key Pages (`/web/src/pages/`)**:
-  * [SessionRoomPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/web/src/pages/app/SessionRoomPage.jsx): Full classroom view embedding WebRTC voice broadcasting and the complete tldraw board canvas.
-  * [OnboardingPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/web/src/pages/app/OnboardingPage.jsx): Registration wizard capturing credentials and pricing setups.
+  * [LandingPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/web/src/pages/LandingPage.jsx): Public Uncedo marketing landing page.
+  * [PrivacyPolicyPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/web/src/pages/PrivacyPolicyPage.jsx): Public privacy policy page.
+  * [TermsPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/web/src/pages/TermsPage.jsx): Public terms of service page.
 
 ---
 
@@ -96,7 +97,8 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
   * [admin/src/pages/CustomersPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/pages/CustomersPage.jsx): Customer directory and stored location/profile data.
   * [admin/src/constants/serviceCatalog.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/constants/serviceCatalog.js): Admin catalog seed data used to render the live service list and helper-approval workflow.
   * [admin/src/services/helperAgreementService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/services/helperAgreementService.js): Admin-side client for reading and publishing helper agreement versions through Cloud Functions.
-  * [admin/src/services/serviceCatalogService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/services/serviceCatalogService.js): Firestore service-catalog reads/writes plus Firebase Storage image upload/delete helpers for the admin services page.
+  * [admin/src/services/serviceCatalogService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/services/serviceCatalogService.js): Firestore service-catalog reads/writes plus Firebase Storage image upload/delete helpers for the admin services page, including post-save request-reconciliation nudges.
+  * [admin/src/services/requestReconciliationService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/admin/src/services/requestReconciliationService.js): Admin-side request-reconciliation helper that nudges active service requests after helper approval/removal or service-catalog mutations so matching can re-run without the removed scheduled backend reconciler.
 
 ---
 

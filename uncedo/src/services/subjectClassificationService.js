@@ -1,8 +1,4 @@
-import { getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
-
-const CLASSIFY_SUBJECT_ENDPOINT = getFunctionEndpoint('classifySubject');
 const MAX_CLASSIFICATION_INPUT_CHARS = 6000;
-const CLASSIFICATION_TIMEOUT_MS = 12000;
 
 function buildFallbackClassification() {
   return {
@@ -111,15 +107,6 @@ function buildQuestionBlocksForClassification({ typedText = '', attachmentExtrac
   return blocks.slice(0, 6);
 }
 
-function fetchWithTimeout(url, options = {}, timeoutMs = CLASSIFICATION_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  return fetch(url, {
-    ...options,
-    signal: controller.signal,
-  }).finally(() => clearTimeout(timeoutId));
-}
-
 export function buildSubjectClassificationInput({ typedText = '', attachmentExtractions = [], supportedSubjects = [] } = {}) {
   const normalizedTypedText = normalizeText(typedText);
   const usableAttachmentTexts = attachmentExtractions
@@ -206,54 +193,27 @@ export async function classifySubjectFromText({ inputText = '', inputPayload = n
     return buildFallbackClassification();
   }
 
-  const clients = getFirebaseClients();
-  const idToken = await clients?.auth?.currentUser?.getIdToken?.();
-  if (!idToken) {
-    throw new Error('You must be signed in before classifying a request.');
-  }
+  const fallbackClassification = buildFallbackClassification();
+  const supportedSubject = normalizeSubjectToSupported(normalizedInput, supportedSubjects)
+    || buildSupportedSubjectHints({ text: normalizedInput, supportedSubjects })[0]
+    || '';
+  const topic = normalizeText(
+    normalizedInput
+      .replace(/\b(i need help with|please help me with|help me with)\b/gi, '')
+      .slice(0, 120),
+  );
+  const estimatedMinutes = estimateMinutesFromPayload({ structuredPayload: inputPayload || {} });
 
-  try {
-    const response = await fetchWithTimeout(CLASSIFY_SUBJECT_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${idToken}`,
-      },
-      body: JSON.stringify({
-        inputText: normalizedInput,
-        inputPayload,
-        supportedSubjects,
-      }),
-    });
-
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok || payload?.success !== true || !payload?.classification) {
-      throw new Error(payload?.message || 'Subject classification failed.');
-    }
-
-    const parsed = payload.classification;
-    const fallbackClassification = buildFallbackClassification();
-    const supportedSubject = normalizeSubjectToSupported(parsed?.subject, supportedSubjects) || fallbackClassification.subject;
-    const confidence = ['high', 'low', 'unknown'].includes(parsed?.subjectConfidence)
-      ? parsed.subjectConfidence
-      : 'unknown';
-    const topic = normalizeText(parsed?.topic);
-    const estimatedMinutes = clampEstimatedMinutes(parsed?.estimatedMinutes);
-    const needsManualSubjectSelection = Boolean(parsed?.needsManualSubjectSelection) || !supportedSubject;
-
-    return {
-      subject: supportedSubject,
-      unsupportedSubject: normalizeText(parsed?.unsupportedSubject),
-      topic,
-      estimatedMinutes: estimatedMinutes || estimateMinutesFromPayload({ structuredPayload: inputPayload || {} }),
-      subjectConfidence: confidence,
-      needsManualSubjectSelection,
-      unsupportedSubjectRequested: Boolean(parsed?.unsupportedSubjectRequested || parsed?.unsupportedSubject),
-      unsupportedSubjectRecorded: Boolean(payload?.unsupportedSubjectRecorded),
-      academicBrainOutput: parsed?.academicBrainOutput || null,
-      isFallback: false,
-    };
-  } catch (error) {
-    return buildFallbackClassification();
-  }
+  return {
+    subject: supportedSubject,
+    unsupportedSubject: '',
+    topic,
+    estimatedMinutes,
+    subjectConfidence: supportedSubject ? 'low' : 'unknown',
+    needsManualSubjectSelection: !supportedSubject,
+    unsupportedSubjectRequested: false,
+    unsupportedSubjectRecorded: false,
+    analysisOutput: null,
+    isFallback: !supportedSubject,
+  };
 }

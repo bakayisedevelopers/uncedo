@@ -77,10 +77,10 @@ This Tutor Agreement is entered into between **${LEGAL_ENTITY_NAME}** ("Parakleo
 - The tutor must follow applicable privacy, security, and data-handling requirements.
 - The tutor must report suspected data misuse, loss, or breach to Parakleo promptly.
 
-**9. AI and platform tools**
+**9. Platform tools**
 
-- Parakleo may use AI-assisted tools for extraction, classification, whiteboard preparation, lesson support, or moderation.
-- The tutor must not rely blindly on AI output and remains responsible for checking educational correctness during lessons.
+- Parakleo may provide software tools and workflow support inside the platform to help tutors deliver lessons and manage requests.
+- The tutor remains responsible for checking educational correctness during lessons and for using platform tools appropriately.
 
 **10. Payouts and fees**
 
@@ -587,6 +587,11 @@ async function acceptTutorAgreement({
       pdfUrl: existingAcceptance.pdfUrl,
     });
 
+    console.info('[tutor-agreement-user-write]', {
+      uid: user.uid,
+      traceLabel: 'functions:acceptTutorAgreement:reuseExistingAcceptance',
+      acceptanceId,
+    });
     await db.collection('users').doc(user.uid).set({
       ...userSnapshot,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -653,6 +658,11 @@ async function acceptTutorAgreement({
       pdfUrl,
     }, { merge: true });
 
+    console.info('[tutor-agreement-user-write]', {
+      uid: user.uid,
+      traceLabel: 'functions:acceptTutorAgreement:newAcceptance',
+      acceptanceId,
+    });
     transaction.set(
       db.collection('users').doc(user.uid),
       {

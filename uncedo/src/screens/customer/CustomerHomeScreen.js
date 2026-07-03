@@ -1,7 +1,6 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { CustomerCallToActionSheet } from '../../components/customer/CustomerCallToActionSheet';
 import { ServiceSearchOverlay } from '../../components/customer/ServiceSearchOverlay';
 import { ServiceShowcaseCarousel } from '../../components/customer/ServiceShowcaseCarousel';
 import { useAuth } from '../../context/AuthContext';
@@ -39,7 +38,6 @@ export function CustomerHomeScreen({
   bottomInset = 0,
   bottomNavVisible = true,
   onBottomNavVisibilityChange,
-  activeRequest,
   systemInsets = {},
 }) {
   const { user } = useAuth();
@@ -162,7 +160,6 @@ export function CustomerHomeScreen({
     });
   }, [rankedCards, user?.uid]);
 
-  const isTrackingActive = !!activeRequest && activeRequest.status !== 'collecting_details';
   const canUseServices = onboardingStatus.complete;
   const filteredResults = useMemo(() => {
     const ranked = rankedCards
@@ -237,38 +234,13 @@ export function CustomerHomeScreen({
 
       <ScrollView
         contentContainerStyle={{
-          paddingBottom: bottomInset + 172,
+          paddingBottom: bottomInset + 108,
           paddingTop: topInset + 70,
         }}
         showsVerticalScrollIndicator={false}
       >
         <ServiceShowcaseCarousel cards={rankedCards} onSelect={openSelection} />
       </ScrollView>
-
-      <View style={[styles.bottomSheetWrap, { bottom: bottomInset + 12 }]}>
-        <CustomerCallToActionSheet
-          disabled={!onboardingStatus.complete}
-          hasActiveRequest={isTrackingActive}
-          label={isTrackingActive ? 'Track Active Request' : 'Browse services'}
-          onPress={() => {
-            if (activeRequest) {
-              if (activeRequest.status !== 'collecting_details') {
-                navigate({
-                  key: 'ServiceRequestTracking',
-                  params: { requestId: activeRequest.id, parentTab: 'CustomerHome' },
-                });
-              } else {
-                navigate({
-                  key: 'ServiceRequestDetails',
-                  params: { requestId: activeRequest.id, parentTab: 'CustomerHome' },
-                });
-              }
-              return;
-            }
-            setSearchVisible(true);
-          }}
-        />
-      </View>
 
       <ServiceSearchOverlay
         onChangeText={setSearchQuery}
@@ -342,11 +314,5 @@ const styles = StyleSheet.create({
     color: '#a21caf',
     fontSize: 15,
     fontWeight: '700',
-  },
-  bottomSheetWrap: {
-    left: 0,
-    position: 'absolute',
-    right: 0,
-    zIndex: 18,
   },
 });

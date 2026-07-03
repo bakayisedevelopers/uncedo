@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { ErrorState, LoadingState } from '../../components/ui/States';
 import { StatusBadge } from '../../components/ui/StatusBadge';
+import { StickyScreenHeader } from '../../components/ui/StickyScreenHeader';
 import { useAuth } from '../../context/AuthContext';
 import { subscribeToRequestById } from '../../services/classRequestService';
 import { subscribeToStudentSessions } from '../../services/sessionService';
@@ -115,7 +116,14 @@ export function RequestDetailsScreen({ route, navigate, goBack }) {
   ];
 
   return (
-    <View style={styles.wrap}>
+    <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false} stickyHeaderIndices={[0]}>
+      <StickyScreenHeader
+        backLabel="Back to services"
+        onBack={() => goBack('Requests')}
+        subtitle={request.description || 'Open the service details below.'}
+        title={request.subject || request.topic || 'Service details'}
+      />
+
       <Card style={styles.heroCard}>
         <Text style={styles.kicker}>Service details</Text>
         <Text style={styles.heroTitle}>{request.subject || request.topic || 'Service request'}</Text>
@@ -170,17 +178,15 @@ export function RequestDetailsScreen({ route, navigate, goBack }) {
         >
           Re-request this service
         </Button>
-        <Button variant="secondary" onPress={() => goBack('Requests')}>
-          Back to Services
-        </Button>
       </View>
-    </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   wrap: {
     gap: 16,
+    paddingBottom: 32,
   },
   heroCard: {
     backgroundColor: '#fdf4ff',

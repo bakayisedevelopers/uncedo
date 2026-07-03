@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Card } from '../../components/ui/Card';
 import { ErrorState, LoadingState } from '../../components/ui/States';
 import { PaymentMethodsManager } from '../../components/customer/PaymentMethodsManager';
+import { StickyScreenHeader } from '../../components/ui/StickyScreenHeader';
 import { LEGAL_URLS } from '../../constants/legal';
 import { useAuth } from '../../context/AuthContext';
 import { subscribeToCustomerWallet } from '../../services/walletService';
@@ -27,16 +28,13 @@ export function CustomerPaymentsScreen({ navigate }) {
   if (!wallet) return <LoadingState label="Loading payment" />;
 
   return (
-    <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false}>
-      <Pressable accessibilityRole="button" onPress={() => navigate('Profile')} style={styles.backRow}>
-        <Ionicons color={colors.brandDark} name="chevron-back" size={18} />
-        <Text style={styles.backText}>Back to profile</Text>
-      </Pressable>
-
-      <View style={styles.header}>
-        <Text style={styles.title}>Payment</Text>
-        <Text style={styles.description}>Manage your cards and review your current Uncedo balance.</Text>
-      </View>
+    <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false} stickyHeaderIndices={[0]}>
+      <StickyScreenHeader
+        backLabel="Back to profile"
+        onBack={() => navigate('Profile')}
+        subtitle="Manage your cards and review your current Uncedo balance."
+        title="Payment"
+      />
 
       <Card style={styles.sectionCard}>
         <Text style={styles.sectionTitle}>Outstanding balance</Text>
@@ -84,25 +82,6 @@ const styles = StyleSheet.create({
   wrap: {
     gap: 16,
     paddingBottom: 32,
-  },
-  backRow: {
-    alignSelf: 'flex-start',
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 4,
-  },
-  backText: {
-    color: colors.brandDark,
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  header: {
-    gap: 6,
-  },
-  title: {
-    color: colors.text,
-    fontSize: 28,
-    fontWeight: '900',
   },
   description: {
     color: colors.muted,
