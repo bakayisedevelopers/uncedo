@@ -36,10 +36,10 @@ export function normalizeServiceCatalogEntry(entry = {}) {
     catalogId: id,
     categoryId: String(entry.categoryId || '').trim(),
     categoryName: String(entry.categoryName || '').trim(),
-    label: String(entry.label || entry.skillName || id).trim(),
-    promptLabel: String(entry.promptLabel || entry.label || entry.skillName || id).trim(),
+    label: String(entry.label || entry.serviceName || id).trim(),
+    promptLabel: String(entry.promptLabel || entry.label || entry.serviceName || id).trim(),
     description: String(entry.description || '').trim(),
-    kind: String(entry.kind || 'service').trim().toLowerCase(),
+    type: String(entry.type || 'service').trim().toLowerCase(),
     active: entry.active !== false,
     approved: entry.approved !== false,
     includedServiceIds: (Array.isArray(entry.includedServiceIds) ? entry.includedServiceIds : [])

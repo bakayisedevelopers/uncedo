@@ -13,9 +13,9 @@ function formatStatusLabel(status = 'approved') {
 }
 
 export function ServicesOfferedScreen({ navigate, goBack }) {
-  const { helperSkills, actions, saving, saveError } = useHelpersApp();
-  const orderedSkills = [...helperSkills].sort((left, right) => (
-    `${left.serviceName}-${left.name}`.localeCompare(`${right.serviceName}-${right.name}`)
+  const { helperServiceOfferings, actions, saving, saveError } = useHelpersApp();
+  const orderedServiceOfferings = [...helperServiceOfferings].sort((left, right) => (
+    `${left.serviceName}`.localeCompare(`${right.serviceName}`)
   ));
 
   return (
@@ -27,7 +27,7 @@ export function ServicesOfferedScreen({ navigate, goBack }) {
 
       <View style={styles.header}>
         <Text style={styles.eyebrow}>Helper</Text>
-        <Text style={styles.title}>Skills</Text>
+        <Text style={styles.title}>ServiceOfferings</Text>
         <Text style={styles.description}>
           Manage the services you offer, keep them active or paused, and open each service to update its work portfolio.
         </Text>
@@ -38,11 +38,11 @@ export function ServicesOfferedScreen({ navigate, goBack }) {
           title="Service rules"
           subtitle="Every helper service needs at least one uploaded work picture and must be approved by the admin before it can go live."
         />
-        <ActionButton label="Add service" onPress={() => navigate({ key: 'SkillCatalog', params: { parentTab: 'Profile' } })} />
+        <ActionButton label="Add service" onPress={() => navigate({ key: 'ServiceOfferingCatalog', params: { parentTab: 'Profile' } })} />
         {saveError ? <Text style={styles.error}>{saveError}</Text> : null}
       </Card>
 
-      {!orderedSkills.length ? (
+      {!orderedServiceOfferings.length ? (
         <Card>
           <EmptyState
             title="No services added yet"
@@ -51,49 +51,48 @@ export function ServicesOfferedScreen({ navigate, goBack }) {
         </Card>
       ) : null}
 
-      {orderedSkills.map((skill) => (
-        <View key={skill.id} style={styles.skillRow}>
+      {orderedServiceOfferings.map((offering) => (
+        <View key={offering.id} style={styles.offeringRow}>
           <Pressable
             accessibilityRole="button"
             onPress={() => navigate({
-              key: 'SkillDetails',
+              key: 'ServiceOfferingDetails',
               params: {
                 parentTab: 'Profile',
-                serviceId: skill.serviceId,
-                skillName: skill.name,
+                serviceId: offering.serviceId,
+                serviceName: offering.serviceName,
               },
             })}
-            style={({ pressed }) => [styles.skillRowPressable, pressed && styles.rowPressed]}
+            style={({ pressed }) => [styles.offeringRowPressable, pressed && styles.rowPressed]}
           >
-            <View style={styles.skillIcon}>
+            <View style={styles.offeringIcon}>
               <Ionicons color={colors.brandDark} name="sparkles-outline" size={18} />
             </View>
-            <View style={styles.skillBody}>
-              <Text style={styles.skillTitle}>{skill.name}</Text>
-              <Text style={styles.skillSubtitle}>{skill.serviceName}</Text>
-              <Text style={styles.skillMeta}>
-                {skill.pictures.length} work photo{skill.pictures.length === 1 ? '' : 's'}
+            <View style={styles.offeringBody}>
+              <Text style={styles.offeringTitle}>{offering.serviceName}</Text>
+              <Text style={styles.offeringSubtitle}>{offering.serviceName}</Text>
+              <Text style={styles.offeringMeta}>
+                {offering.photos.length} work photo{offering.photos.length === 1 ? '' : 's'}
               </Text>
               <View style={styles.badgeRow}>
-                <StatusBadge label={formatStatusLabel(skill.status)} tone={skill.status === 'approved' ? 'success' : 'warning'} />
-                <StatusBadge label={skill.active ? 'Active' : 'Paused'} tone={skill.active ? 'info' : 'neutral'} />
+                <StatusBadge label={formatStatusLabel(offering.status)} tone={offering.status === 'approved' ? 'success' : 'warning'} />
+                <StatusBadge label={offering.active ? 'Active' : 'Paused'} tone={offering.active ? 'info' : 'neutral'} />
               </View>
             </View>
           </Pressable>
 
           <View style={styles.switchWrap}>
-            <Text style={styles.switchLabel}>{skill.active ? 'On' : 'Off'}</Text>
+            <Text style={styles.switchLabel}>{offering.active ? 'On' : 'Off'}</Text>
             <Switch
-              disabled={saving || skill.status !== 'approved'}
-              onValueChange={(value) => actions.toggleSkillActive({
-                serviceId: skill.serviceId,
-                skillName: skill.name,
-                catalogId: skill.catalogId,
+              disabled={saving || offering.status !== 'approved'}
+              onValueChange={(value) => actions.toggleServiceOfferingActive({
+                serviceId: offering.serviceId,
+                serviceName: offering.serviceName,
                 active: value,
               })}
               thumbColor="#ffffff"
               trackColor={{ false: '#d1d5db', true: '#22c55e' }}
-              value={skill.active}
+              value={offering.active}
             />
           </View>
         </View>
@@ -143,7 +142,7 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
   },
-  skillRow: {
+  offeringRow: {
     alignItems: 'center',
     backgroundColor: colors.surface,
     borderColor: colors.border,
@@ -153,7 +152,7 @@ const styles = StyleSheet.create({
     gap: 12,
     padding: 14,
   },
-  skillRowPressable: {
+  offeringRowPressable: {
     alignItems: 'center',
     flex: 1,
     flexDirection: 'row',
@@ -162,7 +161,7 @@ const styles = StyleSheet.create({
   rowPressed: {
     transform: [{ scale: 0.99 }],
   },
-  skillIcon: {
+  offeringIcon: {
     alignItems: 'center',
     backgroundColor: '#fff8fc',
     borderRadius: 16,
@@ -170,21 +169,21 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     width: 38,
   },
-  skillBody: {
+  offeringBody: {
     flex: 1,
     gap: 3,
   },
-  skillTitle: {
+  offeringTitle: {
     color: colors.text,
     fontSize: 15,
     fontWeight: '800',
   },
-  skillSubtitle: {
+  offeringSubtitle: {
     color: colors.brandDark,
     fontSize: 12,
     fontWeight: '700',
   },
-  skillMeta: {
+  offeringMeta: {
     color: colors.muted,
     fontSize: 12,
     lineHeight: 18,

@@ -114,7 +114,7 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
 
   const categoryId = String(item?.categoryId || '').trim();
   const serviceIds = Array.isArray(item?.serviceIds) ? item.serviceIds : [];
-  const selectedPackageId = ['package', 'bundle'].includes(String(item?.kind || '').trim().toLowerCase())
+  const selectedPackageId = ['package', 'bundle'].includes(String(item?.type || '').trim().toLowerCase())
     ? String(item?.packageId || item?.entityId || '').trim()
     : '';
 
@@ -340,7 +340,7 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
               <View style={styles.heroTint} />
               <View style={styles.heroOverlay}>
                 <View style={styles.heroPill}>
-                  <Text style={styles.heroPillText}>{item.kind === 'bundle' || item.kind === 'package' ? 'Bundle' : 'Service'}</Text>
+                  <Text style={styles.heroPillText}>{item.type === 'bundle' || item.type === 'package' ? 'Bundle' : 'Service'}</Text>
                 </View>
                 <View style={styles.heroFooter}>
                   <Text style={styles.heroTitle}>{item.title}</Text>

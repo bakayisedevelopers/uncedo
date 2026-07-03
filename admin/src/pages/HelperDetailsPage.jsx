@@ -5,13 +5,13 @@ import { Badge, Card, EmptyState, LoadingState, SectionTitle } from '../componen
 import {
   flattenProviderServices,
   listHelperProfiles,
-  removeHelperSkill,
+  removeHelperServiceOffering,
   updateHelperModeration,
   updateHelperServiceStatus,
 } from '../services/adminService';
 import {
   groupRowsByService,
-  isPendingSkillStatus,
+  isPendingServiceOfferingStatus,
 } from '../utils/moderationView';
 
 function statusTone(status = '') {
@@ -84,7 +84,7 @@ export default function HelperDetailsPage() {
   const serviceRows = useMemo(() => flattenProviderServices(selected ? [selected] : []), [selected]);
   const serviceGroups = useMemo(() => groupRowsByService(serviceRows), [serviceRows]);
   const pendingCount = useMemo(
-    () => serviceRows.filter((row) => isPendingSkillStatus(row.skillStatus)).length,
+    () => serviceRows.filter((row) => isPendingServiceOfferingStatus(row.offeringStatus)).length,
     [serviceRows],
   );
 
@@ -99,13 +99,13 @@ export default function HelperDetailsPage() {
     }
   };
 
-  const applySkillPatch = async (row, updates) => {
+  const applyServiceOfferingPatch = async (row, updates) => {
     setIsMutating(true);
     try {
       await updateHelperServiceStatus({
         uid: row.providerUid,
         serviceId: row.serviceId,
-        skillId: row.skillId,
+        offeringId: row.offeringId,
         updates,
       });
       await load();
@@ -114,13 +114,13 @@ export default function HelperDetailsPage() {
     }
   };
 
-  const deleteSkill = async (row) => {
+  const deleteServiceOffering = async (row) => {
     setIsMutating(true);
     try {
-      await removeHelperSkill({
+      await removeHelperServiceOffering({
         uid: row.providerUid,
         serviceId: row.serviceId,
-        skillId: row.skillId,
+        offeringId: row.offeringId,
       });
       await load();
     } finally {
@@ -202,7 +202,7 @@ export default function HelperDetailsPage() {
                 ['Address', selected.homeAddress || selected.customerProfile?.serviceAddress || 'Not set'],
                 ['Role', selected.activeRole || selected.role || 'helper'],
                 ['Service count', String(serviceRows.length)],
-                ['Pending skills', String(pendingCount)],
+                ['Pending offerings', String(pendingCount)],
                 ['Agreement', helperAgreementLabel(selected)],
                 ['Business', selected.businessName || 'Not a business profile'],
                 ['Account', selected.suspended ? 'Suspended' : 'Active'],
@@ -257,13 +257,13 @@ export default function HelperDetailsPage() {
           <Card>
             <SectionTitle
               eyebrow="Service submissions"
-              title="Collapsible skills"
-              description="Each service expands into its individual skill submissions with photos and moderation actions."
+              title="Collapsible offerings"
+              description="Each service expands into its individual offering submissions with photos and moderation actions."
             />
 
             <div className="grid gap-3 sm:grid-cols-3">
               <div className="rounded-[22px] border border-white/10 bg-white/5 p-4">
-                <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-ink-300">Skills</p>
+                <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-ink-300">ServiceOfferings</p>
                 <p className="mt-2 text-2xl font-bold text-white">{serviceRows.length}</p>
               </div>
               <div className="rounded-[22px] border border-white/10 bg-white/5 p-4">
@@ -286,7 +286,7 @@ export default function HelperDetailsPage() {
                     </div>
                     <div className="flex flex-wrap gap-2">
                       <Badge tone={group.pendingCount ? 'warning' : 'success'}>{group.pendingCount} pending</Badge>
-                      <Badge tone={group.totalCount ? 'brand' : 'neutral'}>{group.totalCount} skill{group.totalCount === 1 ? '' : 's'}</Badge>
+                      <Badge tone={group.totalCount ? 'brand' : 'neutral'}>{group.totalCount} offering{group.totalCount === 1 ? '' : 's'}</Badge>
                     </div>
                   </div>
 
@@ -295,16 +295,16 @@ export default function HelperDetailsPage() {
                       const defaultOpen = focusedServiceId === group.serviceId && index === 0;
 
                       return (
-                        <details key={row.skillId} open={defaultOpen} className="rounded-[20px] border border-white/10 bg-white/5">
+                        <details key={row.offeringId} open={defaultOpen} className="rounded-[20px] border border-white/10 bg-white/5">
                           <summary className="list-none [&::-webkit-details-marker]:hidden cursor-pointer rounded-[20px] px-4 py-4">
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0">
-                                <p className="text-sm font-bold text-white">{row.skillName}</p>
+                                <p className="text-sm font-bold text-white">{row.serviceName}</p>
                                 <p className="mt-1 text-xs text-ink-300">{row.serviceName}</p>
                               </div>
                               <div className="flex flex-wrap gap-2">
-                                <Badge tone={statusTone(row.skillStatus)}>{row.skillStatus}</Badge>
-                                <Badge tone={row.skillActive ? 'success' : 'neutral'}>{row.skillActive ? 'Active' : 'Paused'}</Badge>
+                                <Badge tone={statusTone(row.offeringStatus)}>{row.offeringStatus}</Badge>
+                                <Badge tone={row.offeringActive ? 'success' : 'neutral'}>{row.offeringActive ? 'Active' : 'Paused'}</Badge>
                                 <Badge tone={row.suspended ? 'danger' : 'neutral'}>{row.suspended ? 'Suspended' : 'Live'}</Badge>
                               </div>
                             </div>
@@ -320,7 +320,7 @@ export default function HelperDetailsPage() {
                                   rel="noreferrer"
                                   className="overflow-hidden rounded-[20px] border border-white/10 bg-ink-950/40"
                                 >
-                                  <img src={picture.uri} alt={row.skillName} className="h-40 w-full object-cover" />
+                                  <img src={picture.uri} alt={row.serviceName} className="h-40 w-full object-cover" />
                                   <div className="flex items-center justify-between gap-2 px-3 py-2 text-xs text-ink-300">
                                     <span>{picture.uploadedAt ? new Date(picture.uploadedAt).toLocaleDateString() : 'Uploaded'}</span>
                                     <span className="inline-flex items-center gap-1"><ImageIcon className="h-3.5 w-3.5" /> Open</span>
@@ -328,7 +328,7 @@ export default function HelperDetailsPage() {
                                 </a>
                               )) : (
                                 <div className="rounded-[20px] border border-dashed border-white/10 bg-white/5 p-4 text-sm text-ink-200 sm:col-span-2">
-                                  No photos uploaded for this skill.
+                                  No photos uploaded for this offering.
                                 </div>
                               )}
                             </div>
@@ -337,7 +337,7 @@ export default function HelperDetailsPage() {
                               <button
                                 type="button"
                                 disabled={isMutating}
-                                onClick={() => applySkillPatch(row, { status: 'approved', active: true, verified: true })}
+                                onClick={() => applyServiceOfferingPatch(row, { status: 'approved', active: true, verified: true })}
                                 className="rounded-2xl bg-brand px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60"
                               >
                                 Approve
@@ -345,7 +345,7 @@ export default function HelperDetailsPage() {
                               <button
                                 type="button"
                                 disabled={isMutating}
-                                onClick={() => applySkillPatch(row, { status: 'pending', active: false })}
+                                onClick={() => applyServiceOfferingPatch(row, { status: 'pending', active: false })}
                                 className="rounded-2xl border border-amber-400/20 bg-amber-400/10 px-4 py-2.5 text-sm font-bold text-amber-100 disabled:opacity-60"
                               >
                                 <Pause className="mr-2 inline-block h-4 w-4" />
@@ -354,7 +354,7 @@ export default function HelperDetailsPage() {
                               <button
                                 type="button"
                                 disabled={isMutating}
-                                onClick={() => applySkillPatch(row, { status: 'rejected', active: false, verified: false })}
+                                onClick={() => applyServiceOfferingPatch(row, { status: 'rejected', active: false, verified: false })}
                                 className="rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-2.5 text-sm font-bold text-rose-100 disabled:opacity-60"
                               >
                                 Decline
@@ -362,7 +362,7 @@ export default function HelperDetailsPage() {
                               <button
                                 type="button"
                                 disabled={isMutating}
-                                onClick={() => deleteSkill(row)}
+                                onClick={() => deleteServiceOffering(row)}
                                 className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60"
                               >
                                 <Trash2 className="h-4 w-4" />
@@ -378,7 +378,7 @@ export default function HelperDetailsPage() {
               )) : (
                 <EmptyState
                   title="No services yet"
-                  description="This helper has not uploaded any service skills with work pictures."
+                  description="This helper has not uploaded any serviceOfferings with work pictures."
                 />
               )}
             </div>

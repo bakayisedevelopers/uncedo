@@ -30,7 +30,7 @@ export function VerificationScreen({ navigate, goBack }) {
         <View style={styles.list}>
           <Text style={styles.item}>1. Agreement accepted for current helper version</Text>
           <Text style={styles.item}>2. Profile selfie captured for helper identity</Text>
-          <Text style={styles.item}>3. Skills include uploaded work photos</Text>
+          <Text style={styles.item}>3. ServiceOfferings include uploaded work photos</Text>
           <Text style={styles.item}>4. Payout destination verified for weekly disbursement</Text>
         </View>
 

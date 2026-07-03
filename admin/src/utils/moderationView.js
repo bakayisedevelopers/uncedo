@@ -10,24 +10,24 @@ export function slugify(value = '') {
     .replace(/^_+|_+$/g, '');
 }
 
-export function isPendingSkillStatus(status = '') {
+export function isPendingServiceOfferingStatus(status = '') {
   const normalized = normalize(status);
   return normalized === 'pending' || normalized === 'review';
 }
 
-export function isApprovedSkillStatus(status = '') {
+export function isApprovedServiceOfferingStatus(status = '') {
   return normalize(status) === 'approved';
 }
 
-export function isRejectedSkillStatus(status = '') {
+export function isRejectedServiceOfferingStatus(status = '') {
   return normalize(status) === 'rejected';
 }
 
 export function matchesCatalogItem(row = {}, item = {}) {
   const rowKeys = [
     row.catalogId,
-    row.skillId,
-    row.skillName,
+    row.offeringId,
+    row.serviceName,
     row.serviceId,
     row.serviceName,
   ]
@@ -67,10 +67,10 @@ function groupRows(rows = [], getKey, buildMeta) {
     ...meta,
     rows: groupedRows,
     totalCount: groupedRows.length,
-    pendingCount: groupedRows.filter((row) => isPendingSkillStatus(row.skillStatus)).length,
-    approvedCount: groupedRows.filter((row) => isApprovedSkillStatus(row.skillStatus)).length,
-    rejectedCount: groupedRows.filter((row) => isRejectedSkillStatus(row.skillStatus)).length,
-    pausedCount: groupedRows.filter((row) => row.skillActive === false).length,
+    pendingCount: groupedRows.filter((row) => isPendingServiceOfferingStatus(row.offeringStatus)).length,
+    approvedCount: groupedRows.filter((row) => isApprovedServiceOfferingStatus(row.offeringStatus)).length,
+    rejectedCount: groupedRows.filter((row) => isRejectedServiceOfferingStatus(row.offeringStatus)).length,
+    pausedCount: groupedRows.filter((row) => row.offeringActive === false).length,
     serviceCount: new Set(groupedRows.map((row) => row.serviceId).filter(Boolean)).size,
   }));
 }
@@ -90,7 +90,7 @@ export function groupRowsByHelper(rows = []) {
       phoneNumber: row.phoneNumber || '',
       suspended: Boolean(row.suspended),
       verificationStatus: String(row.verificationStatus || 'pending').toLowerCase(),
-      skillRows: [],
+      offeringRows: [],
     }),
   ).sort((left, right) => {
     if (right.pendingCount !== left.pendingCount) {
@@ -106,7 +106,7 @@ export function groupRowsByService(rows = []) {
     (row) => row.serviceId || row.catalogId || row.serviceName,
     (row) => ({
       serviceId: row.serviceId || row.catalogId || '',
-      serviceName: row.serviceName || row.skillName || 'Service',
+      serviceName: row.serviceName || row.serviceName || 'Service',
       serviceDescription: row.serviceDescription || '',
     }),
   ).sort((left, right) => {
