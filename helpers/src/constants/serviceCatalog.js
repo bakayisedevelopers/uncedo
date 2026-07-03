@@ -18,7 +18,7 @@ function rebuildServiceCatalog() {
       id: category.id,
       name: category.name,
       description: category.description,
-      skills: [],
+      services: [],
     }));
 
   SERVICE_CATALOG.splice(0, SERVICE_CATALOG.length, ...next);

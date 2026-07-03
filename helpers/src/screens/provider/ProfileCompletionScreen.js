@@ -124,9 +124,9 @@ export function ProfileCompletionScreen({ navigate, goBack }) {
       </Card>
 
       <Card>
-        <SectionHeading title="Skills" subtitle="At least one active skill with an uploaded work photo is required." />
-        <Text style={styles.copy}>Open your skills page to add helper skills, upload work pictures, and control availability.</Text>
-        <ActionButton label="Open skills" onPress={() => navigate({ key: 'ServicesOffered', params: { parentTab: 'Profile' } })} />
+        <SectionHeading title="ServiceOfferings" subtitle="At least one active offering with an uploaded work photo is required." />
+        <Text style={styles.copy}>Open your offerings page to add helper offerings, upload work pictures, and control availability.</Text>
+        <ActionButton label="Open offerings" onPress={() => navigate({ key: 'ServicesOffered', params: { parentTab: 'Profile' } })} />
       </Card>
 
       <Card>

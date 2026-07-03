@@ -26,8 +26,8 @@ import { ProviderDetailsScreen } from '../screens/provider/ProviderDetailsScreen
 import { ProviderLegalScreen } from '../screens/provider/ProviderLegalScreen';
 import { ProviderProfileScreen } from '../screens/provider/ProviderProfileScreen';
 import { ProviderSecurityScreen } from '../screens/provider/ProviderSecurityScreen';
-import { SkillCatalogScreen } from '../screens/provider/SkillCatalogScreen';
-import { SkillDetailsScreen } from '../screens/provider/SkillDetailsScreen';
+import { ServiceOfferingCatalogScreen } from '../screens/provider/ServiceOfferingCatalogScreen';
+import { ServiceOfferingDetailsScreen } from '../screens/provider/ServiceOfferingDetailsScreen';
 import { ServicesOfferedScreen } from '../screens/provider/ServicesOfferedScreen';
 import { VerificationScreen } from '../screens/provider/VerificationScreen';
 import { HelperOfferOverlay } from '../components/app/HelperOfferOverlay';
@@ -53,8 +53,8 @@ const secondaryScreens = {
   ProviderLegal: ProviderLegalScreen,
   ProfileCompletion: ProfileCompletionScreen,
   ServicesOffered: ServicesOfferedScreen,
-  SkillCatalog: SkillCatalogScreen,
-  SkillDetails: SkillDetailsScreen,
+  ServiceOfferingCatalog: ServiceOfferingCatalogScreen,
+  ServiceOfferingDetails: ServiceOfferingDetailsScreen,
   Earnings: EarningsScreen,
   Agreement: AgreementScreen,
   Verification: VerificationScreen,

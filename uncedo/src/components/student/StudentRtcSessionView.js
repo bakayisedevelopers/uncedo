@@ -133,7 +133,7 @@ export function StudentRtcSessionView({
               }
               var sourcePromise = originalGetUserMedia(constraints).then(function (stream) {
                   var tracks = (stream && stream.getTracks ? stream.getTracks() : []).map(function (t) {
-                    return { kind: t.kind, id: t.id, enabled: t.enabled, muted: t.muted, readyState: t.readyState };
+                    return { type: t.type, id: t.id, enabled: t.enabled, muted: t.muted, readyState: t.readyState };
                   });
                   if (window.ReactNativeWebView && typeof window.ReactNativeWebView.postMessage === 'function') {
                     window.ReactNativeWebView.postMessage(JSON.stringify({

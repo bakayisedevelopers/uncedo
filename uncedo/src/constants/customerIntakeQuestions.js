@@ -505,7 +505,7 @@ const SERVICE_QUESTION_PLAN = {
     optional: [q('pedicure_reference_photo', 'Would you like to upload a reference photo?', { answerType: 'enum', options: ['yes', 'no'] })],
   },
   waxing_prep: {
-    required: [q('waxing_prep_scope', 'What kind of waxing prep do you need?', { answerType: 'text' })],
+    required: [q('waxing_prep_scope', 'What type of waxing prep do you need?', { answerType: 'text' })],
     optional: [q('waxing_prep_same_visit', 'Is this part of a beauty appointment today?', { answerType: 'enum', options: ['yes', 'no'] })],
   },
   haircut: {

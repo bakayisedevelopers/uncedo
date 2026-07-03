@@ -6,6 +6,7 @@ const { logger } = require('firebase-functions');
 const admin = require('firebase-admin');
 const { Resend } = require('resend');
 const { createHash, randomUUID } = require('crypto');
+const h3 = require('h3-js');
 const {
   normalizeServiceCatalogEntry: normalizeMarketplaceServiceCatalogEntry,
 } = require('./serviceMarketplacePricing');
@@ -183,6 +184,7 @@ const HELPER_PAYOUT_COLLECTION = 'helperWeeklyPayouts';
 const PAYOUT_LOOKBACK_WEEKS = 12;
 const FAIRNESS_WORKLOAD_CAP = 10;
 const HELPER_DISPATCH_MAX_RADIUS_KM = 70;
+const HELPER_DISPATCH_H3_RESOLUTION = 4;
 const HELPER_DISPATCH_DISTANCE_BANDS = [
   { key: 'within_5km', minKm: 0, maxKm: 5 },
   { key: 'within_10km', minKm: 5, maxKm: 10 },
@@ -537,56 +539,6 @@ function normalizeCatalogIdList(values = []) {
   )];
 }
 
-function normalizeHelperSkill(skill = {}, serviceId = '') {
-  const catalogId = normalizeServiceToken(skill?.catalogId || skill?.serviceCatalogId || skill?.name || '');
-  const name = String(skill?.name || skill?.skillName || catalogId).trim();
-  if (!catalogId || !name) {
-    return null;
-  }
-
-  return {
-    ...skill,
-    id: String(skill?.id || `${serviceId}_${catalogId}`).trim() || `${serviceId}_${catalogId}`,
-    catalogId,
-    name,
-    status: String(skill?.status || 'pending').trim().toLowerCase() || 'pending',
-    active: skill?.active !== false,
-    verified: skill?.verified !== false,
-    approvalSource: String(skill?.approvalSource || '').trim().toLowerCase() || '',
-    derivedFromBundleIds: normalizeCatalogIdList(skill?.derivedFromBundleIds),
-    derivedFromServiceIds: normalizeCatalogIdList(skill?.derivedFromServiceIds),
-    pictures: Array.isArray(skill?.pictures) ? skill.pictures.filter(Boolean) : [],
-    createdAt: skill?.createdAt || null,
-    updatedAt: skill?.updatedAt || null,
-  };
-}
-
-function normalizeHelperServicesForApprovalSync(services = []) {
-  return (Array.isArray(services) ? services : [])
-    .map((service) => {
-      const serviceId = String(service?.serviceId || '').trim();
-      if (!serviceId) {
-        return null;
-      }
-
-      return {
-        ...service,
-        serviceId,
-        serviceName: String(service?.serviceName || service?.name || serviceId).trim(),
-        description: String(service?.description || '').trim(),
-        skills: (Array.isArray(service?.skills) ? service.skills : [])
-          .map((skill) => normalizeHelperSkill(skill, serviceId))
-          .filter(Boolean),
-      };
-    })
-    .filter(Boolean)
-    .filter((service) => Array.isArray(service.skills) && service.skills.length > 0);
-}
-
-function isApprovedHelperSkill(skill = {}) {
-  return String(skill?.status || '').trim().toLowerCase() === 'approved';
-}
-
 function isHelperUserRecord(user = {}) {
   const roles = new Set(
     [
@@ -599,279 +551,6 @@ function isHelperUserRecord(user = {}) {
   );
 
   return roles.has('helper') || roles.has('provider') || roles.has('tutor');
-}
-
-function mergeDerivedIds(existing = [], additions = []) {
-  return [...new Set([
-    ...normalizeCatalogIdList(existing),
-    ...normalizeCatalogIdList(additions),
-  ])];
-}
-
-function cloneHelperServicesForApprovalSync(services = []) {
-  return normalizeHelperServicesForApprovalSync(services).map((service) => ({
-    ...service,
-    skills: (service.skills || []).map((skill) => ({ ...skill })),
-  }));
-}
-
-function findSkillByCatalogId(services = [], catalogId = '') {
-  const normalizedCatalogId = normalizeServiceToken(catalogId);
-  if (!normalizedCatalogId) {
-    return null;
-  }
-
-  for (const service of services) {
-    for (const skill of (Array.isArray(service?.skills) ? service.skills : [])) {
-      if (normalizeServiceToken(skill?.catalogId || skill?.serviceCatalogId || '') === normalizedCatalogId) {
-        return { service, skill };
-      }
-    }
-  }
-
-  return null;
-}
-
-function skillHasBundleBackedPortfolio(skill = {}, helperServices = [], catalogIndex = buildActiveServiceCatalogIndex([])) {
-  const derivedBundleIds = normalizeCatalogIdList(skill?.derivedFromBundleIds);
-  if (!derivedBundleIds.length) {
-    return false;
-  }
-
-  return derivedBundleIds.some((bundleId) => {
-    const bundleSkillEntry = findSkillByCatalogId(helperServices, bundleId);
-    const bundleSkill = bundleSkillEntry?.skill || null;
-    if (!bundleSkill || bundleSkill.active === false || !isApprovedHelperSkill(bundleSkill)) {
-      return false;
-    }
-
-    const bundleCatalogEntry = catalogIndex.byId?.get(bundleId) || null;
-    return (
-      (Array.isArray(bundleSkill?.pictures) && bundleSkill.pictures.length > 0)
-      || (
-        bundleCatalogEntry
-        && String(bundleCatalogEntry.kind || '').toLowerCase() === 'bundle'
-        && bundleCatalogEntry.inheritBundleImages !== false
-      )
-    );
-  });
-}
-
-function skillMeetsPortfolioRequirement(skill = {}, helperServices = [], catalogEntry = null, catalogIndex = buildActiveServiceCatalogIndex([])) {
-  if (Array.isArray(skill?.pictures) && skill.pictures.length > 0) {
-    return true;
-  }
-
-  if (
-    catalogEntry
-    && String(catalogEntry.kind || '').toLowerCase() === 'bundle'
-    && catalogEntry.inheritBundleImages !== false
-  ) {
-    return true;
-  }
-
-  return skillHasBundleBackedPortfolio(skill, helperServices, catalogIndex);
-}
-
-function reconcileHelperServiceApprovals({
-  services = [],
-  serviceCatalogEntries = [],
-}) {
-  const normalizedServices = normalizeHelperServicesForApprovalSync(services);
-  const catalogIndex = buildActiveServiceCatalogIndex(serviceCatalogEntries);
-  const catalogById = catalogIndex.byId || new Map();
-  const autoSkillStateByCatalogId = new Map();
-
-  normalizedServices.forEach((service) => {
-    (service.skills || []).forEach((skill) => {
-      if (String(skill.approvalSource || '').toLowerCase() === 'bundle_sync') {
-        autoSkillStateByCatalogId.set(skill.catalogId, {
-          serviceId: service.serviceId,
-          serviceName: service.serviceName,
-          description: service.description,
-          skill: { ...skill },
-        });
-      }
-    });
-  });
-
-  const baselineServices = normalizedServices
-    .map((service) => ({
-      ...service,
-      skills: (service.skills || [])
-        .filter((skill) => String(skill.approvalSource || '').toLowerCase() !== 'bundle_sync')
-        .map((skill) => ({ ...skill })),
-    }))
-    .filter((service) => service.skills.length > 0);
-
-  const requiredIndividualApprovals = new Map();
-  const requiredBundleApprovals = new Map();
-  const effectiveApprovedCatalogIds = new Set();
-
-  baselineServices.forEach((service) => {
-    (service.skills || []).forEach((skill) => {
-      if (isApprovedHelperSkill(skill)) {
-        effectiveApprovedCatalogIds.add(skill.catalogId);
-      }
-    });
-  });
-
-  let changed = true;
-  let safetyCounter = 0;
-  while (changed && safetyCounter < 20) {
-    changed = false;
-    safetyCounter += 1;
-
-    for (const catalogEntry of catalogIndex.activeEntries) {
-      const bundleId = normalizeServiceToken(catalogEntry.id);
-      const includedServiceIds = normalizeCatalogIdList(catalogEntry.includedServiceIds);
-      if (String(catalogEntry.kind || '').toLowerCase() !== 'bundle' || !bundleId || !includedServiceIds.length) {
-        continue;
-      }
-
-      if (effectiveApprovedCatalogIds.has(bundleId)) {
-        for (const includedId of includedServiceIds) {
-          const current = requiredIndividualApprovals.get(includedId) || { bundleIds: [] };
-          const nextBundleIds = mergeDerivedIds(current.bundleIds, [bundleId]);
-          if (nextBundleIds.length !== current.bundleIds.length) {
-            requiredIndividualApprovals.set(includedId, { bundleIds: nextBundleIds });
-            changed = true;
-          }
-          if (!effectiveApprovedCatalogIds.has(includedId)) {
-            effectiveApprovedCatalogIds.add(includedId);
-            changed = true;
-          }
-        }
-      }
-
-      const hasEveryComponent = includedServiceIds.every((includedId) => effectiveApprovedCatalogIds.has(includedId));
-      if (hasEveryComponent) {
-        const current = requiredBundleApprovals.get(bundleId) || { serviceIds: [] };
-        const nextServiceIds = mergeDerivedIds(current.serviceIds, includedServiceIds);
-        if (nextServiceIds.length !== current.serviceIds.length) {
-          requiredBundleApprovals.set(bundleId, { serviceIds: nextServiceIds });
-          changed = true;
-        }
-        if (!effectiveApprovedCatalogIds.has(bundleId)) {
-          effectiveApprovedCatalogIds.add(bundleId);
-          changed = true;
-        }
-      }
-    }
-  }
-
-  const reconciledServices = cloneHelperServicesForApprovalSync(baselineServices);
-  const nowIso = new Date().toISOString();
-
-  function ensureServiceContainer(catalogEntry = {}, fallbackState = null) {
-    const targetServiceId = String(
-      fallbackState?.serviceId
-      || catalogEntry?.categoryId
-      || catalogEntry?.categoryName
-      || catalogEntry?.id
-      || 'services'
-    ).trim();
-    const existing = reconciledServices.find((service) => service.serviceId === targetServiceId);
-    if (existing) {
-      if (!existing.serviceName) {
-        existing.serviceName = String(
-          fallbackState?.serviceName
-          || catalogEntry?.categoryName
-          || targetServiceId
-        ).trim();
-      }
-      if (!existing.description && fallbackState?.description) {
-        existing.description = String(fallbackState.description || '').trim();
-      }
-      return existing;
-    }
-
-    const created = {
-      serviceId: targetServiceId,
-      serviceName: String(
-        fallbackState?.serviceName
-        || catalogEntry?.categoryName
-        || targetServiceId
-      ).trim(),
-      description: String(fallbackState?.description || '').trim(),
-      skills: [],
-    };
-    reconciledServices.push(created);
-    return created;
-  }
-
-  function applyDerivedApproval(catalogId, derivedState = {}, sourceType = 'bundle') {
-    const normalizedCatalogId = normalizeServiceToken(catalogId);
-    const catalogEntry = catalogById.get(normalizedCatalogId) || null;
-    if (!normalizedCatalogId || !catalogEntry) {
-      return;
-    }
-
-    const existing = findSkillByCatalogId(reconciledServices, normalizedCatalogId);
-    const fallbackAutoState = autoSkillStateByCatalogId.get(normalizedCatalogId) || null;
-    const targetService = ensureServiceContainer(catalogEntry, fallbackAutoState);
-    const existingSkill = existing?.skill || fallbackAutoState?.skill || null;
-    const existingApprovalSource = String(existingSkill?.approvalSource || '').toLowerCase();
-    const isManualApproved = existingSkill && existingApprovalSource !== 'bundle_sync' && isApprovedHelperSkill(existingSkill);
-    const shouldPreserveManualStatus = Boolean(isManualApproved);
-    const nextSkillPayload = {
-      ...(existingSkill || {}),
-      id: existingSkill?.id || `${targetService.serviceId}_${normalizedCatalogId}`,
-      catalogId: normalizedCatalogId,
-      name: existingSkill?.name || catalogEntry.label || normalizedCatalogId,
-      status: 'approved',
-      verified: true,
-      active: existingSkill?.active !== false,
-      approvalSource: shouldPreserveManualStatus ? existingApprovalSource || 'manual' : 'bundle_sync',
-      derivedFromBundleIds: sourceType === 'bundle'
-        ? mergeDerivedIds(existingSkill?.derivedFromBundleIds, derivedState.bundleIds)
-        : normalizeCatalogIdList(existingSkill?.derivedFromBundleIds),
-      derivedFromServiceIds: sourceType === 'service'
-        ? mergeDerivedIds(existingSkill?.derivedFromServiceIds, derivedState.serviceIds)
-        : normalizeCatalogIdList(existingSkill?.derivedFromServiceIds),
-      updatedAt: existingSkill?.updatedAt || existingSkill?.createdAt || nowIso,
-      createdAt: existingSkill?.createdAt || nowIso,
-      pictures: Array.isArray(existingSkill?.pictures) ? existingSkill.pictures : [],
-    };
-    const nextSkill = normalizeHelperSkill(nextSkillPayload, targetService.serviceId);
-    const existingNormalizedSkill = existingSkill ? normalizeHelperSkill(existingSkill, targetService.serviceId) : null;
-    if (existingNormalizedSkill && JSON.stringify(existingNormalizedSkill) === JSON.stringify(nextSkill)) {
-      return;
-    }
-
-    nextSkill.updatedAt = nowIso;
-
-    const skills = Array.isArray(targetService.skills) ? targetService.skills : [];
-    const targetIndex = skills.findIndex((skill) => skill.catalogId === normalizedCatalogId);
-    if (targetIndex >= 0) {
-      skills[targetIndex] = nextSkill;
-    } else {
-      skills.push(nextSkill);
-    }
-    targetService.skills = skills;
-  }
-
-  for (const [catalogId, derivedState] of requiredIndividualApprovals.entries()) {
-    applyDerivedApproval(catalogId, derivedState, 'bundle');
-  }
-
-  for (const [catalogId, derivedState] of requiredBundleApprovals.entries()) {
-    applyDerivedApproval(catalogId, derivedState, 'service');
-  }
-
-  const finalServices = reconciledServices
-    .map((service) => ({
-      ...service,
-      skills: (Array.isArray(service.skills) ? service.skills : [])
-        .map((skill) => normalizeHelperSkill(skill, service.serviceId))
-        .filter(Boolean),
-    }))
-    .filter((service) => service.skills.length > 0);
-
-  return {
-    changed: JSON.stringify(normalizedServices) !== JSON.stringify(finalServices),
-    services: finalServices,
-  };
 }
 
 function normalizeServiceCatalogEntry(entry = {}) {
@@ -945,15 +624,6 @@ function expandRequestedServiceTokens(requestServiceIds = [], serviceCatalogInde
   return [...tokens];
 }
 
-function skillBelongsToActiveCatalog(skill = {}, catalogIndex = buildActiveServiceCatalogIndex([])) {
-  const catalogToken = normalizeServiceToken(skill?.catalogId || skill?.serviceCatalogId || '');
-  const nameToken = normalizeServiceToken(skill?.name || '');
-  return (
-    (catalogToken && catalogIndex.activeCatalogIds.has(catalogToken))
-    || (nameToken && catalogIndex.activeTokens.has(nameToken))
-  );
-}
-
 async function getLiveServiceCatalogEntries() {
   const now = Date.now();
   if (serviceCatalogCache.entries.length && (now - serviceCatalogCache.loadedAtMs) < SERVICE_CATALOG_CACHE_TTL_MS) {
@@ -980,54 +650,15 @@ async function getLiveServiceCatalogEntries() {
   }
 }
 
-function helperSupportsCategory(helper = {}, categoryId = '', requestServiceIds = [], serviceCatalogIndex = null) {
+function helperSupportsCategory(helper = {}, categoryId = '', requestServiceIds = [], serviceCatalogIndex = null, helperOfferings = []) {
   const catalogIndex = serviceCatalogIndex || buildActiveServiceCatalogIndex([]);
   const categoryToken = normalizeServiceToken(categoryId);
-  const categoryEntries = catalogIndex.byCategoryId.get(categoryToken) || [];
-  if (!categoryEntries.length) {
+  if (!catalogIndex.byCategoryId.has(categoryToken)) {
     return false;
   }
 
-  const requestedTokens = expandRequestedServiceTokens(requestServiceIds, catalogIndex);
-  const helperServices = Array.isArray(helper.services) ? helper.services : [];
-  const activeCategorySkills = helperServices.flatMap((entry) => {
-    const serviceIdToken = normalizeServiceToken(entry?.serviceId || '');
-    return (Array.isArray(entry?.skills) ? entry.skills : [])
-      .filter((skill) => {
-        if (skill?.active === false || String(skill?.status || '').toLowerCase() !== 'approved') {
-          return false;
-        }
-        if (!skillBelongsToActiveCatalog(skill, catalogIndex)) {
-          return false;
-        }
-
-        const catalogToken = normalizeServiceToken(skill?.catalogId || skill?.serviceCatalogId || '');
-        const catalogEntry = catalogIndex.byId?.get(catalogToken) || null;
-        const skillCategoryToken = normalizeServiceToken(
-          catalogEntry?.categoryId || catalogEntry?.categoryName || serviceIdToken,
-        );
-        if (skillCategoryToken !== categoryToken) {
-          return false;
-        }
-
-        return skillMeetsPortfolioRequirement(skill, helperServices, catalogEntry, catalogIndex);
-      })
-      .map((skill) => ({
-        ...skill,
-        _catalogToken: normalizeServiceToken(skill?.catalogId || skill?.serviceCatalogId || ''),
-        _nameToken: normalizeServiceToken(skill?.name || ''),
-      }));
-  });
-
-  if (!activeCategorySkills.length) {
-    return false;
-  }
-  if (!requestedTokens.length) {
-    return true;
-  }
-
-  const helperSkillTokens = activeCategorySkills.flatMap((skill) => [skill._catalogToken, skill._nameToken]).filter(Boolean);
-  return requestedTokens.some((token) => helperSkillTokens.includes(token));
+  return getApprovedActiveHelperServiceOfferings(helperOfferings)
+    .some((offering) => helperServiceOfferingMatchesRequest(offering, categoryId, requestServiceIds, catalogIndex));
 }
 
 const CUSTOMER_RECOMMENDATION_EVENT_WEIGHTS = {
@@ -1187,7 +818,294 @@ function buildCustomerRecommendationTrainingSample({
   };
 }
 
-function isHelperDispatchEligible(helper = {}, categoryId = '', requestServiceIds = [], catalogIndex = null) {
+
+function uniqueTokens(values = []) {
+  return [...new Set((Array.isArray(values) ? values : [values]).map(normalizeServiceToken).filter(Boolean))];
+}
+
+function encodeGeohash(latitude, longitude, precision = 7) {
+  const base32 = '0123456789bcdefghjkmnpqrstuvwxyz';
+  let latRange = [-90, 90];
+  let lonRange = [-180, 180];
+  let hash = '';
+  let bit = 0;
+  let ch = 0;
+  let even = true;
+
+  while (hash.length < precision) {
+    const range = even ? lonRange : latRange;
+    const mid = (range[0] + range[1]) / 2;
+    const value = even ? longitude : latitude;
+    if (value >= mid) {
+      ch = (ch << 1) + 1;
+      range[0] = mid;
+    } else {
+      ch = (ch << 1);
+      range[1] = mid;
+    }
+    even = !even;
+    if (bit < 4) {
+      bit += 1;
+    } else {
+      hash += base32[ch];
+      bit = 0;
+      ch = 0;
+    }
+  }
+
+  return hash;
+}
+
+function getH3CellForLocation(location = null, resolution = HELPER_DISPATCH_H3_RESOLUTION) {
+  const latitude = normalizeCoordinate(location?.latitude);
+  const longitude = normalizeCoordinate(location?.longitude);
+  if (latitude === null || longitude === null) {
+    return null;
+  }
+
+  return h3.latLngToCell(latitude, longitude, resolution);
+}
+
+function getH3QueryCellsForLocation(location = null, resolution = HELPER_DISPATCH_H3_RESOLUTION) {
+  const centerCell = getH3CellForLocation(location, resolution);
+  if (!centerCell) return [];
+
+  // Resolution 4 keeps dispatch fan-out low while still narrowing the city/region search.
+  // Exact distance filtering below remains the source of truth for the 70 km radius.
+  return [...new Set(h3.gridDisk(centerCell, 3))];
+}
+
+function chunkList(values = [], size = 10) {
+  const chunks = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function buildHelperDispatchServiceIds(helperOfferings = [], catalogIndex = buildActiveServiceCatalogIndex([])) {
+  const categoryIds = new Set();
+  const serviceIds = new Set();
+  const expandedServiceIds = new Set();
+
+  getApprovedActiveHelperServiceOfferings(helperOfferings).forEach((offering) => {
+    const serviceToken = normalizeServiceToken(offering.serviceId);
+    const categoryToken = normalizeServiceToken(offering.categoryId);
+    const nameToken = normalizeServiceToken(offering.serviceName || offering.name || '');
+    const catalogEntry = catalogIndex.byId?.get(serviceToken) || null;
+    const catalogCategoryToken = normalizeServiceToken(catalogEntry?.categoryId || categoryToken);
+    if (catalogCategoryToken) categoryIds.add(catalogCategoryToken);
+    if (serviceToken) serviceIds.add(serviceToken);
+    if (nameToken) serviceIds.add(nameToken);
+    [serviceToken, nameToken].filter(Boolean).forEach((token) => expandedServiceIds.add(token));
+    if (catalogEntry?.label) {
+      const labelToken = normalizeServiceToken(catalogEntry.label);
+      if (labelToken) expandedServiceIds.add(labelToken);
+    }
+    (Array.isArray(catalogEntry?.includedServiceIds) ? catalogEntry.includedServiceIds : []).forEach((includedId) => {
+      const includedToken = normalizeServiceToken(includedId);
+      if (includedToken) expandedServiceIds.add(includedToken);
+    });
+  });
+
+  return {
+    categoryIds: [...categoryIds],
+    serviceIds: [...serviceIds],
+    expandedServiceIds: [...expandedServiceIds],
+  };
+}
+
+function getHelperPayoutVerificationStatus(helper = {}) {
+  return String(helper?.payout?.verificationStatus || helper?.payoutVerificationStatus || '').trim().toLowerCase();
+}
+
+function buildHelperDispatchIndexDocument(helperId = '', helper = {}, catalogIndex = buildActiveServiceCatalogIndex([]), helperOfferings = []) {
+  const liveLocation = getLiveLocationSnapshot(helper);
+  const dispatchServices = buildHelperDispatchServiceIds(helperOfferings, catalogIndex);
+  const metrics = helper.metrics || {};
+  const activeRole = String(helper.activeRole || helper.role || '').trim().toLowerCase();
+  const onlineStatus = String(helper.onlineStatus || '').trim().toLowerCase();
+  const dispatchPaused = isTruthyFlag(helper.dispatchPaused ?? helper.isDispatchPaused);
+  const suspended = isTruthyFlag(helper.suspended ?? helper.isSuspended);
+  const blocked = isTruthyFlag(helper.blocked ?? helper.isBlocked);
+  const verificationStatus = String(helper.verificationStatus || '').trim().toLowerCase();
+  const payoutVerificationStatus = getHelperPayoutVerificationStatus(helper);
+  const agreementCurrent = isHelperAgreementCurrent(helper);
+  const online = activeRole === 'helper' && onlineStatus === 'online';
+  const activeServiceRequestId = String(helper.activeServiceRequestId || '').trim() || null;
+  const hasApprovedServices = dispatchServices.expandedServiceIds.length > 0 || dispatchServices.categoryIds.length > 0;
+  const available = online
+    && !activeServiceRequestId
+    && !dispatchPaused
+    && !suspended
+    && !blocked
+    && verificationStatus === 'verified'
+    && payoutVerificationStatus === 'verified'
+    && agreementCurrent
+    && hasApprovedServices
+    && Boolean(liveLocation);
+
+  const location = liveLocation || null;
+  const geohash = location ? encodeGeohash(location.latitude, location.longitude) : null;
+  const h3Cell = location ? getH3CellForLocation(location) : null;
+
+  return {
+    helperId,
+    activeRole,
+    online,
+    available,
+    onlineStatus,
+    categoryIds: dispatchServices.categoryIds,
+    serviceIds: dispatchServices.serviceIds,
+    expandedServiceIds: dispatchServices.expandedServiceIds,
+    location,
+    liveLocation: location,
+    geohash,
+    h3Cell,
+    h3Resolution: h3Cell ? HELPER_DISPATCH_H3_RESOLUTION : null,
+    city: String(helper.city || helper.address?.city || helper.location?.city || '').trim(),
+    province: String(helper.province || helper.address?.province || helper.location?.province || '').trim(),
+    verificationStatus,
+    payoutVerificationStatus,
+    agreementCurrent,
+    dispatchPaused,
+    suspended,
+    blocked,
+    activeServiceRequestId,
+    rating: normalizePositiveNumber(metrics.overallRating ?? helper.rating, 0),
+    acceptanceRate: normalizePositiveNumber(metrics.acceptanceRate, 0),
+    completionRate: normalizePositiveNumber(metrics.completionRate, 0),
+    cancellationRate: normalizePositiveNumber(metrics.cancellationRate, 0),
+    avgResponseMinutes: normalizePositiveNumber(metrics.avgResponseMinutes, 0),
+    recentAssignmentCount: normalizePositiveNumber(metrics.recentAssignmentsCount ?? metrics.recentAssignmentCount, 0),
+    lastOfferAt: helper.lastOfferAt || null,
+    lastLocationUpdatedAt: liveLocation?.updatedAtMs || null,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    sourceUpdatedAt: helper.updatedAt || null,
+  };
+}
+
+async function writeHelperDispatchIndexFromUser(helperId = '', helper = {}, catalogIndex = null) {
+  if (!helperId || !isHelperUserRecord(helper)) {
+    return { skipped: true };
+  }
+  const index = catalogIndex || buildActiveServiceCatalogIndex(await getLiveServiceCatalogEntries());
+  const helperOfferings = await getHelperServiceOfferings(helperId);
+  const dispatchDoc = buildHelperDispatchIndexDocument(helperId, helper, index, helperOfferings);
+  await db.collection('helperDispatchIndex').doc(helperId).set(dispatchDoc, { merge: true });
+  return { skipped: false, available: dispatchDoc.available };
+}
+
+async function syncHelperDispatchIndexById(helperId = '') {
+  if (!helperId) return { skipped: true };
+  const snap = await db.collection('users').doc(helperId).get();
+  if (!snap.exists) return { skipped: true };
+  return writeHelperDispatchIndexFromUser(helperId, snap.data() || {});
+}
+
+async function queryHelperDispatchCandidates(categoryId = '', requestServiceIds = [], catalogIndex = buildActiveServiceCatalogIndex([]), requestLocation = null) {
+  const requestedTokens = uniqueTokens(expandRequestedServiceTokens(requestServiceIds, catalogIndex));
+  const byId = new Map();
+  const base = db.collection('helperDispatchIndex')
+    .where('activeRole', '==', 'helper')
+    .where('online', '==', true)
+    .where('available', '==', true);
+  const h3Cells = getH3QueryCellsForLocation(requestLocation);
+  const h3CellChunks = h3Cells.length ? chunkList(h3Cells, 10) : [null];
+
+  if (requestedTokens.length) {
+    const snapshots = await Promise.all(requestedTokens.slice(0, 10).flatMap((token) => (
+      h3CellChunks.map((cellChunk) => {
+        let query = base.where('expandedServiceIds', 'array-contains', token);
+        if (cellChunk) {
+          query = query.where('h3Cell', 'in', cellChunk);
+        }
+        return query.get();
+      })
+    )));
+    snapshots.forEach((snap) => snap.docs.forEach((docSnap) => byId.set(docSnap.id, { uid: docSnap.id, ...docSnap.data() })));
+    return [...byId.values()];
+  }
+
+  const categoryToken = normalizeServiceToken(categoryId);
+  if (!categoryToken) return [];
+  const snapshots = await Promise.all(h3CellChunks.map((cellChunk) => {
+    let query = base.where('categoryIds', 'array-contains', categoryToken);
+    if (cellChunk) {
+      query = query.where('h3Cell', 'in', cellChunk);
+    }
+    return query.get();
+  }));
+  snapshots.forEach((snap) => snap.docs.forEach((docSnap) => byId.set(docSnap.id, { uid: docSnap.id, ...docSnap.data() })));
+  return [...byId.values()];
+}
+
+
+function normalizeHelperServiceOfferingDocument(offeringId = '', offering = {}) {
+  const helperId = String(offering.helperId || '').trim();
+  const serviceId = normalizeServiceToken(offering.serviceId || '');
+  const categoryId = normalizeServiceToken(offering.categoryId || '');
+  if (!helperId || !serviceId || !categoryId) return null;
+
+  return {
+    offeringId: String(offering.offeringId || offeringId || `${helperId}_${serviceId}`).trim(),
+    helperId,
+    serviceId,
+    categoryId,
+    serviceName: String(offering.serviceName || offering.name || offering.label || serviceId).trim(),
+    status: String(offering.status || 'pending').trim().toLowerCase(),
+    active: offering.active !== false,
+    approved: offering.approved === true || String(offering.status || '').toLowerCase() === 'approved',
+    verified: offering.verified === true,
+    photos: (Array.isArray(offering.photos) ? offering.photos : []).filter(Boolean),
+    approvalSource: String(offering.approvalSource || '').trim().toLowerCase(),
+    derivedFromBundleIds: normalizeCatalogIdList(offering.derivedFromBundleIds),
+    createdAt: offering.createdAt || null,
+    updatedAt: offering.updatedAt || null,
+  };
+}
+
+async function getHelperServiceOfferings(helperId = '') {
+  const normalizedHelperId = String(helperId || '').trim();
+  if (!normalizedHelperId) return [];
+
+  const snapshot = await db.collection('helperServices')
+    .where('helperId', '==', normalizedHelperId)
+    .get();
+
+  return snapshot.docs
+    .map((docSnap) => normalizeHelperServiceOfferingDocument(docSnap.id, docSnap.data() || {}))
+    .filter(Boolean);
+}
+
+function getApprovedActiveHelperServiceOfferings(offerings = []) {
+  return (Array.isArray(offerings) ? offerings : []).filter((offering) => (
+    offering.active !== false
+    && offering.approved === true
+    && offering.verified === true
+    && String(offering.status || '').toLowerCase() === 'approved'
+  ));
+}
+
+function helperServiceOfferingMatchesRequest(offering = {}, categoryId = '', requestServiceIds = [], catalogIndex = buildActiveServiceCatalogIndex([])) {
+  const categoryToken = normalizeServiceToken(categoryId);
+  if (!categoryToken || normalizeServiceToken(offering.categoryId) !== categoryToken) return false;
+
+  const requestedTokens = expandRequestedServiceTokens(requestServiceIds, catalogIndex);
+  if (!requestedTokens.length) return true;
+
+  const serviceToken = normalizeServiceToken(offering.serviceId);
+  const offeringTokens = new Set([serviceToken, normalizeServiceToken(offering.serviceName)]);
+  const catalogEntry = catalogIndex.byId?.get(serviceToken) || null;
+  if (catalogEntry?.label) offeringTokens.add(normalizeServiceToken(catalogEntry.label));
+  (Array.isArray(catalogEntry?.includedServiceIds) ? catalogEntry.includedServiceIds : []).forEach((includedId) => {
+    const token = normalizeServiceToken(includedId);
+    if (token) offeringTokens.add(token);
+  });
+  return requestedTokens.some((token) => offeringTokens.has(token));
+}
+
+function isHelperDispatchEligible(helper = {}, categoryId = '', requestServiceIds = [], catalogIndex = null, helperOfferings = []) {
   const isDispatchPaused = isTruthyFlag(helper.dispatchPaused ?? helper.isDispatchPaused);
   const isSuspendedOrBlocked = isTruthyFlag(
     helper.suspended
@@ -1201,7 +1119,7 @@ function isHelperDispatchEligible(helper = {}, categoryId = '', requestServiceId
   return verificationStatus === 'verified'
     && payoutVerificationStatus === 'verified'
     && isHelperAgreementCurrent(helper)
-    && helperSupportsCategory(helper, categoryId, requestServiceIds, catalogIndex)
+    && helperSupportsCategory(helper, categoryId, requestServiceIds, catalogIndex, helperOfferings)
     && !isDispatchPaused
     && !isSuspendedOrBlocked;
 }
@@ -1429,11 +1347,7 @@ async function getHelperQueueForServiceRequest(request = {}) {
   const requestServiceIds = Array.isArray(request.serviceIds) ? request.serviceIds : [];
   if (!categoryId) return [];
 
-  const [helpersSnap, activeRequestsSnap, catalogEntries] = await Promise.all([
-    db.collection('users')
-      .where('activeRole', '==', 'helper')
-      .where('onlineStatus', '==', 'online')
-      .get(),
+  const [activeRequestsSnap, catalogEntries] = await Promise.all([
     db.collection('serviceRequests')
       .where('status', 'in', [...HELPER_BUSY_REQUEST_STATUSES])
       .get(),
@@ -1446,18 +1360,31 @@ async function getHelperQueueForServiceRequest(request = {}) {
     return [];
   }
 
+  const requestLocation = getServiceRequestLocationSnapshot(request);
+  const dispatchCandidates = await queryHelperDispatchCandidates(categoryId, requestServiceIds, catalogIndex, requestLocation);
+
   const busyHelperIds = new Set(
     activeRequestsSnap.docs
       .map((item) => item.data()?.helperAssignment?.helperId)
       .filter(Boolean),
   );
 
-  const eligibleHelpers = helpersSnap.docs
-    .map((item) => ({ uid: item.id, ...item.data() }))
-    .filter((helper) => !busyHelperIds.has(helper.uid))
-    .filter((helper) => isHelperDispatchEligible(helper, categoryId, requestServiceIds, catalogIndex));
-  const requestLocation = getServiceRequestLocationSnapshot(request);
+  const candidateIds = dispatchCandidates
+    .map((helper) => String(helper.helperId || helper.uid || '').trim())
+    .filter((helperId) => helperId && !busyHelperIds.has(helperId));
 
+  const helperDocsWithOfferings = await Promise.all(candidateIds.map(async (helperId) => {
+    const [userSnap, helperOfferings] = await Promise.all([
+      db.collection('users').doc(helperId).get(),
+      getHelperServiceOfferings(helperId),
+    ]);
+    return { userSnap, helperOfferings };
+  }));
+  const eligibleHelpers = helperDocsWithOfferings
+    .filter(({ userSnap }) => userSnap.exists)
+    .map(({ userSnap, helperOfferings }) => ({ helper: { uid: userSnap.id, ...userSnap.data() }, helperOfferings }))
+    .filter(({ helper, helperOfferings }) => isHelperDispatchEligible(helper, categoryId, requestServiceIds, catalogIndex, helperOfferings))
+    .map(({ helper }) => helper);
   if (!requestLocation) {
     return rankHelpersWithFairness(eligibleHelpers);
   }
@@ -1693,6 +1620,10 @@ exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{reques
       lastOfferAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     }, { merge: true });
+    transaction.set(db.collection('helperDispatchIndex').doc(selectedHelperId), {
+      lastOfferAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
   });
 });
 
@@ -1716,6 +1647,11 @@ exports.syncServiceRequestAssignmentState = onDocumentWritten('serviceRequests/{
     await Promise.all([
       db.collection('users').doc(helperId).set({
         activeServiceRequestId: requestId,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true }),
+      db.collection('helperDispatchIndex').doc(helperId).set({
+        activeServiceRequestId: requestId,
+        available: false,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true }),
       createUserNotification({
@@ -1745,6 +1681,7 @@ exports.syncServiceRequestAssignmentState = onDocumentWritten('serviceRequests/{
       activeServiceRequestId: admin.firestore.FieldValue.delete(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     }, { merge: true });
+    await syncHelperDispatchIndexById(helperId);
   }
 
   if (afterStatus === SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE && beforeStatus !== SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE) {
@@ -1914,6 +1851,80 @@ exports.promoteScheduledServiceRequests = onSchedule('every 1 minutes', async ()
   }
 });
 
+
+
+exports.syncHelperDispatchIndexOnServiceOfferingWrite = onDocumentWritten('helperServices/{offeringId}', async (event) => {
+  const before = event.data.before.exists ? event.data.before.data() : null;
+  const after = event.data.after.exists ? event.data.after.data() : null;
+  const helperId = String(after?.helperId || before?.helperId || '').trim();
+  if (!helperId) return;
+  await syncHelperDispatchIndexById(helperId);
+});
+
+exports.syncHelperDispatchIndex = onDocumentWritten('users/{uid}', async (event) => {
+  const after = event.data.after.exists ? event.data.after.data() : null;
+  const helperId = event.params.uid;
+
+  if (!after || !isHelperUserRecord(after)) {
+    await db.collection('helperDispatchIndex').doc(helperId).delete().catch((error) => {
+      logger.warn('helper_dispatch_index_delete_failed', { helperId, error: error.message });
+    });
+    return;
+  }
+
+  const result = await writeHelperDispatchIndexFromUser(helperId, after);
+  logger.info('helper_dispatch_index_synced', {
+    helperId,
+    skipped: Boolean(result.skipped),
+    available: result.available ?? null,
+    traceLabel: 'functions:syncHelperDispatchIndex:synced',
+  });
+});
+
+async function isAdminAuthorizationHeader(req) {
+  const header = String(req.get('authorization') || '');
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  if (!match) return false;
+  try {
+    const decoded = await admin.auth().verifyIdToken(match[1]);
+    const userSnap = await db.collection('users').doc(decoded.uid).get();
+    const user = userSnap.exists ? userSnap.data() || {} : {};
+    return decoded.email === 'jabuobed1@gmail.com'
+      || user.isAdmin === true
+      || String(user.role || '').toLowerCase() === 'admin'
+      || (Array.isArray(user.roles) && user.roles.includes('admin'));
+  } catch (error) {
+    logger.warn('helper_dispatch_index_rebuild_auth_failed', { error: error.message });
+    return false;
+  }
+}
+
+exports.rebuildHelperDispatchIndex = onRequest({ cors: true }, async (req, res) => {
+  if (!(await isAdminAuthorizationHeader(req))) {
+    res.status(403).json({ ok: false, error: 'Admin authorization required.' });
+    return;
+  }
+
+  const catalogIndex = buildActiveServiceCatalogIndex(await getLiveServiceCatalogEntries());
+  const snap = await db.collection('users').where('activeRole', '==', 'helper').get();
+  const counts = { processed: 0, updated: 0, skipped: 0, failed: 0 };
+
+  for (const docSnap of snap.docs) {
+    counts.processed += 1;
+    try {
+      const result = await writeHelperDispatchIndexFromUser(docSnap.id, docSnap.data() || {}, catalogIndex);
+      if (result.skipped) counts.skipped += 1;
+      else counts.updated += 1;
+    } catch (error) {
+      counts.failed += 1;
+      logger.error('helper_dispatch_index_rebuild_record_failed', { helperId: docSnap.id, error: error.message });
+    }
+  }
+
+  logger.info('helper_dispatch_index_rebuild_complete', counts);
+  res.json({ ok: true, ...counts });
+});
+
 exports.syncHelperQueueOnHelperOnline = onDocumentWritten('users/{uid}', async (event) => {
   const before = event.data.before.exists ? event.data.before.data() : null;
   const after = event.data.after.exists ? event.data.after.data() : null;
@@ -1922,6 +1933,7 @@ exports.syncHelperQueueOnHelperOnline = onDocumentWritten('users/{uid}', async (
   const wasOnline = String(before?.onlineStatus || '').toLowerCase() === 'online';
   const isOnline = String(after.onlineStatus || '').toLowerCase() === 'online';
   if (wasOnline || !isOnline) return;
+  await writeHelperDispatchIndexFromUser(event.params.uid, after);
   if (String(after.activeServiceRequestId || '').trim()) return;
 
   const requestsSnap = await db.collection('serviceRequests')
@@ -1948,7 +1960,8 @@ exports.syncHelperQueueOnHelperOnline = onDocumentWritten('users/{uid}', async (
   for (const request of candidateRequests) {
     const categoryId = String(request.categoryId || '').trim();
     const requestServiceIds = Array.isArray(request.serviceIds) ? request.serviceIds : [];
-    if (!isHelperDispatchEligible(after, categoryId, requestServiceIds, catalogIndex)) {
+    const helperOfferings = await getHelperServiceOfferings(event.params.uid);
+    if (!isHelperDispatchEligible(after, categoryId, requestServiceIds, catalogIndex, helperOfferings)) {
       continue;
     }
 
@@ -3210,6 +3223,10 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
     const helperRef = db.collection('users').doc(helperId);
     batch.set(helperRef, {
       activeServiceRequestId: admin.firestore.FieldValue.delete(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    batch.set(db.collection('helperDispatchIndex').doc(helperId), {
+      activeServiceRequestId: null,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     }, { merge: true });
   }

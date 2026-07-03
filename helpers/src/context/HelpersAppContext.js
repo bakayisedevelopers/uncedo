@@ -14,6 +14,12 @@ import {
 } from '../services/helperLocationService';
 import { subscribeToServiceCatalog } from '../services/serviceCatalogService';
 import {
+  deleteHelperServiceOffering,
+  submitHelperServiceOffering,
+  subscribeToHelperServiceOfferings,
+  updateHelperServiceOfferingActive,
+} from '../services/helperServiceOfferingService';
+import {
   getStoredActiveTrackingSession,
   isTrackableActiveJobStatus,
   stopActiveJobTracking,
@@ -120,108 +126,9 @@ function normalizePictureEntry(picture) {
   };
 }
 
-function resolveSkillCatalogId(skill = {}) {
-  return String(skill.catalogId || skill.serviceCatalogId || slugify(skill.name || '')).trim().toLowerCase();
-}
 
-function normalizeCatalogIdList(values = []) {
-  return [...new Set(
-    (Array.isArray(values) ? values : [])
-      .map((value) => String(value || '').trim().toLowerCase())
-      .filter(Boolean),
-  )];
-}
-
-function findExistingSkillEntry(existingSkills = [], skill = {}) {
-  const targetId = String(skill.id || '').trim();
-  const targetCatalogId = resolveSkillCatalogId(skill);
-  const targetName = String(skill.name || '').trim();
-
-  return (Array.isArray(existingSkills) ? existingSkills : []).find((entry) => (
-    (targetId && String(entry?.id || '').trim() === targetId)
-    || (targetCatalogId && resolveSkillCatalogId(entry) === targetCatalogId)
-    || (targetName && String(entry?.name || '').trim() === targetName)
-  )) || null;
-}
-
-function normalizeSkillEntry(skill = {}, serviceId = '', existingSkill = null) {
-  const skillName = String(skill.name || '').trim();
-  if (!skillName) return null;
-
-  const explicitStatus = String(skill.status || '').trim().toLowerCase();
-  const fallbackStatus = String(existingSkill?.status || '').trim().toLowerCase();
-
-  return {
-    id: String(skill.id || `skill_${serviceId}_${slugify(skillName)}`),
-    catalogId: resolveSkillCatalogId(skill),
-    name: skillName,
-    status: explicitStatus || fallbackStatus || 'pending',
-    active: typeof skill.active === 'boolean'
-      ? skill.active
-      : (typeof existingSkill?.active === 'boolean' ? existingSkill.active : true),
-    verified: typeof skill.verified === 'boolean'
-      ? skill.verified
-      : (typeof existingSkill?.verified === 'boolean' ? existingSkill.verified : true),
-    approvalSource: String(skill.approvalSource || existingSkill?.approvalSource || '').trim().toLowerCase(),
-    derivedFromBundleIds: [...new Set((Array.isArray(skill.derivedFromBundleIds) ? skill.derivedFromBundleIds : [])
-      .map((value) => String(value || '').trim().toLowerCase())
-      .filter(Boolean))],
-    derivedFromServiceIds: [...new Set((Array.isArray(skill.derivedFromServiceIds) ? skill.derivedFromServiceIds : [])
-      .map((value) => String(value || '').trim().toLowerCase())
-      .filter(Boolean))],
-    createdAt: skill.createdAt || null,
-    updatedAt: skill.updatedAt || skill.createdAt || null,
-    pictures: (Array.isArray(skill.pictures) ? skill.pictures : [])
-      .map(normalizePictureEntry)
-      .filter(Boolean),
-  };
-}
-
-function normalizeServiceEntry(entry = {}, existingEntry = null) {
-  const serviceId = String(entry.serviceId || '').trim();
-  if (!serviceId) return null;
-
-  const serviceMeta = getServiceById(serviceId);
-  return {
-    ...entry,
-    serviceId,
-    serviceName: serviceMeta?.name || entry.serviceName || serviceId,
-    description: serviceMeta?.description || entry.description || '',
-    catalogId: String(entry.catalogId || '').trim().toLowerCase(),
-    skills: (Array.isArray(entry.skills) ? entry.skills : [])
-      .map((skill) => normalizeSkillEntry(skill, serviceId, findExistingSkillEntry(existingEntry?.skills || [], skill)))
-      .filter(Boolean),
-  };
-}
-
-function normalizeServices(services = [], existingServices = []) {
-  return (Array.isArray(services) ? services : [])
-    .map((entry) => normalizeServiceEntry(
-      entry,
-      (Array.isArray(existingServices) ? existingServices : []).find((service) => String(service?.serviceId || '').trim() === String(entry?.serviceId || '').trim()) || null,
-    ))
-    .filter(Boolean)
-    .filter((entry) => Array.isArray(entry.skills) && entry.skills.length > 0);
-}
-
-function buildHelperSkillsList(services = []) {
-  return normalizeServices(services).flatMap((service) => (
-    (service.skills || []).map((skill) => ({
-      ...skill,
-      serviceId: service.serviceId,
-      serviceName: service.serviceName,
-      serviceDescription: service.description,
-      catalogId: skill.catalogId || slugify(skill.name),
-      categoryId: service.serviceId,
-    }))
-  ));
-}
-
-function withServiceMetadata(profile, existingProfile = null) {
-  return {
-    ...profile,
-    services: normalizeServices(profile.services || [], existingProfile?.services || []),
-  };
+function withServiceMetadata(profile) {
+  return { ...profile, services: [] };
 }
 
 function normalizeProfile(user, existingProfile = null) {
@@ -249,52 +156,11 @@ function normalizeProfile(user, existingProfile = null) {
       ...FALLBACK_PROFILE.metrics,
       ...(user.metrics || {}),
     },
-    services: Array.isArray(user.services) ? user.services : [],
+    services: [],
   }, existingProfile);
 }
 
-function getStablePictureSignature(picture = {}) {
-  return {
-    id: String(picture?.id || '').trim(),
-    uri: String(picture?.uri || picture?.downloadUrl || '').trim(),
-    objectPath: String(picture?.objectPath || '').trim(),
-  };
-}
-
-function getStableSkillSignature(skill = {}) {
-  return {
-    id: String(skill?.id || '').trim(),
-    catalogId: String(skill?.catalogId || skill?.serviceCatalogId || '').trim().toLowerCase(),
-    name: String(skill?.name || '').trim(),
-    status: String(skill?.status || '').trim().toLowerCase(),
-    active: skill?.active === true,
-    verified: skill?.verified === true,
-    approvalSource: String(skill?.approvalSource || '').trim().toLowerCase(),
-    derivedFromBundleIds: normalizeCatalogIdList(skill?.derivedFromBundleIds),
-    derivedFromServiceIds: normalizeCatalogIdList(skill?.derivedFromServiceIds),
-    pictures: (Array.isArray(skill?.pictures) ? skill.pictures : []).map(getStablePictureSignature),
-  };
-}
-
-function getStableServiceSignature(service = {}) {
-  return {
-    serviceId: String(service?.serviceId || '').trim(),
-    serviceName: String(service?.serviceName || '').trim(),
-    description: String(service?.description || '').trim(),
-    catalogId: String(service?.catalogId || '').trim().toLowerCase(),
-    skills: (Array.isArray(service?.skills) ? service.skills : []).map(getStableSkillSignature),
-  };
-}
-
-function getServicesSignature(services = []) {
-  return JSON.stringify(
-    (Array.isArray(services) ? services : [])
-      .map(getStableServiceSignature)
-      .filter((service) => service.serviceId),
-  );
-}
-
-function getHelperOnboardingStatus(profile, { serviceCatalog = [], serviceCatalogResolved = false } = {}) {
+function getHelperOnboardingStatus(profile, { serviceCatalog = [], serviceCatalogResolved = false, helperServiceOfferings = [] } = {}) {
   const firstName = String(profile?.firstName || '').trim();
   const lastName = String(profile?.lastName || '').trim();
   const fullName = String(profile?.fullName || '').trim();
@@ -316,34 +182,21 @@ function getHelperOnboardingStatus(profile, { serviceCatalog = [], serviceCatalo
     && payout.verificationStatus === 'verified'
   );
   const isVerified = profile?.verificationStatus === 'verified';
-  const services = Array.isArray(profile?.services) ? profile.services : [];
-  const helperSkills = buildHelperSkillsList(services);
-  const hasAnyService = helperSkills.length > 0;
+  const hasAnyService = helperServiceOfferings.length > 0;
   const activeCatalogIds = new Set(
     (Array.isArray(serviceCatalog) ? serviceCatalog : [])
       .filter((entry) => entry.active !== false)
       .map((entry) => String(entry.id || '').trim().toLowerCase())
       .filter(Boolean),
   );
-  const activeCatalogMap = new Map(
-    (Array.isArray(serviceCatalog) ? serviceCatalog : [])
-      .filter((entry) => entry.active !== false)
-      .map((entry) => [String(entry.id || '').trim().toLowerCase(), entry]),
-  );
-  const hasQualifiedSkills = services.some((service) => (
-    Array.isArray(service.skills)
-    && service.skills.some((skill) => (
-      skill.status === 'approved'
-      && skill.active !== false
-      && (serviceCatalogResolved ? activeCatalogIds.has(String(skill.catalogId || slugify(skill.name)).trim().toLowerCase()) : true)
-      && (
-        (Array.isArray(skill.pictures) && skill.pictures.length > 0)
-        || Boolean(
-          activeCatalogMap.get(String(skill.catalogId || slugify(skill.name)).trim().toLowerCase())?.kind === 'bundle'
-          && activeCatalogMap.get(String(skill.catalogId || slugify(skill.name)).trim().toLowerCase())?.inheritBundleImages !== false
-        )
-      )
-    ))
+  const hasQualifiedServiceOfferings = helperServiceOfferings.some((offering) => (
+    offering.status === 'approved'
+    && offering.active !== false
+    && offering.approved === true
+    && offering.verified === true
+    && (serviceCatalogResolved ? activeCatalogIds.has(String(offering.serviceId || '').trim().toLowerCase()) : true)
+    && Array.isArray(offering.photos)
+    && offering.photos.length > 0
   ));
   const hasProfilePhoto = Boolean(String(profile?.profilePhoto || profile?.selfieUrl || '').trim());
   const hasName = Boolean(fullName || (firstName && lastName));
@@ -367,15 +220,15 @@ function getHelperOnboardingStatus(profile, { serviceCatalog = [], serviceCatalo
   }
 
   if (!hasAnyService) {
-    return { complete: false, step: 'services', message: 'Add at least one helper skill before going online.' };
+    return { complete: false, step: 'services', message: 'Add at least one helper offering before going online.' };
   }
 
   if (!serviceCatalogResolved) {
     return { complete: false, step: 'services', message: 'Loading the live service catalog...' };
   }
 
-  if (!hasQualifiedSkills) {
-      return { complete: false, step: 'services', message: 'Add at least one approved skill with a portfolio or an approved inherited bundle before going online.' };
+  if (!hasQualifiedServiceOfferings) {
+      return { complete: false, step: 'services', message: 'Add at least one approved offering with a portfolio or an approved inherited bundle before going online.' };
   }
 
   if (!hasAgreement) {
@@ -411,30 +264,25 @@ export function HelpersAppProvider({ children }) {
   const [homeLocation, setHomeLocation] = useState(null);
   const [serviceCatalog, setServiceCatalog] = useState([]);
   const [serviceCatalogResolved, setServiceCatalogResolved] = useState(false);
+  const [helperServiceOfferingsState, setHelperServiceOfferingsState] = useState([]);
   const helperLocationWatchRef = useRef(null);
   const activeJobCleanupPromiseRef = useRef(null);
-  const pendingServicesSignatureRef = useRef('');
 
   useEffect(() => {
-    setProfile((current) => {
-      const normalizedUserProfile = normalizeProfile(user, current);
-      const incomingServicesSignature = getServicesSignature(normalizedUserProfile.services || []);
+    if (!user?.uid) {
+      setHelperServiceOfferingsState([]);
+      return undefined;
+    }
+    return subscribeToHelperServiceOfferings(
+      user.uid,
+      setHelperServiceOfferingsState,
+      (error) => logError('HelpersAppContext.subscribeToHelperServiceOfferings', error),
+    );
+  }, [user?.uid]);
 
-      if (pendingServicesSignatureRef.current) {
-        if (incomingServicesSignature === pendingServicesSignatureRef.current) {
-          pendingServicesSignatureRef.current = '';
-          return normalizedUserProfile;
-        }
-
-        return withServiceMetadata({
-          ...normalizedUserProfile,
-          services: current?.services || [],
-        });
-      }
-
-      return normalizedUserProfile;
-    });
-  }, [user]);
+  useEffect(() => {
+    setProfile((current) => normalizeProfile(user, current));
+  }, [user]);;
 
   useEffect(() => {
     if (!user?.uid) {
@@ -682,25 +530,19 @@ export function HelpersAppProvider({ children }) {
 
   const applyProfileUpdate = async (updater, traceLabel = 'helpers:context:applyProfileUpdate') => {
     const nextProfile = withServiceMetadata(updater(profile));
-    const currentServicesSignature = getServicesSignature(profile.services || []);
-    const nextServicesSignature = getServicesSignature(nextProfile.services || []);
-    if (currentServicesSignature !== nextServicesSignature) {
-      pendingServicesSignatureRef.current = nextServicesSignature;
-    }
     setProfile(nextProfile);
     const result = await persistProfileUpdate(nextProfile, traceLabel);
     if (!result.success) {
-      pendingServicesSignatureRef.current = '';
       setProfile((current) => normalizeProfile(user, current));
     }
     return result;
   };
 
   const onboardingStatus = useMemo(
-    () => getHelperOnboardingStatus(profile, { serviceCatalog, serviceCatalogResolved }),
-    [profile, serviceCatalog, serviceCatalogResolved],
+    () => getHelperOnboardingStatus(profile, { serviceCatalog, serviceCatalogResolved, helperServiceOfferings: helperServiceOfferingsState }),
+    [profile, serviceCatalog, serviceCatalogResolved, helperServiceOfferingsState],
   );
-  const helperSkills = useMemo(() => buildHelperSkillsList(profile.services || []), [profile.services]);
+  const helperServiceOfferings = helperServiceOfferingsState;
 
   const completedJobs = useMemo(
     () => serviceRequests.filter((item) => shouldIncludeJobInPayouts(item)),
@@ -864,52 +706,7 @@ export function HelpersAppProvider({ children }) {
     }
   };
 
-  const addSkillPicture = async ({ serviceId, skillName, pictureUri }) => {
-    const normalizedUri = String(pictureUri || '').trim();
-    if (!serviceId || !skillName || !normalizedUri) {
-      return { success: false, message: 'A service, skill, and work photo are required.' };
-    }
-
-    return applyProfileUpdate((current) => {
-      const existingServices = Array.isArray(current.services) ? [...current.services] : [];
-      const targetIndex = existingServices.findIndex((service) => service.serviceId === serviceId);
-      const serviceMeta = getServiceById(serviceId);
-      const nextService = targetIndex >= 0
-        ? { ...existingServices[targetIndex], skills: [...(existingServices[targetIndex].skills || [])] }
-        : {
-            serviceId,
-            serviceName: serviceMeta?.name || serviceId,
-            description: serviceMeta?.description || '',
-            skills: [],
-          };
-
-      const existingSkillIndex = nextService.skills.findIndex((skill) => skill.name === skillName);
-      if (existingSkillIndex >= 0) {
-        const currentSkill = nextService.skills[existingSkillIndex];
-        nextService.skills[existingSkillIndex] = {
-          ...currentSkill,
-          pictures: [...(currentSkill.pictures || []), createPicture(normalizedUri)],
-        };
-      } else {
-        nextService.skills.push({
-          name: skillName,
-          pictures: [createPicture(normalizedUri)],
-        });
-      }
-
-      if (targetIndex >= 0) {
-        existingServices[targetIndex] = nextService;
-      } else {
-        existingServices.push(nextService);
-      }
-
-      return { ...current, services: existingServices };
-    }, 'helpers:context:addSkillPicture').then((result) => (
-      result.success
-        ? { success: true, message: `${skillName} added with a linked work photo.` }
-        : result
-    ));
-  };
+  const addServiceOfferingPicture = async () => ({ success: false, message: 'Use the service submission flow to upload work photos.' });
 
   const saveProfilePhoto = async ({ imageAsset, source = 'camera' }) => {
     if (!user?.uid || !imageAsset?.uri) {
@@ -954,7 +751,7 @@ export function HelpersAppProvider({ children }) {
     }
   };
 
-  const addSkillWithPhoto = async ({ serviceId, skillName, catalogId, imageAsset, imageAssets }) => {
+  const addServiceOfferingWithPhoto = async ({ serviceId, serviceName, categoryId, imageAsset, imageAssets }) => {
     const assets = [
       ...(Array.isArray(imageAssets) ? imageAssets : []),
       ...(imageAsset ? [imageAsset] : []),
@@ -964,188 +761,58 @@ export function HelpersAppProvider({ children }) {
     setSaveError('');
 
     try {
-      const normalizedCatalogId = String(catalogId || slugify(skillName)).trim().toLowerCase();
-      const catalogEntry = (Array.isArray(serviceCatalog) ? serviceCatalog : []).find((entry) => String(entry.id || '').trim().toLowerCase() === normalizedCatalogId) || null;
-      const allowsInheritedPortfolio = catalogEntry?.kind === 'bundle' && catalogEntry?.inheritBundleImages !== false;
-      if (!user?.uid || !serviceId || !skillName || (!assets.length && !allowsInheritedPortfolio)) {
-        return { success: false, message: 'A skill and uploaded work photo are required unless this bundle inherits its portfolio.' };
+      const catalogEntry = (Array.isArray(serviceCatalog) ? serviceCatalog : []).find((entry) => String(entry.id || '').trim().toLowerCase() === String(serviceId || '').trim().toLowerCase()) || null;
+      const resolvedCategoryId = categoryId || catalogEntry?.categoryId || '';
+      const allowsInheritedPortfolio = catalogEntry?.type === 'bundle' && catalogEntry?.inheritBundleImages !== false;
+      if (!user?.uid || !serviceId || (!assets.length && !allowsInheritedPortfolio)) {
+        return { success: false, message: 'A service and uploaded work photo are required unless this bundle inherits its portfolio.' };
       }
-      const nextTimestamp = new Date().toISOString();
-      const uploads = [];
-
+      const photos = [];
       for (const asset of assets) {
         const upload = await uploadLocalFile({
           userId: user.uid,
           fileUri: asset.uri,
-          fileName: asset.fileName || `${slugify(skillName)}.jpg`,
+          fileName: asset.fileName || `${slugify(serviceName || serviceId)}.jpg`,
           mimeType: asset.mimeType || 'image/jpeg',
-          pathPrefix: `helper-skills/${serviceId}/${normalizedCatalogId || slugify(skillName)}`,
+          pathPrefix: `helper-services/${serviceId}`,
         });
-
-        uploads.push(createPicture({
-          uri: upload.downloadUrl,
-          objectPath: upload.objectPath,
-          uploadedAt: upload.uploadedAt,
-        }));
+        photos.push(createPicture({ uri: upload.downloadUrl, objectPath: upload.objectPath, uploadedAt: upload.uploadedAt }));
       }
-
-      const nextProfile = withServiceMetadata({
-        ...profile,
-        services: normalizeServices((profile.services || []).map((service) => ({ ...service }))),
+      await submitHelperServiceOffering({
+        helperId: user.uid,
+        serviceId,
+        categoryId: resolvedCategoryId,
+        serviceName: serviceName || catalogEntry?.label || catalogEntry?.name || serviceId,
+        photos,
       });
-      const existingServices = [...nextProfile.services];
-      const targetIndex = existingServices.findIndex((service) => service.serviceId === serviceId);
-      const serviceMeta = getServiceById(serviceId);
-      const targetService = targetIndex >= 0
-        ? {
-            ...existingServices[targetIndex],
-            skills: [...(existingServices[targetIndex].skills || [])],
-          }
-        : {
-            serviceId,
-            serviceName: serviceMeta?.name || serviceId,
-            description: serviceMeta?.description || '',
-            skills: [],
-          };
-
-      const existingSkillIndex = targetService.skills.findIndex((skill) => (
-        skill.name === skillName || slugify(skill.catalogId || skill.name) === normalizedCatalogId
-      ));
-
-      if (existingSkillIndex >= 0) {
-        const currentSkill = targetService.skills[existingSkillIndex];
-        const mergedPictures = [...(currentSkill.pictures || []), ...uploads].slice(0, 10);
-        targetService.skills[existingSkillIndex] = normalizeSkillEntry({
-          ...currentSkill,
-          catalogId: normalizedCatalogId,
-          status: currentSkill.status || 'pending',
-          verified: currentSkill.verified === true,
-          active: currentSkill.active === true && currentSkill.status === 'approved',
-          updatedAt: nextTimestamp,
-          pictures: mergedPictures,
-        }, serviceId);
-      } else {
-        targetService.skills.push(normalizeSkillEntry({
-          name: skillName,
-          catalogId: normalizedCatalogId,
-          status: 'pending',
-          verified: false,
-          active: false,
-          createdAt: nextTimestamp,
-          updatedAt: nextTimestamp,
-          pictures: uploads,
-        }, serviceId));
-      }
-
-      if (targetIndex >= 0) {
-        existingServices[targetIndex] = targetService;
-      } else {
-        existingServices.push(targetService);
-      }
-
-      const persistedProfile = withServiceMetadata({
-        ...nextProfile,
-        services: existingServices,
-      });
-      pendingServicesSignatureRef.current = getServicesSignature(persistedProfile.services || []);
-
-      setProfile(persistedProfile);
-      const result = await persistProfileUpdate(persistedProfile, 'helpers:context:addSkillWithPhoto');
-      if (!result.success) {
-        pendingServicesSignatureRef.current = '';
-        setProfile((current) => normalizeProfile(user, current));
-        return result;
-      }
-
-      return { success: true, message: allowsInheritedPortfolio && !uploads.length ? `${skillName} submitted for approval with inherited bundle images.` : `${skillName} submitted for approval.` };
+      return { success: true, message: `${serviceName || catalogEntry?.label || serviceId} submitted for approval.` };
     } catch (error) {
-      logError('HelpersAppContext.addSkillWithPhoto', error);
-      setSaveError(error.message || 'Unable to upload this skill photo right now.');
-      return { success: false, message: error.message || 'Unable to upload this skill photo right now.' };
+      logError('HelpersAppContext.addServiceOfferingWithPhoto', error);
+      setSaveError(error.message || 'Unable to upload this service photo right now.');
+      return { success: false, message: error.message || 'Unable to upload this service photo right now.' };
     } finally {
       setSaving(false);
     }
   };
 
-  const toggleSkillActive = async ({ serviceId, skillName, catalogId, active }) => {
-    const normalizedCatalogId = String(catalogId || slugify(skillName)).trim().toLowerCase();
-    return applyProfileUpdate((current) => ({
-      ...current,
-      services: normalizeServices((current.services || []).map((service) => {
-        if (service.serviceId !== serviceId) return service;
-        return {
-          ...service,
-          skills: (service.skills || []).map((skill) => (
-            skill.name === skillName || resolveSkillCatalogId(skill) === normalizedCatalogId
-              ? {
-                  ...skill,
-                  active: Boolean(active),
-                  updatedAt: new Date().toISOString(),
-                }
-              : skill
-          )),
-        };
-      })),
-    }), 'helpers:context:toggleSkillActive');
+  const toggleServiceOfferingActive = async ({ serviceId, active }) => {
+    if (!user?.uid || !serviceId) return { success: false, message: 'Service reference is required.' };
+    await updateHelperServiceOfferingActive({ helperId: user.uid, serviceId, active });
+    return { success: true };
   };
 
-  const removeSkill = async ({ serviceId, skillName }) => {
-    const targetService = (profile.services || []).find((service) => service.serviceId === serviceId);
-    const targetSkill = (targetService?.skills || []).find((skill) => skill.name === skillName);
-    const targetPictures = Array.isArray(targetSkill?.pictures) ? targetSkill.pictures : [];
-
-    await Promise.all(
-      targetPictures
-        .map((picture) => picture?.objectPath)
-        .filter(Boolean)
-        .map((objectPath) => deleteUploadedFile(objectPath).catch((error) => {
-          logError('HelpersAppContext.removeSkill.deleteUploadedFile', error);
-        })),
-    );
-
-    return applyProfileUpdate((current) => ({
-      ...current,
-      services: (current.services || [])
-        .map((service) => (
-          service.serviceId === serviceId
-            ? { ...service, skills: (service.skills || []).filter((skill) => skill.name !== skillName) }
-            : service
-        ))
-        .filter((service) => (service.skills || []).length > 0),
-    }), 'helpers:context:removeSkill');
+  const removeServiceOffering = async ({ serviceId }) => {
+    if (!user?.uid || !serviceId) return { success: false, message: 'Service reference is required.' };
+    const offering = helperServiceOfferingsState.find((item) => item.serviceId === serviceId);
+    await Promise.all((offering?.photos || []).map((photo) => photo?.objectPath).filter(Boolean).map((objectPath) => deleteUploadedFile(objectPath).catch((error) => {
+      logError('HelpersAppContext.removeServiceOffering.deleteUploadedFile', error);
+    })));
+    await deleteHelperServiceOffering({ helperId: user.uid, serviceId });
+    return { success: true };
   };
 
-  const removeSkillPicture = async ({ serviceId, skillName, pictureId }) => {
-    const targetService = (profile.services || []).find((service) => service.serviceId === serviceId);
-    const targetSkill = (targetService?.skills || []).find((skill) => skill.name === skillName);
-    const targetPicture = (targetSkill?.pictures || []).find((picture) => picture.id === pictureId);
-    if (targetPicture?.objectPath) {
-      await deleteUploadedFile(targetPicture.objectPath).catch((error) => {
-        logError('HelpersAppContext.removeSkillPicture.deleteUploadedFile', error);
-      });
-    }
+  const removeServiceOfferingPicture = async () => ({ success: false, message: 'Photo removal is managed by resubmitting the service in this development build.' });
 
-    return applyProfileUpdate((current) => ({
-      ...current,
-      services: (current.services || [])
-        .map((service) => {
-          if (service.serviceId !== serviceId) return service;
-          return {
-            ...service,
-            skills: (service.skills || [])
-              .map((skill) => {
-                if (skill.name !== skillName) return skill;
-                return {
-                  ...skill,
-                  pictures: (skill.pictures || []).filter((picture) => picture.id !== pictureId),
-                };
-              })
-              .filter((skill) => (skill.pictures || []).length > 0),
-          };
-        })
-        .filter((service) => (service.skills || []).length > 0),
-    }), 'helpers:context:removeSkillPicture');
-  };
 
   const acceptAgreement = async ({ typedSignatureName, checkboxAccepted = true } = {}) => {
     if (!user?.uid) {
@@ -1217,7 +884,7 @@ export function HelpersAppProvider({ children }) {
   const value = useMemo(() => ({
     profile,
     homeLocation,
-    helperSkills,
+    helperServiceOfferings,
     onboardingStatus,
     jobOffers,
     offerResponseState,
@@ -1244,11 +911,11 @@ export function HelpersAppProvider({ children }) {
       cancelActiveJob,
       completeActiveJobWithBilling,
       saveProfilePhoto,
-      addSkillPicture,
-      addSkillWithPhoto,
-      toggleSkillActive,
-      removeSkill,
-      removeSkillPicture,
+      addServiceOfferingPicture,
+      addServiceOfferingWithPhoto,
+      toggleServiceOfferingActive,
+      removeServiceOffering,
+      removeServiceOfferingPicture,
       acceptAgreement,
       setVerificationStatus,
       updateProfileBasics,
@@ -1256,7 +923,7 @@ export function HelpersAppProvider({ children }) {
     },
   }), [
     activeJob,
-    helperSkills,
+    helperServiceOfferings,
     homeLocation,
     jobOffers,
     offerResponseState,
