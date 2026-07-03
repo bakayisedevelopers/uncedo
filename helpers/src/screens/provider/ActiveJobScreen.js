@@ -1273,9 +1273,9 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
 
           <View style={styles.metaGrid}>
             <View style={styles.metaCard}>
-              <Text style={styles.metaLabel}>Requested skills</Text>
+              <Text style={styles.metaLabel}>Requested offerings</Text>
               <Text style={styles.metaValue}>
-                {(activeJob.requestedSkills || []).join(', ') || 'Service details will appear here.'}
+                {(activeJob.requestedServiceOfferings || []).join(', ') || 'Service details will appear here.'}
               </Text>
             </View>
             <View style={styles.metaCard}>

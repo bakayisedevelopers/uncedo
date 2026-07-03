@@ -110,6 +110,43 @@ service cloud.firestore {
       allow create, update, delete: if isAdmin();
     }
 
+
+    function isHelperServiceOwner(helperId) {
+      return signedIn() && request.auth.uid == helperId;
+    }
+
+    function isSafeHelperServiceApplication(helperId) {
+      return isHelperServiceOwner(helperId)
+        && request.resource.data.helperId == helperId
+        && request.resource.data.status == 'pending'
+        && request.resource.data.active == false
+        && request.resource.data.approved == false
+        && request.resource.data.verified == false;
+    }
+
+    match /helperServices/{offeringId} {
+      allow get, list: if isAdmin() || signedIn();
+      allow create: if isAdmin() || isSafeHelperServiceApplication(request.resource.data.helperId);
+      allow update: if isAdmin()
+        || (
+          isHelperServiceOwner(resource.data.helperId)
+          && request.resource.data.helperId == resource.data.helperId
+          && request.resource.data.serviceId == resource.data.serviceId
+          && request.resource.data.categoryId == resource.data.categoryId
+          && request.resource.data.status == resource.data.status
+          && request.resource.data.approved == resource.data.approved
+          && request.resource.data.verified == resource.data.verified
+        );
+      allow delete: if isAdmin() || isHelperServiceOwner(resource.data.helperId);
+    }
+
+
+    match /helperDispatchIndex/{helperId} {
+      allow get: if isAdmin() || isOwner(helperId);
+      allow list: if isAdmin();
+      allow create, update, delete: if isAdmin();
+    }
+
     match /customerServiceEvents/{eventId} {
       allow create: if signedIn() && request.resource.data.customerId == request.auth.uid;
       allow get, list: if isAdmin() || isOwner(resource.data.customerId);

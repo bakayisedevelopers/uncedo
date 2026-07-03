@@ -129,7 +129,7 @@ export function ProviderProfileScreen({ navigate }) {
       <View style={styles.hero}>
         <Text style={styles.kicker}>Account</Text>
         <Text style={styles.title}>Profile</Text>
-        <Text style={styles.subtitle}>Manage helper details, profile completion, payout readiness, security, and skill settings.</Text>
+        <Text style={styles.subtitle}>Manage helper details, profile completion, payout readiness, security, and offering settings.</Text>
       </View>
 
       <View style={styles.identityCard}>
@@ -209,8 +209,8 @@ export function ProviderProfileScreen({ navigate }) {
         />
         <ProfileRow
           icon="briefcase-outline"
-          title="Skills"
-          description="Manage your helper skills, uploaded work pictures, and availability."
+          title="ServiceOfferings"
+          description="Manage your helper offerings, uploaded work pictures, and availability."
           onPress={() => navigate({ key: 'ServicesOffered', params: { parentTab: 'Profile' } })}
         />
         <ProfileRow

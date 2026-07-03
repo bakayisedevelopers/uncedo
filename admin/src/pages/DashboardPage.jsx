@@ -30,11 +30,11 @@ export default function DashboardPage() {
 
   const summary = useMemo(() => {
     const serviceRows = flattenProviderServices(helpers);
-    const pendingServices = serviceRows.filter((item) => item.skillStatus === 'pending' || item.skillStatus === 'review');
+    const pendingServices = serviceRows.filter((item) => item.offeringStatus === 'pending' || item.offeringStatus === 'review');
     const suspendedHelpers = helpers.filter((item) => item.suspended || item.adminStatus === 'suspended');
     const businessHelpers = helpers.filter((item) => String(item.providerType || '').toLowerCase() === 'business');
     const verifiedHelpers = helpers.filter((item) => String(item.verificationStatus || '').toLowerCase() === 'verified');
-    const activeServices = serviceRows.filter((item) => item.skillActive !== false && item.skillStatus !== 'rejected');
+    const activeServices = serviceRows.filter((item) => item.offeringActive !== false && item.offeringStatus !== 'rejected');
 
     return {
       serviceRows,
@@ -51,7 +51,7 @@ export default function DashboardPage() {
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <MetricCard label="Helpers" value={formatCount(helpers.length)} detail="Helper accounts in the shared users collection" tone="brand" />
         <MetricCard label="Customers" value={formatCount(customers.length)} detail="Customer accounts stored in Firestore" tone="neutral" />
-        <MetricCard label="Pending services" value={formatCount(summary.pendingServices.length)} detail="Skills that still need review" tone="accent" />
+        <MetricCard label="Pending services" value={formatCount(summary.pendingServices.length)} detail="ServiceOfferings that still need review" tone="accent" />
         <MetricCard label="Suspended helpers" value={formatCount(summary.suspendedHelpers.length)} detail="Helpers blocked from active work" tone="danger" />
       </div>
 
@@ -112,15 +112,15 @@ export default function DashboardPage() {
             <SectionTitle
               eyebrow="Needs attention"
               title="Pending service reviews"
-              description="These are the latest skills waiting to be approved, rejected, or paused."
+              description="These are the latest offerings waiting to be approved, rejected, or paused."
             />
             {summary.pendingServices.length ? (
               <div className="space-y-3">
                 {summary.pendingServices.slice(0, 6).map((item) => (
-                  <div key={`${item.providerUid}-${item.skillId}`} className="rounded-[22px] border border-white/10 bg-white/5 p-4">
+                  <div key={`${item.providerUid}-${item.offeringId}`} className="rounded-[22px] border border-white/10 bg-white/5 p-4">
                     <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                       <div className="min-w-0">
-                        <p className="font-bold text-white">{item.skillName}</p>
+                        <p className="font-bold text-white">{item.serviceName}</p>
                         <p className="mt-1 text-sm text-ink-200">
                           {item.serviceName} by {item.providerName}
                         </p>
@@ -128,7 +128,7 @@ export default function DashboardPage() {
                           {item.businessName || item.providerType || 'individual'} {item.city ? `- ${item.city}` : ''}
                         </p>
                       </div>
-                      <Badge tone={item.skillStatus === 'pending' ? 'warning' : 'neutral'}>{item.skillStatus}</Badge>
+                      <Badge tone={item.offeringStatus === 'pending' ? 'warning' : 'neutral'}>{item.offeringStatus}</Badge>
                     </div>
                   </div>
                 ))}

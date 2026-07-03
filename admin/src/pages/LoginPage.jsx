@@ -58,7 +58,7 @@ export default function LoginPage() {
           <div className="mt-8 grid gap-3 sm:grid-cols-3">
             {[
               ['Helper moderation', 'Approve or suspend helpers.'],
-              ['Service control', 'Review individual skill photos.'],
+              ['Service control', 'Review individual offering photos.'],
               ['Customer insight', 'See profile and location data.'],
             ].map(([title, copy]) => (
               <div key={title} className="rounded-[24px] border border-white/10 bg-white/5 p-4">

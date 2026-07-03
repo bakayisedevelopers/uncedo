@@ -19,15 +19,15 @@ async function ensurePermission(permissionPromise, deniedMessage) {
   }
 }
 
-export async function pickSkillImageFromLibrary() {
-  const images = await pickSkillImagesFromLibrary({ maxSelection: 1 });
+export async function pickServiceOfferingImageFromLibrary() {
+  const images = await pickServiceOfferingImagesFromLibrary({ maxSelection: 1 });
   return images[0] || null;
 }
 
-export async function pickSkillImagesFromLibrary({ maxSelection = 10 } = {}) {
+export async function pickServiceOfferingImagesFromLibrary({ maxSelection = 10 } = {}) {
   await ensurePermission(
     ImagePicker.requestMediaLibraryPermissionsAsync(),
-    'Photo library access is required to upload a skill picture.',
+    'Photo library access is required to upload a offering picture.',
   );
 
   const result = await ImagePicker.launchImageLibraryAsync({

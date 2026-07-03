@@ -9,7 +9,7 @@ import {
 } from '../services/serviceCatalogService';
 import {
   groupRowsByHelper,
-  isPendingSkillStatus,
+  isPendingServiceOfferingStatus,
   matchesCatalogItem,
 } from '../utils/moderationView';
 
@@ -103,7 +103,7 @@ export default function ServicesPage() {
     return filteredCatalog.map((item) => {
       const rows = flattenProviderServices(helpers).filter((row) => matchesCatalogItem(row, item));
       const helperGroups = groupRowsByHelper(rows);
-      const pendingCount = rows.filter((row) => isPendingSkillStatus(row.skillStatus)).length;
+      const pendingCount = rows.filter((row) => isPendingServiceOfferingStatus(row.offeringStatus)).length;
 
       return {
         item,
@@ -169,7 +169,7 @@ export default function ServicesPage() {
                   </div>
                   <div className="flex flex-col gap-2">
                   <Badge tone={item.persisted ? 'success' : 'neutral'}>{formatPublishedState(item)}</Badge>
-                    <Badge tone={item.kind === 'bundle' ? 'brand' : 'neutral'}>{item.kind === 'bundle' ? 'Bundle' : 'Standard'}</Badge>
+                    <Badge tone={item.type === 'bundle' ? 'brand' : 'neutral'}>{item.type === 'bundle' ? 'Bundle' : 'Standard'}</Badge>
                     <Badge tone={pendingCount ? 'warning' : 'success'}>{pendingCount} pending</Badge>
                   </div>
                 </div>

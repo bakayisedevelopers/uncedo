@@ -13,6 +13,7 @@
     "firebase-admin": "^12.1.1",
     "firebase-functions": "^7.2.5",
     "pdfkit": "^0.17.2",
-    "resend": "^4.1.2"
+    "resend": "^4.1.2",
+    "h3-js": "^4.2.1"
   }
 }

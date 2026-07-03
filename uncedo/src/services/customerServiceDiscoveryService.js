@@ -13,32 +13,8 @@ function normalizeToken(value = '') {
     .replace(/[^a-z0-9]+/g, '');
 }
 
-function normalizeRole(value) {
+function normalizeRole(value = '') {
   return String(value || '').trim().toLowerCase();
-}
-
-function collectRoles(profile = {}) {
-  return new Set([
-    normalizeRole(profile?.role),
-    normalizeRole(profile?.activeRole),
-    ...(Array.isArray(profile?.roles) ? profile.roles.map(normalizeRole) : []),
-  ].filter(Boolean));
-}
-
-function isHelperRecord(profile = {}) {
-  const roles = collectRoles(profile);
-  return roles.has('helper')
-    || roles.has('provider')
-    || roles.has('tutor')
-    || Boolean(
-      (Array.isArray(profile?.services) && profile.services.length)
-      || profile?.agreement
-      || profile?.payout
-      || normalizeRole(profile?.providerType)
-      || String(profile?.businessName || '').trim()
-      || normalizeRole(profile?.verificationStatus)
-      || normalizeRole(profile?.onlineStatus)
-    );
 }
 
 function normalizePicture(picture) {
@@ -58,48 +34,6 @@ function normalizePicture(picture) {
   };
 }
 
-function normalizeSkill(skill = {}) {
-  const name = String(skill.name || '').trim();
-  if (!name) return null;
-
-  const pictures = (Array.isArray(skill.pictures) ? skill.pictures : [])
-    .map(normalizePicture)
-    .filter(Boolean);
-
-  return {
-    name,
-    catalogId: String(skill.catalogId || skill.serviceCatalogId || normalizeToken(name)).trim().toLowerCase(),
-    active: skill.active !== false,
-    status: String(skill.status || 'approved').trim().toLowerCase(),
-    pictures,
-  };
-}
-
-function normalizeHelper(helper = {}) {
-  const serviceEntries = Array.isArray(helper.services) ? helper.services : [];
-  const services = serviceEntries
-    .map((service) => {
-      const serviceId = String(service.serviceId || '').trim();
-      if (!serviceId) return null;
-
-      return {
-        serviceId,
-        skills: (Array.isArray(service.skills) ? service.skills : [])
-          .map(normalizeSkill)
-          .filter(Boolean),
-      };
-    })
-    .filter(Boolean);
-
-  return {
-    id: String(helper.uid || helper.id || '').trim(),
-    fullName: String(helper.fullName || helper.displayName || 'Helper').trim(),
-    profilePhoto: String(helper.profilePhoto || helper.selfieUrl || '').trim(),
-    onlineStatus: normalizeRole(helper.onlineStatus || 'offline'),
-    services,
-  };
-}
-
 function buildCardPriceLabel(service) {
   const price = Number(service?.pricing?.basePrice || service?.pricing?.minimumCallout || 0) || 0;
   return service?.pricing?.pricingMode === 'fixed' ? `R${price.toFixed(0)}` : `From R${price.toFixed(0)}`;
@@ -109,24 +43,6 @@ function buildDiscoveryDescription(service, categoryLabel) {
   const description = String(service?.description || '').trim();
   if (description) return description;
   return `${service.label} available from approved helpers in ${categoryLabel}.`;
-}
-
-function findMatchingSkills(helper, categoryId, labels = []) {
-  const categoryService = (helper.services || []).find((entry) => entry.serviceId === categoryId) || null;
-  if (!categoryService) return [];
-
-  const normalizedLabels = labels.map(normalizeToken).filter(Boolean);
-  return (categoryService.skills || []).filter((skill) => (
-    skill.status === 'approved'
-    && skill.active !== false
-    && Array.isArray(skill.pictures)
-    && skill.pictures.length > 0
-    && (
-      !normalizedLabels.length
-      || normalizedLabels.includes(normalizeToken(skill.name))
-      || normalizedLabels.includes(normalizeToken(skill.catalogId))
-    )
-  ));
 }
 
 function resolveDiscoveryImageUris(serviceEntry) {
@@ -139,8 +55,13 @@ function resolveDiscoveryImageUris(serviceEntry) {
 
 function buildDiscoveryItems({ helpers = [], serviceCatalog = [], preferredCategoryIds = [] } = {}) {
   const helperItems = (Array.isArray(helpers) ? helpers : [])
-    .filter((helper) => isHelperRecord(helper))
-    .map(normalizeHelper)
+    .map((helper) => ({
+      id: String(helper.helperId || helper.uid || helper.id || '').trim(),
+      fullName: String(helper.fullName || helper.displayName || 'Helper').trim(),
+      onlineStatus: helper.online === true ? 'online' : normalizeRole(helper.onlineStatus || 'offline'),
+      categoryIds: Array.isArray(helper.categoryIds) ? helper.categoryIds.map(normalizeToken) : [],
+      expandedServiceIds: Array.isArray(helper.expandedServiceIds) ? helper.expandedServiceIds.map(normalizeToken) : [],
+    }))
     .filter((helper) => helper.id);
 
   const activeCatalog = (Array.isArray(serviceCatalog) ? serviceCatalog : [])
@@ -154,16 +75,20 @@ function buildDiscoveryItems({ helpers = [], serviceCatalog = [], preferredCateg
     const customerService = getCustomerServiceById(entry.id);
     if (!customerService) return;
 
-    const helperCategoryId = String(entry.categoryId || customerService.categoryId || '').trim();
     const categoryId = String(customerService.categoryId || entry.categoryId || '').trim();
     const category = getCustomerServiceCategoryById(categoryId);
     const categoryLabel = category?.label || entry.categoryName || categoryId;
-    const matchingHelpers = helperItems.filter((helper) => findMatchingSkills(helper, helperCategoryId, [entry.label, customerService.label]));
+    const serviceToken = normalizeToken(customerService.id || entry.id);
+    const categoryToken = normalizeToken(categoryId);
+    const matchingHelpers = helperItems.filter((helper) => (
+      helper.onlineStatus === 'online'
+      && helper.categoryIds.includes(categoryToken)
+      && helper.expandedServiceIds.includes(serviceToken)
+    ));
     const imageUris = resolveDiscoveryImageUris(entry);
     if (!matchingHelpers.length || !imageUris.length) return;
 
-    const onlineHelperCount = matchingHelpers.filter((helper) => helper.onlineStatus === 'online').length;
-
+    const onlineHelperCount = matchingHelpers.length;
     const resolvedServiceId = customerService.id || entry.id;
     const key = `service-${categoryId}-${resolvedServiceId}`;
     if (seen.has(key)) return;
@@ -172,8 +97,8 @@ function buildDiscoveryItems({ helpers = [], serviceCatalog = [], preferredCateg
     items.push({
       id: key,
       entityId: resolvedServiceId,
-      kind: customerService.kind || 'service',
-      packageId: customerService.kind === 'bundle' ? resolvedServiceId : '',
+      type: customerService.type || 'service',
+      packageId: customerService.type === 'bundle' ? resolvedServiceId : '',
       categoryId,
       categoryLabel,
       title: customerService.label || entry.label,
@@ -202,7 +127,7 @@ function buildDiscoveryItems({ helpers = [], serviceCatalog = [], preferredCateg
 
 export function subscribeToCustomerServiceShowcase({ preferredCategoryIds = [], callback, onError } = {}) {
   const { db } = getFirebaseClients();
-  const helpersQuery = query(collection(db, 'users'));
+  const helpersQuery = query(collection(db, 'helperDispatchIndex'));
 
   let helperItems = [];
   let serviceCatalogItems = [];
@@ -217,7 +142,7 @@ export function subscribeToCustomerServiceShowcase({ preferredCategoryIds = [], 
   const unsubscribeHelpers = onSnapshot(
     helpersQuery,
     (snapshot) => {
-      helperItems = snapshot.docs.map((docSnap) => ({ uid: docSnap.id, ...docSnap.data() }));
+      helperItems = snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }));
       helpersReady = true;
       emit();
     },

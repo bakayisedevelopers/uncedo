@@ -46,9 +46,7 @@ function inferRolesFromShape(profile = {}) {
   const customerProfile = profile.customerProfile || profile.studentProfile || {};
 
   const hasHelperSignals = Boolean(
-    (Array.isArray(profile.services) && profile.services.length)
-    || (Array.isArray(helperProfile.services) && helperProfile.services.length)
-    || profile.agreement
+    profile.agreement
     || profile.payout
     || profile.onlineStatus
     || profile.verificationStatus
@@ -110,72 +108,6 @@ function normalizePictureEntry(picture) {
   };
 }
 
-function normalizeSkill(skill = {}, serviceId = '') {
-  const name = String(skill.name || skill.skillName || '').trim();
-  if (!name) return null;
-
-  return {
-    id: String(skill.id || `${serviceId}_${name}`.replace(/[^a-z0-9]+/gi, '_').toLowerCase()),
-    catalogId: String(skill.catalogId || skill.serviceCatalogId || name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '_'),
-    name,
-    status: String(skill.status || 'pending').trim().toLowerCase(),
-    active: skill.active !== false,
-    verified: skill.verified !== false,
-    approvalSource: String(skill.approvalSource || '').trim().toLowerCase(),
-    derivedFromBundleIds: [...new Set((Array.isArray(skill.derivedFromBundleIds) ? skill.derivedFromBundleIds : [])
-      .map((value) => String(value || '').trim().toLowerCase())
-      .filter(Boolean))],
-    derivedFromServiceIds: [...new Set((Array.isArray(skill.derivedFromServiceIds) ? skill.derivedFromServiceIds : [])
-      .map((value) => String(value || '').trim().toLowerCase())
-      .filter(Boolean))],
-    createdAt: skill.createdAt || null,
-    updatedAt: skill.updatedAt || null,
-    pictures: (Array.isArray(skill.pictures) ? skill.pictures : [])
-      .map(normalizePictureEntry)
-      .filter(Boolean),
-  };
-}
-
-async function getAuthToken() {
-  const clients = await getFirebaseClients();
-  return clients?.auth?.currentUser?.getIdToken?.() || '';
-}
-
-async function authorizedFunctionFetch(functionName, options = {}) {
-  const token = await getAuthToken();
-  if (!token) {
-    throw new Error('You must be signed in before managing helper approvals.');
-  }
-
-  const response = await fetch(getFunctionEndpoint(functionName), {
-    ...options,
-    headers: {
-      ...(options.headers || {}),
-      Authorization: `Bearer ${token}`,
-    },
-  });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok || !result?.success) {
-    throw new Error(result?.message || 'Unable to complete the helper approval request.');
-  }
-  return result;
-}
-
-function normalizeService(service = {}) {
-  const serviceId = String(service.serviceId || '').trim();
-  if (!serviceId) return null;
-
-  return {
-    ...service,
-    serviceId,
-    serviceName: String(service.serviceName || service.name || serviceId).trim(),
-    description: String(service.description || '').trim(),
-    skills: (Array.isArray(service.skills) ? service.skills : [])
-      .map((skill) => normalizeSkill(skill, serviceId))
-      .filter(Boolean),
-  };
-}
-
 export function normalizeAdminProfile(profile = {}) {
   const helperProfile = profile.helperProfile || profile.providerProfile || {};
   const customerProfile = profile.customerProfile || profile.studentProfile || {};
@@ -200,9 +132,6 @@ export function normalizeAdminProfile(profile = {}) {
     suspended: Boolean(profile.suspended ?? helperProfile.suspended ?? false),
     verificationStatus: String(profile.verificationStatus || helperProfile.verificationStatus || '').trim().toLowerCase(),
     adminStatus: String(profile.adminStatus || helperProfile.adminStatus || '').trim().toLowerCase(),
-    services: (Array.isArray(profile.services) ? profile.services : Array.isArray(helperProfile.services) ? helperProfile.services : [])
-      .map(normalizeService)
-      .filter(Boolean),
     customerProfile: {
       ...(profile.customerProfile || {}),
       serviceAddress: String(customerProfile?.serviceAddress || '').trim(),
@@ -239,10 +168,6 @@ async function saveUserProfile(uid, nextProfile, traceLabel = 'admin:saveUserPro
     traceLabel,
     uid,
     keys: Object.keys(nextProfile || {}),
-    serviceCount: Array.isArray(nextProfile?.services) ? nextProfile.services.length : 0,
-    skillCount: Array.isArray(nextProfile?.services)
-      ? nextProfile.services.reduce((count, service) => count + (Array.isArray(service?.skills) ? service.skills.length : 0), 0)
-      : 0,
   });
 
   await setDoc(
@@ -299,7 +224,12 @@ export async function listUsersByRole(activeRole) {
 }
 
 export async function listHelperProfiles() {
-  return listUsersByRole('helper');
+  const helpers = await listUsersByRole('helper');
+  const serviceRows = await loadHelperServiceRows(helpers);
+  return helpers.map((helper) => ({
+    ...helper,
+    helperServiceRows: serviceRows.filter((row) => row.helperUid === helper.uid),
+  }));
 }
 
 export async function listCustomerProfiles() {
@@ -318,38 +248,52 @@ export async function updateHelperModeration(uid, updates = {}) {
   }, 'admin:updateHelperModeration');
 }
 
-export async function updateHelperServiceStatus({ uid, serviceId, skillId, updates = {} }) {
-  const profile = await getUserProfile(uid);
-  if (!profile) {
-    throw new Error('Helper profile not found.');
-  }
+function normalizeHelperServiceOfferingRow(docId = '', data = {}, helperProfilesById = new Map()) {
+  const helperId = String(data.helperId || '').trim();
+  const helper = helperProfilesById.get(helperId) || {};
+  const serviceId = String(data.serviceId || '').trim();
+  return {
+    providerUid: helperId,
+    providerName: helper.fullName || helper.displayName || helper.email || 'Helper',
+    helperUid: helperId,
+    helperName: helper.fullName || helper.displayName || helper.email || 'Helper',
+    providerEmail: helper.email || '',
+    providerType: helper.providerType || 'individual',
+    businessName: helper.businessName || '',
+    city: helper.city || '',
+    phoneNumber: helper.phoneNumber || '',
+    suspended: Boolean(helper.suspended),
+    verificationStatus: String(helper.verificationStatus || 'pending').toLowerCase(),
+    serviceId,
+    categoryId: String(data.categoryId || '').trim(),
+    serviceName: String(data.serviceName || data.name || serviceId).trim(),
+    serviceDescription: String(data.description || '').trim(),
+    offeringId: String(data.offeringId || docId).trim(),
+    offeringStatus: String(data.status || 'pending').toLowerCase(),
+    offeringActive: data.active !== false,
+    offeringVerified: data.verified === true,
+    approved: data.approved === true,
+    photos: Array.isArray(data.photos) ? data.photos : [],
+    pictures: Array.isArray(data.photos) ? data.photos : [],
+    createdAt: data.createdAt || null,
+    updatedAt: data.updatedAt || null,
+  };
+}
 
+export async function updateHelperServiceStatus({ uid, serviceId, offeringId, updates = {} }) {
+  const clients = await getFirebaseClients();
+  if (!clients) throw new Error('Firebase is not configured for the admin app.');
+  const { db, firestoreModule } = clients;
+  const { doc, serverTimestamp, setDoc } = firestoreModule;
   const normalizedStatus = String(updates.status || '').trim().toLowerCase();
   const nextUpdates = {
     ...updates,
+    ...(normalizedStatus === 'approved' ? { approved: true, verified: true, active: updates.active !== false } : {}),
+    ...(normalizedStatus === 'rejected' ? { approved: false, verified: false, active: false } : {}),
     ...(normalizedStatus === 'approved' && !('approvalSource' in updates) ? { approvalSource: 'manual' } : {}),
+    updatedAt: serverTimestamp(),
   };
-
-  const nextServices = (Array.isArray(profile.services) ? profile.services : []).map((service) => {
-    if (service.serviceId !== serviceId) return service;
-
-    return {
-      ...service,
-      skills: (Array.isArray(service.skills) ? service.skills : []).map((skill) => {
-        if (skill.id !== skillId && skill.name !== skillId) return skill;
-        return {
-          ...skill,
-          ...nextUpdates,
-          updatedAt: new Date().toISOString(),
-        };
-      }),
-    };
-  });
-
-  await saveUserProfile(uid, {
-    ...profile,
-    services: nextServices,
-  }, 'admin:updateHelperServiceStatus');
+  await setDoc(doc(db, 'helperServices', offeringId || `${uid}_${serviceId}`), nextUpdates, { merge: true });
   await reconcileOpenServiceRequests({
     reason: 'admin_helper_service_status_updated',
     touchedServiceIds: [serviceId],
@@ -357,61 +301,31 @@ export async function updateHelperServiceStatus({ uid, serviceId, skillId, updat
   return getUserProfile(uid);
 }
 
-export async function removeHelperSkill({ uid, serviceId, skillId }) {
-  const profile = await getUserProfile(uid);
-  if (!profile) {
-    throw new Error('Helper profile not found.');
-  }
-
-  const nextServices = (Array.isArray(profile.services) ? profile.services : [])
-    .map((service) => {
-      if (service.serviceId !== serviceId) return service;
-      return {
-        ...service,
-        skills: (Array.isArray(service.skills) ? service.skills : []).filter((skill) => skill.id !== skillId && skill.name !== skillId),
-      };
-    })
-    .filter((service) => (Array.isArray(service.skills) ? service.skills.length : 0) > 0);
-
-  await saveUserProfile(uid, {
-    ...profile,
-    services: nextServices,
-  }, 'admin:removeHelperSkill');
+export async function removeHelperServiceOffering({ uid, serviceId, offeringId }) {
+  const clients = await getFirebaseClients();
+  if (!clients) throw new Error('Firebase is not configured for the admin app.');
+  const { db, firestoreModule } = clients;
+  const { deleteDoc, doc } = firestoreModule;
+  await deleteDoc(doc(db, 'helperServices', offeringId || `${uid}_${serviceId}`));
   await reconcileOpenServiceRequests({
-    reason: 'admin_helper_skill_removed',
+    reason: 'admin_helper_service_removed',
     touchedServiceIds: [serviceId],
   }).catch(() => null);
   return getUserProfile(uid);
 }
 
+async function loadHelperServiceRows(profiles = []) {
+  const clients = await getFirebaseClients();
+  if (!clients) return [];
+  const { db, firestoreModule } = clients;
+  const { collection, getDocs } = firestoreModule;
+  const helperProfilesById = new Map((Array.isArray(profiles) ? profiles : []).map((profile) => [profile.uid, profile]));
+  const snapshot = await getDocs(collection(db, 'helperServices'));
+  return snapshot.docs
+    .map((docSnap) => normalizeHelperServiceOfferingRow(docSnap.id, docSnap.data(), helperProfilesById))
+    .filter((row) => row.helperUid);
+}
+
 export function flattenProviderServices(profiles = []) {
-  return profiles.flatMap((profile) => (
-    (Array.isArray(profile.services) ? profile.services : []).flatMap((service) => (
-      (Array.isArray(service.skills) ? service.skills : []).map((skill) => ({
-        providerUid: profile.uid,
-        providerName: profile.fullName || profile.displayName || profile.email || 'Helper',
-        helperUid: profile.uid,
-        helperName: profile.fullName || profile.displayName || profile.email || 'Helper',
-        providerEmail: profile.email || '',
-        providerType: profile.providerType || 'individual',
-        businessName: profile.businessName || '',
-        city: profile.city || '',
-        phoneNumber: profile.phoneNumber || '',
-        suspended: Boolean(profile.suspended),
-        verificationStatus: String(profile.verificationStatus || 'pending').toLowerCase(),
-        serviceId: service.serviceId,
-        serviceName: service.serviceName,
-        serviceDescription: service.description,
-        skillId: skill.id,
-        catalogId: skill.catalogId || '',
-        skillName: skill.name,
-        skillStatus: String(skill.status || 'pending').toLowerCase(),
-        skillActive: skill.active !== false,
-        skillVerified: skill.verified !== false,
-        pictures: Array.isArray(skill.pictures) ? skill.pictures : [],
-        createdAt: skill.createdAt || null,
-        updatedAt: skill.updatedAt || null,
-      }))
-    ))
-  ));
+  return (Array.isArray(profiles) ? profiles : []).flatMap((profile) => Array.isArray(profile.helperServiceRows) ? profile.helperServiceRows : []);
 }

@@ -48,7 +48,7 @@ export function ServiceSearchOverlay({
                   <View style={styles.resultCopy}>
                     <Text style={styles.resultTitle}>{item.title}</Text>
                     <Text style={styles.resultMeta}>
-                      {item.kind === 'package' ? 'Package' : 'Service'} - {item.categoryLabel}
+                      {item.type === 'package' ? 'Package' : 'Service'} - {item.categoryLabel}
                     </Text>
                     {item.includedLabels?.length ? (
                       <Text numberOfLines={1} style={styles.resultDescription}>

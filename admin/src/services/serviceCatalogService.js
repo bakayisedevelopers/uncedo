@@ -55,10 +55,10 @@ export function normalizeServiceCatalogEntry(entry = {}, fallback = null) {
     id: serviceId,
     categoryId: String(entry.categoryId || fallbackItem?.categoryId || '').trim(),
     categoryName: String(entry.categoryName || fallbackItem?.categoryName || '').trim(),
-    label: String(entry.label || entry.skillName || fallbackItem?.label || fallbackItem?.skillName || serviceId).trim(),
+    label: String(entry.label || entry.serviceName || fallbackItem?.label || fallbackItem?.serviceName || serviceId).trim(),
     promptLabel: String(entry.promptLabel || entry.label || fallbackItem?.promptLabel || fallbackItem?.label || serviceId).trim(),
     description: String(entry.description || fallbackItem?.description || '').trim(),
-    kind: String(entry.kind || fallbackItem?.kind || 'service').trim().toLowerCase(),
+    type: String(entry.type || fallbackItem?.type || 'service').trim().toLowerCase(),
     persisted: entry.persisted === true,
     active: entry.active !== false,
     approved: entry.approved !== false,
@@ -229,17 +229,17 @@ export async function uploadSharedServiceCatalogImages({ assignments = [], servi
         id: serviceId,
         categoryId: String(current.categoryId || serviceMeta.categoryId || '').trim(),
         categoryName: String(current.categoryName || serviceMeta.categoryName || '').trim(),
-        label: String(current.label || current.skillName || serviceMeta.label || serviceMeta.skillName || serviceId).trim(),
+        label: String(current.label || current.serviceName || serviceMeta.label || serviceMeta.serviceName || serviceId).trim(),
         promptLabel: String(
           current.promptLabel
           || current.label
           || serviceMeta.promptLabel
           || serviceMeta.label
-          || serviceMeta.skillName
+          || serviceMeta.serviceName
           || serviceId
         ).trim(),
         description: String(current.description || serviceMeta.description || '').trim(),
-        kind: String(current.kind || serviceMeta.kind || 'service').trim().toLowerCase(),
+        type: String(current.type || serviceMeta.type || 'service').trim().toLowerCase(),
         active: current.active !== false,
         approved: current.approved !== false,
         persisted: true,

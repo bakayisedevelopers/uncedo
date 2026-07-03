@@ -68,15 +68,10 @@ export async function getUserProfile(uid) {
 }
 
 function logUserProfileWrite(traceLabel, uid, updates = {}) {
-  const services = Array.isArray(updates?.services) ? updates.services : [];
-  const serviceCount = services.length;
-  const skillCount = services.reduce((count, service) => count + (Array.isArray(service?.skills) ? service.skills.length : 0), 0);
 
   console.info('[helpers:user-write]', {
     traceLabel,
     uid,
-    serviceCount,
-    skillCount,
     keys: Object.keys(updates || {}),
   });
 }

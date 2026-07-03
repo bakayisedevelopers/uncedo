@@ -32,8 +32,7 @@ function collectRoles(profile = {}) {
 
 function hasHelperSignals(profile = {}) {
   return Boolean(
-    (Array.isArray(profile?.services) && profile.services.length)
-    || profile?.agreement
+profile?.agreement
     || profile?.payout
     || normalizeRole(profile?.providerType)
     || String(profile?.businessName || '').trim()

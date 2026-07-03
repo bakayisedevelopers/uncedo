@@ -75,14 +75,14 @@ function buildLiveServiceEntry(entry = {}) {
   const questionnaire = entry.questionnaire && typeof entry.questionnaire === 'object'
     ? entry.questionnaire
     : { required: entry.requiredQuestions, optional: entry.optionalQuestions };
-  const kind = String(entry.kind || 'service').trim().toLowerCase();
+  const type = String(entry.type || 'service').trim().toLowerCase();
 
   return {
     id,
     categoryId,
-    label: String(entry.label || entry.skillName || id).trim(),
-    promptLabel: String(entry.promptLabel || entry.label || entry.skillName || id).trim(),
-    kind: kind === 'bundle' || kind === 'package' ? 'bundle' : 'service',
+    label: String(entry.label || entry.serviceName || id).trim(),
+    promptLabel: String(entry.promptLabel || entry.label || entry.serviceName || id).trim(),
+    type: type === 'bundle' || type === 'package' ? 'bundle' : 'service',
     description: String(entry.description || '').trim(),
     includedServiceIds: (Array.isArray(entry.includedServiceIds) ? entry.includedServiceIds : [])
       .map((item) => String(item || '').trim().toLowerCase())
@@ -128,10 +128,10 @@ function rebuildMutableCatalogExports() {
     .map((category) => ({
       ...category,
       packages: [...liveServiceMap.values()]
-        .filter((service) => service.categoryId === category.id && service.kind === 'bundle')
+        .filter((service) => service.categoryId === category.id && service.type === 'bundle')
         .sort(compareByLabel),
       services: [...liveServiceMap.values()]
-        .filter((service) => service.categoryId === category.id && service.kind !== 'bundle')
+        .filter((service) => service.categoryId === category.id && service.type !== 'bundle')
         .sort(compareByLabel),
     }));
 
@@ -192,12 +192,12 @@ export function getCustomerServiceById(serviceId) {
 
 export function getCustomerServicesForCategory(categoryId) {
   const normalizedCategoryId = String(categoryId || '').trim().toLowerCase();
-  return CUSTOMER_SERVICE_OPTIONS.filter((service) => service.categoryId === normalizedCategoryId && service.kind !== 'bundle');
+  return CUSTOMER_SERVICE_OPTIONS.filter((service) => service.categoryId === normalizedCategoryId && service.type !== 'bundle');
 }
 
 export function getCustomerPackagesForCategory(categoryId) {
   const normalizedCategoryId = String(categoryId || '').trim().toLowerCase();
-  return CUSTOMER_SERVICE_OPTIONS.filter((service) => service.categoryId === normalizedCategoryId && service.kind === 'bundle');
+  return CUSTOMER_SERVICE_OPTIONS.filter((service) => service.categoryId === normalizedCategoryId && service.type === 'bundle');
 }
 
 export function buildJobRequestSuggestions(limit = 8) {

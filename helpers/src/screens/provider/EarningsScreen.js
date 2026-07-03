@@ -103,7 +103,7 @@ export function EarningsScreen({ goBack }) {
                           <Text style={styles.jobRowTitle}>{job.title}</Text>
                           <Text style={styles.jobRowMeta}>{`${job.customerName} | ${formatDate(job.completedAt)}`}</Text>
                           <Text style={styles.jobRowMeta}>{job.computedAmounts.summaryLabel}</Text>
-                          <Text style={styles.jobRowMeta}>{(job.requestedSkills || []).join(', ')}</Text>
+                          <Text style={styles.jobRowMeta}>{(job.requestedServiceOfferings || []).join(', ')}</Text>
                         </View>
                         <View style={styles.jobRowAmounts}>
                           <Text style={styles.jobRowTotal}>Charged {formatCurrency(job.computedAmounts.totalAmount)}</Text>

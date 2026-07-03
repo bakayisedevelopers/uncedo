@@ -14,43 +14,42 @@ function slugify(value = '') {
     .replace(/^_+|_+$/g, '');
 }
 
-export function SkillCatalogScreen({ navigate, goBack }) {
-  const { helperSkills, serviceCatalog } = useHelpersApp();
+export function ServiceOfferingCatalogScreen({ navigate, goBack }) {
+  const { helperServiceOfferings, serviceCatalog } = useHelpersApp();
 
   const catalogGroups = useMemo(
     () => buildHelperServiceCatalog(serviceCatalog),
     [serviceCatalog],
   );
 
-  const catalogSkills = useMemo(
+  const catalogServiceOfferings = useMemo(
     () => catalogGroups.flatMap((service) => (
         service.services.map((entry) => ({
           id: entry.id,
-          catalogId: entry.id,
-          serviceId: service.id,
-          serviceName: service.name,
-          serviceDescription: service.description,
-          skillName: entry.label,
+          serviceId: entry.id,
+          categoryId: service.id,
+          serviceName: entry.label,
+          serviceDescription: entry.description || service.description,
           active: entry.active !== false,
-          kind: entry.kind || 'service',
+          type: entry.type || 'service',
         }))
     )),
     [catalogGroups],
   );
 
-  const existingSkillMap = useMemo(() => new Map(
-    helperSkills.flatMap((skill) => ([
-      [String(skill.catalogId || '').trim().toLowerCase(), skill],
-      [slugify(skill.name), skill],
-      [slugify(`${skill.serviceId || ''}_${skill.name || ''}`), skill],
+  const existingServiceOfferingMap = useMemo(() => new Map(
+    helperServiceOfferings.flatMap((offering) => ([
+      [String(offering.serviceId || '').trim().toLowerCase(), offering],
+      [slugify(offering.serviceName), offering],
+      [slugify(`${offering.serviceId || ''}_${offering.serviceName || ''}`), offering],
     ])).filter(([key]) => Boolean(key)),
-  ), [helperSkills]);
+  ), [helperServiceOfferings]);
 
   return (
     <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false}>
       <Pressable accessibilityRole="button" onPress={() => goBack('ServicesOffered')} style={styles.backRow}>
         <Ionicons color={colors.brandDark} name="chevron-back" size={18} />
-        <Text style={styles.backText}>Back to skills</Text>
+        <Text style={styles.backText}>Back to offerings</Text>
       </Pressable>
 
       <View style={styles.header}>
@@ -68,19 +67,19 @@ export function SkillCatalogScreen({ navigate, goBack }) {
         />
       </Card>
 
-      {catalogSkills.length ? catalogSkills.map((item) => {
-        const existing = existingSkillMap.get(item.catalogId);
+      {catalogServiceOfferings.length ? catalogServiceOfferings.map((item) => {
+        const existing = existingServiceOfferingMap.get(item.serviceId);
         return (
           <Pressable
             accessibilityRole="button"
             key={item.id}
             onPress={() => navigate({
-              key: 'SkillDetails',
+              key: 'ServiceOfferingDetails',
               params: {
                 parentTab: 'Profile',
                 serviceId: item.serviceId,
-                skillName: item.skillName,
-                catalogId: item.catalogId,
+                categoryId: item.categoryId,
+                serviceName: item.serviceName,
                 mode: existing ? 'edit' : 'create',
               },
             })}
@@ -90,8 +89,8 @@ export function SkillCatalogScreen({ navigate, goBack }) {
               <Ionicons color={colors.brandDark} name="briefcase-outline" size={18} />
             </View>
             <View style={styles.rowBody}>
-              <Text style={styles.rowTitle}>{item.skillName}</Text>
-              <Text style={styles.rowDescription}>{item.serviceName}{item.kind === 'bundle' ? ' • bundle' : ''}</Text>
+              <Text style={styles.rowTitle}>{item.serviceName}</Text>
+              <Text style={styles.rowDescription}>{item.serviceName}{item.type === 'bundle' ? ' • bundle' : ''}</Text>
             </View>
             {existing ? (
               <StatusBadge label={existing.status === 'approved' ? 'Approved' : 'Pending'} tone={existing.status === 'approved' ? 'success' : 'warning'} />

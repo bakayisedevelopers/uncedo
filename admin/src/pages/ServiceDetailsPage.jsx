@@ -12,7 +12,7 @@ import {
   subscribeToServiceCatalog,
   uploadServiceCatalogImages,
 } from '../services/serviceCatalogService';
-import { groupRowsByHelper, isPendingSkillStatus, matchesCatalogItem } from '../utils/moderationView';
+import { groupRowsByHelper, isPendingServiceOfferingStatus, matchesCatalogItem } from '../utils/moderationView';
 
 function slugify(value = '') {
   return String(value || '')
@@ -314,7 +314,7 @@ export default function ServiceDetailsPage() {
   const [draftPromptLabel, setDraftPromptLabel] = useState('');
   const [draftDescription, setDraftDescription] = useState('');
   const [draftCategoryId, setDraftCategoryId] = useState('');
-  const [draftKind, setDraftKind] = useState('service');
+  const [draftType, setDraftType] = useState('service');
   const [draftActive, setDraftActive] = useState(true);
   const [draftFiles, setDraftFiles] = useState([]);
   const [draftIncludedServiceIds, setDraftIncludedServiceIds] = useState([]);
@@ -381,7 +381,7 @@ export default function ServiceDetailsPage() {
         label: 'New service',
         promptLabel: '',
         description: '',
-        kind: 'service',
+        type: 'service',
         persisted: false,
         active: true,
         approved: true,
@@ -411,7 +411,7 @@ export default function ServiceDetailsPage() {
     setDraftPromptLabel(selectedService.promptLabel || selectedService.label || '');
     setDraftDescription(selectedService.description || '');
     setDraftCategoryId(nextCategoryId);
-    setDraftKind(selectedService.kind || 'service');
+    setDraftType(selectedService.type || 'service');
     setDraftActive(selectedService.persisted ? selectedService.active !== false : true);
     setDraftFiles([]);
     setDraftIncludedServiceIds(Array.isArray(selectedService.includedServiceIds) ? selectedService.includedServiceIds : []);
@@ -439,17 +439,17 @@ export default function ServiceDetailsPage() {
 
   const helperGroups = useMemo(() => groupRowsByHelper(serviceRows), [serviceRows]);
   const pendingSubmissionCount = useMemo(
-    () => serviceRows.filter((row) => isPendingSkillStatus(row.skillStatus)).length,
+    () => serviceRows.filter((row) => isPendingServiceOfferingStatus(row.offeringStatus)).length,
     [serviceRows],
   );
 
   const selectableBundleServices = useMemo(
-    () => catalogEntries.filter((entry) => entry.id !== selectedService?.id && entry.kind !== 'bundle'),
+    () => catalogEntries.filter((entry) => entry.id !== selectedService?.id && entry.type !== 'bundle'),
     [catalogEntries, selectedService?.id],
   );
 
   const inheritedBundleImages = useMemo(() => {
-    if (draftKind !== 'bundle' || draftInheritBundleImages === false) return [];
+    if (draftType !== 'bundle' || draftInheritBundleImages === false) return [];
     const seen = new Set();
     return catalogEntries
       .filter((entry) => draftIncludedServiceIds.includes(entry.id))
@@ -460,7 +460,7 @@ export default function ServiceDetailsPage() {
         seen.add(key);
         return true;
       });
-  }, [catalogEntries, draftIncludedServiceIds, draftInheritBundleImages, draftKind]);
+  }, [catalogEntries, draftIncludedServiceIds, draftInheritBundleImages, draftType]);
 
   const effectiveImages = useMemo(
     () => ([...(selectedService?.images || []), ...inheritedBundleImages].slice(0, 10)),
@@ -475,11 +475,11 @@ export default function ServiceDetailsPage() {
     label: String(draftLabel || '').trim(),
     promptLabel: String(draftPromptLabel || draftLabel || '').trim(),
     description: String(draftDescription || '').trim(),
-    kind: draftKind,
+    type: draftType,
     active: draftActive,
     approved: true,
     images,
-    includedServiceIds: draftKind === 'bundle' ? draftIncludedServiceIds : [],
+    includedServiceIds: draftType === 'bundle' ? draftIncludedServiceIds : [],
     requiresPortfolioSelection: draftRequiresPortfolioSelection,
     inheritBundleImages: draftInheritBundleImages,
     pricing: {
@@ -626,8 +626,8 @@ export default function ServiceDetailsPage() {
                 <label className="space-y-2">
                   <span className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Service type</span>
                   <select
-                    value={draftKind}
-                    onChange={(event) => setDraftKind(event.target.value)}
+                    value={draftType}
+                    onChange={(event) => setDraftType(event.target.value)}
                     className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
                   >
                     <option value="service">Standard service</option>
@@ -700,7 +700,7 @@ export default function ServiceDetailsPage() {
                 />
               </label>
 
-              {draftKind === 'bundle' ? (
+              {draftType === 'bundle' ? (
                 <div className="mt-5 rounded-[24px] border border-white/10 bg-white/5 p-4">
                   <div className="flex items-center justify-between gap-3">
                     <div>
