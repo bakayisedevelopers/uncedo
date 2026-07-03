@@ -88,6 +88,7 @@ export function HelperActiveNavigationMap({
   const [initState, setInitState] = useState(ANDROID_ONLY ? 'initializing' : 'fallback');
   const [sdkError, setSdkError] = useState('');
   const [hasSdkLocation, setHasSdkLocation] = useState(false);
+  const [isMapReady, setIsMapReady] = useState(false);
   const configuredDestinationRef = useRef('');
   const isMountedRef = useRef(true);
   const {
@@ -193,6 +194,25 @@ export function HelperActiveNavigationMap({
       navigationController.cleanup().catch(() => {});
     };
   }, [navigationController, onMetricsChange]);
+
+  useEffect(() => {
+    if (!ANDROID_ONLY || initState === 'fallback' || isMapReady) {
+      return () => {};
+    }
+
+    const timeoutId = setTimeout(() => {
+      if (!isMountedRef.current || isMapReady) {
+        return;
+      }
+
+      setSdkError('The Google navigation map did not finish loading. Check the Navigation SDK API key and enabled APIs.');
+      setInitState('fallback');
+    }, 15000);
+
+    return () => {
+      clearTimeout(timeoutId);
+    };
+  }, [initState, isMapReady]);
 
   useEffect(() => {
     if (initState !== 'ready' || !navigationViewController) {
@@ -331,6 +351,7 @@ export function HelperActiveNavigationMap({
         myLocationButtonEnabled={false}
         myLocationEnabled
         navigationUIEnabledPreference={GoogleNavigationUIEnabledPreference.AUTOMATIC}
+        onMapReady={() => setIsMapReady(true)}
         onNavigationViewControllerCreated={setNavigationViewController}
         recenterButtonEnabled
         reportIncidentButtonEnabled={false}
