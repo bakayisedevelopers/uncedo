@@ -2,8 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Platform, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import {
-  GoogleNavigationUIEnabledPreference,
-  GoogleNavigationView,
+  GoogleMapView,
   googleNavigationSdkAvailable,
 } from '../../services/googleNavigationSdk';
 import { colors } from '../../theme/colors';
@@ -44,13 +43,29 @@ export function HelperHomeMap({
   const currentCoordinate = useMemo(() => normalizeCoordinate(currentUserMarker), [currentUserMarker]);
   const [mapController, setMapController] = useState(null);
   const [isMapReady, setIsMapReady] = useState(false);
-  const googleMapAvailable = Platform.OS === 'android' && googleNavigationSdkAvailable && Boolean(GoogleNavigationView);
+  const [mapTimedOut, setMapTimedOut] = useState(false);
+  const googleMapAvailable = Platform.OS === 'android' && googleNavigationSdkAvailable && Boolean(GoogleMapView);
   const legendCopy = statusMessage
     || (isLoading
       ? 'Loading your live location and service radius...'
       : (currentCoordinate
         ? `Showing your live location and ${radiusKm} km service radius.`
         : 'Allow location access to show your live location and service radius.'));
+
+  useEffect(() => {
+    if (!googleMapAvailable || isMapReady) {
+      setMapTimedOut(false);
+      return () => {};
+    }
+
+    const timeoutId = setTimeout(() => {
+      setMapTimedOut(true);
+    }, 12000);
+
+    return () => {
+      clearTimeout(timeoutId);
+    };
+  }, [googleMapAvailable, isMapReady]);
 
   useEffect(() => {
     if (!googleMapAvailable || !mapController || !isMapReady) {
@@ -127,12 +142,24 @@ export function HelperHomeMap({
     );
   }
 
+  if (mapTimedOut) {
+    return (
+      <View style={styles.map}>
+        <View style={styles.webFallback}>
+          <Ionicons color={colors.brandDark} name="alert-circle-outline" size={28} />
+          <Text style={styles.webFallbackTitle}>The Google map did not finish loading.</Text>
+          <Text style={styles.webFallbackCopy}>
+            Check the helper build API key setup for Maps SDK for Android and Navigation SDK.
+          </Text>
+        </View>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.map}>
-      <GoogleNavigationView
+      <GoogleMapView
         compassEnabled={false}
-        footerEnabled={false}
-        headerEnabled={false}
         initialCameraPosition={{
           target: {
             lat: currentCoordinate?.latitude || DEFAULT_COORDINATE.latitude,
@@ -143,10 +170,8 @@ export function HelperHomeMap({
         mapToolbarEnabled={false}
         myLocationButtonEnabled={false}
         myLocationEnabled
-        navigationUIEnabledPreference={GoogleNavigationUIEnabledPreference.DISABLED}
         onMapReady={() => setIsMapReady(true)}
         onMapViewControllerCreated={setMapController}
-        reportIncidentButtonEnabled={false}
         style={StyleSheet.absoluteFill}
         zoomControlsEnabled={false}
       />
