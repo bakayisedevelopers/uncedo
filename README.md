@@ -1,6 +1,6 @@
 # Uncedo Monorepo
 
-Uncedo is a monorepo for a tutoring and service platform with four client apps, a Firebase backend, and supporting services.
+Uncedo is a monorepo for a tutoring and service platform with three active client apps, a public website, a Firebase backend, and supporting services.
 
 ## Top-Level Layout
 
@@ -19,12 +19,12 @@ Uncedo is a monorepo for a tutoring and service platform with four client apps, 
 
 ## What Each Folder Contains
 
-- `web/`: React + Vite web app for the main portal, tutor portal, and marketing pages.
+- `web/`: React + Vite public website containing the landing page plus privacy and terms pages.
 - `admin/`: React + Vite admin console for provider moderation, service approvals, and customer review.
 - `uncedo/`: Expo React Native app for the student/customer experience.
 - `helpers/`: Expo React Native app for the helper/provider experience.
-- `functions/`: Firebase Cloud Functions, pricing logic, OCR, AI extraction, agreements, and backend endpoints.
-- `services/`: Supporting local services such as the Gemini Live proxy and OCR service.
+- `functions/`: Firebase Cloud Functions for secure billing, payouts, agreements, matching orchestration, and backend endpoints that must stay server-side.
+- `services/`: Supporting local services. AI-specific proxy services have been removed.
 - `docs/skills/`: Repo-level agent guidance and workflow docs.
 - `releases/`: Generated Android release builds for distribution.
 
@@ -62,7 +62,15 @@ cd uncedo
 npm install
 npm run start
 ```
+cd helpers\android .\gradlew installDebug
+npm start
 
+Switch to same-Wi‑Fi / wireless ADB
+With the phone still connected once by USB:
+
+adb devices
+adb tcpip 5555
+adb shell ip addr show wlan0
 ### Helper app
 
 ```powershell

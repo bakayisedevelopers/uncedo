@@ -185,7 +185,7 @@ function buildDiscoveryItems({ helpers = [], serviceCatalog = [], preferredCateg
       includedLabels: Array.isArray(customerService.includedServiceIds) && customerService.includedServiceIds.length
         ? customerService.includedServiceIds.map((serviceId) => getCustomerServiceById(serviceId)?.label || serviceId).filter(Boolean)
         : [customerService.label || entry.label],
-      helperCount: matchingHelpers.length,
+      helperCount: onlineHelperCount,
       onlineHelperCount,
       helperName: matchingHelpers[0]?.fullName || 'Helper',
       imageUris,

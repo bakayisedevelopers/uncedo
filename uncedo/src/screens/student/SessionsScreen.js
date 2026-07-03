@@ -17,7 +17,7 @@ function getMeetingProviderLabel(session) {
     || '',
   ).toLowerCase();
 
-  if (meetingProvider === 'gemini_live') return 'Gemini Live';
+  if (meetingProvider === 'gemini_live') return 'Live session';
   if (meetingProvider === 'webrtc_human') return 'Uncedo WebRTC';
   if (meetingProvider === 'webrtc') return 'In-app call';
   if (meetingProvider) return meetingProvider.replace(/_/g, ' ');

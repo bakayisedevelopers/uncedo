@@ -13,6 +13,11 @@ import { getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
 import { updateLiveTracking } from './liveTrackingRealtimeService';
 import { logInfo } from './logger';
 import {
+  computeHelperDerivedStats,
+  recordHelperOfferLifecycleEvent,
+  syncHelperOfferSnapshot,
+} from './helperRequestStatsService';
+import {
   buildRouteSnapshot,
   fetchRouteData,
   normalizeCoordinate,
@@ -255,6 +260,7 @@ export function subscribeToHelperAvailableServiceRequests(helperId, callback, on
     (snapshot) => {
       const now = Date.now();
       const rawItems = snapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
+      syncHelperOfferSnapshot(helperId, rawItems).catch(() => null);
       logInfo('service-request.offer-subscription-snapshot', 'Received helper offer snapshot.', {
         helperId,
         snapshotSize: rawItems.length,
@@ -434,6 +440,28 @@ export async function acceptServiceRequestOffer({
   const acceptedRequest = refreshed.exists() ? { id: refreshed.id, ...refreshed.data() } : null;
 
   if (acceptedRequest) {
+    const offeredAtMs = normalizeTime(
+      acceptedRequest.lastOfferAt
+      || acceptedRequest.offerExpiresAt
+      || acceptedRequest.helperAssignment?.acceptedAt
+      || Date.now(),
+    ) || Date.now();
+    const acceptedAtMs = normalizeTime(acceptedRequest.helperAssignment?.acceptedAt || Date.now()) || Date.now();
+    await recordHelperOfferLifecycleEvent({
+      helperId,
+      requestId,
+      offerRevision: Number(acceptedRequest.offerRevision || 0) || 0,
+      categoryId: acceptedRequest.categoryId || '',
+      serviceIds: Array.isArray(acceptedRequest.serviceIds) ? acceptedRequest.serviceIds : [],
+      outcome: 'accepted',
+      offeredAtMs,
+      closedAtMs: acceptedAtMs,
+      responseMinutes: Math.max(0, Number(((acceptedAtMs - offeredAtMs) / 60000).toFixed(2))),
+      sourceStatus: 'accepted',
+    }).catch(() => null);
+  }
+
+  if (acceptedRequest) {
     await seedAcceptedLiveTracking({
       requestId,
       request: acceptedRequest,
@@ -496,7 +524,21 @@ export async function declineServiceRequestOffer({ requestId, helperId }) {
   });
 
   const refreshed = await getDoc(requestRef);
-  return refreshed.exists() ? { id: refreshed.id, ...refreshed.data() } : null;
+  const refreshedRequest = refreshed.exists() ? { id: refreshed.id, ...refreshed.data() } : null;
+  if (refreshedRequest) {
+    await recordHelperOfferLifecycleEvent({
+      helperId,
+      requestId,
+      offerRevision: Number(refreshedRequest.offerRevision || 0) || 0,
+      categoryId: refreshedRequest.categoryId || '',
+      serviceIds: Array.isArray(refreshedRequest.serviceIds) ? refreshedRequest.serviceIds : [],
+      outcome: 'declined',
+      offeredAtMs: normalizeTime(refreshedRequest.lastOfferAt || Date.now()) || Date.now(),
+      closedAtMs: Date.now(),
+      sourceStatus: String(refreshedRequest.status || 'matching').toLowerCase(),
+    }).catch(() => null);
+  }
+  return refreshedRequest;
 }
 
 export async function updateHelperActiveRequestStatus({ requestId, helperId, status }) {
@@ -582,6 +624,11 @@ export async function finalizeServiceRequestBilling({ requestId }) {
     throw new Error(payload?.message || 'Unable to finalize service request billing.');
   }
 
+  const helperId = String(auth.currentUser?.uid || '').trim();
+  if (helperId) {
+    await computeHelperDerivedStats(helperId).catch(() => null);
+  }
+
   return payload;
 }
 
@@ -613,6 +660,8 @@ export async function cancelServiceRequest({ requestId, helperId, reason }) {
     });
   });
 
+  await computeHelperDerivedStats(helperId).catch(() => null);
+
   logInfo('service-request.cancel-helper-write', 'Clearing helper active request state after cancel', {
     helperId,
     requestId,
@@ -625,29 +674,100 @@ export async function submitServiceRequestRating({ requestId, score, comment = '
     throw new Error('A request ID is required to submit a rating.');
   }
 
-  const { auth } = getFirebaseClients();
-  const idToken = await auth.currentUser?.getIdToken();
-  if (!idToken) {
+  const { auth, db } = getFirebaseClients();
+  const uid = String(auth.currentUser?.uid || '').trim();
+  if (!uid) {
     throw new Error('You must be signed in to submit a rating.');
   }
 
-  const response = await fetch(getFunctionEndpoint('submitServiceRequestRating'), {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      requestId,
-      score,
-      comment,
-    }),
-  });
-
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload?.success === false) {
-    throw new Error(payload?.message || 'Unable to submit this rating.');
+  const normalizedScore = Math.max(1, Math.min(5, Number(score || 0)));
+  if (!Number.isFinite(normalizedScore) || normalizedScore <= 0) {
+    throw new Error('requestId and a rating score are required.');
   }
 
-  return payload?.rating || null;
+  const requestRef = doc(db, 'serviceRequests', requestId);
+  const requestSnap = await getDoc(requestRef);
+  if (!requestSnap.exists()) {
+    throw new Error('Service request not found.');
+  }
+
+  const request = requestSnap.data() || {};
+  const helperId = String(request?.helperAssignment?.helperId || '').trim();
+  const customerId = String(request?.customerId || '').trim();
+  const isCustomer = uid === customerId;
+  const isHelper = uid === helperId;
+  if (!isCustomer && !isHelper) {
+    throw new Error('Only request participants can submit ratings.');
+  }
+
+  const targetUserId = isCustomer ? helperId : customerId;
+  if (!targetUserId) {
+    throw new Error('No valid rating target was found for this request.');
+  }
+
+  const ratingKey = isCustomer ? 'customer' : 'helper';
+  const roleKey = isCustomer ? 'asHelper' : 'asCustomer';
+  const targetRef = doc(db, 'users', targetUserId);
+  const existingRating = request?.ratings?.[ratingKey];
+
+  await runTransaction(db, async (transaction) => {
+    const [requestTxnSnap, targetSnap] = await Promise.all([
+      transaction.get(requestRef),
+      transaction.get(targetRef),
+    ]);
+    const requestData = requestTxnSnap.data() || {};
+    const targetData = targetSnap.exists() ? targetSnap.data() || {} : {};
+    const currentStats = targetData?.ratings?.[roleKey] || {};
+    const totalCount = Number(currentStats.totalLessons ?? currentStats.count ?? 0);
+    const totalRatings = Number(currentStats.totalRatings ?? ((currentStats.average || 0) * totalCount) ?? 0);
+    const nextCount = totalCount + 1;
+    const nextTotalRatings = Number((totalRatings + normalizedScore).toFixed(2));
+    const nextAverage = Number((nextTotalRatings / nextCount).toFixed(2));
+
+    transaction.set(requestRef, {
+      ratings: {
+        ...(requestData.ratings || {}),
+        [ratingKey]: {
+          score: normalizedScore,
+          comment: String(comment || '').trim(),
+          submittedAt: serverTimestamp(),
+          submittedBy: uid,
+          targetUserId,
+        },
+      },
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+
+    transaction.set(targetRef, {
+      ratings: {
+        ...(targetData.ratings || {}),
+        [roleKey]: {
+          count: nextCount,
+          totalLessons: nextCount,
+          totalRatings: nextTotalRatings,
+          average: nextAverage,
+          updatedAt: Date.now(),
+        },
+      },
+      ...(roleKey === 'asHelper'
+        ? {
+            metrics: {
+              ...(targetData.metrics || {}),
+              overallRating: nextAverage,
+            },
+            rating: nextAverage,
+          }
+        : {}),
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+  });
+
+  return {
+    requestId,
+    score: normalizedScore,
+    comment: String(comment || '').trim(),
+    targetUserId,
+    roleKey,
+    replacedExisting: Boolean(existingRating),
+  };
 }

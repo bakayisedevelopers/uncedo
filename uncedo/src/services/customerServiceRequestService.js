@@ -9,6 +9,7 @@ import {
   query,
   runTransaction,
   serverTimestamp,
+  setDoc,
   updateDoc,
   where,
 } from 'firebase/firestore';
@@ -27,6 +28,8 @@ import {
 import { uploadUserFile } from './storageService';
 import { recordCustomerServiceEvent } from './customerRecommendationService';
 import { getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
+import { computeHelperDerivedStats } from './helperRequestStatsService';
+import { updateLiveTracking } from './liveTrackingRealtimeService';
 
 const ACTIVE_SERVICE_REQUEST_STATUSES = ['collecting_details', 'scheduled_pending', 'matching', 'helper_found', 'accepted', 'driving', 'en_route', 'buying_resources', 'arrived', 'work_started', 'no_helper_available'];
 const CATEGORY_ENGINE_LOOKUP = {
@@ -145,6 +148,38 @@ function normalizeTime(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+async function createUserNotification({
+  userId,
+  title,
+  message,
+  type = 'update',
+  requestId = null,
+  sessionId = null,
+  targetPath = '',
+  metadata = {},
+} = {}) {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) return null;
+
+  const { db } = getFirebaseClients();
+  const docRef = await addDoc(collection(db, 'notifications'), {
+    userId: normalizedUserId,
+    title: String(title || 'Parakleo update'),
+    message: String(message || 'You have a new update.'),
+    type: String(type || 'update'),
+    requestId: requestId || null,
+    sessionId: sessionId || null,
+    targetPath: targetPath || '',
+    metadata: metadata || {},
+    read: false,
+    readAt: null,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+
+  return docRef.id;
+}
+
 function buildServiceRequestTitle({ categoryId = '', serviceIds = [], selectedPackageId = '' } = {}) {
   const selectedPackage = selectedPackageId ? getCustomerServiceById(selectedPackageId) : null;
   if (selectedPackage?.label) {
@@ -198,30 +233,15 @@ export async function fetchServicePricingQuote({
   structuredAnswers = {},
 } = {}) {
   const { auth } = getFirebaseClients();
-  const idToken = await auth.currentUser?.getIdToken();
-  if (!idToken) {
+  if (!auth.currentUser?.uid) {
     throw new Error('You must be signed in to price this service.');
   }
 
-  const response = await fetch(getFunctionEndpoint('getServicePricingQuote'), {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      categoryId,
-      serviceIds,
-      structuredAnswers,
-    }),
+  return buildServicePricingSnapshot({
+    categoryId,
+    serviceIds,
+    structuredAnswers,
   });
-
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload?.success === false) {
-    throw new Error(payload?.message || 'Unable to calculate the service quote.');
-  }
-
-  return payload?.pricingSnapshot || null;
 }
 
 export async function createCustomerServiceRequest({ user, location, initialDraft = {} }) {
@@ -285,9 +305,9 @@ export async function createCustomerServiceRequest({ user, location, initialDraf
     customerPhone: user.phoneNumber || '',
     location: resolvedLocation,
     status: 'collecting_details',
-    statusDetail: 'AI intake call started. Collecting service details.',
+    statusDetail: 'Request intake started. Collecting service details.',
     requestType: 'customer_service',
-    intakeMode: 'ai_voice_chat',
+    intakeMode: 'guided_chat',
     requestPayload: {
       ...draft,
       selectedPackageId,
@@ -333,46 +353,6 @@ export async function createCustomerServiceRequest({ user, location, initialDraf
       topic,
     },
   }).catch(() => {});
-
-  return docRef.id;
-}
-
-export async function createCustomerServiceCall({ requestId, user }) {
-  if (!requestId) {
-    throw new Error('A service request is required before starting the AI call.');
-  }
-  if (!user?.uid) {
-    throw new Error('You must be signed in to start the AI call.');
-  }
-
-  const { db } = getFirebaseClients();
-  const docRef = await addDoc(collection(db, 'serviceCalls'), {
-    requestId,
-    customerId: user.uid,
-    customerName: user.fullName || user.displayName || 'Customer',
-    customerEmail: user.email || '',
-    callType: 'customer_service_intake',
-    status: 'dialing',
-    aiLive: {
-      agentType: 'customer_request',
-      model: 'gemini-2.5-flash',
-      status: 'dialing',
-      wsConnected: false,
-      audioInActive: false,
-      audioOutActive: false,
-      transcriptStatus: 'idle',
-      usageSummary: null,
-      startedAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    },
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
-
-  await updateDoc(doc(db, 'serviceRequests', requestId), {
-    callId: docRef.id,
-    updatedAt: serverTimestamp(),
-  });
 
   return docRef.id;
 }
@@ -657,24 +637,6 @@ export async function finalizeCustomerServiceRequest({
   return pricingSnapshot;
 }
 
-export async function cancelCustomerServiceCall(callId) {
-  if (!callId) return;
-  const { db } = getFirebaseClients();
-  await updateDoc(doc(db, 'serviceCalls', callId), {
-    status: 'ended',
-    updatedAt: serverTimestamp(),
-    aiLive: {
-      status: 'ended',
-      wsConnected: false,
-      audioInActive: false,
-      audioOutActive: false,
-      transcriptStatus: 'finalized',
-      endedAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    },
-  });
-}
-
 export function subscribeToServiceRequestById(requestId, callback, onError) {
   if (!requestId) {
     callback(null);
@@ -684,20 +646,6 @@ export function subscribeToServiceRequestById(requestId, callback, onError) {
   const { db } = getFirebaseClients();
   return onSnapshot(
     doc(db, 'serviceRequests', requestId),
-    (snapshot) => callback(snapshot.exists() ? { id: snapshot.id, ...snapshot.data() } : null),
-    onError,
-  );
-}
-
-export function subscribeToServiceCallById(callId, callback, onError) {
-  if (!callId) {
-    callback(null);
-    return () => {};
-  }
-
-  const { db } = getFirebaseClients();
-  return onSnapshot(
-    doc(db, 'serviceCalls', callId),
     (snapshot) => callback(snapshot.exists() ? { id: snapshot.id, ...snapshot.data() } : null),
     onError,
   );
@@ -728,12 +676,105 @@ export async function cancelServiceRequestByCustomer({ requestId, reason }) {
   }
 
   const { auth, db } = getFirebaseClients();
+  const currentUserId = String(auth.currentUser?.uid || '').trim();
   const idToken = await auth.currentUser?.getIdToken();
-  if (!idToken) {
+  if (!idToken || !currentUserId) {
     throw new Error('You must be signed in to cancel this request.');
   }
 
-  const response = await fetch(getFunctionEndpoint('cancelCustomerServiceRequest'), {
+  const requestRef = doc(db, 'serviceRequests', requestId);
+  const requestSnap = await getDoc(requestRef).catch(() => null);
+  if (!requestSnap?.exists()) {
+    throw new Error('Service request not found.');
+  }
+
+  const request = requestSnap.data() || {};
+  if (String(request.customerId || '').trim() !== currentUserId) {
+    throw new Error('Only the customer can cancel this request.');
+  }
+
+  const normalizedStatus = String(request.status || '').toLowerCase();
+  if (['completed', 'canceled'].includes(normalizedStatus)) {
+    return { id: requestSnap.id, ...request };
+  }
+
+  const helperId = String(request?.helperAssignment?.helperId || '').trim();
+  const canceledReason = String(reason || '').trim();
+  const isPreAssignment = ['collecting_details', 'scheduled_pending', 'matching', 'helper_found', 'no_helper_available'].includes(normalizedStatus);
+  const isPostAssignment = ['accepted', 'driving', 'en_route', 'buying_resources', 'arrived', 'work_started'].includes(normalizedStatus);
+
+  if (!isPreAssignment && !isPostAssignment) {
+    throw new Error('This request cannot be canceled from its current state.');
+  }
+
+  const endedAt = Date.now();
+
+  if (isPreAssignment) {
+    await updateDoc(requestRef, {
+      status: 'canceled',
+      statusDetail: 'Customer canceled the service request before helper assignment.',
+      canceledAt: endedAt,
+      canceledBy: 'customer',
+      canceledReason,
+      helperAssignment: null,
+      helperQueue: [],
+      currentOfferHelperId: null,
+      offerExpiresAt: null,
+      offerToken: null,
+      offerCycleExcludedHelperIds: [],
+      declinedHelperIds: [],
+      matchingStartedAtMs: null,
+      paymentStatus: null,
+      paymentTransactionId: null,
+      cancellationFeeAmount: 0,
+      updatedAt: serverTimestamp(),
+    });
+
+    await updateLiveTracking(requestId, {
+      status: 'canceled',
+      closedReason: 'customer_canceled_pre_assignment',
+      closedAtMs: endedAt,
+      updatedAtMs: endedAt,
+    }).catch(() => null);
+
+    await recordCustomerServiceEvent({
+      customerId: request.customerId,
+      eventType: 'request_canceled',
+      serviceId: request.serviceIds?.[0] || request.selectedPackageId || request.categoryId || '',
+      categoryId: request.categoryId || '',
+      serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
+      requestId,
+      source: 'customer_cancel_frontend',
+      metadata: {
+        helperId: '',
+        paymentStatus: 'not_applicable',
+        cancellationAmount: 0,
+        cancellationBillingRule: 'pre_assignment',
+        cancellationDistanceKm: 0,
+        helperPayoutAmount: 0,
+        platformAmount: 0,
+        requestStatus: 'canceled',
+      },
+    }).catch(() => null);
+
+    await createUserNotification({
+      userId: request.customerId,
+      title: 'Service canceled',
+      message: 'Your service request was canceled.',
+      type: 'service_canceled',
+      requestId,
+      targetPath: `/customer/requests/${requestId}`,
+      metadata: {
+        paymentStatus: 'not_applicable',
+        cancellationAmount: 0,
+      },
+    }).catch(() => null);
+
+    const updatedSnap = await getDoc(requestRef);
+    return updatedSnap.exists() ? { id: updatedSnap.id, ...updatedSnap.data() } : null;
+  }
+
+  const response = await fetch(getFunctionEndpoint('billCustomerServiceCancellation'), {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${idToken}`,
@@ -741,50 +782,116 @@ export async function cancelServiceRequestByCustomer({ requestId, reason }) {
     },
     body: JSON.stringify({
       requestId,
-      reason: reason || '',
+      reason: canceledReason,
     }),
   });
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || payload?.success === false) {
-    const requestRef = doc(db, 'serviceRequests', requestId);
-    const requestSnap = await getDoc(requestRef).catch(() => null);
-    const request = requestSnap?.exists() ? requestSnap.data() || {} : null;
-    const normalizedStatus = String(request?.status || '').toLowerCase();
-    const helperId = String(request?.helperAssignment?.helperId || '').trim();
-    const canCancelLocally = Boolean(
-      request
-      && request.customerId === auth.currentUser?.uid
-      && !helperId
-      && ['collecting_details', 'scheduled_pending', 'matching', 'helper_found', 'no_helper_available'].includes(normalizedStatus),
-    );
-
-    if (canCancelLocally) {
-      await updateDoc(requestRef, {
-        status: 'canceled',
-        statusDetail: 'Customer canceled the service request.',
-        canceledBy: 'customer',
-        canceledReason: reason || '',
-        canceledAt: serverTimestamp(),
-        helperAssignment: null,
-        helperQueue: [],
-        currentOfferHelperId: null,
-        offerExpiresAt: null,
-        offerToken: null,
-        offerCycleExcludedHelperIds: [],
-        declinedHelperIds: [],
-        matchingStartedAtMs: null,
-        updatedAt: serverTimestamp(),
-      });
-
-      const updatedSnap = await getDoc(requestRef);
-      return updatedSnap.exists() ? { id: updatedSnap.id, ...updatedSnap.data() } : null;
-    }
-
     throw new Error(payload?.message || 'Unable to cancel this request.');
   }
 
-  return payload?.request || null;
+  const cancellation = payload?.cancellation || {};
+  const helperPayoutBreakdown = cancellation.helperPayoutBreakdown || {};
+  const paymentStatus = String(cancellation.paymentStatus || '').trim() || 'not_applicable';
+  const cancellationAmount = Number(cancellation.cancellationAmount || 0) || 0;
+  const chargedCardLast4 = cancellation.chargedCardLast4 || null;
+  const paymentTransactionId = cancellation.paymentTransactionId || null;
+  const pricingSnapshot = cancellation.pricingSnapshot || {};
+
+  const customerRef = doc(db, 'users', request.customerId);
+  await updateDoc(requestRef, {
+    status: 'canceled',
+    statusDetail: cancellationAmount > 0
+      ? `Customer canceled the service. Cancellation fee charged: R${cancellationAmount.toFixed(2)}.`
+      : 'Customer canceled the service.',
+    canceledAt: cancellation.endedAt || endedAt,
+    canceledBy: 'customer',
+    canceledReason,
+    cancellationFeeAmount: cancellationAmount,
+    paymentStatus,
+    paymentTransactionId,
+    chargedCardLast4,
+    pricingSnapshot,
+    helperPayoutBreakdown: {
+      ...helperPayoutBreakdown,
+      finalizedAt: pricingSnapshot.finalizedAt || new Date(cancellation.endedAt || endedAt).toISOString(),
+    },
+    updatedAt: serverTimestamp(),
+  });
+
+  if (paymentStatus === 'wallet_debt_recorded') {
+    await setDoc(customerRef, {
+      wallet: {
+        ...(request?.wallet || {}),
+        balance: Number(cancellation.walletBalance || 0),
+        currency: cancellation.walletCurrency || 'ZAR',
+        updatedAt: new Date().toISOString(),
+      },
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+  }
+
+  await updateLiveTracking(requestId, {
+    status: 'canceled',
+    closedReason: cancellation.liveTrackingClosedReason || 'customer_canceled',
+    closedAtMs: cancellation.endedAt || endedAt,
+    updatedAtMs: cancellation.endedAt || endedAt,
+  }).catch(() => null);
+
+  await recordCustomerServiceEvent({
+    customerId: request.customerId,
+    eventType: 'request_canceled',
+    serviceId: request.serviceIds?.[0] || request.selectedPackageId || request.categoryId || '',
+    categoryId: request.categoryId || '',
+    serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
+    requestId,
+    source: 'customer_cancel_frontend',
+    metadata: {
+      helperId,
+      paymentStatus,
+      cancellationAmount,
+      cancellationBillingRule: cancellation.cancellationBillingRule || '',
+      cancellationDistanceKm: Number(cancellation.cancellationDistanceKm || 0),
+      helperPayoutAmount: Number(helperPayoutBreakdown.helperAmount || 0),
+      platformAmount: Number(helperPayoutBreakdown.platformAmount || 0),
+      requestStatus: 'canceled',
+    },
+  }).catch(() => null);
+
+  await Promise.all([
+    createUserNotification({
+      userId: request.customerId,
+      title: 'Service canceled',
+      message: cancellationAmount > 0
+        ? `Your service request was canceled. Cancellation fee: R${cancellationAmount.toFixed(2)}.`
+        : 'Your service request was canceled.',
+      type: 'service_canceled',
+      requestId,
+      targetPath: `/customer/requests/${requestId}`,
+      metadata: {
+        paymentStatus,
+        cancellationAmount,
+      },
+    }),
+    ...(helperId ? [
+      createUserNotification({
+        userId: helperId,
+        title: 'Job canceled',
+        message: `${request.customerName || 'The customer'} canceled this job. Helper earnings recorded: R${Number(helperPayoutBreakdown.helperAmount || 0).toFixed(2)}.`,
+        type: 'job_canceled',
+        requestId,
+        targetPath: `/provider/jobs/${requestId}`,
+      }),
+    ] : []),
+  ]).catch(() => null);
+
+  if (helperId) {
+    await computeHelperDerivedStats(helperId).catch(() => null);
+  }
+
+  const updatedSnap = await getDoc(requestRef);
+  return updatedSnap.exists() ? { id: updatedSnap.id, ...updatedSnap.data() } : null;
 }
 
 export async function submitServiceRequestRating({ requestId, score, comment = '' }) {
@@ -792,29 +899,100 @@ export async function submitServiceRequestRating({ requestId, score, comment = '
     throw new Error('A request ID is required to submit a rating.');
   }
 
-  const { auth } = getFirebaseClients();
-  const idToken = await auth.currentUser?.getIdToken();
-  if (!idToken) {
+  const { auth, db } = getFirebaseClients();
+  const uid = String(auth.currentUser?.uid || '').trim();
+  if (!uid) {
     throw new Error('You must be signed in to submit a rating.');
   }
 
-  const response = await fetch(getFunctionEndpoint('submitServiceRequestRating'), {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      requestId,
-      score,
-      comment,
-    }),
-  });
-
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload?.success === false) {
-    throw new Error(payload?.message || 'Unable to submit this rating.');
+  const normalizedScore = Math.max(1, Math.min(5, Number(score || 0)));
+  if (!Number.isFinite(normalizedScore) || normalizedScore <= 0) {
+    throw new Error('requestId and a rating score are required.');
   }
 
-  return payload?.rating || null;
+  const requestRef = doc(db, 'serviceRequests', requestId);
+  const requestSnap = await getDoc(requestRef);
+  if (!requestSnap.exists()) {
+    throw new Error('Service request not found.');
+  }
+
+  const request = requestSnap.data() || {};
+  const helperId = String(request?.helperAssignment?.helperId || '').trim();
+  const customerId = String(request?.customerId || '').trim();
+  const isCustomer = uid === customerId;
+  const isHelper = uid === helperId;
+  if (!isCustomer && !isHelper) {
+    throw new Error('Only request participants can submit ratings.');
+  }
+
+  const targetUserId = isCustomer ? helperId : customerId;
+  if (!targetUserId) {
+    throw new Error('No valid rating target was found for this request.');
+  }
+
+  const ratingKey = isCustomer ? 'customer' : 'helper';
+  const roleKey = isCustomer ? 'asHelper' : 'asCustomer';
+  const targetRef = doc(db, 'users', targetUserId);
+  const existingRating = request?.ratings?.[ratingKey];
+
+  await runTransaction(db, async (transaction) => {
+    const [requestTxnSnap, targetSnap] = await Promise.all([
+      transaction.get(requestRef),
+      transaction.get(targetRef),
+    ]);
+    const requestData = requestTxnSnap.data() || {};
+    const targetData = targetSnap.exists() ? targetSnap.data() || {} : {};
+    const currentStats = targetData?.ratings?.[roleKey] || {};
+    const totalCount = Number(currentStats.totalLessons ?? currentStats.count ?? 0);
+    const totalRatings = Number(currentStats.totalRatings ?? ((currentStats.average || 0) * totalCount) ?? 0);
+    const nextCount = totalCount + 1;
+    const nextTotalRatings = Number((totalRatings + normalizedScore).toFixed(2));
+    const nextAverage = Number((nextTotalRatings / nextCount).toFixed(2));
+
+    transaction.set(requestRef, {
+      ratings: {
+        ...(requestData.ratings || {}),
+        [ratingKey]: {
+          score: normalizedScore,
+          comment: String(comment || '').trim(),
+          submittedAt: serverTimestamp(),
+          submittedBy: uid,
+          targetUserId,
+        },
+      },
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+
+    transaction.set(targetRef, {
+      ratings: {
+        ...(targetData.ratings || {}),
+        [roleKey]: {
+          count: nextCount,
+          totalLessons: nextCount,
+          totalRatings: nextTotalRatings,
+          average: nextAverage,
+          updatedAt: Date.now(),
+        },
+      },
+      ...(roleKey === 'asHelper'
+        ? {
+            metrics: {
+              ...(targetData.metrics || {}),
+              overallRating: nextAverage,
+            },
+            rating: nextAverage,
+          }
+        : {}),
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+  });
+
+  return {
+    requestId,
+    score: normalizedScore,
+    comment: String(comment || '').trim(),
+    targetUserId,
+    roleKey,
+    replacedExisting: Boolean(existingRating),
+  };
 }

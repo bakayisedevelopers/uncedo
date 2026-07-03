@@ -31,72 +31,8 @@
           "function": "finalizeSessionBilling"
         },
         {
-          "source": "/pay-outstanding-balance",
-          "function": "payOutstandingBalance"
-        },
-        {
-          "source": "/delete-payment-method",
-          "function": "deletePaymentMethod"
-        },
-        {
-          "source": "/verify-tutor-payout-account",
-          "function": "verifyTutorPayoutAccount"
-        },
-        {
-          "source": "/list-tutor-payout-banks",
-          "function": "listTutorPayoutBanks"
-        },
-        {
-          "source": "/pricing-quote",
-          "function": "getPricingQuote"
-        },
-        {
-          "source": "/sync-student-growth",
-          "function": "syncStudentGrowth"
-        },
-        {
-          "source": "/image-ocr",
-          "function": "extractImageOcr"
-        },
-        {
-          "source": "/classify-subject",
-          "function": "classifySubject"
-        },
-        {
-          "source": "/extract-attachment-ai",
-          "function": "extractAttachmentAi"
-        },
-        {
-          "source": "/stream-board-extraction",
-          "function": "streamAttachmentAi"
-        },
-        {
-          "source": "/customer-service-ai-turn",
-          "function": "customerServiceAiTurn"
-        },
-        {
-          "source": "/save-academic-brain-feedback",
-          "function": "saveAcademicBrainFeedback"
-        },
-        {
           "source": "/mobile-webview-auth",
           "function": "mobileWebviewAuth"
-        },
-        {
-          "source": "/getTutorAgreement",
-          "function": "getTutorAgreement"
-        },
-        {
-          "source": "/acceptTutorAgreement",
-          "function": "acceptTutorAgreement"
-        },
-        {
-          "source": "/emailSignedTutorAgreement",
-          "function": "emailSignedTutorAgreement"
-        },
-        {
-          "source": "/publishTutorAgreementVersion",
-          "function": "publishTutorAgreementVersion"
         },
         {
           "source": "**",

@@ -1097,9 +1097,10 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
 
   return (
     <View style={styles.container}>
-      <View style={styles.mapLayer}>
+      <View style={styles.mapLayer} pointerEvents="box-none">
         <MapPlaceholder
           mode="route"
+          interactive
           currentUserMarker={clientLocation ? {
             latitude: clientLocation.latitude,
             longitude: clientLocation.longitude,
@@ -1114,15 +1115,16 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
 
         <Pressable
           accessibilityRole="button"
-          style={[styles.topBackButton, { top: topInset + 16 }]}
+          style={[styles.topBackButton, { top: topInset + 44 }]}
           onPress={() => goBack('CustomerHome')}
         >
           <Ionicons name="chevron-back" size={24} color={colors.text} />
+          <Text style={styles.topBackButtonText}>Back</Text>
         </Pressable>
 
         <Pressable
           accessibilityRole="button"
-          style={[styles.topSafetyButton, { top: topInset + 16 }]}
+          style={[styles.topSafetyButton, { top: topInset + 44 }]}
           onPress={() => setShowSafetyModal(true)}
         >
           <Ionicons name="shield-checkmark" size={24} color={colors.brand} />
@@ -1258,18 +1260,26 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: 50,
     left: 16,
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#ffffff',
+    minHeight: 48,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: colors.surface,
     justifyContent: 'center',
     alignItems: 'center',
+    flexDirection: 'row',
+    gap: 4,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.18,
     shadowRadius: 6,
     elevation: 5,
     zIndex: 10,
+  },
+  topBackButtonText: {
+    color: colors.brandDark,
+    fontSize: 13,
+    fontWeight: '800',
   },
   topSafetyButton: {
     position: 'absolute',
