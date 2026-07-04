@@ -1,0 +1,11 @@
+node_modules/
+.expo/
+.expo-shared/
+dist/
+dist-export/
+android/.gradle/
+android/build/
+android/app/build/
+eas-build-log.bin
+eas-build-log.txt
+*.log
