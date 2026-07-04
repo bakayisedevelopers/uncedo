@@ -1,38 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Platform, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import {
-  GoogleMapView,
-  googleNavigationSdkAvailable,
-} from '../../services/googleNavigationSdk';
+import { HelperHomeStaticMap } from './HelperHomeStaticMap';
 import { colors } from '../../theme/colors';
-
-const DEFAULT_COORDINATE = {
-  latitude: -26.2041,
-  longitude: 28.0473,
-};
-
-function normalizeCoordinate(coordinate = null) {
-  const latitude = Number(coordinate?.latitude);
-  const longitude = Number(coordinate?.longitude);
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-    return null;
-  }
-
-  return { latitude, longitude };
-}
-
-function getZoomForRadius(radiusKm = 50) {
-  const distance = Math.max(1, Number(radiusKm || 50));
-
-  if (distance <= 2) return 14.8;
-  if (distance <= 5) return 13.9;
-  if (distance <= 10) return 13.1;
-  if (distance <= 20) return 12.2;
-  if (distance <= 35) return 11.4;
-  if (distance <= 50) return 10.8;
-  return 10.1;
-}
 
 export function HelperHomeMap({
   currentUserMarker = null,
@@ -40,147 +9,23 @@ export function HelperHomeMap({
   isLoading = false,
   statusMessage = '',
 }) {
-  const currentCoordinate = useMemo(() => normalizeCoordinate(currentUserMarker), [currentUserMarker]);
-  const [mapController, setMapController] = useState(null);
-  const [isMapReady, setIsMapReady] = useState(false);
-  const [mapTimedOut, setMapTimedOut] = useState(false);
-  const googleMapAvailable = Platform.OS === 'android' && googleNavigationSdkAvailable && Boolean(GoogleMapView);
-  const legendCopy = statusMessage
-    || (isLoading
-      ? 'Loading your live location and service radius...'
-      : (currentCoordinate
-        ? `Showing your live location and ${radiusKm} km service radius.`
-        : 'Allow location access to show your live location and service radius.'));
-
-  useEffect(() => {
-    if (!googleMapAvailable || isMapReady) {
-      setMapTimedOut(false);
-      return () => {};
-    }
-
-    const timeoutId = setTimeout(() => {
-      setMapTimedOut(true);
-    }, 12000);
-
-    return () => {
-      clearTimeout(timeoutId);
-    };
-  }, [googleMapAvailable, isMapReady]);
-
-  useEffect(() => {
-    if (!googleMapAvailable || !mapController || !isMapReady) {
-      return;
-    }
-
-    let cancelled = false;
-
-    const syncMap = async () => {
-      try {
-        await mapController.clearMapView();
-      } catch (error) {
-        if (__DEV__) {
-          console.warn('Unable to clear helper home map before redraw.', error);
-        }
-      }
-
-      if (cancelled) {
-        return;
-      }
-
-      const target = currentCoordinate || DEFAULT_COORDINATE;
-      mapController.moveCamera({
-        target: {
-          lat: target.latitude,
-          lng: target.longitude,
-        },
-        zoom: getZoomForRadius(radiusKm),
-      });
-
-      if (!currentCoordinate || cancelled) {
-        return;
-      }
-
-      await mapController.addCircle({
-        id: 'service-radius',
-        center: {
-          lat: currentCoordinate.latitude,
-          lng: currentCoordinate.longitude,
-        },
-        radius: Math.max(1000, Number(radiusKm || 50) * 1000),
-        fillColor: 'rgba(236,72,153,0.10)',
-        strokeColor: 'rgba(190,24,93,0.26)',
-        strokeWidth: 2,
-      }).catch(() => {});
-
-      await mapController.addMarker({
-        id: 'current-user',
-        position: {
-          lat: currentCoordinate.latitude,
-          lng: currentCoordinate.longitude,
-        },
-        title: String(currentUserMarker?.initials || 'You').trim() || 'You',
-        snippet: 'Your live location',
-      }).catch(() => {});
-    };
-
-    syncMap();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [currentCoordinate, currentUserMarker?.initials, googleMapAvailable, isMapReady, mapController, radiusKm]);
-
-  if (!googleMapAvailable) {
-    return (
-      <View style={styles.map}>
-        <View style={styles.webFallback}>
-          <Ionicons color={colors.brandDark} name="map-outline" size={28} />
-          <Text style={styles.webFallbackTitle}>Live map is available in the native helper build.</Text>
-          <Text style={styles.webFallbackCopy}>{legendCopy}</Text>
-        </View>
-      </View>
-    );
-  }
-
-  if (mapTimedOut) {
-    return (
-      <View style={styles.map}>
-        <View style={styles.webFallback}>
-          <Ionicons color={colors.brandDark} name="alert-circle-outline" size={28} />
-          <Text style={styles.webFallbackTitle}>The Google map did not finish loading.</Text>
-          <Text style={styles.webFallbackCopy}>
-            Check the helper build API key setup for Maps SDK for Android and Navigation SDK.
-          </Text>
-        </View>
-      </View>
-    );
-  }
+  const hasLocationError = Boolean(String(statusMessage || '').trim()) && !isLoading;
 
   return (
     <View style={styles.map}>
-      <GoogleMapView
-        compassEnabled={false}
-        initialCameraPosition={{
-          target: {
-            lat: currentCoordinate?.latitude || DEFAULT_COORDINATE.latitude,
-            lng: currentCoordinate?.longitude || DEFAULT_COORDINATE.longitude,
-          },
-          zoom: getZoomForRadius(radiusKm),
-        }}
-        mapToolbarEnabled={false}
-        myLocationButtonEnabled={false}
-        myLocationEnabled
-        onMapReady={() => setIsMapReady(true)}
-        onMapViewControllerCreated={setMapController}
-        style={StyleSheet.absoluteFill}
-        zoomControlsEnabled={false}
-      />
-      {(isLoading || !isMapReady) ? (
+      <HelperHomeStaticMap currentUserMarker={currentUserMarker} radiusKm={radiusKm} />
+
+      {hasLocationError ? (
+        <View style={styles.statusBanner}>
+          <Ionicons color="#ffffff" name="alert-circle-outline" size={16} />
+          <Text style={styles.statusBannerText}>{statusMessage}</Text>
+        </View>
+      ) : null}
+
+      {isLoading ? (
         <View pointerEvents="none" style={styles.loadingOverlay}>
           <ActivityIndicator color={colors.brand} size="small" />
-          <Text style={styles.loadingText}>
-            {isLoading ? 'Loading your live location...' : 'Loading map...'}
-          </Text>
+          <Text style={styles.loadingText}>Loading your live location...</Text>
         </View>
       ) : null}
     </View>
@@ -193,30 +38,30 @@ const styles = StyleSheet.create({
     flex: 1,
     overflow: 'hidden',
   },
-  webFallback: {
+  statusBanner: {
     alignItems: 'center',
+    alignSelf: 'center',
+    backgroundColor: 'rgba(17,24,39,0.88)',
+    borderRadius: 18,
+    flexDirection: 'row',
+    gap: 8,
+    left: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    position: 'absolute',
+    right: 16,
+    top: 16,
+  },
+  statusBannerText: {
+    color: '#ffffff',
     flex: 1,
-    justifyContent: 'center',
-    paddingHorizontal: 28,
-  },
-  webFallbackTitle: {
-    color: colors.text,
-    fontSize: 18,
-    fontWeight: '800',
-    marginTop: 12,
-    textAlign: 'center',
-  },
-  webFallbackCopy: {
-    color: colors.muted,
-    fontSize: 13,
-    lineHeight: 20,
-    marginTop: 8,
-    textAlign: 'center',
+    fontSize: 12,
+    fontWeight: '700',
   },
   loadingOverlay: {
     alignItems: 'center',
     alignSelf: 'center',
-    backgroundColor: 'rgba(255,255,255,0.92)',
+    backgroundColor: 'rgba(255,255,255,0.94)',
     borderRadius: 999,
     bottom: 18,
     flexDirection: 'row',
