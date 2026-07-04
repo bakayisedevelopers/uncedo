@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "@openai/codex": "^0.137.0",
+    "firebase-functions": "^7.2.5"
+  }
+}

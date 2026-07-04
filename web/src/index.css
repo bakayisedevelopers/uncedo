@@ -1,0 +1,57 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-white text-zinc-900 antialiased transition-colors duration-300;
+    background-image:
+      radial-gradient(circle at 12% 20%, rgba(16, 185, 129, 0.12), transparent 35%),
+      radial-gradient(circle at 82% 6%, rgba(99, 102, 241, 0.1), transparent 40%),
+      linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+    min-height: 100vh;
+  }
+
+  select option,
+  select optgroup {
+    background-color: #ffffff;
+    color: #18181b;
+  }
+}
+
+@layer components {
+  .glass {
+    @apply border border-white/20 bg-white/80 backdrop-blur-md;
+  }
+
+  .rainbow-border {
+    background: conic-gradient(from 0deg, #22d3ee, #a78bfa, #f472b6, #facc15, #22d3ee);
+    animation: spin 6s linear infinite;
+  }
+
+  .app-surface {
+    @apply rounded-[28px] border border-zinc-200 bg-white/90 shadow-[0_20px_40px_rgba(15,23,42,0.08)] backdrop-blur;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+@keyframes offer-countdown-shrink {
+  0% {
+    transform: scaleX(1);
+    background-color: #10b981;
+  }
+
+  55% {
+    background-color: #f97316;
+  }
+
+  100% {
+    transform: scaleX(0);
+    background-color: #dc2626;
+  }
+}
