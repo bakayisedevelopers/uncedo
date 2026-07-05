@@ -12,6 +12,11 @@ import {
   updateProfile,
 } from 'firebase/auth';
 import {
+  connectFunctionsEmulator,
+  getFunctions,
+  httpsCallable,
+} from 'firebase/functions';
+import {
   connectFirestoreEmulator,
   collection,
   doc,
@@ -54,6 +59,7 @@ export const hasFirebaseEnv = missingFirebaseEnvKeys.length === 0;
 const isProductionBuild = import.meta.env.PROD;
 const useFirebaseEmulators = !isProductionBuild && import.meta.env.VITE_USE_FIREBASE_EMULATORS === 'true';
 const firebaseEmulatorHost = import.meta.env.VITE_FIREBASE_EMULATOR_HOST || 'localhost';
+const firebaseFunctionsRegion = import.meta.env.VITE_FIREBASE_FUNCTIONS_REGION || 'us-central1';
 let emulatorsConnected = false;
 let cachedClients = null;
 
@@ -75,11 +81,13 @@ function initializeFirebase() {
   const auth = getAuth(app);
   const db = getFirestore(app);
   const storage = getStorage(app);
+  const functions = getFunctions(app, firebaseFunctionsRegion);
 
   if (useFirebaseEmulators && !emulatorsConnected) {
     connectAuthEmulator(auth, `http://${firebaseEmulatorHost}:9099`, { disableWarnings: true });
     connectFirestoreEmulator(db, firebaseEmulatorHost, 8080);
     connectStorageEmulator(storage, firebaseEmulatorHost, 9199);
+    connectFunctionsEmulator(functions, firebaseEmulatorHost, 5001);
     emulatorsConnected = true;
   }
 
@@ -87,6 +95,7 @@ function initializeFirebase() {
     auth,
     db,
     storage,
+    functions,
     authModule: {
       browserLocalPersistence,
       browserSessionPersistence,
@@ -112,6 +121,9 @@ function initializeFirebase() {
       updateDoc,
       where,
       writeBatch,
+    },
+    functionsModule: {
+      httpsCallable,
     },
   };
 

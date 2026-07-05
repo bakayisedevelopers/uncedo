@@ -12,12 +12,6 @@ export const SERVICE_CATALOG = [
     services: ['Hand wash', 'Machine wash', 'Ironing', 'Folding', 'Stain treatment'],
   },
   {
-    id: 'gardening',
-    name: 'Gardening',
-    description: 'Garden upkeep, trimming, watering, and outdoor presentation support.',
-    services: ['Lawn care', 'Weeding', 'Pruning', 'Plant watering', 'Garden tidy-up'],
-  },
-  {
     id: 'beauty',
     name: 'Beauty',
     description: 'At-home beauty services with portfolio-based trust and service matching.',
@@ -46,6 +40,12 @@ export const SERVICE_CATALOG = [
     name: 'Car Wash',
     description: 'Mobile car washing, interior cleaning, detailing, and related vehicle care.',
     services: ['Exterior wash', 'Interior cleaning', 'Seat cleaning', 'Full body wash', 'Full detailing'],
+  },
+  {
+    id: 'tutoring',
+    name: 'Tutoring',
+    description: 'Academic support for homework, exam prep, subject coaching, and study guidance.',
+    services: ['Homework help', 'Exam preparation', 'Math tutoring', 'Reading support', 'Language tutoring'],
   },
 ];
 

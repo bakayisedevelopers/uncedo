@@ -1,3 +1,4 @@
+import { useMemo, useState } from 'react';
 import { Image, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { GOOGLE_MAPS_API_KEY } from '../../constants/runtimeConfig';
@@ -71,7 +72,25 @@ export function HelperHomeStaticMap({
 }) {
   const coordinate = normalizeCoordinate(currentUserMarker);
   const hasKey = Boolean(GOOGLE_MAPS_API_KEY);
-  const mapUri = hasKey ? buildStaticMapUrl(coordinate, radiusKm) : '';
+  const [imageFailed, setImageFailed] = useState(false);
+  const mapUri = useMemo(
+    () => (hasKey ? buildStaticMapUrl(coordinate, radiusKm) : ''),
+    [coordinate, hasKey, radiusKm],
+  );
+
+  if (imageFailed) {
+    return (
+      <View style={styles.map}>
+        <View style={styles.placeholder}>
+          <Ionicons color={colors.brandDark} name="image-outline" size={28} />
+          <Text style={styles.placeholderTitle}>Map preview unavailable.</Text>
+          <Text style={styles.placeholderCopy}>
+            The Google Static Maps image could not load. Check the current Maps API key restrictions.
+          </Text>
+        </View>
+      </View>
+    );
+  }
 
   if (!hasKey) {
     return (
@@ -87,7 +106,12 @@ export function HelperHomeStaticMap({
 
   return (
     <View style={styles.map}>
-      <Image source={{ uri: mapUri }} style={styles.image} />
+      <Image
+        source={{ uri: mapUri }}
+        style={styles.image}
+        onError={() => setImageFailed(true)}
+        onLoad={() => setImageFailed(false)}
+      />
     </View>
   );
 }

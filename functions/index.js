@@ -1,5 +1,5 @@
 const { onDocumentCreated, onDocumentWritten } = require('firebase-functions/v2/firestore');
-const { onRequest } = require('firebase-functions/v2/https');
+const { onCall, onRequest, HttpsError } = require('firebase-functions/v2/https');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { defineSecret } = require('firebase-functions/params');
 const { logger } = require('firebase-functions');
@@ -2342,6 +2342,406 @@ function isAdminUserRecord(user = {}) {
   return roles.has('admin');
 }
 
+const ALLOWED_SERVICE_CATEGORIES = new Set([
+  'cleaning',
+  'laundry',
+  'beauty',
+  'yard_maintenance',
+  'barber',
+  'care',
+  'car_wash',
+  'tutoring',
+]);
+
+function slugifyServiceDraft(value = '') {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function titleCaseFromSlug(value = '') {
+  return String(value || '')
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function normalizeDraftOption(option = {}, index = 0) {
+  const label = String(option.label || option.value || '').trim();
+  const value = slugifyServiceDraft(option.value || label || `option_${index + 1}`);
+  if (!label || !value) return null;
+
+  return {
+    value,
+    label,
+    priceAdder: Math.max(0, Math.round(Number(option.priceAdder || 0))),
+    materialAdder: Math.max(0, Math.round(Number(option.materialAdder || 0))),
+  };
+}
+
+function normalizeDraftQuestion(question = {}, index = 0) {
+  const prompt = String(question.prompt || '').trim();
+  if (!prompt) return null;
+
+  const answerType = String(question.answerType || 'enum').trim().toLowerCase() === 'text' ? 'text' : 'enum';
+  const options = answerType === 'text'
+    ? []
+    : (Array.isArray(question.options) ? question.options : [])
+      .map((option, optionIndex) => normalizeDraftOption(option, optionIndex))
+      .filter(Boolean);
+
+  if (answerType === 'enum' && !options.length) return null;
+
+  return {
+    id: slugifyServiceDraft(question.id || prompt || `question_${index + 1}`) || `question_${index + 1}`,
+    prompt,
+    answerType,
+    answerHint: String(question.answerHint || '').trim(),
+    options,
+  };
+}
+
+function clampMoney(value, fallback, { min = 0, max = 5000 } = {}) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return Math.round(Number(fallback || 0));
+  return Math.max(min, Math.min(max, Math.round(numeric)));
+}
+
+function defaultDraftPricing(categoryId, serviceName) {
+  const normalized = String(categoryId || '').trim().toLowerCase();
+  const defaults = {
+    cleaning: 140,
+    laundry: 95,
+    beauty: 180,
+    yard_maintenance: 190,
+    barber: 150,
+    care: 170,
+    car_wash: 135,
+    tutoring: 125,
+  };
+  const basePrice = defaults[normalized] || 120;
+  const promptSize = String(serviceName || '').trim().length;
+  const uplift = promptSize > 30 ? 20 : 0;
+  const finalBase = basePrice + uplift;
+  return {
+    basePrice: finalBase,
+    travelFee: 35,
+    minimumTotal: Math.max(50, Math.round(finalBase * 0.7)),
+    maximumTotal: Math.max(finalBase * 2.8, finalBase + 150),
+    bookingFee: 0,
+    bundleDiscountPercent: 0,
+  };
+}
+
+function defaultDraftQuestions(categoryId, serviceName) {
+  const normalized = String(categoryId || '').trim().toLowerCase();
+  const sharedLocationQuestion = {
+    id: 'service_location',
+    prompt: 'Where should the service happen?',
+    answerType: 'enum',
+    options: [
+      { value: 'current_location', label: 'Current location', priceAdder: 0 },
+      { value: 'saved_home_address', label: 'Saved home address', priceAdder: 0 },
+      { value: 'another_address', label: 'Another address', priceAdder: 0 },
+    ],
+  };
+
+  const templates = {
+    cleaning: {
+      required: [
+        {
+          id: 'service_timing',
+          prompt: 'Do you need this help now or later?',
+          answerType: 'enum',
+          options: [
+            { value: 'now', label: 'Now', priceAdder: 10 },
+            { value: 'later', label: 'Later', priceAdder: 0 },
+          ],
+        },
+        sharedLocationQuestion,
+        {
+          id: 'cleaning_scope',
+          prompt: 'How much cleaning work is involved?',
+          answerType: 'enum',
+          options: [
+            { value: 'small', label: 'Small', priceAdder: 0 },
+            { value: 'medium', label: 'Medium', priceAdder: 20 },
+            { value: 'large', label: 'Large', priceAdder: 45 },
+            { value: 'deep_clean', label: 'Deep clean', priceAdder: 80 },
+          ],
+        },
+      ],
+      optional: [
+        {
+          id: 'cleaning_materials',
+          prompt: 'Should the helper bring equipment or materials?',
+          answerType: 'enum',
+          options: [
+            { value: 'bring_all', label: 'Bring everything', priceAdder: 35 },
+            { value: 'bring_some', label: 'Bring some items', priceAdder: 20 },
+            { value: 'use_mine', label: 'Use mine', priceAdder: 0 },
+          ],
+        },
+      ],
+    },
+    tutoring: {
+      required: [
+        {
+          id: 'subject',
+          prompt: 'What subject do you need help with?',
+          answerType: 'text',
+          answerHint: 'For example, algebra, English, or chemistry.',
+        },
+        {
+          id: 'grade_level',
+          prompt: 'What grade or level is the learner at?',
+          answerType: 'enum',
+          options: [
+            { value: 'primary', label: 'Primary school', priceAdder: 0 },
+            { value: 'secondary', label: 'Secondary school', priceAdder: 20 },
+            { value: 'matric', label: 'Matric', priceAdder: 35 },
+            { value: 'tertiary', label: 'Tertiary', priceAdder: 50 },
+          ],
+        },
+        {
+          id: 'session_length',
+          prompt: 'How long should the tutoring session be?',
+          answerType: 'enum',
+          options: [
+            { value: 'thirty_minutes', label: '30 minutes', priceAdder: 0 },
+            { value: 'one_hour', label: '1 hour', priceAdder: 35 },
+            { value: 'two_hours', label: '2 hours', priceAdder: 70 },
+          ],
+        },
+      ],
+      optional: [
+        {
+          id: 'delivery_mode',
+          prompt: 'Should the session happen in person or online?',
+          answerType: 'enum',
+          options: [
+            { value: 'in_person', label: 'In person', priceAdder: 0 },
+            { value: 'online', label: 'Online', priceAdder: 0 },
+            { value: 'either', label: 'Either', priceAdder: 0 },
+          ],
+        },
+      ],
+    },
+  };
+
+  const selected = templates[normalized] || {
+    required: [
+      {
+        id: 'service_timing',
+        prompt: 'Do you need this help now or later?',
+        answerType: 'enum',
+        options: [
+          { value: 'now', label: 'Now', priceAdder: 10 },
+          { value: 'later', label: 'Later', priceAdder: 0 },
+        ],
+      },
+      sharedLocationQuestion,
+    ],
+    optional: [],
+  };
+
+  return {
+    required: selected.required,
+    optional: selected.optional,
+    requiresPortfolioSelection: ['beauty'].includes(normalized),
+    promptLabel: `I need ${serviceName || titleCaseFromSlug(categoryId)}`.trim(),
+  };
+}
+
+function normalizeServiceDraftPayload(payload = {}, fallback = {}) {
+  const categoryId = String(payload.categoryId || fallback.categoryId || '').trim().toLowerCase();
+  const serviceName = String(payload.serviceName || fallback.serviceName || '').trim();
+  const description = String(payload.description || fallback.description || '').trim();
+  const promptLabel = String(payload.promptLabel || fallback.promptLabel || `I need ${serviceName}`).trim();
+  const type = String(payload.type || payload.serviceType || fallback.type || 'service').trim().toLowerCase() === 'bundle'
+    ? 'bundle'
+    : 'service';
+  const pricing = payload.pricing && typeof payload.pricing === 'object' ? payload.pricing : {};
+  const questionnaire = payload.questionnaire && typeof payload.questionnaire === 'object' ? payload.questionnaire : {};
+  const defaultQuestions = defaultDraftQuestions(categoryId, serviceName);
+  const normalizedRequiredQuestions = (Array.isArray(questionnaire.required) && questionnaire.required.length ? questionnaire.required : defaultQuestions.required)
+    .map((question, index) => normalizeDraftQuestion(question, index))
+    .filter(Boolean);
+  const normalizedOptionalQuestions = (Array.isArray(questionnaire.optional) && questionnaire.optional.length ? questionnaire.optional : defaultQuestions.optional)
+    .map((question, index) => normalizeDraftQuestion(question, index))
+    .filter(Boolean);
+  const requiredQuestions = (normalizedRequiredQuestions.length ? normalizedRequiredQuestions : defaultQuestions.required)
+    .slice(0, 6);
+  const optionalQuestions = (normalizedOptionalQuestions.length ? normalizedOptionalQuestions : defaultQuestions.optional)
+    .slice(0, 4);
+  const defaultPricing = defaultDraftPricing(categoryId, serviceName);
+
+  return {
+    categoryId,
+    categoryName: String(payload.categoryName || fallback.categoryName || titleCaseFromSlug(categoryId)).trim(),
+    label: serviceName,
+    promptLabel,
+    description,
+    type,
+    active: true,
+    approved: true,
+    requiresPortfolioSelection: Boolean(payload.requiresPortfolioSelection ?? defaultQuestions.requiresPortfolioSelection ?? false),
+    inheritBundleImages: payload.inheritBundleImages !== false,
+    pricing: {
+      basePrice: clampMoney(pricing.basePrice, defaultPricing.basePrice, { min: 0, max: 5000 }),
+      travelFee: clampMoney(pricing.travelFee, defaultPricing.travelFee, { min: 0, max: 500 }),
+      bookingFee: clampMoney(pricing.bookingFee, 0, { min: 0, max: 500 }),
+      minimumTotal: clampMoney(pricing.minimumTotal, defaultPricing.minimumTotal, { min: 0, max: 5000 }),
+      maximumTotal: clampMoney(pricing.maximumTotal, defaultPricing.maximumTotal, { min: 0, max: 10000 }),
+      bundleDiscountPercent: clampMoney(pricing.bundleDiscountPercent, 0, { min: 0, max: 90 }),
+    },
+    questionnaire: {
+      required: requiredQuestions,
+      optional: optionalQuestions,
+    },
+  };
+}
+
+function buildFallbackServiceDraft(payload = {}) {
+  return normalizeServiceDraftPayload({
+    ...payload,
+    pricing: defaultDraftPricing(payload.categoryId, payload.serviceName),
+    questionnaire: defaultDraftQuestions(payload.categoryId, payload.serviceName),
+  }, payload);
+}
+
+async function generateServiceDraftWithGemini(payload = {}) {
+  const apiKey = String(process.env.GEMINI_API_KEY || '').trim();
+  if (!apiKey) {
+    return { draft: buildFallbackServiceDraft(payload), source: 'fallback', warning: 'Gemini API key is not configured. Using a deterministic draft.' };
+  }
+
+  const model = String(process.env.GEMINI_MODEL || 'gemini-2.0-flash').trim();
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      systemInstruction: {
+        parts: [{
+          text: [
+            'You generate service catalog drafts for an admin UI.',
+            'Return only valid JSON.',
+            'Do not include images.',
+            'Do not invent included service ids.',
+            'Keep the output concise and practical.',
+          ].join(' '),
+        }],
+      },
+      contents: [
+        {
+          role: 'user',
+          parts: [{
+            text: JSON.stringify({
+              task: 'Generate the rest of the service details from the admin input.',
+              categoryId: payload.categoryId,
+              categoryName: payload.categoryName,
+              serviceName: payload.serviceName,
+              description: payload.description,
+              requiredOutput: {
+                type: 'service or bundle',
+                promptLabel: 'customer-facing prompt label',
+                requiresPortfolioSelection: 'boolean',
+                inheritBundleImages: 'boolean',
+                pricing: {
+                  basePrice: 'number',
+                  travelFee: 'number',
+                  bookingFee: 'number',
+                  minimumTotal: 'number',
+                  maximumTotal: 'number',
+                  bundleDiscountPercent: 'number',
+                },
+                questionnaire: {
+                  required: [{ id: 'string', prompt: 'string', answerType: 'enum or text', answerHint: 'string', options: [{ value: 'string', label: 'string', priceAdder: 'number', materialAdder: 'number' }] }],
+                  optional: [{ id: 'string', prompt: 'string', answerType: 'enum or text', answerHint: 'string', options: [{ value: 'string', label: 'string', priceAdder: 'number', materialAdder: 'number' }] }],
+                },
+              },
+            }),
+          }],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.3,
+        responseMimeType: 'application/json',
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => '');
+    throw new Error(`Gemini request failed: ${response.status} ${body}`.trim());
+  }
+
+  const json = await response.json();
+  const content = json?.candidates?.[0]?.content?.parts?.map((part) => part?.text || '').join('') || '{}';
+  let parsed = {};
+  try {
+    parsed = JSON.parse(content);
+  } catch (_error) {
+    parsed = {};
+  }
+
+  return {
+    draft: normalizeServiceDraftPayload(parsed, payload),
+    source: 'gemini',
+  };
+}
+
+exports.generateServiceDraft = onCall(async (request) => {
+  if (!request.auth?.uid) {
+    throw new HttpsError('unauthenticated', 'Sign in required.');
+  }
+
+  const userSnap = await db.collection('users').doc(request.auth.uid).get();
+  const user = userSnap.exists ? (userSnap.data() || {}) : {};
+  if (!isAdminToken(request.auth.token || {}) && !isAdminUserRecord(user)) {
+    throw new HttpsError('permission-denied', 'Admin authorization required.');
+  }
+
+  const payload = request.data || {};
+  const categoryId = String(payload.categoryId || '').trim().toLowerCase();
+  const categoryName = String(payload.categoryName || '').trim();
+  const serviceName = String(payload.serviceName || '').trim();
+  const description = String(payload.description || '').trim();
+
+  if (!ALLOWED_SERVICE_CATEGORIES.has(categoryId)) {
+    throw new HttpsError('invalid-argument', 'Please choose a valid catalog category.');
+  }
+  if (!serviceName || !description) {
+    throw new HttpsError('invalid-argument', 'Service name and description are required.');
+  }
+
+  try {
+    const result = await generateServiceDraftWithGemini({
+      categoryId,
+      categoryName,
+      serviceName,
+      description,
+    });
+    return {
+      ok: true,
+      ...result,
+    };
+  } catch (error) {
+    logger.warn('generate_service_draft_fallback_used', { error: error.message, categoryId, serviceName });
+    return {
+      ok: true,
+      source: 'fallback',
+      warning: 'AI generation is unavailable right now. A deterministic draft was prepared instead.',
+      draft: buildFallbackServiceDraft({ categoryId, categoryName, serviceName, description }),
+    };
+  }
+});
+
 function normalizeExtractedText(rawText) {
   return String(rawText || '').replace(/\s+/g, ' ').trim();
 }
@@ -3964,5 +4364,3 @@ exports.sendEmailFromQueue = onDocumentCreated(
     }
   },
 );
-
-

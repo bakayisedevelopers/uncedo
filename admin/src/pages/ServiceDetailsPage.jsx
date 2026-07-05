@@ -12,6 +12,7 @@ import {
   subscribeToServiceCatalog,
   uploadServiceCatalogImages,
 } from '../services/serviceCatalogService';
+import { generateServiceCatalogDraft } from '../services/serviceCatalogAiService';
 import { groupRowsByHelper, isPendingServiceOfferingStatus, matchesCatalogItem } from '../utils/moderationView';
 
 function slugify(value = '') {
@@ -326,6 +327,8 @@ export default function ServiceDetailsPage() {
   const [draftInheritBundleImages, setDraftInheritBundleImages] = useState(true);
   const [draftRequiredQuestions, setDraftRequiredQuestions] = useState([]);
   const [draftOptionalQuestions, setDraftOptionalQuestions] = useState([]);
+  const [draftAiStatus, setDraftAiStatus] = useState('idle');
+  const [draftAiMessage, setDraftAiMessage] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -430,6 +433,8 @@ export default function ServiceDetailsPage() {
       false,
     ));
     setMessage('');
+    setDraftAiStatus('idle');
+    setDraftAiMessage('');
   }, [categoryOptions, selectedService]);
 
   const serviceRows = useMemo(() => {
@@ -499,6 +504,64 @@ export default function ServiceDetailsPage() {
   const refreshHelpers = async () => {
     const items = await listHelperProfiles();
     setHelpers(items);
+  };
+
+  const applyGeneratedDraft = (generatedDraft = {}) => {
+    const pricing = generatedDraft.pricing && typeof generatedDraft.pricing === 'object' ? generatedDraft.pricing : {};
+    const questionnaire = generatedDraft.questionnaire && typeof generatedDraft.questionnaire === 'object'
+      ? generatedDraft.questionnaire
+      : {};
+    const nextMinimumTotal = Number(pricing.minimumTotal ?? draftMinimumTotal ?? 0);
+    const nextMaximumTotalRaw = Number(pricing.maximumTotal ?? draftMaximumTotal ?? 0);
+    const nextMaximumTotal = Number.isFinite(nextMaximumTotalRaw) ? Math.max(nextMinimumTotal, nextMaximumTotalRaw) : nextMinimumTotal;
+
+    setDraftPromptLabel(String(generatedDraft.promptLabel || draftLabel || '').trim());
+    setDraftBasePrice(Number(pricing.basePrice ?? draftBasePrice ?? 0));
+    setDraftTravelFee(Number(pricing.travelFee ?? draftTravelFee ?? 35));
+    setDraftMinimumTotal(nextMinimumTotal);
+    setDraftMaximumTotal(nextMaximumTotal);
+    setDraftRequiresPortfolioSelection(Boolean(generatedDraft.requiresPortfolioSelection));
+    setDraftInheritBundleImages(generatedDraft.inheritBundleImages !== false);
+    setDraftIncludedServiceIds([]);
+    setDraftRequiredQuestions(mapQuestionDrafts(questionnaire.required || [], true));
+    setDraftOptionalQuestions(mapQuestionDrafts(questionnaire.optional || [], false));
+  };
+
+  const handleGenerateDraft = async () => {
+    if (!isNewService || isMutating || draftAiStatus === 'loading') return;
+
+    const categoryName = String(selectedCategory?.name || '').trim();
+    const serviceName = String(draftLabel || '').trim();
+    const description = String(draftDescription || '').trim();
+
+    if (!draftCategoryId.trim() || !serviceName || !description) {
+      setDraftAiMessage('Pick a category, service name, and description before generating the draft.');
+      setDraftAiStatus('error');
+      return;
+    }
+
+    setDraftAiStatus('loading');
+    setDraftAiMessage('Generating a service draft...');
+
+    try {
+      const response = await generateServiceCatalogDraft({
+        categoryId: draftCategoryId,
+        categoryName,
+        serviceName,
+        description,
+      });
+      const draft = response?.draft || response?.serviceDraft || response || null;
+      if (!draft) {
+        throw new Error('No generated draft was returned.');
+      }
+
+      applyGeneratedDraft(draft);
+      setDraftAiStatus('ready');
+      setDraftAiMessage(response?.warning || 'AI draft generated. Review the details, add images, then save.');
+    } catch (error) {
+      setDraftAiStatus('error');
+      setDraftAiMessage(error.message || 'Unable to generate an AI draft right now.');
+    }
   };
 
   const upsertSavedService = (saved) => {
@@ -612,6 +675,32 @@ export default function ServiceDetailsPage() {
           <div className="space-y-6">
             <Card className="bg-white/7">
               <div className="grid gap-4 md:grid-cols-2">
+                {isNewService ? (
+                  <div className="md:col-span-2 rounded-[24px] border border-brand/20 bg-brand/5 p-4">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                      <div>
+                        <p className="font-bold text-white">AI assisted setup</p>
+                        <p className="mt-1 text-sm leading-6 text-ink-200">
+                          Fill in category, name, and description, then let AI populate pricing, questions, and the rest of the draft service details.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleGenerateDraft}
+                        disabled={draftAiStatus === 'loading' || isMutating}
+                        className="inline-flex items-center justify-center rounded-2xl bg-brand px-4 py-3 text-sm font-bold text-white disabled:opacity-60"
+                      >
+                        {draftAiStatus === 'loading' ? 'Generating...' : 'Generate draft'}
+                      </button>
+                    </div>
+                    {draftAiMessage ? (
+                      <p className={`mt-3 text-sm font-medium ${draftAiStatus === 'error' ? 'text-rose-200' : 'text-brand-soft'}`}>
+                        {draftAiMessage}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+
                 <label className="space-y-2">
                   <span className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Service id</span>
                   <input

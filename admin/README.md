@@ -32,12 +32,14 @@ npm run preview
 ## Environment
 
 The app expects the usual `VITE_FIREBASE_*` environment variables that point at the shared Uncedo Firebase project.
+AI-assisted service creation also expects the backend Firebase Functions runtime to expose `GEMINI_API_KEY` and optional `GEMINI_MODEL` env vars.
 
 ## Notes
 
 - `admin/` is deployed as a separate Firebase Hosting site.
 - The app reads helper and customer records from the shared `users` collection.
 - Service catalog data is stored in the shared `serviceCatalog` collection, with service images uploaded to Firebase Storage.
+- The create-service flow can request an AI-generated draft from Firebase Functions before the admin reviews pricing and questionnaire details.
 - The services area includes both per-service image uploads and a bulk uploader that stages multiple pictures locally, then assigns each uploaded image to one or more services before saving.
 - Helper agreement publishing is handled through the dedicated helper agreement management screen with direct Firestore version publishing and helper re-acceptance invalidation.
 - Admin helper-approval and service-catalog saves now trigger client-side reconciliation nudges for active `serviceRequests`, replacing the removed scheduled backend reconciliation pass.

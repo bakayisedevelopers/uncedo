@@ -5,6 +5,9 @@ let navigationSdk = null;
 try {
   navigationSdk = require('@googlemaps/react-native-navigation-sdk');
 } catch (error) {
+  if (typeof __DEV__ !== 'undefined' && __DEV__) {
+    console.warn('[google-navigation-sdk] React Native bridge package is unavailable:', error?.message || error);
+  }
   navigationSdk = null;
 }
 

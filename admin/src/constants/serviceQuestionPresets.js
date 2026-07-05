@@ -125,6 +125,25 @@ const CATEGORY_PRESETS = {
       q('car_wash_site_utilities', 'Do you have water or electricity available on site?', ['both', 'water_only', 'electricity_only', 'neither'], { required: false }),
     ],
   },
+  tutoring: {
+    required: [
+      q('subject', 'What subject do you need help with?'),
+      q('grade_level', 'What grade or level is the learner at?', [
+        { value: 'primary', label: 'Primary school', priceAdder: 0 },
+        { value: 'secondary', label: 'Secondary school', priceAdder: 20 },
+        { value: 'matric', label: 'Matric', priceAdder: 35 },
+        { value: 'tertiary', label: 'Tertiary', priceAdder: 50 },
+      ]),
+      q('session_length', 'How long should the tutoring session be?', [
+        { value: 'thirty_minutes', label: '30 minutes', priceAdder: 0 },
+        { value: 'one_hour', label: '1 hour', priceAdder: 35 },
+        { value: 'two_hours', label: '2 hours', priceAdder: 70 },
+      ]),
+    ],
+    optional: [
+      q('delivery_mode', 'Should the session happen in person or online?', ['in_person', 'online', 'either'], { required: false }),
+    ],
+  },
 };
 
 const SERVICE_PRESETS = {

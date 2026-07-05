@@ -176,6 +176,10 @@ android {
     }
 }
 
+configurations.configureEach {
+    exclude group: "com.google.android.gms", module: "play-services-maps"
+}
+
 // Apply static values from `gradle.properties` to the `android.packagingOptions`
 // Accepts values in comma delimited lists, example:
 // android.packagingOptions.pickFirsts=/LICENSE,**/picasa.ini

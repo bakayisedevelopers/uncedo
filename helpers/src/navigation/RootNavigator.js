@@ -26,8 +26,8 @@ import { ProviderDetailsScreen } from '../screens/provider/ProviderDetailsScreen
 import { ProviderLegalScreen } from '../screens/provider/ProviderLegalScreen';
 import { ProviderProfileScreen } from '../screens/provider/ProviderProfileScreen';
 import { ProviderSecurityScreen } from '../screens/provider/ProviderSecurityScreen';
-import { ServiceOfferingCatalogScreen } from '../screens/provider/ServiceOfferingCatalogScreen';
-import { ServiceOfferingDetailsScreen } from '../screens/provider/ServiceOfferingDetailsScreen';
+import { ServiceOfferingCatalogScreen } from '../screens/provider/SkillCatalogScreen';
+import { ServiceOfferingDetailsScreen } from '../screens/provider/SkillDetailsScreen';
 import { ServicesOfferedScreen } from '../screens/provider/ServicesOfferedScreen';
 import { VerificationScreen } from '../screens/provider/VerificationScreen';
 import { HelperOfferOverlay } from '../components/app/HelperOfferOverlay';
