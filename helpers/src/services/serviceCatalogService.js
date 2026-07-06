@@ -9,6 +9,35 @@ function slugify(value = '') {
     .replace(/^_+|_+$/g, '');
 }
 
+const SERVICE_CATALOG_COLLECTIONS = ['serviceCatalog', 'services'];
+
+function normalizeCatalogCollectionEntries(entries = []) {
+  const byId = new Map();
+
+  (Array.isArray(entries) ? entries : []).forEach((entry) => {
+    const normalized = normalizeServiceCatalogEntry(entry);
+    if (!normalized) return;
+
+    const key = String(normalized.id || '').trim().toLowerCase();
+    if (!key) return;
+
+    const existing = byId.get(key);
+    byId.set(key, existing ? { ...normalized, ...existing } : normalized);
+  });
+
+  return [...byId.values()];
+}
+
+function normalizeCategoryId(entry = {}) {
+  const directCategoryId = String(entry.categoryId || '').trim().toLowerCase();
+  if (directCategoryId) return directCategoryId;
+
+  const categoryName = String(entry.categoryName || '').trim();
+  if (categoryName) return slugify(categoryName);
+
+  return 'uncategorized';
+}
+
 function normalizeImage(image) {
   if (!image) return null;
   if (typeof image === 'string') {
@@ -34,8 +63,8 @@ export function normalizeServiceCatalogEntry(entry = {}) {
   return {
     id,
     catalogId: id,
-    categoryId: String(entry.categoryId || '').trim(),
-    categoryName: String(entry.categoryName || '').trim(),
+    categoryId: normalizeCategoryId(entry),
+    categoryName: String(entry.categoryName || (normalizeCategoryId(entry) === 'uncategorized' ? 'Uncategorized' : '')).trim(),
     label: String(entry.label || entry.serviceName || id).trim(),
     description: String(entry.description || '').trim(),
     type: String(entry.type || 'service').trim().toLowerCase(),
@@ -71,21 +100,41 @@ export function buildHelperServiceCatalog(entries = []) {
   }));
 }
 
-export function subscribeToServiceCatalog(callback, onError) {
+export function subscribeToServiceCatalog(callback) {
   const { db, firestoreModule } = getFirebaseClients();
   const { collection, onSnapshot, query } = firestoreModule;
-  const catalogQuery = query(collection(db, 'serviceCatalog'));
+  const collectionEntries = new Map();
+  const unsubscribers = [];
+  const emitCatalog = () => {
+    const normalizedEntries = normalizeCatalogCollectionEntries(
+      SERVICE_CATALOG_COLLECTIONS.flatMap((collectionName) => collectionEntries.get(collectionName) || []),
+    );
+    hydrateHelperServiceCategories(normalizedEntries);
+    callback(normalizedEntries);
+  };
 
-  return onSnapshot(
-    catalogQuery,
-    (snapshot) => {
-      const entries = snapshot.docs.map((docSnap) => normalizeServiceCatalogEntry({ id: docSnap.id, ...docSnap.data() }));
-      const normalizedEntries = entries.filter(Boolean);
-      hydrateHelperServiceCategories(normalizedEntries);
-      callback(normalizedEntries);
-    },
-    onError,
-  );
+  SERVICE_CATALOG_COLLECTIONS.forEach((collectionName) => {
+    const catalogQuery = query(collection(db, collectionName));
+    const unsubscribe = onSnapshot(
+      catalogQuery,
+      (snapshot) => {
+        collectionEntries.set(collectionName, snapshot.docs.map((docSnap) => ({
+          id: docSnap.id,
+          ...docSnap.data(),
+        })));
+        emitCatalog();
+      },
+      () => {
+        collectionEntries.set(collectionName, []);
+        emitCatalog();
+      },
+    );
+    unsubscribers.push(unsubscribe);
+  });
+
+  return () => {
+    unsubscribers.forEach((unsubscribe) => unsubscribe?.());
+  };
 }
 
 export function getCatalogEntryById(entries = [], catalogId = '') {

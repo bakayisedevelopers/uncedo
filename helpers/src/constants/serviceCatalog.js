@@ -29,11 +29,11 @@ export function hydrateHelperServiceCategories(entries = []) {
 
   (Array.isArray(entries) ? entries : []).forEach((entry) => {
     const categoryId = String(entry.categoryId || '').trim().toLowerCase();
-    if (!categoryId) return;
+    const normalizedCategoryId = categoryId || 'uncategorized';
 
-    liveCategoryMap.set(categoryId, {
-      id: categoryId,
-      name: String(entry.categoryName || toTitleCase(categoryId)).trim(),
+    liveCategoryMap.set(normalizedCategoryId, {
+      id: normalizedCategoryId,
+      name: String(entry.categoryName || toTitleCase(normalizedCategoryId)).trim(),
       description: String(entry.description || '').trim(),
     });
   });

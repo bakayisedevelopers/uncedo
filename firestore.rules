@@ -110,6 +110,11 @@ service cloud.firestore {
       allow create, update, delete: if isAdmin();
     }
 
+    match /services/{serviceId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
 
     function isHelperServiceOwner(helperId) {
       return signedIn() && request.auth.uid == helperId;
