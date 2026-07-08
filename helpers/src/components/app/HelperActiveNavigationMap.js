@@ -85,12 +85,16 @@ export function HelperActiveNavigationMap({
     [destination, destinationTitle],
   );
   const [navigationViewController, setNavigationViewController] = useState(null);
-  const [initState, setInitState] = useState(ANDROID_ONLY ? 'initializing' : 'fallback');
+  const [initState, setInitState] = useState(ANDROID_ONLY ? 'waiting' : 'fallback');
   const [sdkError, setSdkError] = useState('');
   const [hasSdkLocation, setHasSdkLocation] = useState(false);
   const [isMapReady, setIsMapReady] = useState(false);
+  const [isNavigationViewSettled, setIsNavigationViewSettled] = useState(false);
   const configuredDestinationRef = useRef('');
   const isMountedRef = useRef(true);
+  const initializationStartedRef = useRef(false);
+  const sdkInitializedRef = useRef(false);
+  const onMetricsChangeRef = useRef(onMetricsChange);
   const {
     navigationController,
     removeAllListeners,
@@ -98,6 +102,10 @@ export function HelperActiveNavigationMap({
     setOnNavigationReady,
     setOnRemainingTimeOrDistanceChanged,
   } = useGoogleNavigationSafe();
+
+  useEffect(() => {
+    onMetricsChangeRef.current = onMetricsChange;
+  }, [onMetricsChange]);
 
   useEffect(() => {
     return () => {
@@ -123,7 +131,7 @@ export function HelperActiveNavigationMap({
       setInitState('ready');
     });
     setOnRemainingTimeOrDistanceChanged((timeAndDistance) => {
-      onMetricsChange?.({
+      onMetricsChangeRef.current?.({
         distanceMeters: Number.isFinite(Number(timeAndDistance?.meters))
           ? Number(timeAndDistance.meters)
           : null,
@@ -137,7 +145,6 @@ export function HelperActiveNavigationMap({
       removeAllListeners();
     };
   }, [
-    onMetricsChange,
     removeAllListeners,
     setOnLocationChanged,
     setOnNavigationReady,
@@ -145,7 +152,25 @@ export function HelperActiveNavigationMap({
   ]);
 
   useEffect(() => {
-    if (!ANDROID_ONLY) {
+    if (!navigationViewController || !isMapReady) {
+      setIsNavigationViewSettled(false);
+      return () => {};
+    }
+
+    const timeoutId = setTimeout(() => {
+      if (isMountedRef.current) {
+        setIsNavigationViewSettled(true);
+      }
+    }, 350);
+
+    return () => {
+      clearTimeout(timeoutId);
+      setIsNavigationViewSettled(false);
+    };
+  }, [isMapReady, navigationViewController]);
+
+  useEffect(() => {
+    if (!ANDROID_ONLY || !navigationViewController || !isMapReady || initializationStartedRef.current) {
       return () => {};
     }
 
@@ -153,6 +178,7 @@ export function HelperActiveNavigationMap({
 
     const initializeNavigation = async () => {
       try {
+        initializationStartedRef.current = true;
         setInitState('initializing');
         const accepted = await navigationController.showTermsAndConditionsDialog();
         if (cancelled) return;
@@ -172,9 +198,9 @@ export function HelperActiveNavigationMap({
           return;
         }
 
+        sdkInitializedRef.current = true;
         navigationController.startUpdatingLocation();
         setSdkError('');
-        setInitState('ready');
       } catch (error) {
         if (cancelled) return;
         setSdkError(error?.message || 'Google Navigation failed to initialize.');
@@ -186,17 +212,22 @@ export function HelperActiveNavigationMap({
 
     return () => {
       cancelled = true;
+      const shouldCleanupSdk = sdkInitializedRef.current;
       configuredDestinationRef.current = '';
-      onMetricsChange?.({ distanceMeters: null, durationSeconds: null });
-      navigationController.stopUpdatingLocation();
-      navigationController.stopGuidance().catch(() => {});
-      navigationController.clearDestinations().catch(() => {});
-      navigationController.cleanup().catch(() => {});
+      onMetricsChangeRef.current?.({ distanceMeters: null, durationSeconds: null });
+      if (shouldCleanupSdk) {
+        navigationController.stopUpdatingLocation();
+        navigationController.stopGuidance().catch(() => {});
+        navigationController.clearDestinations().catch(() => {});
+        navigationController.cleanup().catch(() => {});
+      }
+      initializationStartedRef.current = false;
+      sdkInitializedRef.current = false;
     };
-  }, [navigationController, onMetricsChange]);
+  }, [isMapReady, navigationController, navigationViewController]);
 
   useEffect(() => {
-    if (!ANDROID_ONLY || initState === 'fallback' || isMapReady) {
+    if (!ANDROID_ONLY || initState === 'fallback' || initState === 'waiting' || isMapReady) {
       return () => {};
     }
 
@@ -215,7 +246,7 @@ export function HelperActiveNavigationMap({
   }, [initState, isMapReady]);
 
   useEffect(() => {
-    if (initState !== 'ready' || !navigationViewController) {
+    if (initState !== 'ready' || !navigationViewController || !isNavigationViewSettled || !sdkInitializedRef.current) {
       return;
     }
 
@@ -230,10 +261,10 @@ export function HelperActiveNavigationMap({
     if (!navigationEnabled) {
       navigationViewController.showRouteOverview();
     }
-  }, [initState, navigationEnabled, navigationViewController, routeView]);
+  }, [initState, isNavigationViewSettled, navigationEnabled, navigationViewController, routeView]);
 
   useEffect(() => {
-    if (initState !== 'ready') {
+    if (initState !== 'ready' || !isNavigationViewSettled || !sdkInitializedRef.current || !navigationViewController) {
       return;
     }
 
@@ -307,6 +338,7 @@ export function HelperActiveNavigationMap({
     destinationTitle,
     hasSdkLocation,
     initState,
+    isNavigationViewSettled,
     navigationController,
     navigationEnabled,
     navigationViewController,

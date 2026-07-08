@@ -40,6 +40,41 @@ npm run web
 
 The helper Android app now requires React Native new architecture and Android core-library desugaring because the Google Navigation SDK depends on them.
 
+## Android Device Testing For Native Navigation SDK
+
+Use this flow when testing the helper Android app on a real device because the Google Navigation SDK does not run inside Expo Go.
+
+1. Build and install the helper Android development build:
+   ```powershell
+   cd helpers
+   npm install
+   npm run android
+   ```
+2. With the phone connected over USB and USB debugging enabled, switch `adb` to TCP/IP mode:
+   ```powershell
+   C:\Users\Jabu Babb\AppData\Local\Android\Sdk\platform-tools\adb.exe devices
+   C:\Users\Jabu Babb\AppData\Local\Android\Sdk\platform-tools\adb.exe tcpip 5555
+   ```
+3. Read the phone Wi-Fi address and connect to it over the same network:
+   ```powershell
+   C:\Users\Jabu Babb\AppData\Local\Android\Sdk\platform-tools\adb.exe shell "ip addr show wlan0"
+   C:\Users\Jabu Babb\AppData\Local\Android\Sdk\platform-tools\adb.exe connect <phone-ip>:5555
+   ```
+4. Start Metro for the helper app:
+   ```powershell
+   cd helpers
+   npm run start
+   ```
+5. Open the installed Helpers app on the phone to pick up live JavaScript changes while keeping the native Google Navigation SDK available.
+
+Current local example from this machine:
+
+```powershell
+C:\Users\Jabu Babb\AppData\Local\Android\Sdk\platform-tools\adb.exe -s 10AD8E12G40026G tcpip 5555
+C:\Users\Jabu Babb\AppData\Local\Android\Sdk\platform-tools\adb.exe -s 10AD8E12G40026G shell "ip addr show wlan0"
+C:\Users\Jabu Babb\AppData\Local\Android\Sdk\platform-tools\adb.exe connect 192.168.0.68:5555
+```
+
 ## Key Folders
 
 - `src/screens/provider/`

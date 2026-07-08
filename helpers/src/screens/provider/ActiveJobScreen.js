@@ -793,9 +793,9 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
   );
   const statusDetail = activeJob?.statusDetail || statusMeta.detail;
 
-  const customerMarkers = activeJobDestination
+  const customerMarkers = activeJobDestination && activeJob
     ? [{
-        id: activeJob.id,
+        id: activeJob.id || 'customer-destination',
         coordinate: activeJobDestination,
         initials: activeJob.customerName || 'Customer',
         profilePhoto: activeJob.customerPhoto || null,
@@ -858,12 +858,21 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
       return;
     }
 
+    const closedJob = activeJob
+      ? {
+          requestId: activeJob.requestId || activeJob.id,
+          customerId: activeJob.customerId || '',
+          customerName: activeJob.customerName || 'customer',
+        }
+      : null;
     const success = await actions.cancelActiveJob(cancelReason);
     if (success) {
       setShowCancelModal(false);
       setCancelReason('');
       setShowCompletionModal(false);
-      goBack('Home');
+      setProofPhotos([]);
+      setRatingTarget(closedJob);
+      setShowRatingModal(true);
       return;
     }
 
@@ -1014,6 +1023,13 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
         return;
       }
 
+      const closedJob = activeJob
+        ? {
+            requestId: activeJob.requestId || activeJob.id,
+            customerId: activeJob.customerId || '',
+            customerName: activeJob.customerName || 'customer',
+          }
+        : null;
       await uploadCompletionProofPhotos();
       const success = await actions.completeActiveJobWithBilling();
       if (!success) {
@@ -1023,7 +1039,8 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
 
       setShowCompletionModal(false);
       setProofPhotos([]);
-      goBack('Home');
+      setRatingTarget(closedJob);
+      setShowRatingModal(true);
     } catch (error) {
       Alert.alert('Error', error.message || 'Unable to complete this job.');
     }
@@ -1072,14 +1089,19 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
 
   if (!activeJob) {
     return (
-      <View style={[styles.emptyContainer, { paddingBottom: bottomInset, paddingTop: topInset }]}>
-        <Ionicons name="checkmark-circle-outline" size={64} color={colors.success} />
-        <Text style={styles.emptyTitle}>Job closed</Text>
-        <Text style={styles.emptyCopy}>This active job has been completed or canceled.</Text>
-        <Pressable style={styles.primaryAction} onPress={() => goBack('Home')}>
-          <Text style={styles.primaryActionText}>Back to dashboard</Text>
-        </Pressable>
-      </View>
+      <>
+        <View style={[styles.emptyContainer, { paddingBottom: bottomInset, paddingTop: topInset }]}>
+          <Ionicons name="checkmark-circle-outline" size={64} color={colors.success} />
+          <Text style={styles.emptyTitle}>Job closed</Text>
+          <Text style={styles.emptyCopy}>This active job has been completed or canceled.</Text>
+          {!showRatingModal ? (
+            <Pressable style={styles.primaryAction} onPress={() => goBack('Home')}>
+              <Text style={styles.primaryActionText}>Back to dashboard</Text>
+            </Pressable>
+          ) : null}
+        </View>
+        {renderRatingModal()}
+      </>
     );
   }
 
@@ -1230,29 +1252,29 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
       </View>
       <Text style={styles.sheetSubtitle} numberOfLines={expanded ? 3 : 2}>{statusDetail}</Text>
 
-      <View style={styles.personCard}>
-        <View style={styles.avatarWrap}>
-          {activeJob.customerPhoto ? (
-            <Image source={{ uri: activeJob.customerPhoto }} style={styles.avatarImage} />
-          ) : (
-            <View style={styles.avatarFallback}>
-              <Text style={styles.avatarInitials}>{getInitials(activeJob.customerName)}</Text>
-            </View>
-          )}
-        </View>
-        <View style={styles.personMeta}>
-          <Text style={styles.personLabel}>Customer</Text>
-          <Text style={styles.personName}>{activeJob.customerName}</Text>
-        </View>
-        <Pressable style={styles.iconAction} onPress={handleCallCustomer}>
-          <Ionicons name="call-outline" size={18} color={colors.brandDark} />
-        </Pressable>
-      </View>
-
       {renderActions()}
 
       {expanded ? (
         <>
+          <View style={styles.personCard}>
+            <View style={styles.avatarWrap}>
+              {activeJob.customerPhoto ? (
+                <Image source={{ uri: activeJob.customerPhoto }} style={styles.avatarImage} />
+              ) : (
+                <View style={styles.avatarFallback}>
+                  <Text style={styles.avatarInitials}>{getInitials(activeJob.customerName)}</Text>
+                </View>
+              )}
+            </View>
+            <View style={styles.personMeta}>
+              <Text style={styles.personLabel}>Customer</Text>
+              <Text style={styles.personName}>{activeJob.customerName}</Text>
+            </View>
+            <Pressable style={styles.iconAction} onPress={handleCallCustomer}>
+              <Ionicons name="call-outline" size={18} color={colors.brandDark} />
+            </Pressable>
+          </View>
+
           <View style={styles.divider} />
 
           <Text style={styles.sectionTitle}>Destination</Text>
@@ -1471,16 +1493,11 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
       </Modal>
 
       <Modal visible={showCompletionModal} animationType="fade">
-        <View style={styles.ratingOverlay}>
+        <View style={[styles.ratingOverlay, { paddingTop: topInset + 28, paddingBottom: bottomInset + 28 }]}>
           <View style={styles.completionCard}>
             <View style={styles.completionHeader}>
-              <View>
-                <Text style={styles.ratingTitle}>Job completed</Text>
-                <Text style={styles.ratingCopy}>Add proof photos before billing is finalized.</Text>
-              </View>
-              <Pressable accessibilityRole="button" onPress={() => setShowCompletionModal(false)} style={styles.ratingCloseButton}>
-                <Ionicons color={colors.text} name="close" size={24} />
-              </Pressable>
+              <Text style={styles.ratingTitle}>Job completed</Text>
+              <Text style={styles.ratingCopy}>Add proof photos before billing is finalized.</Text>
             </View>
 
             <View style={styles.photoActions}>
@@ -1519,11 +1536,8 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
             ) : null}
 
             <View style={styles.modalButtonRow}>
-              <Pressable style={styles.secondaryAction} onPress={() => setShowCompletionModal(false)} disabled={uploadingProof || saving}>
-                <Text style={styles.secondaryActionText}>Back</Text>
-              </Pressable>
               <Pressable
-                style={[styles.primaryAction, (!proofPhotos.length || uploadingProof || saving) && styles.disabledAction]}
+                style={[styles.primaryAction, styles.completionDoneAction, (!proofPhotos.length || uploadingProof || saving) && styles.disabledAction]}
                 onPress={handleCompleteJob}
                 disabled={!proofPhotos.length || uploadingProof || saving}
               >
@@ -2010,12 +2024,11 @@ const styles = StyleSheet.create({
   completionCard: {
     flex: 1,
     gap: 18,
+    justifyContent: 'center',
   },
   completionHeader: {
-    alignItems: 'flex-start',
-    flexDirection: 'row',
-    gap: 12,
-    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
   },
   completionPreviewWrap: {
     flex: 1,
@@ -2105,6 +2118,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 12,
     width: '100%',
+  },
+  completionDoneAction: {
+    flex: 1,
   },
   dangerAction: {
     backgroundColor: colors.danger,
