@@ -1,3 +1,4 @@
+import { useMemo, useState } from 'react';
 import { Image, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { GOOGLE_MAPS_API_KEY } from '../../constants/runtimeConfig';
@@ -7,6 +8,7 @@ const DEFAULT_CENTER = {
   latitude: -26.2041,
   longitude: 28.0473,
 };
+const STATIC_MAP_STYLE_VERSION = 'marker-magenta-v3';
 
 function normalizeCoordinate(coordinate = null) {
   const latitude = Number(coordinate?.latitude);
@@ -23,12 +25,12 @@ function clampZoom(zoom) {
 }
 
 function getRadiusZoomLevel(radiusKm) {
-  const latitudeDelta = Math.max(0.015, ((radiusKm * 2.4) / 111) * 2);
+  const latitudeDelta = Math.max(0.015, ((radiusKm * 2 * 1.15) / 111));
   return Math.log2(360 / latitudeDelta);
 }
 
 function buildMarkerParam(coordinate) {
-  return `color:0x7c3aed|size:mid|${coordinate.latitude},${coordinate.longitude}`;
+  return `color:0xd946ef|size:mid|${coordinate.latitude},${coordinate.longitude}`;
 }
 
 function buildCirclePath(center, radiusKm, pointCount = 40) {
@@ -55,6 +57,7 @@ function buildStaticMapUrl(coordinate, radiusKm) {
     scale: '2',
     maptype: 'roadmap',
     key: GOOGLE_MAPS_API_KEY,
+    v: STATIC_MAP_STYLE_VERSION,
   });
 
   if (coordinate) {
@@ -71,15 +74,29 @@ export function HelperHomeStaticMap({
 }) {
   const coordinate = normalizeCoordinate(currentUserMarker);
   const hasKey = Boolean(GOOGLE_MAPS_API_KEY);
-  const mapUri = hasKey ? buildStaticMapUrl(coordinate, radiusKm) : '';
+  const mapUri = useMemo(
+    () => (hasKey ? buildStaticMapUrl(coordinate, radiusKm) : ''),
+    [coordinate, hasKey, radiusKm],
+  );
+  const [imageLoadFailed, setImageLoadFailed] = useState(false);
 
-  if (!hasKey) {
+  const resetImageFailure = () => {
+    if (imageLoadFailed) {
+      setImageLoadFailed(false);
+    }
+  };
+
+  if (!hasKey || imageLoadFailed) {
     return (
       <View style={styles.map}>
         <View style={styles.placeholder}>
           <Ionicons color={colors.brandDark} name="map-outline" size={28} />
           <Text style={styles.placeholderTitle}>Map preview unavailable.</Text>
-          <Text style={styles.placeholderCopy}>Google Maps API key is missing for the home map.</Text>
+          <Text style={styles.placeholderCopy}>
+            {hasKey
+              ? 'The home map image could not load right now. Check the connection and try again.'
+              : 'Google Maps API key is missing for the home map.'}
+          </Text>
         </View>
       </View>
     );
@@ -87,7 +104,12 @@ export function HelperHomeStaticMap({
 
   return (
     <View style={styles.map}>
-      <Image source={{ uri: mapUri }} style={styles.image} />
+      <Image
+        onError={() => setImageLoadFailed(true)}
+        onLoadStart={resetImageFailure}
+        source={{ uri: mapUri }}
+        style={styles.image}
+      />
     </View>
   );
 }

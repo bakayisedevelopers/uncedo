@@ -112,7 +112,7 @@ export function CustomerProfileScreen({ navigate }) {
     }
 
     setLiveLocationAddress('Resolving current address...');
-    reverseGeocodeCustomerLocation(liveLocation)
+    reverseGeocodeCustomerLocation(liveLocation, { detailLevel: 'street-city' })
       .then((address) => {
         if (!cancelled) {
           setLiveLocationAddress(address);

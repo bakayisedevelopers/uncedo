@@ -33,9 +33,8 @@ export async function getCurrentCustomerLocation() {
   return normalizeLocation(current?.coords || {});
 }
 
-function formatAddressParts(address = {}) {
-  const lineOne = [
-    address.name,
+function buildStreetLine(address = {}) {
+  const streetAddress = [
     address.streetNumber,
     address.street,
   ]
@@ -43,6 +42,24 @@ function formatAddressParts(address = {}) {
     .filter(Boolean)
     .join(' ')
     .trim();
+
+  if (streetAddress) {
+    return streetAddress;
+  }
+
+  return String(address.name || '').trim();
+}
+
+function formatAddressParts(address = {}, detailLevel = 'full') {
+  const lineOne = buildStreetLine(address);
+
+  if (detailLevel === 'street-city') {
+    const city = String(address.city || '').trim();
+    return [lineOne, city]
+      .filter(Boolean)
+      .join(', ')
+      .trim();
+  }
 
   const lineTwo = [
     address.district,
@@ -64,19 +81,20 @@ function formatAddressParts(address = {}) {
     .trim();
 }
 
-export async function reverseGeocodeCustomerLocation(location = null) {
+export async function reverseGeocodeCustomerLocation(location = null, options = {}) {
   const normalized = normalizeLocation(location);
   if (!normalized) {
     return '';
   }
 
   try {
+    const detailLevel = String(options?.detailLevel || 'full').trim().toLowerCase();
     const results = await Location.reverseGeocodeAsync({
       latitude: normalized.latitude,
       longitude: normalized.longitude,
     });
     const [firstResult] = Array.isArray(results) ? results : [];
-    return formatAddressParts(firstResult || {});
+    return formatAddressParts(firstResult || {}, detailLevel);
   } catch (error) {
     return '';
   }
