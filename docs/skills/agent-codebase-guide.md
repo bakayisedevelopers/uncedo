@@ -114,3 +114,13 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
 
 - Helper service applications are stored in `helperServices/{helperId}_{serviceId}` and use service/offering terminology. Backend matching builds `helperDispatchIndex/{helperId}` from `helperServices`, `users`, and `serviceCatalog`; do not reintroduce nested helper `services[].offerings` or legacy skill terminology for dispatch/admin moderation.
 - `serviceCatalog/{serviceId}` uses `type` (`service`, `bundle`, or `package`) rather than `kind`; bundles/packages expand through `includedServiceIds`.
+
+
+## 7. Shared Rewards Foundation (`/shared`, `/functions/rewards`)
+* [shared/rewards/index.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/shared/rewards/index.js): Central constants and validators for membership levels, mastery levels, rating directions, reward transaction states, referral statuses, account types, schema versions, and reward event types used by both mobile apps and Functions.
+* [functions/rewards/config.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/rewards/config.js): Versioned default reward, referral, membership, and mastery configuration seeded into `rewardConfig/*` for public client display and admin-managed changes.
+* [functions/rewards/rewardService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/rewards/rewardService.js): Authoritative reward-account initialization, append-only transaction ledger writes, idempotency, reversals, and point-expiry processing.
+* [functions/rewards/referralService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/rewards/referralService.js): Unique public referral-code creation, referral relationship capture, self-referral prevention, and milestone rewards.
+* [functions/rewards/ratingService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/rewards/ratingService.js): Trusted service-request rating submission, normalized `ratings/{requestId}_{direction}` records, embedded snapshot preservation, and aggregate updates.
+* [functions/rewards/progressionService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/functions/rewards/progressionService.js): Customer/helper membership recalculation and helper per-service mastery progression.
+* [uncedo/src/services/rewards/rewardClientService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/uncedo/src/services/rewards/rewardClientService.js) and [helpers/src/services/rewards/rewardClientService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/services/rewards/rewardClientService.js): Read-only mobile client helpers for reward accounts, transactions, config, rating summaries, membership, mastery, and referral code APIs.
