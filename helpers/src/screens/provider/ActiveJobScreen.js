@@ -43,6 +43,7 @@ import { formatCurrency } from '../../utils/payouts';
 
 const ARRIVAL_THRESHOLD_METERS = 50;
 const FREE_WAIT_SECONDS = 120;
+const ROUTE_MAP_SHEET_CLEARANCE = 156;
 
 function getDistanceInMeters(lat1, lon1, lat2, lon2) {
   if (
@@ -245,6 +246,8 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
   const [routeCoordinates, setRouteCoordinates] = useState([]);
   const [routeDistanceMeters, setRouteDistanceMeters] = useState(null);
   const [routeDurationSeconds, setRouteDurationSeconds] = useState(null);
+  const [navigationSdkDistanceMeters, setNavigationSdkDistanceMeters] = useState(null);
+  const [navigationSdkDurationSeconds, setNavigationSdkDurationSeconds] = useState(null);
   const [routeError, setRouteError] = useState('');
   const [isExpanded, setIsExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -331,6 +334,8 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
       setRouteCoordinates([]);
       setRouteDistanceMeters(null);
       setRouteDurationSeconds(null);
+      setNavigationSdkDistanceMeters(null);
+      setNavigationSdkDurationSeconds(null);
       setRouteError('');
       setTrackingDocument(null);
       setShowCompletionModal(false);
@@ -681,6 +686,8 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
       setRouteCoordinates([]);
       setRouteDistanceMeters(null);
       setRouteDurationSeconds(null);
+      setNavigationSdkDistanceMeters(null);
+      setNavigationSdkDurationSeconds(null);
       setRouteError('');
       setTrackingDocument(null);
       return () => {};
@@ -739,11 +746,6 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
     };
   }, [activeJob, nowTime]);
 
-  const distance = useMemo(
-    () => (Number.isFinite(routeDistanceMeters) ? routeDistanceMeters : null),
-    [routeDistanceMeters],
-  );
-  const etaMinutes = useMemo(() => formatEta(routeDurationSeconds), [routeDurationSeconds]);
   const routeSteps = useMemo(
     () => (Array.isArray(trackingDocument?.routeSteps) ? trackingDocument.routeSteps : []),
     [trackingDocument?.routeSteps],
@@ -787,11 +789,84 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
   const shouldUseNavigationCamera = ['driving', 'en_route', 'buying_resources'].includes(normalizedJobStatus);
   const useGoogleNavigation = Platform.OS === 'android' && Boolean(activeJobDestination);
   const canCancelJob = String(activeJob?.status || '').toLowerCase() !== 'completed';
+  const distance = useMemo(() => {
+    if (useGoogleNavigation && Number.isFinite(navigationSdkDistanceMeters)) {
+      return navigationSdkDistanceMeters;
+    }
+    return Number.isFinite(routeDistanceMeters) ? routeDistanceMeters : null;
+  }, [navigationSdkDistanceMeters, routeDistanceMeters, useGoogleNavigation]);
+  const etaMinutes = useMemo(() => {
+    if (useGoogleNavigation && Number.isFinite(navigationSdkDurationSeconds)) {
+      return formatEta(navigationSdkDurationSeconds);
+    }
+    return formatEta(routeDurationSeconds);
+  }, [navigationSdkDurationSeconds, routeDurationSeconds, useGoogleNavigation]);
+  const routeMapBottomInset = isLandscape
+    ? 24
+    : (isExpanded ? expandedHeight : collapsedHeight) + bottomInset + ROUTE_MAP_SHEET_CLEARANCE;
   const serviceName = useMemo(
     () => getServiceById(activeJob?.serviceId)?.name || 'Service request',
     [activeJob?.serviceId],
   );
   const statusDetail = activeJob?.statusDetail || statusMeta.detail;
+  const effectiveWaitFee = useMemo(() => {
+    const explicitWaitingCost = Number(
+      activeJob?.raw?.pricingSnapshot?.waitingCost
+      ?? activeJob?.raw?.waitingCost
+      ?? 0,
+    );
+    if (Number.isFinite(explicitWaitingCost) && explicitWaitingCost > 0) {
+      return explicitWaitingCost;
+    }
+
+    const arrivedAt = activeJob?.raw?.arrivedAt;
+    if (!arrivedAt) {
+      return 0;
+    }
+
+    let arrivedAtMs = 0;
+    if (typeof arrivedAt?.toMillis === 'function') {
+      arrivedAtMs = arrivedAt.toMillis();
+    } else if (typeof arrivedAt?.seconds === 'number') {
+      arrivedAtMs = arrivedAt.seconds * 1000;
+    } else {
+      arrivedAtMs = Date.parse(arrivedAt);
+    }
+
+    if (!Number.isFinite(arrivedAtMs) || arrivedAtMs <= 0) {
+      return 0;
+    }
+
+    const workStartedAt = activeJob?.raw?.workStartedAt;
+    let workStartedAtMs = 0;
+    if (typeof workStartedAt?.toMillis === 'function') {
+      workStartedAtMs = workStartedAt.toMillis();
+    } else if (typeof workStartedAt?.seconds === 'number') {
+      workStartedAtMs = workStartedAt.seconds * 1000;
+    } else if (workStartedAt) {
+      workStartedAtMs = Date.parse(workStartedAt);
+    }
+
+    const waitEndMs = Number.isFinite(workStartedAtMs) && workStartedAtMs > arrivedAtMs
+      ? workStartedAtMs
+      : normalizedJobStatus === 'arrived'
+        ? nowTime
+        : 0;
+    if (!waitEndMs || waitEndMs <= arrivedAtMs) {
+      return 0;
+    }
+
+    const waitingMinutes = Number(((waitEndMs - arrivedAtMs) / 60000).toFixed(2));
+    if (!Number.isFinite(waitingMinutes) || waitingMinutes <= 2) {
+      return 0;
+    }
+
+    return Math.round(waitingMinutes - 2) * 1.0;
+  }, [activeJob?.raw?.arrivedAt, activeJob?.raw?.pricingSnapshot?.waitingCost, activeJob?.raw?.waitingCost, activeJob?.raw?.workStartedAt, normalizedJobStatus, nowTime]);
+  const finalPriceAmount = useMemo(
+    () => Number((Number(activeJob?.totalAmount || 0) + Number(effectiveWaitFee || 0)).toFixed(2)),
+    [activeJob?.totalAmount, effectiveWaitFee],
+  );
 
   const customerMarkers = activeJobDestination && activeJob
     ? [{
@@ -880,12 +955,8 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
   };
 
   const handleNavigationMetricsChange = ({ distanceMeters: nextDistance, durationSeconds: nextDuration } = {}) => {
-    if (Number.isFinite(Number(nextDistance))) {
-      setRouteDistanceMeters(Number(nextDistance));
-    }
-    if (Number.isFinite(Number(nextDuration))) {
-      setRouteDurationSeconds(Number(nextDuration));
-    }
+    setNavigationSdkDistanceMeters(Number.isFinite(Number(nextDistance)) ? Number(nextDistance) : null);
+    setNavigationSdkDurationSeconds(Number.isFinite(Number(nextDuration)) ? Number(nextDuration) : null);
   };
 
   const dismissRatingModal = () => {
@@ -895,7 +966,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
     goBack('Home');
   };
 
-  const handleSubmitRating = async () => {
+  const handleSubmitRating = async (scoreOverride = null) => {
     if (!ratingTarget?.requestId) {
       dismissRatingModal();
       return;
@@ -903,10 +974,12 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
 
     try {
       setSubmittingRating(true);
+      const nextScore = Number(scoreOverride ?? rating);
+      setRating(nextScore);
       await submitServiceRequestRating({
         requestId: ratingTarget.requestId,
-        score: rating,
-        comment: ratingComment,
+        score: nextScore,
+        comment: '',
       });
       dismissRatingModal();
     } catch (error) {
@@ -1048,7 +1121,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
 
   const renderRatingModal = () => (
     <Modal visible={showRatingModal} animationType="fade">
-      <View style={styles.ratingOverlay}>
+      <View style={[styles.ratingOverlay, { paddingTop: topInset + 18, paddingBottom: bottomInset + 28 }]}>
         <Pressable accessibilityRole="button" onPress={dismissRatingModal} style={styles.ratingCloseButton}>
           <Ionicons color={colors.text} name="close" size={26} />
         </Pressable>
@@ -1057,31 +1130,14 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
           <Text style={styles.ratingCopy}>Leave quick feedback about this job experience.</Text>
           <View style={styles.starRow}>
             {[1, 2, 3, 4, 5].map((star) => (
-              <Pressable key={star} onPress={() => setRating(star)}>
+              <Pressable key={star} onPress={() => handleSubmitRating(star)} disabled={submittingRating}>
                 <Ionicons name={star <= rating ? 'star' : 'star-outline'} size={34} color="#eab308" />
               </Pressable>
             ))}
           </View>
-          <TextInput
-            style={styles.reasonInput}
-            placeholder="Feedback (optional)"
-            placeholderTextColor={colors.muted}
-            value={ratingComment}
-            onChangeText={setRatingComment}
-            multiline
-          />
-          <View style={styles.modalButtonRow}>
-            <Pressable style={styles.secondaryAction} onPress={dismissRatingModal}>
-              <Text style={styles.secondaryActionText}>Skip</Text>
-            </Pressable>
-            <Pressable style={styles.primaryAction} onPress={handleSubmitRating} disabled={submittingRating}>
-              {submittingRating ? (
-                <ActivityIndicator color="#ffffff" />
-              ) : (
-                <Text style={styles.primaryActionText}>Done</Text>
-              )}
-            </Pressable>
-          </View>
+          {submittingRating ? (
+            <ActivityIndicator color={colors.brand} size="large" style={{ marginTop: 8 }} />
+          ) : null}
         </View>
       </View>
     </Modal>
@@ -1222,6 +1278,9 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
 
     return (
       <View style={styles.inlineFooterActions}>
+        <Pressable style={styles.textSecondaryAction} onPress={() => setShowSafetyModal(true)}>
+          <Text style={styles.textSecondaryActionLabel}>Safety guidelines</Text>
+        </Pressable>
         <Pressable style={styles.textDangerAction} onPress={() => setShowCancelModal(true)}>
           <Text style={styles.textDangerActionLabel}>Cancel job</Text>
         </Pressable>
@@ -1303,7 +1362,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
             <View style={styles.metaCard}>
               <Text style={styles.metaLabel}>Price details</Text>
               <Text style={styles.metaValue}>
-                {`${serviceName}\nQuoted total: ${formatCurrency(activeJob.totalAmount)}`}
+                {`${serviceName}\nFinal total: ${formatCurrency(finalPriceAmount)}${effectiveWaitFee > 0 ? `\nIncludes waiting: ${formatCurrency(effectiveWaitFee)}` : ''}`}
               </Text>
             </View>
           </View>
@@ -1319,7 +1378,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
       <View style={styles.mapLayer}>
         {useGoogleNavigation ? (
           <HelperActiveNavigationMap
-            controlBottomInset={isLandscape ? 24 : collapsedHeight + bottomInset + 24}
+            controlBottomInset={routeMapBottomInset + 24}
             currentUserMarker={currentLocation ? {
               latitude: currentLocation.latitude,
               longitude: currentLocation.longitude,
@@ -1328,7 +1387,7 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
             } : null}
             customerMarkers={customerMarkers}
             destinationTitle={activeJob?.customerName || 'Customer'}
-            floatingBottomInset={isLandscape ? 24 : collapsedHeight + bottomInset}
+            floatingBottomInset={routeMapBottomInset}
             navigationEnabled={shouldUseNavigationCamera}
             onMetricsChange={handleNavigationMetricsChange}
             routeCoordinates={routeCoordinates}
@@ -1349,21 +1408,13 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
             customerMarkers={customerMarkers}
             routeCoordinates={routeCoordinates}
             routeError={routeError}
-            floatingBottomInset={isLandscape ? 24 : collapsedHeight + bottomInset}
-            controlBottomInset={isLandscape ? 24 : collapsedHeight + bottomInset + 24}
+            floatingBottomInset={routeMapBottomInset}
+            controlBottomInset={routeMapBottomInset + 24}
           />
         )}
 
-        <View style={[styles.topChromeRow, { top: topInset + 16 }]}>
-          <Pressable
-            accessibilityRole="button"
-            onPress={() => goBack('Home')}
-            style={styles.topBackButton}
-          >
-            <Ionicons name="chevron-back" size={24} color={colors.text} />
-          </Pressable>
-
-          {!useGoogleNavigation && navigationHint ? (
+        {!useGoogleNavigation && navigationHint ? (
+          <View style={[styles.topChromeRow, { top: topInset + 30 }]}>
             <View style={styles.topDirectionCard}>
               <Ionicons color="#ffffff" name="return-up-forward-outline" size={30} />
               <View style={styles.topDirectionCopy}>
@@ -1377,18 +1428,8 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
                 </Text>
               </View>
             </View>
-          ) : (
-            <View style={styles.topDirectionCardSpacer} />
-          )}
-
-          <Pressable
-            accessibilityRole="button"
-            onPress={() => setShowSafetyModal(true)}
-            style={styles.topSafetyButton}
-          >
-            <Ionicons name="shield-checkmark" size={24} color={colors.brand} />
-          </Pressable>
-        </View>
+          </View>
+        ) : null}
       </View>
 
       {isLandscape ? (
@@ -1561,34 +1602,6 @@ const styles = StyleSheet.create({
   mapLayer: {
     ...StyleSheet.absoluteFillObject,
   },
-  topBackButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#ffffff',
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.18,
-    shadowRadius: 6,
-    elevation: 5,
-    zIndex: 10,
-  },
-  topSafetyButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#ffffff',
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.18,
-    shadowRadius: 6,
-    elevation: 5,
-    zIndex: 10,
-  },
   recenterButton: {
     alignItems: 'center',
     flexDirection: 'row',
@@ -1667,9 +1680,7 @@ const styles = StyleSheet.create({
   },
   topChromeRow: {
     alignItems: 'center',
-    flexDirection: 'row',
-    gap: 10,
-    justifyContent: 'space-between',
+    justifyContent: 'center',
     left: 16,
     position: 'absolute',
     right: 16,
@@ -1683,14 +1694,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 12,
     justifyContent: 'flex-start',
-    marginHorizontal: 8,
     minHeight: 82,
+    maxWidth: 420,
     paddingHorizontal: 18,
     paddingVertical: 14,
-  },
-  topDirectionCardSpacer: {
-    flex: 1,
-    marginHorizontal: 8,
   },
   topDirectionCopy: {
     flex: 1,
@@ -1932,11 +1939,21 @@ const styles = StyleSheet.create({
   },
   inlineFooterActions: {
     marginTop: 12,
-    alignItems: 'flex-end',
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
   },
   footerActions: {
     marginTop: 18,
     alignItems: 'flex-end',
+  },
+  textSecondaryAction: {
+    paddingVertical: 8,
+  },
+  textSecondaryActionLabel: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: colors.brandDark,
   },
   textDangerAction: {
     paddingVertical: 8,

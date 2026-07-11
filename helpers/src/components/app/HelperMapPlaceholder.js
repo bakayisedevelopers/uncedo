@@ -233,6 +233,7 @@ export function HelperMapPlaceholder({
   routeView = 'overview',
   interactive = true,
   showControls = true,
+  zoomPaddingMultiplier = null,
 }) {
   const currentCoordinate = useMemo(() => normalizeCoordinate(currentUserMarker), [currentUserMarker]);
   const firstCustomer = customerMarkers[0] || null;
@@ -262,7 +263,22 @@ export function HelperMapPlaceholder({
     ].join(':');
   }, [currentCoordinate?.latitude, currentCoordinate?.longitude, destinationCoordinate?.latitude, destinationCoordinate?.longitude, normalizedRouteCoordinates]);
   const mapCenter = currentCoordinate || destinationCoordinate || DEFAULT_REGION;
-  const [region, setRegion] = useState(() => buildRegion(mapCenter, radiusKm));
+  const effectiveZoomPaddingMultiplier = Number.isFinite(Number(zoomPaddingMultiplier))
+    ? Math.max(1.2, Number(zoomPaddingMultiplier))
+    : null;
+  const buildNearbyRegion = (center, nextRadiusKm) => {
+    const nextRegion = buildRegion(center, nextRadiusKm);
+    if (!effectiveZoomPaddingMultiplier) {
+      return nextRegion;
+    }
+
+    return {
+      ...nextRegion,
+      latitudeDelta: Math.max(0.02, nextRegion.latitudeDelta * (effectiveZoomPaddingMultiplier / 2.4)),
+      longitudeDelta: Math.max(0.02, nextRegion.longitudeDelta * (effectiveZoomPaddingMultiplier / 2.4)),
+    };
+  };
+  const [region, setRegion] = useState(() => buildNearbyRegion(mapCenter, radiusKm));
   const [isAutoFollowEnabled, setIsAutoFollowEnabled] = useState(true);
   const mapRef = useRef(null);
   const [isMapReady, setIsMapReady] = useState(false);
@@ -332,7 +348,7 @@ export function HelperMapPlaceholder({
       if (destinationCoordinate) coords.push(destinationCoordinate);
 
       if (coords.length === 1) {
-        const next = buildRegion(coords[0], radiusKm);
+        const next = buildNearbyRegion(coords[0], radiusKm);
         setRegion(next);
         mapRef.current.animateToRegion?.(next, 350);
       } else if (coords.length > 1) {
@@ -418,14 +434,16 @@ export function HelperMapPlaceholder({
       : [currentCoordinate, destinationCoordinate].filter(Boolean);
 
     if (!coords.length) {
-      const next = buildRegion(mapCenter, radiusKm);
+      const next = buildNearbyRegion(mapCenter, radiusKm);
       setRegion(next);
       mapRef.current?.animateToRegion?.(next, 350);
       return;
     }
 
     if (coords.length === 1) {
-      const next = buildRegion(coords[0], mode === 'route' ? 5 : radiusKm);
+      const next = mode === 'route'
+        ? buildRegion(coords[0], 5)
+        : buildNearbyRegion(coords[0], radiusKm);
       setRegion(next);
       mapRef.current?.animateToRegion?.(next, 350);
       return;

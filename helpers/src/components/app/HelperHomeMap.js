@@ -1,7 +1,24 @@
+import { useEffect, useState } from 'react';
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { HelperHomeStaticMap } from './HelperHomeStaticMap';
+import { HelperMapPlaceholder } from './HelperMapPlaceholder';
 import { colors } from '../../theme/colors';
+
+let lastKnownHomeMarker = null;
+
+function normalizeMarker(marker = null) {
+  const latitude = Number(marker?.latitude);
+  const longitude = Number(marker?.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return null;
+  }
+
+  return {
+    ...marker,
+    latitude,
+    longitude,
+  };
+}
 
 export function HelperHomeMap({
   currentUserMarker = null,
@@ -9,11 +26,29 @@ export function HelperHomeMap({
   isLoading = false,
   statusMessage = '',
 }) {
+  const [displayMarker, setDisplayMarker] = useState(() => normalizeMarker(currentUserMarker) || lastKnownHomeMarker);
   const hasLocationError = Boolean(String(statusMessage || '').trim()) && !isLoading;
+
+  useEffect(() => {
+    const nextMarker = normalizeMarker(currentUserMarker);
+    if (!nextMarker) {
+      return;
+    }
+
+    lastKnownHomeMarker = nextMarker;
+    setDisplayMarker(nextMarker);
+  }, [currentUserMarker]);
 
   return (
     <View style={styles.map}>
-      <HelperHomeStaticMap currentUserMarker={currentUserMarker} radiusKm={radiusKm} />
+      <HelperMapPlaceholder
+        currentUserMarker={displayMarker}
+        floatingBottomInset={18}
+        interactive
+        radiusKm={radiusKm}
+        showControls
+        zoomPaddingMultiplier={1.55}
+      />
 
       {hasLocationError ? (
         <View style={styles.statusBanner}>

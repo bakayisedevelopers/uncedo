@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Image as ImageIcon, Plus, Trash2 } from 'lucide-react';
+import { ArrowLeft, Image as ImageIcon, Plus, Sparkles, Trash2 } from 'lucide-react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Badge, Card, EmptyState, LoadingState, SectionTitle } from '../components/ui';
 import { getAdminCatalogCategories } from '../constants/serviceCatalog';
 import { getAdminQuestionPreset } from '../constants/serviceQuestionPresets';
+import { getAdminServiceSuggestionMatch, getAdminServiceSuggestionsByCategory } from '../constants/serviceTemplateSuggestions';
 import { flattenProviderServices, listHelperProfiles } from '../services/adminService';
 import {
   buildServiceCatalogView,
@@ -91,6 +92,41 @@ function normalizeQuestionDrafts(questions = [], required = true) {
     });
 }
 
+function clampNumber(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function snapToStep(value, min, step) {
+  if (!step) return value;
+  return min + (Math.round((value - min) / step) * step);
+}
+
+function coerceSliderValue(rawValue, min, max, step) {
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed)) return min;
+  return clampNumber(snapToStep(parsed, min, step), min, max);
+}
+
+function mergeQuestionDrafts(current = [], suggestions = [], required = true) {
+  const currentQuestions = Array.isArray(current) ? current : [];
+  const nextQuestions = [...currentQuestions];
+  const seen = new Set(
+    currentQuestions.map((question) => (
+      `${String(question.id || '').trim().toLowerCase()}::${String(question.prompt || '').trim().toLowerCase()}`
+    )),
+  );
+
+  (Array.isArray(suggestions) ? suggestions : []).forEach((question, index) => {
+    const draft = createQuestionDraft(question, currentQuestions.length + index, required);
+    const key = `${String(draft.id || '').trim().toLowerCase()}::${String(draft.prompt || '').trim().toLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    nextQuestions.push(draft);
+  });
+
+  return nextQuestions;
+}
+
 function SliderField({
   label,
   help = '',
@@ -101,6 +137,10 @@ function SliderField({
   onChange,
   prefix = 'R',
 }) {
+  const handleValueChange = (rawValue) => {
+    onChange(coerceSliderValue(rawValue, min, max, step));
+  };
+
   return (
     <label className="space-y-3">
       <div className="flex items-start justify-between gap-3">
@@ -108,9 +148,18 @@ function SliderField({
           <span className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">{label}</span>
           {help ? <p className="mt-1 text-xs leading-5 text-ink-300">{help}</p> : null}
         </div>
-        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-sm font-bold text-white">
-          {prefix}{Number(value || 0).toFixed(step < 1 ? 2 : 0)}
-        </span>
+        <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm font-bold text-white">
+          <span>{prefix}</span>
+          <input
+            type="number"
+            min={min}
+            max={max}
+            step={step}
+            value={value}
+            onChange={(event) => handleValueChange(event.target.value)}
+            className="w-20 bg-transparent text-right text-white outline-none"
+          />
+        </div>
       </div>
       <input
         type="range"
@@ -118,7 +167,7 @@ function SliderField({
         max={max}
         step={step}
         value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
+        onChange={(event) => handleValueChange(event.target.value)}
         className="h-2 w-full cursor-pointer appearance-none rounded-full bg-white/10 accent-[#ff7a59]"
       />
     </label>
@@ -126,6 +175,10 @@ function SliderField({
 }
 
 function QuestionOptionEditor({ option, onChange, onRemove }) {
+  const handlePriceAdderChange = (rawValue) => {
+    onChange({ ...option, priceAdder: coerceSliderValue(rawValue, 0, 500, 5) });
+  };
+
   return (
     <div className="rounded-2xl border border-white/10 bg-ink-950/30 p-3">
       <div className="grid gap-3 md:grid-cols-[1.2fr_0.8fr_auto]">
@@ -143,10 +196,21 @@ function QuestionOptionEditor({ option, onChange, onRemove }) {
             max={500}
             step={5}
             value={option.priceAdder}
-            onChange={(event) => onChange({ ...option, priceAdder: Number(event.target.value) })}
+            onChange={(event) => handlePriceAdderChange(event.target.value)}
             className="h-2 flex-1 cursor-pointer appearance-none rounded-full bg-white/10 accent-[#ff7a59]"
           />
-          <span className="text-sm font-bold text-white">R{Number(option.priceAdder || 0).toFixed(0)}</span>
+          <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-ink-950/40 px-3 py-2 text-sm font-bold text-white">
+            <span>R</span>
+            <input
+              type="number"
+              min={0}
+              max={500}
+              step={5}
+              value={option.priceAdder}
+              onChange={(event) => handlePriceAdderChange(event.target.value)}
+              className="w-16 bg-transparent text-right text-white outline-none"
+            />
+          </div>
         </div>
         <button
           type="button"
@@ -163,7 +227,9 @@ function QuestionOptionEditor({ option, onChange, onRemove }) {
 function QuestionEditor({
   title,
   description,
+  required = true,
   questions,
+  suggestions = [],
   onChange,
 }) {
   const updateQuestion = (targetIndex, nextQuestion) => {
@@ -186,6 +252,14 @@ function QuestionEditor({
     ]);
   };
 
+  const appendSuggestedQuestion = (question) => {
+    onChange(mergeQuestionDrafts(questions, [question], question.required !== false));
+  };
+
+  const appendAllSuggestedQuestions = () => {
+    onChange(mergeQuestionDrafts(questions, suggestions, required));
+  };
+
   return (
     <div className="rounded-[24px] border border-white/10 bg-white/5 p-4">
       <div className="flex items-start justify-between gap-3">
@@ -202,6 +276,38 @@ function QuestionEditor({
           Add question
         </button>
       </div>
+
+      {suggestions.length ? (
+        <div className="mt-4 rounded-[20px] border border-dashed border-white/10 bg-ink-950/20 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-bold text-white">Suggested questions</p>
+              <p className="mt-1 text-xs leading-5 text-ink-300">Click one to add it, or apply the whole suggested set for this service.</p>
+            </div>
+            <button
+              type="button"
+              onClick={appendAllSuggestedQuestions}
+              className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-bold text-white"
+            >
+              <Sparkles className="h-4 w-4" />
+              Apply all
+            </button>
+          </div>
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            {suggestions.map((question, index) => (
+              <button
+                key={`${question.id || question.prompt || 'question'}_${index}`}
+                type="button"
+                onClick={() => appendSuggestedQuestion(question)}
+                className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-left text-sm text-ink-100 transition hover:border-white/20 hover:bg-white/10"
+              >
+                {question.prompt}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       <div className="mt-4 space-y-4">
         {questions.length ? questions.map((question, index) => (
@@ -401,6 +507,32 @@ export default function ServiceDetailsPage() {
     [categoryOptions, draftCategoryId],
   );
 
+  const serviceSuggestions = useMemo(
+    () => getAdminServiceSuggestionsByCategory(draftCategoryId),
+    [draftCategoryId],
+  );
+
+  const matchedSuggestion = useMemo(
+    () => getAdminServiceSuggestionMatch({
+      categoryId: draftCategoryId,
+      serviceId: draftServiceId,
+      label: draftLabel,
+    }),
+    [draftCategoryId, draftLabel, draftServiceId],
+  );
+
+  const suggestedQuestionSet = useMemo(() => {
+    const preset = getAdminQuestionPreset({
+      serviceId: matchedSuggestion?.id || slugify(draftServiceId || draftLabel),
+      categoryId: draftCategoryId,
+    });
+
+    return {
+      required: mergeQuestionDrafts([], [...preset.required, ...(matchedSuggestion?.requiredQuestions || [])], true),
+      optional: mergeQuestionDrafts([], [...preset.optional, ...(matchedSuggestion?.optionalQuestions || [])], false),
+    };
+  }, [draftCategoryId, draftLabel, draftServiceId, matchedSuggestion]);
+
   useEffect(() => {
     if (!selectedService) return;
     const nextCategoryId = selectedService.categoryId || categoryOptions[0]?.id || '';
@@ -468,6 +600,35 @@ export default function ServiceDetailsPage() {
   );
 
   const remainingUploads = Math.max(0, 10 - effectiveImages.length);
+
+  const applyServiceSuggestion = (suggestion, { replaceQuestions = true } = {}) => {
+    if (!suggestion) return;
+
+    const preset = getAdminQuestionPreset({ serviceId: suggestion.id, categoryId: draftCategoryId });
+    const requiredQuestions = [...preset.required, ...(suggestion.requiredQuestions || [])];
+    const optionalQuestions = [...preset.optional, ...(suggestion.optionalQuestions || [])];
+
+    if (isNewService) {
+      setDraftServiceId(suggestion.id);
+    }
+    setDraftLabel(suggestion.label || '');
+    setDraftPromptLabel(suggestion.promptLabel || suggestion.label || '');
+    setDraftDescription(suggestion.description || '');
+    setDraftBasePrice(Number(suggestion.pricing?.basePrice ?? 120));
+    setDraftTravelFee(Number(suggestion.pricing?.travelFee ?? 35));
+    setDraftMinimumTotal(Number(suggestion.pricing?.minimumTotal ?? 80));
+    setDraftMaximumTotal(Number(suggestion.pricing?.maximumTotal ?? 500));
+    setDraftRequiresPortfolioSelection(Boolean(suggestion.requiresPortfolioSelection));
+
+    if (replaceQuestions) {
+      setDraftRequiredQuestions(mapQuestionDrafts(requiredQuestions, true));
+      setDraftOptionalQuestions(mapQuestionDrafts(optionalQuestions, false));
+      return;
+    }
+
+    setDraftRequiredQuestions((current) => mergeQuestionDrafts(current, requiredQuestions, true));
+    setDraftOptionalQuestions((current) => mergeQuestionDrafts(current, optionalQuestions, false));
+  };
 
   const buildPayload = (images = []) => ({
     categoryId: draftCategoryId,
@@ -700,6 +861,72 @@ export default function ServiceDetailsPage() {
                 />
               </label>
 
+              <div className="mt-5 rounded-[24px] border border-dashed border-white/10 bg-white/5 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="font-bold text-white">Service suggestions</p>
+                    <p className="mt-1 text-sm leading-6 text-ink-200">
+                      Pick a category template to prefill the service name, description, pricing, and common questions.
+                    </p>
+                  </div>
+                  {matchedSuggestion ? (
+                    <button
+                      type="button"
+                      onClick={() => applyServiceSuggestion(matchedSuggestion)}
+                      className="inline-flex items-center gap-2 rounded-2xl bg-brand px-4 py-3 text-sm font-bold text-white"
+                    >
+                      <Sparkles className="h-4 w-4" />
+                      Apply matched template
+                    </button>
+                  ) : null}
+                </div>
+
+                {serviceSuggestions.length ? (
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {serviceSuggestions.map((suggestion) => {
+                      const isActiveSuggestion = matchedSuggestion?.id === suggestion.id;
+                      return (
+                        <button
+                          key={suggestion.id}
+                          type="button"
+                          onClick={() => applyServiceSuggestion(suggestion)}
+                          className={`rounded-full border px-3 py-2 text-sm transition ${
+                            isActiveSuggestion
+                              ? 'border-brand bg-brand/20 text-white'
+                              : 'border-white/10 bg-ink-950/30 text-ink-100 hover:border-white/20 hover:bg-white/10'
+                          }`}
+                        >
+                          {suggestion.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="mt-4 text-sm text-ink-300">No category suggestions are configured yet.</p>
+                )}
+
+                {matchedSuggestion ? (
+                  <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                    <div className="rounded-[20px] border border-white/10 bg-ink-950/30 px-4 py-3">
+                      <p className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Base</p>
+                      <p className="mt-2 text-lg font-bold text-white">R{matchedSuggestion.pricing.basePrice}</p>
+                    </div>
+                    <div className="rounded-[20px] border border-white/10 bg-ink-950/30 px-4 py-3">
+                      <p className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Travel</p>
+                      <p className="mt-2 text-lg font-bold text-white">R{matchedSuggestion.pricing.travelFee}</p>
+                    </div>
+                    <div className="rounded-[20px] border border-white/10 bg-ink-950/30 px-4 py-3">
+                      <p className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Minimum</p>
+                      <p className="mt-2 text-lg font-bold text-white">R{matchedSuggestion.pricing.minimumTotal}</p>
+                    </div>
+                    <div className="rounded-[20px] border border-white/10 bg-ink-950/30 px-4 py-3">
+                      <p className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Maximum</p>
+                      <p className="mt-2 text-lg font-bold text-white">R{matchedSuggestion.pricing.maximumTotal}</p>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+
               {draftType === 'bundle' ? (
                 <div className="mt-5 rounded-[24px] border border-white/10 bg-white/5 p-4">
                   <div className="flex items-center justify-between gap-3">
@@ -816,13 +1043,17 @@ export default function ServiceDetailsPage() {
                 <QuestionEditor
                   title="Required questions"
                   description="These questions appear in the customer flow before continuing. Each option can add its own amount on top of the base price."
+                  required
                   questions={draftRequiredQuestions}
+                  suggestions={suggestedQuestionSet.required}
                   onChange={setDraftRequiredQuestions}
                 />
                 <QuestionEditor
                   title="Optional questions"
                   description="Use these for extra detail or follow-up questions that can still influence price when selected."
+                  required={false}
                   questions={draftOptionalQuestions}
+                  suggestions={suggestedQuestionSet.optional}
                   onChange={setDraftOptionalQuestions}
                 />
               </div>

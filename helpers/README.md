@@ -9,7 +9,7 @@ This folder contains the Expo React Native app for helpers.
 - Firestore-backed service browsing, skill setup, bundle-service enrollment, and service approval flow
 - Multi-image uploads for helper service submissions
 - Availability management and active job handling
-- Helper home map with a static Google Maps preview, persistent live location marker, and 50 km service radius
+- Helper home map with an interactive live map, persistent live location marker, and 50 km service radius
 - Route-based active job tracking with in-app travel status updates
 - Android active-job guidance now uses the Google Navigation SDK through the official React Native package, while the helper dashboard uses a stable static map preview and the existing live-tracking pipeline still keeps customer/helper tracking in sync.
 - Accepted jobs seed `liveTracking/serviceRequests/{requestId}` in Realtime Database immediately, then update helper movement, destination, route geometry, and closure status through the same tracking node.

@@ -80,6 +80,8 @@ export function HelperActiveNavigationMap({
   onMetricsChange = null,
 }) {
   const destination = customerMarkers[0]?.coordinate || null;
+  const navigationViewTopInset = Math.max(12, Math.round(Number(topInset || 0) + 12));
+  const navigationViewBottomInset = Math.max(88, Math.round(Number(floatingBottomInset || 0) * 0.48));
   const destinationKey = useMemo(
     () => buildDestinationKey(destination, destinationTitle),
     [destination, destinationTitle],
@@ -369,14 +371,20 @@ export function HelperActiveNavigationMap({
   return (
     <View style={styles.container}>
       <GoogleNavigationView
-        style={StyleSheet.absoluteFill}
+        style={[
+          styles.navigationView,
+          {
+            top: navigationViewTopInset,
+            bottom: navigationViewBottomInset,
+          },
+        ]}
         compassEnabled
         footerEnabled={navigationEnabled}
         headerEnabled={navigationEnabled}
         mapPadding={{
-          top: Math.max(96, Math.round(topInset + 84)),
+          top: Math.max(72, Math.round(navigationViewTopInset + 28)),
           right: 24,
-          bottom: Math.max(120, Math.round(floatingBottomInset + 40)),
+          bottom: Math.max(184, Math.round(navigationViewBottomInset + 104)),
           left: 24,
         }}
         mapToolbarEnabled={false}
@@ -394,13 +402,13 @@ export function HelperActiveNavigationMap({
         tiltGesturesEnabled
         trafficIncidentCardsEnabled={navigationEnabled}
         trafficPromptsEnabled={navigationEnabled}
-        tripProgressBarEnabled={navigationEnabled}
+        tripProgressBarEnabled={false}
         zoomControlsEnabled={false}
         zoomGesturesEnabled
       />
 
       {initState === 'initializing' ? (
-        <View style={styles.loadingOverlay}>
+        <View style={[styles.loadingOverlay, { top: Math.max(16, topInset + 16) }]}>
           <ActivityIndicator color={colors.brand} size="small" />
           <Text style={styles.loadingText}>Starting Google Navigation...</Text>
         </View>
@@ -419,6 +427,11 @@ const styles = StyleSheet.create({
   container: {
     backgroundColor: '#f3f4f6',
     flex: 1,
+  },
+  navigationView: {
+    left: 0,
+    position: 'absolute',
+    right: 0,
   },
   fallbackWrap: {
     flex: 1,
