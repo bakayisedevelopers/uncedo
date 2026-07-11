@@ -17,6 +17,13 @@ const {
   isHelperAgreementCurrent,
 } = require('./helperLegalAgreements');
 
+const { ACCOUNT_TYPES, REWARD_REASON_CODES, REWARD_TRANSACTION_DIRECTIONS } = require('../shared/rewards');
+const { seedDefaultRewardConfig, getRewardConfig } = require('./rewards/config');
+const { ensureRewardAccount, applyRewardTransaction, processExpiredCustomerPoints } = require('./rewards/rewardService');
+const { ensureReferralCode, attachReferral, awardReferralStage } = require('./rewards/referralService');
+const { submitServiceRequestRating, serviceIdsFor } = require('./rewards/ratingService');
+const { incrementCompletedPaid, recalculateMembership } = require('./rewards/progressionService');
+
 admin.initializeApp();
 
 const db = admin.firestore();
@@ -2790,6 +2797,20 @@ exports.verifyPaystack = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRE
       isDefault: safeCardRecord.isDefault,
     });
 
+
+    await ensureRewardAccount(db, admin, { get: (ref) => ref.get(), set: (ref, data, opts) => ref.set(data, opts) }, uid, ACCOUNT_TYPES.CUSTOMER).catch(() => null);
+    const customerConfig = await getRewardConfig(db, 'customer');
+    await applyRewardTransaction({
+      db, admin, userId: uid, accountType: ACCOUNT_TYPES.CUSTOMER,
+      direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT,
+      points: Number(customerConfig.rewards?.paymentMethodVerified || 50),
+      reasonCode: REWARD_REASON_CODES.PAYMENT_METHOD_VERIFIED,
+      reasonLabel: 'Verified payment method', sourceType: 'paystack_verification', sourceId: createHash('sha256').update(reference).digest('hex').slice(0, 24),
+      idempotencyKey: `customer:${uid}:payment-method-verified:${createHash('sha256').update(reference).digest('hex').slice(0, 24)}`,
+      metadata: { duplicateMethod: Boolean(duplicateMethod) },
+    }).catch((error) => logger.warn('verified_payment_reward_failed', { uid, error: error.message }));
+    await awardReferralStage({ db, admin, referredUserId: uid, stage: 1 }).catch((error) => logger.warn('referral_stage_one_failed', { uid, error: error.message }));
+
     let refundSucceeded = false;
     let refundMessage = null;
 
@@ -2902,6 +2923,51 @@ exports.verifyPaystack = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRE
     });
   }
 });
+
+
+exports.seedRewardConfig = onRequest({ cors: true }, async (req, res) => {
+  const token = getBearerToken(req);
+  const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  const user = decoded?.uid ? (await db.collection('users').doc(decoded.uid).get()).data() : null;
+  if (!decoded?.uid || !(user?.isAdmin === true || user?.role === 'admin' || decoded.email === 'jabuobed1@gmail.com')) {
+    res.status(403).json({ success: false, message: 'Admin only.' }); return;
+  }
+  await seedDefaultRewardConfig(db, admin);
+  res.status(200).json({ success: true });
+});
+
+exports.captureReferral = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
+  const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) { res.status(401).json({ success: false, message: 'Unauthorized request.' }); return; }
+  try {
+    const result = await attachReferral({ db, admin, referralCode: req.body?.referralCode, referredUserId: decoded.uid, referredAccountType: req.body?.accountType || ACCOUNT_TYPES.CUSTOMER });
+    res.status(200).json({ success: true, ...result });
+  } catch (error) { logger.warn('referral_rejected', { uid: decoded.uid, reason: error.message }); res.status(400).json({ success: false, message: error.message }); }
+});
+
+exports.ensureReferralCode = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
+  const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) { res.status(401).json({ success: false, message: 'Unauthorized request.' }); return; }
+  const userSnap = await db.collection('users').doc(decoded.uid).get(); const user = userSnap.data() || {};
+  const accountType = String(req.body?.accountType || user.activeRole || user.role || '').toLowerCase() === 'helper' || String(user.activeRole || '').toLowerCase() === 'tutor' ? ACCOUNT_TYPES.HELPER : ACCOUNT_TYPES.CUSTOMER;
+  const result = await ensureReferralCode({ db, admin, userId: decoded.uid, accountType, displayName: user.displayName || user.fullName || user.name || decoded.name || '' });
+  res.status(200).json({ success: true, code: result.code });
+});
+
+exports.submitServiceRequestRating = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
+  const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) { res.status(401).json({ success: false, message: 'Unauthorized request.' }); return; }
+  try {
+    const result = await submitServiceRequestRating({ db, admin, requestId: String(req.body?.requestId || '').trim(), raterUserId: decoded.uid, score: req.body?.score, comment: req.body?.comment || '' });
+    await recalculateMembership({ db, admin, userId: result.ratedUserId, accountType: result.direction === 'customer_to_helper' ? ACCOUNT_TYPES.HELPER : ACCOUNT_TYPES.CUSTOMER }).catch(() => null);
+    res.status(200).json({ success: true, rating: result });
+  } catch (error) { logger.warn('rating_validation_failed', { uid: decoded.uid, error: error.message }); res.status(400).json({ success: false, message: error.message }); }
+});
+
+exports.expireRewardPoints = onSchedule('every 24 hours', async () => processExpiredCustomerPoints({ db, admin, limit: 200 }));
 
 const BILLING_RULES = {
   PLATFORM_FEE_RATE: 0.27,
@@ -3279,6 +3345,21 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
     createdAtMs: endedAt,
     dayBucket: new Date(endedAt).toISOString().slice(0, 10),
   }, { merge: true });
+
+
+  if (paymentStatus === 'paid') {
+    const customerConfig = await getRewardConfig(db, 'customer');
+    const helperConfig = await getRewardConfig(db, 'helper');
+    const expandedServiceIds = serviceIdsFor(updatedRequest);
+    await applyRewardTransaction({ db, admin, userId: request.customerId, accountType: ACCOUNT_TYPES.CUSTOMER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(customerConfig.rewards?.completedPaidBooking || 50), reasonCode: REWARD_REASON_CODES.CUSTOMER_COMPLETED_PAID_BOOKING, reasonLabel: 'Completed paid booking', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `customer:${request.customerId}:request:${requestId}:completed-paid`, requestId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '' }).catch((error) => logger.warn('customer_booking_reward_failed', { requestId, error: error.message }));
+    await applyRewardTransaction({ db, admin, userId: request.customerId, accountType: ACCOUNT_TYPES.CUSTOMER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(customerConfig.rewards?.firstCompletedPaidBooking || 100), reasonCode: REWARD_REASON_CODES.CUSTOMER_FIRST_COMPLETED_PAID_BOOKING, reasonLabel: 'First completed paid booking', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `customer:${request.customerId}:request:first-booking-bonus`, requestId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '' }).catch((error) => logger.info('first_booking_bonus_skipped_or_failed', { requestId, error: error.message }));
+    await incrementCompletedPaid({ db, admin, userId: request.customerId, accountType: ACCOUNT_TYPES.CUSTOMER, requestId }).catch((error) => logger.warn('customer_membership_recalc_failed', { requestId, error: error.message }));
+    if (helperId) {
+      await applyRewardTransaction({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(helperConfig.rewards?.completedPaidJob || 50), reasonCode: REWARD_REASON_CODES.HELPER_COMPLETED_PAID_JOB, reasonLabel: 'Completed paid job', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `helper:${helperId}:request:${requestId}:completed-paid`, requestId, relatedUserId: request.customerId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '' }).catch((error) => logger.warn('helper_booking_reward_failed', { requestId, helperId, error: error.message }));
+      await incrementCompletedPaid({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, requestId, serviceIds: expandedServiceIds, categoryId: request.categoryId || '' }).catch((error) => logger.warn('helper_mastery_recalc_failed', { requestId, helperId, error: error.message }));
+    }
+    await awardReferralStage({ db, admin, referredUserId: request.customerId, stage: 2, requestId }).catch((error) => logger.warn('referral_stage_two_failed', { requestId, error: error.message }));
+  }
 
   await Promise.all([
     createUserNotification({

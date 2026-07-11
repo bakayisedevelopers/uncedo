@@ -58,3 +58,7 @@ npm run web
 - The customer discovery feed, service selection, and intake question flow read the shared `serviceCatalog` collection so customers can request admin-approved services, including admin-created bundle services with backend-priced quotes.
 - Customer recommendation signals are stored in `customerServiceEvents` and `customerRecommendationProfiles`, with Firestore-triggered aggregation in `functions/index.js`.
 - Navigation is implemented in `src/navigation/RootNavigator.js`, including the custom route history used for Android hardware back behavior and mobile system-bar insets.
+
+## Phase 0 rewards foundation
+
+The customer app now submits service-request ratings through the trusted `submitServiceRequestRating` Cloud Function instead of updating another user's rating aggregate from the client. Read-only reward helpers live in `src/services/rewards/rewardClientService.js` for reward accounts, transactions, reward configuration, rating summaries, membership, helper mastery, and referral-code operations. Full rewards dashboards are intentionally deferred.

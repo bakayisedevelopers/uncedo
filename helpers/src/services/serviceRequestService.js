@@ -674,100 +674,35 @@ export async function submitServiceRequestRating({ requestId, score, comment = '
     throw new Error('A request ID is required to submit a rating.');
   }
 
-  const { auth, db } = getFirebaseClients();
-  const uid = String(auth.currentUser?.uid || '').trim();
-  if (!uid) {
+  const { auth } = getFirebaseClients();
+  const currentUser = auth.currentUser;
+  if (!currentUser) {
     throw new Error('You must be signed in to submit a rating.');
   }
 
-  const normalizedScore = Math.max(1, Math.min(5, Number(score || 0)));
+  const normalizedScore = Math.max(1, Math.min(5, Math.round(Number(score || 0))));
   if (!Number.isFinite(normalizedScore) || normalizedScore <= 0) {
     throw new Error('requestId and a rating score are required.');
   }
 
-  const requestRef = doc(db, 'serviceRequests', requestId);
-  const requestSnap = await getDoc(requestRef);
-  if (!requestSnap.exists()) {
-    throw new Error('Service request not found.');
-  }
-
-  const request = requestSnap.data() || {};
-  const helperId = String(request?.helperAssignment?.helperId || '').trim();
-  const customerId = String(request?.customerId || '').trim();
-  const isCustomer = uid === customerId;
-  const isHelper = uid === helperId;
-  if (!isCustomer && !isHelper) {
-    throw new Error('Only request participants can submit ratings.');
-  }
-
-  const targetUserId = isCustomer ? helperId : customerId;
-  if (!targetUserId) {
-    throw new Error('No valid rating target was found for this request.');
-  }
-
-  const ratingKey = isCustomer ? 'customer' : 'helper';
-  const roleKey = isCustomer ? 'asHelper' : 'asCustomer';
-  const targetRef = doc(db, 'users', targetUserId);
-  const existingRating = request?.ratings?.[ratingKey];
-
-  await runTransaction(db, async (transaction) => {
-    const [requestTxnSnap, targetSnap] = await Promise.all([
-      transaction.get(requestRef),
-      transaction.get(targetRef),
-    ]);
-    const requestData = requestTxnSnap.data() || {};
-    const targetData = targetSnap.exists() ? targetSnap.data() || {} : {};
-    const currentStats = targetData?.ratings?.[roleKey] || {};
-    const totalCount = Number(currentStats.totalLessons ?? currentStats.count ?? 0);
-    const totalRatings = Number(currentStats.totalRatings ?? ((currentStats.average || 0) * totalCount) ?? 0);
-    const nextCount = totalCount + 1;
-    const nextTotalRatings = Number((totalRatings + normalizedScore).toFixed(2));
-    const nextAverage = Number((nextTotalRatings / nextCount).toFixed(2));
-
-    transaction.set(requestRef, {
-      ratings: {
-        ...(requestData.ratings || {}),
-        [ratingKey]: {
-          score: normalizedScore,
-          comment: String(comment || '').trim(),
-          submittedAt: serverTimestamp(),
-          submittedBy: uid,
-          targetUserId,
-        },
-      },
-      updatedAt: serverTimestamp(),
-    }, { merge: true });
-
-    transaction.set(targetRef, {
-      ratings: {
-        ...(targetData.ratings || {}),
-        [roleKey]: {
-          count: nextCount,
-          totalLessons: nextCount,
-          totalRatings: nextTotalRatings,
-          average: nextAverage,
-          updatedAt: Date.now(),
-        },
-      },
-      ...(roleKey === 'asHelper'
-        ? {
-            metrics: {
-              ...(targetData.metrics || {}),
-              overallRating: nextAverage,
-            },
-            rating: nextAverage,
-          }
-        : {}),
-      updatedAt: serverTimestamp(),
-    }, { merge: true });
+  const token = await currentUser.getIdToken();
+  const response = await fetch(getFunctionEndpoint('submitServiceRequestRating'), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      requestId,
+      score: normalizedScore,
+      comment: String(comment || '').trim(),
+    }),
   });
 
-  return {
-    requestId,
-    score: normalizedScore,
-    comment: String(comment || '').trim(),
-    targetUserId,
-    roleKey,
-    replacedExisting: Boolean(existingRating),
-  };
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || payload?.success === false) {
+    throw new Error(payload?.message || 'Unable to submit the rating right now.');
+  }
+
+  return payload.rating || { requestId, score: normalizedScore, comment: String(comment || '').trim() };
 }
