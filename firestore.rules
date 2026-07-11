@@ -37,11 +37,23 @@ service cloud.firestore {
         );
     }
 
+    function hasOnlySafeUserFieldChanges() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+        'ratings', 'metrics', 'wallet', 'paymentMethods', 'verificationStatus', 'payout',
+        'referralRewardCount', 'rewardAccount', 'rewards', 'membership', 'mastery',
+        'eligibleCompletedPaidBookings', 'eligibleCompletedPaidJobs', 'completedJobs',
+        'completionCounters', 'acceptanceRate', 'cancellationRate', 'completionRate',
+        'responseMetrics', 'earningsTotals', 'admin', 'adminNotes', 'blocked',
+        'isBlocked', 'suspended', 'isSuspended', 'role', 'roles', 'activeRole',
+        'isAdmin', 'accountStatus', 'restrictedStatus', 'dispatchPaused'
+      ]);
+    }
+
     match /users/{userId} {
       allow get: if isOwner(userId) || isAdmin() || (signedIn() && resource.data.activeRole == 'tutor');
       allow list: if isAdmin() || signedIn();
       allow create: if isOwner(userId) || isAdmin();
-      allow update: if isOwner(userId) || isAdmin();
+      allow update: if isAdmin() || (isOwner(userId) && hasOnlySafeUserFieldChanges());
       allow delete: if isOwner(userId) || isAdmin();
 
       match /aiLogs/{logId} {
@@ -77,8 +89,8 @@ service cloud.firestore {
 
     match /notifications/{notificationId} {
       allow get, list: if isAdmin() || isOwner(resource.data.userId);
-      allow create: if signedIn();
-      allow update: if isAdmin() || isOwner(resource.data.userId);
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid && !(request.resource.data.type in ['points_earned', 'points_deducted', 'referral_stage_achieved', 'membership_level_achieved', 'helper_mastery_level_achieved', 'points_expiring_soon', 'reward_reversed']);
+      allow update: if isAdmin() || (isOwner(resource.data.userId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read', 'readAt', 'updatedAt']));
       allow delete: if isAdmin() || isOwner(resource.data.userId);
     }
 
@@ -161,6 +173,63 @@ service cloud.firestore {
     match /customerRecommendationTrainingSamples/{sampleId} {
       allow read, write: if isAdmin();
     }
+
+    match /rewardConfig/{configId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /rewardAccounts/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      allow create, update, delete: if isAdmin();
+      match /transactions/{transactionId} {
+        allow get, list: if isOwner(userId) || isAdmin();
+        allow create, update, delete: if isAdmin();
+      }
+    }
+
+    match /referralCodes/{code} {
+      allow get, list: if isAdmin();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /referrals/{referredUserId} {
+      allow get: if isOwner(referredUserId) || isOwner(resource.data.referrerUserId) || isAdmin();
+      allow list: if isAdmin();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /ratings/{ratingId} {
+      allow get, list: if isAdmin() || isOwner(resource.data.raterUserId) || isOwner(resource.data.ratedUserId);
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /ratingAccounts/{userId} {
+      allow get: if signedIn();
+      allow list: if isAdmin();
+      allow create, update, delete: if isAdmin();
+      match /services/{serviceId} {
+        allow get, list: if signedIn();
+        allow create, update, delete: if isAdmin();
+      }
+    }
+
+    match /helperMastery/{helperId} {
+      allow get: if isOwner(helperId) || isAdmin();
+      allow list: if isAdmin();
+      allow create, update, delete: if isAdmin();
+      match /services/{serviceId} {
+        allow get, list: if isOwner(helperId) || isAdmin();
+        allow create, update, delete: if isAdmin();
+      }
+    }
+
+    match /serviceCreditRedemptions/{redemptionId} {
+      allow get, list: if isAdmin() || isOwner(resource.data.userId);
+      allow create, update, delete: if isAdmin();
+    }
+
 
     match /{document=**} {
       allow read, write: if false;

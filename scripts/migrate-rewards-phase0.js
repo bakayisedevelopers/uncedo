@@ -1,0 +1,12 @@
+#!/usr/bin/env node
+/* Controlled Phase 0 migration. Default is dry-run. Requires GOOGLE_APPLICATION_CREDENTIALS or emulator env. */
+const admin = require('firebase-admin');
+const { RATING_DIRECTIONS, SCHEMA_VERSION } = require('../shared/rewards');
+const dryRun = !process.argv.includes('--write');
+const limitArg = Number(process.argv.find((arg) => arg.startsWith('--limit='))?.split('=')[1] || 100);
+const cursor = process.argv.find((arg) => arg.startsWith('--start-after='))?.split('=')[1] || null;
+admin.initializeApp();
+const db = admin.firestore();
+function serviceIdsFor(req){ return [...new Set([...(Array.isArray(req.serviceIds)?req.serviceIds:[]), ...(Array.isArray(req.includedServiceIds)?req.includedServiceIds:[]), req.selectedPackageId].filter(Boolean).map(String))]; }
+async function main(){ let q=db.collection('serviceRequests').orderBy(admin.firestore.FieldPath.documentId()).limit(limitArg); if(cursor) q=q.startAfter(cursor); const snap=await q.get(); let writes=0; const batch=db.batch(); for(const doc of snap.docs){ const r=doc.data()||{}; const customerId=r.customerId||r.studentId; const helperId=r.helperAssignment?.helperId||r.helperId||r.tutorId; const services=serviceIdsFor(r); for(const [key,direction,raterUserId,ratedUserId,raterRole,ratedRole] of [['customer',RATING_DIRECTIONS.CUSTOMER_TO_HELPER,customerId,helperId,'customer','helper'],['helper',RATING_DIRECTIONS.HELPER_TO_CUSTOMER,helperId,customerId,'helper','customer']]){ const old=r.ratings?.[key]; if(!old?.score||!raterUserId||!ratedUserId) continue; const ratingId=`${doc.id}_${direction}`; const ref=db.collection('ratings').doc(ratingId); const record={ratingId,requestId:doc.id,direction,raterUserId,raterRole,ratedUserId,ratedRole,categoryId:r.categoryId||'',serviceIds:Array.isArray(r.serviceIds)?r.serviceIds:[],expandedServiceIds:services,primaryServiceId:services[0]||r.categoryId||'',selectedPackageId:r.selectedPackageId||null,score:Number(old.score),comment:String(old.comment||'').slice(0,1000),status:'active',moderationStatus:'legacy_unreviewed',createdAt:old.submittedAt||r.updatedAt||r.createdAt||admin.firestore.FieldValue.serverTimestamp(),updatedAt:admin.firestore.FieldValue.serverTimestamp(),schemaVersion:SCHEMA_VERSION,legacyBackfill:true}; if(!dryRun) batch.set(ref,record,{merge:true}); writes++; }} } if(!dryRun && writes) await batch.commit(); console.log(JSON.stringify({dryRun,scanned:snap.size,plannedWrites:writes,nextCursor:snap.docs.at(-1)?.id||null}, null, 2)); }
+main().catch((error)=>{ console.error(error); process.exit(1); });

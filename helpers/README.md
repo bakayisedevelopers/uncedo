@@ -94,3 +94,7 @@ C:\Users\Jabu Babb\AppData\Local\Android\Sdk\platform-tools\adb.exe connect 192.
 - The helper service catalog is loaded from the shared `serviceCatalog` collection, including admin-created bundle services, and helper submissions stay pending until the admin approves them.
 - Navigation is implemented in `src/navigation/RootNavigator.js`, including the custom route history used for Android hardware back behavior and mobile system-bar insets.
 - The helper agreement flow now reads and writes the live contract records directly in Firebase client-side, including signed acceptance records and the stored acceptance PDF, and blocks profile completion until the latest published version is signed.
+
+## Phase 0 rewards foundation
+
+The helper app now submits service-request ratings through the trusted `submitServiceRequestRating` Cloud Function instead of updating customer aggregates from the client. Read-only reward helpers live in `src/services/rewards/rewardClientService.js` for reward accounts, transactions, reward configuration, rating summaries, membership, helper mastery, and referral-code operations. Full rewards dashboards are intentionally deferred.
