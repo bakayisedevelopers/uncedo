@@ -3,7 +3,11 @@ import { Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } fro
 import { Ionicons } from '@expo/vector-icons';
 import { ActionButton, Card, SectionHeading, StatusBadge } from '../../components/app/HelperUi';
 import { useHelpersApp } from '../../context/HelpersAppContext';
-import { formatAgreementDate, getHelperAgreementBundle } from '../../services/legalAgreementService';
+import {
+  formatAgreementDate,
+  getHelperAgreementBundle,
+  getHelperAgreementPdfUrl,
+} from '../../services/legalAgreementService';
 import { colors } from '../../theme/colors';
 
 function formatTimestamp(value) {
@@ -64,9 +68,15 @@ export function AgreementScreen({ goBack }) {
   const [typedSignatureName, setTypedSignatureName] = useState(profile.fullName || profile.displayName || profile.email || '');
 
   const activeVersion = bundle.activeVersion || null;
+  const versions = Array.isArray(bundle.versions) ? bundle.versions : [];
   const acceptances = Array.isArray(bundle.acceptances) ? bundle.acceptances : [];
   const currentAcceptance = acceptances[0] || null;
-  const latestPdfUrl = currentAcceptance?.pdfUrl || profile?.agreement?.latestAcceptancePdfUrl || '';
+  const latestPdfUrl = useMemo(() => (
+    getHelperAgreementPdfUrl({
+      acceptance: currentAcceptance,
+      versionRecord: activeVersion,
+    }) || String(profile?.agreement?.latestAcceptancePdfUrl || '').trim()
+  ), [activeVersion, currentAcceptance, profile?.agreement?.latestAcceptancePdfUrl]);
   const hasSignedPdf = Boolean(latestPdfUrl);
   const hasSignedActiveVersion = Boolean(
     activeVersion?.version
@@ -87,6 +97,24 @@ export function AgreementScreen({ goBack }) {
   const canSubmit = Boolean(activeVersion && checkboxAccepted && String(typedSignatureName || '').trim() && !hasSignedActiveVersion);
 
   const statusTone = useMemo(() => (isCurrent ? 'success' : 'warning'), [isCurrent]);
+  const historyPdfUrls = useMemo(() => {
+    const byVersion = new Map(
+      versions.map((item) => [String(item?.version || '').trim(), item]),
+    );
+
+    return acceptances.reduce((result, acceptance) => {
+      const versionKey = String(acceptance?.version || '').trim();
+      const pdfUrl = getHelperAgreementPdfUrl({
+        acceptance,
+        versionRecord: byVersion.get(versionKey) || null,
+      });
+
+      if (pdfUrl) {
+        result[String(acceptance.id || versionKey)] = pdfUrl;
+      }
+      return result;
+    }, {});
+  }, [acceptances, versions]);
 
   useEffect(() => {
     setTypedSignatureName(profile.fullName || profile.displayName || profile.email || '');
@@ -152,7 +180,7 @@ export function AgreementScreen({ goBack }) {
       return;
     }
 
-    setMessage('Helper Agreement accepted successfully.');
+    setMessage(result?.message || 'Helper Agreement accepted successfully.');
     try {
       const refreshed = await getHelperAgreementBundle();
       setBundle({
@@ -285,8 +313,8 @@ export function AgreementScreen({ goBack }) {
                 <Text style={styles.historyVersion}>Version {acceptance.version}</Text>
                 <Text style={styles.historyDate}>{formatTimestamp(acceptance.acceptedAt)}</Text>
               </View>
-              {acceptance.pdfUrl ? (
-                <Pressable accessibilityRole="button" onPress={() => openUrl(acceptance.pdfUrl)} style={styles.historyLink}>
+              {historyPdfUrls[String(acceptance.id || acceptance.version)] ? (
+                <Pressable accessibilityRole="button" onPress={() => openUrl(historyPdfUrls[String(acceptance.id || acceptance.version)])} style={styles.historyLink}>
                   <Ionicons color={colors.brandDark} name="document-text-outline" size={16} />
                   <Text style={styles.historyLinkText}>PDF</Text>
                 </Pressable>

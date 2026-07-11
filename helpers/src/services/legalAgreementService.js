@@ -9,8 +9,9 @@ import {
   setDoc,
   where,
 } from 'firebase/firestore';
-import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
+import { getDownloadURL, ref, uploadString } from 'firebase/storage';
 import { getFirebaseClients } from '../firebase/config';
+import { logError } from './logger';
 
 export const HELPER_AGREEMENT_DOCUMENT_ID = 'helper_agreement';
 const HELPER_AGREEMENT_TITLE = 'Helper Agreement';
@@ -58,6 +59,27 @@ function stringToBytes(value) {
     bytes[index] = normalized.charCodeAt(index) & 0xff;
   }
   return bytes;
+}
+
+function bytesToBase64(bytes) {
+  const input = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+  const base64Chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let output = '';
+
+  for (let index = 0; index < input.length; index += 3) {
+    const first = input[index];
+    const hasSecond = index + 1 < input.length;
+    const hasThird = index + 2 < input.length;
+    const second = hasSecond ? input[index + 1] : 0;
+    const third = hasThird ? input[index + 2] : 0;
+
+    output += base64Chars[first >> 2];
+    output += base64Chars[((first & 0x03) << 4) | (second >> 4)];
+    output += hasSecond ? base64Chars[((second & 0x0f) << 2) | (third >> 6)] : '=';
+    output += hasThird ? base64Chars[third & 0x3f] : '=';
+  }
+
+  return output;
 }
 
 function wrapPdfLine(line = '', maxChars = 86) {
@@ -269,8 +291,9 @@ async function uploadAgreementPdf({
     contentMarkdown: activeVersion?.contentMarkdown || '',
     acceptance,
   });
+  const pdfBase64 = bytesToBase64(pdfBytes);
 
-  await uploadBytes(fileRef, pdfBytes, {
+  await uploadString(fileRef, pdfBase64, 'base64', {
     contentType: 'application/pdf',
     cacheControl: 'private,max-age=0,no-store',
     customMetadata: {
@@ -285,6 +308,19 @@ async function uploadAgreementPdf({
     pdfUrl: await getDownloadURL(fileRef),
     pdfStoragePath: storagePath,
   };
+}
+
+async function tryUploadAgreementPdf(options) {
+  try {
+    return await uploadAgreementPdf(options);
+  } catch (error) {
+    logError('legalAgreementService.uploadAgreementPdf', error);
+    return {
+      pdfUrl: '',
+      pdfStoragePath: '',
+      uploadError: error,
+    };
+  }
 }
 
 export async function getHelperAgreementBundle() {
@@ -420,7 +456,7 @@ export async function acceptHelperAgreement({ typedSignatureName, checkboxAccept
     updatedAt: serverTimestamp(),
   };
 
-  const uploaded = await uploadAgreementPdf({
+  const uploaded = await tryUploadAgreementPdf({
     storage,
     acceptanceId,
     userId: uid,
@@ -437,6 +473,8 @@ export async function acceptHelperAgreement({ typedSignatureName, checkboxAccept
       ...acceptance,
       pdfUrl: uploaded.pdfUrl,
       pdfStoragePath: uploaded.pdfStoragePath,
+      pdfUploadFailed: !uploaded.pdfUrl,
+      pdfUploadErrorMessage: uploaded.uploadError ? String(uploaded.uploadError?.message || 'PDF upload failed.') : '',
     }, { merge: true });
 
     transaction.set(userRef, {
@@ -456,7 +494,9 @@ export async function acceptHelperAgreement({ typedSignatureName, checkboxAccept
 
   return {
     success: true,
-    message: 'Helper Agreement accepted successfully.',
+    message: uploaded.pdfUrl
+      ? 'Helper Agreement accepted successfully.'
+      : 'Helper Agreement accepted successfully. The signed PDF could not be uploaded on this device.',
     acceptanceId,
     acceptance: {
       id: acceptanceId,
@@ -465,12 +505,55 @@ export async function acceptHelperAgreement({ typedSignatureName, checkboxAccept
       updatedAt: acceptedAt,
       pdfUrl: uploaded.pdfUrl,
       pdfStoragePath: uploaded.pdfStoragePath,
+      pdfUploadFailed: !uploaded.pdfUrl,
+      pdfUploadErrorMessage: uploaded.uploadError ? String(uploaded.uploadError?.message || 'PDF upload failed.') : '',
     },
     pdfUrl: uploaded.pdfUrl,
     activeVersion,
     agreement: refreshedUser.agreement || {},
     verificationStatus: refreshedUser.verificationStatus || 'pending',
   };
+}
+
+export function getHelperAgreementPdfUrl({ acceptance = null, versionRecord = null } = {}) {
+  if (!acceptance) return '';
+
+  const storedUrl = String(acceptance?.pdfUrl || '').trim();
+  if (storedUrl) {
+    return storedUrl;
+  }
+
+  const contentMarkdown = String(
+    acceptance?.immutableContentSnapshot
+    || versionRecord?.contentMarkdown
+    || '',
+  ).trim();
+
+  if (!contentMarkdown) {
+    return '';
+  }
+
+  const pdfBytes = buildHelperAgreementPdfBytes({
+    title: acceptance?.documentTitle || versionRecord?.title || HELPER_AGREEMENT_TITLE,
+    version: acceptance?.version || versionRecord?.version || HELPER_AGREEMENT_DEFAULT_VERSION,
+    effectiveDate: acceptance?.documentEffectiveDate || versionRecord?.effectiveDate || '',
+    reviewedAt: versionRecord?.reviewedAt || '',
+    nextReviewAt: versionRecord?.nextReviewAt || '',
+    stampLabel: versionRecord?.stampLabel || HELPER_AGREEMENT_STAMP_LABEL,
+    contentMarkdown,
+    acceptance: {
+      ...acceptance,
+      acceptedByFullName: acceptance?.acceptedByFullName || acceptance?.typedSignatureName || '',
+      acceptedByEmail: acceptance?.acceptedByEmail || '',
+      userId: acceptance?.userId || '',
+      acceptedAt: acceptance?.acceptedAt || '',
+      checkboxAccepted: acceptance?.checkboxAccepted !== false,
+      typedSignatureName: acceptance?.typedSignatureName || '',
+      contentHash: acceptance?.contentHash || versionRecord?.contentHash || '',
+    },
+  });
+
+  return `data:application/pdf;base64,${bytesToBase64(pdfBytes)}`;
 }
 
 export function formatAgreementDate(value) {
