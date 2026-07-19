@@ -216,6 +216,12 @@ export function CustomerProfileScreen({ navigate }) {
           onPress={openPayments}
         />
         <ProfileRow
+          icon="sparkles-outline"
+          title="Uncedo Points"
+          description="View your points balance, membership level, referrals, ratings, and earning opportunities."
+          onPress={() => navigate('CustomerRewardsOverview')}
+        />
+        <ProfileRow
           icon="shield-checkmark-outline"
           title="Security"
           description="Review safety guidance and account deletion controls."

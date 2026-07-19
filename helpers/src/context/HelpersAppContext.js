@@ -59,7 +59,7 @@ const FALLBACK_PROFILE = {
   agreement: {
     documentId: 'helper_agreement',
     title: 'Helper Agreement',
-    legalEntityName: 'Parakleo, operated by Jabu Msiza',
+    legalEntityName: 'Uncedo, operated by Jabu Msiza',
     acceptedVersion: '',
     requiredVersion: '1.0.1',
     requiredVersionId: 'helper_agreement_1.0.1',

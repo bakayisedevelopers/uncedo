@@ -1,5 +1,6 @@
 import { collection, doc, getDoc, getDocs, limit, orderBy, query, where } from 'firebase/firestore';
 import { getFirebaseClients, getFunctionEndpoint } from '../../firebase/config';
+import { REWARD_CONFIG_DOCS } from '../../shared/rewards';
 export async function getRewardAccount(userId) { const { db } = getFirebaseClients(); const snap = await getDoc(doc(db, 'rewardAccounts', userId)); return snap.exists() ? { id: snap.id, ...snap.data() } : null; }
 export async function getRewardTransactions(userId, pageSize = 25) { const { db } = getFirebaseClients(); const snap = await getDocs(query(collection(db, 'rewardAccounts', userId, 'transactions'), orderBy('createdAt', 'desc'), limit(pageSize))); return snap.docs.map((item) => ({ id: item.id, ...item.data() })); }
 export async function getRewardConfig(section = 'global') { const { db } = getFirebaseClients(); const snap = await getDoc(doc(db, 'rewardConfig', section)); return snap.exists() ? { id: snap.id, ...snap.data() } : null; }

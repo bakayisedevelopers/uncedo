@@ -1,6 +1,39 @@
+function parseRefCodeFromUrl(url) {
+  if (!url) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(url);
+    const code = (
+      parsed.searchParams.get('ref')
+      || parsed.searchParams.get('referral')
+      || parsed.searchParams.get('referralCode')
+      || parsed.searchParams.get('code')
+      || null
+    );
+    return code ? String(code).trim().toUpperCase().replace(/[^A-Z0-9]/g, '') || null : null;
+  } catch (error) {
+    const match = String(url || '').match(/[?&](?:ref|referral|referralCode|code)=([^&#]+)/i);
+    if (!match) {
+      return null;
+    }
+
+    const raw = decodeURIComponent(match[1]);
+    return raw ? raw.trim().toUpperCase().replace(/[^A-Z0-9]/g, '') || null : null;
+  }
+}
+
 export function resolveDeepLink(url) {
   if (!url) {
     return null;
+  }
+
+  // Referral signup links: https://uncedo.bakayise.com/signup?ref=CODE
+  // or uncedo://signup?ref=CODE — route to Onboarding for pre-auth capture.
+  const referralCode = parseRefCodeFromUrl(url);
+  if (referralCode) {
+    return { key: 'Onboarding', params: { pendingReferralCode: referralCode } };
   }
 
   const cleaned = String(url || '').replace(/^[a-z]+:\/\//i, '');
