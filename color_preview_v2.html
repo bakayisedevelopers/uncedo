@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Uncedo - Brand Color Palette Visualizer (Set 2)</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0f172a;
+      --surface: #1e293b;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --border: #334155;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      padding: 40px 20px;
+      line-height: 1.5;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 40px;
+    }
+
+    header h1 {
+      font-size: 2.5rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin-bottom: 10px;
+      background: linear-gradient(135deg, #f97316, #eab308, #84cc16);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    header p {
+      color: var(--text-muted);
+      font-size: 1.1rem;
+    }
+
+    .image-preview-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 40px;
+      text-align: center;
+    }
+
+    .image-preview-card h2 {
+      font-size: 1.3rem;
+      margin-bottom: 15px;
+      color: var(--text);
+    }
+
+    .image-preview-card img {
+      max-width: 100%;
+      border-radius: 12px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 24px;
+      margin-bottom: 40px;
+    }
+
+    .palette-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 24px;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .palette-card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 12px 30px rgba(0,0,0,0.4);
+    }
+
+    .palette-title {
+      font-size: 1.25rem;
+      font-weight: 700;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .palette-desc {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      margin-bottom: 20px;
+    }
+
+    .swatches {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    .swatch-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      border-radius: 12px;
+      color: white;
+      font-weight: 600;
+      font-size: 0.9rem;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    }
+
+    .hex-code {
+      font-family: monospace;
+      font-size: 0.85rem;
+      background: rgba(0,0,0,0.25);
+      padding: 3px 8px;
+      border-radius: 6px;
+    }
+
+    .ui-demo {
+      background: #ffffff;
+      border-radius: 14px;
+      padding: 16px;
+      color: #1e293b;
+    }
+
+    .ui-demo-header {
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 12px;
+    }
+
+    .demo-button {
+      width: 100%;
+      padding: 12px;
+      border-radius: 10px;
+      border: none;
+      color: white;
+      font-weight: 700;
+      font-size: 0.95rem;
+      cursor: pointer;
+      margin-bottom: 10px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.1);
+    }
+
+    .demo-card {
+      padding: 12px;
+      border-radius: 10px;
+      border: 1px solid #e2e8f0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .demo-badge {
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      font-weight: 700;
+    }
+
+    /* Option A: Terracotta & Sage */
+    .pa-primary { background: #C85A32; color: #fff; }
+    .pa-dark { background: #9E3D1B; color: #fff; }
+    .pa-accent { background: #84A98C; color: #1e293b; }
+    .pa-badge { background: #fcebe6; color: #9e3d1b; }
+
+    /* Option B: Crimson & Gold */
+    .pb-primary { background: #BE123C; color: #fff; }
+    .pb-dark { background: #881337; color: #fff; }
+    .pb-accent { background: #EAB308; color: #1e293b; }
+    .pb-badge { background: #ffe4e6; color: #9f1239; }
+
+    /* Option C: Cyber Cyan */
+    .pc-primary { background: #00B4D8; color: #fff; }
+    .pc-dark { background: #0077B6; color: #fff; }
+    .pc-accent { background: #00F5D4; color: #0f172a; }
+    .pc-badge { background: #e0f2fe; color: #0369a1; }
+
+    /* Option D: Electric Volt Lime */
+    .pd-primary { background: #84CC16; color: #0f172a; }
+    .pd-dark { background: #4D7C0F; color: #fff; }
+    .pd-accent { background: #18181B; color: #fff; }
+    .pd-badge { background: #ecfccb; color: #3f6212; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Uncedo Brand Color Directions (Set 2)</h1>
+      <p>Fresh alternative color palette concepts for the Uncedo application</p>
+    </header>
+
+    <div class="image-preview-card">
+      <h2>Generated Color Board Image</h2>
+      <img src="brand_color_palettes_v2.png" alt="Uncedo Color Palettes Comparison Set 2">
+    </div>
+
+    <div class="grid">
+      <!-- Option A -->
+      <div class="palette-card">
+        <div class="palette-title">🍂 A. Terracotta & Sage</div>
+        <div class="palette-desc">Organic, warm, earthy, trustworthy & premium feel</div>
+        
+        <div class="swatches">
+          <div class="swatch-item pa-primary">
+            <span>Warm Terracotta</span>
+            <span class="hex-code">#C85A32</span>
+          </div>
+          <div class="swatch-item pa-dark">
+            <span>Deep Rust</span>
+            <span class="hex-code">#9E3D1B</span>
+          </div>
+          <div class="swatch-item pa-accent">
+            <span>Soft Sage</span>
+            <span class="hex-code">#84A98C</span>
+          </div>
+        </div>
+
+        <div class="ui-demo">
+          <div class="ui-demo-header">UI Component Preview</div>
+          <button class="demo-button pa-primary">Request Helper</button>
+          <div class="demo-card">
+            <span style="font-size: 0.85rem; font-weight: 600;">Maths Tutoring</span>
+            <span class="demo-badge pa-badge">Active Request</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Option B -->
+      <div class="palette-card">
+        <div class="palette-title">🍷 B. Crimson & Gold</div>
+        <div class="palette-desc">Bold, prestigious, executive excellence & luxury velvet</div>
+        
+        <div class="swatches">
+          <div class="swatch-item pb-primary">
+            <span>Deep Crimson</span>
+            <span class="hex-code">#BE123C</span>
+          </div>
+          <div class="swatch-item pb-dark">
+            <span>Dark Velvet</span>
+            <span class="hex-code">#881337</span>
+          </div>
+          <div class="swatch-item pb-accent">
+            <span>Champagne Gold</span>
+            <span class="hex-code">#EAB308</span>
+          </div>
+        </div>
+
+        <div class="ui-demo">
+          <div class="ui-demo-header">UI Component Preview</div>
+          <button class="demo-button pb-primary">Request Helper</button>
+          <div class="demo-card">
+            <span style="font-size: 0.85rem; font-weight: 600;">Maths Tutoring</span>
+            <span class="demo-badge pb-badge">Active Request</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Option C -->
+      <div class="palette-card">
+        <div class="palette-title">⚡ C. Cyber Turquoise</div>
+        <div class="palette-desc">Ultra-modern, high-tech, futuristic cyan contrast</div>
+        
+        <div class="swatches">
+          <div class="swatch-item pc-primary">
+            <span>Vivid Turquoise</span>
+            <span class="hex-code">#00B4D8</span>
+          </div>
+          <div class="swatch-item pc-dark">
+            <span>Deep Navy</span>
+            <span class="hex-code">#0077B6</span>
+          </div>
+          <div class="swatch-item pc-accent">
+            <span>Cyber Cyan</span>
+            <span class="hex-code">#00F5D4</span>
+          </div>
+        </div>
+
+        <div class="ui-demo">
+          <div class="ui-demo-header">UI Component Preview</div>
+          <button class="demo-button pc-primary">Request Helper</button>
+          <div class="demo-card">
+            <span style="font-size: 0.85rem; font-weight: 600;">Maths Tutoring</span>
+            <span class="demo-badge pc-badge">Active Request</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Option D -->
+      <div class="palette-card">
+        <div class="palette-title">⚡ D. Electric Volt Lime</div>
+        <div class="palette-desc">High-contrast, bold, energetic startup vibe</div>
+        
+        <div class="swatches">
+          <div class="swatch-item pd-primary">
+            <span>Electric Volt</span>
+            <span class="hex-code">#84CC16</span>
+          </div>
+          <div class="swatch-item pd-dark">
+            <span>Deep Olive</span>
+            <span class="hex-code">#4D7C0F</span>
+          </div>
+          <div class="swatch-item pd-accent">
+            <span>Obsidian Charcoal</span>
+            <span class="hex-code">#18181B</span>
+          </div>
+        </div>
+
+        <div class="ui-demo">
+          <div class="ui-demo-header">UI Component Preview</div>
+          <button class="demo-button pd-primary">Request Helper</button>
+          <div class="demo-card">
+            <span style="font-size: 0.85rem; font-weight: 600;">Maths Tutoring</span>
+            <span class="demo-badge pd-badge">Active Request</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</body>
+</html>

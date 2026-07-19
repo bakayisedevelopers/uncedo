@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Uncedo - 5 Electric Lime & Obsidian Variations</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #09090b;
+      --surface: #18181b;
+      --text: #f4f4f5;
+      --text-muted: #a1a1aa;
+      --border: #27272a;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      padding: 40px 20px;
+      line-height: 1.5;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 40px;
+    }
+
+    header h1 {
+      font-size: 2.5rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin-bottom: 10px;
+      background: linear-gradient(135deg, #ccff00, #84cc16, #34d399);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    header p {
+      color: var(--text-muted);
+      font-size: 1.1rem;
+    }
+
+    .image-preview-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 40px;
+      text-align: center;
+    }
+
+    .image-preview-card h2 {
+      font-size: 1.3rem;
+      margin-bottom: 15px;
+      color: var(--text);
+    }
+
+    .image-preview-card img {
+      max-width: 100%;
+      border-radius: 12px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 24px;
+      margin-bottom: 40px;
+    }
+
+    .palette-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 24px;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .palette-card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 12px 30px rgba(0,0,0,0.6);
+    }
+
+    .palette-title {
+      font-size: 1.2rem;
+      font-weight: 700;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .palette-desc {
+      font-size: 0.88rem;
+      color: var(--text-muted);
+      margin-bottom: 20px;
+    }
+
+    .swatches {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-bottom: 24px;
+    }
+
+    .swatch-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      border-radius: 12px;
+      font-weight: 700;
+      font-size: 0.88rem;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    }
+
+    .hex-code {
+      font-family: monospace;
+      font-size: 0.82rem;
+      background: rgba(0,0,0,0.3);
+      padding: 3px 8px;
+      border-radius: 6px;
+    }
+
+    .ui-demo {
+      background: #ffffff;
+      border-radius: 14px;
+      padding: 16px;
+      color: #1e293b;
+    }
+
+    .ui-demo-header {
+      font-size: 0.8rem;
+      font-weight: 700;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 12px;
+    }
+
+    .demo-button {
+      width: 100%;
+      padding: 12px;
+      border-radius: 10px;
+      border: none;
+      font-weight: 700;
+      font-size: 0.95rem;
+      cursor: pointer;
+      margin-bottom: 10px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.1);
+    }
+
+    .demo-card {
+      padding: 12px;
+      border-radius: 10px;
+      border: 1px solid #e2e8f0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .demo-badge {
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      font-weight: 700;
+    }
+
+    /* Var 1: Neon Volt & Onyx */
+    .v1-lime { background: #CCFF00; color: #000; }
+    .v1-dark { background: #000000; color: #fff; }
+    .v1-badge { background: #facc15; color: #000; }
+
+    /* Var 2: Cyber Emerald Lime */
+    .v2-lime { background: #34D399; color: #064e3b; }
+    .v2-dark { background: #111827; color: #fff; }
+    .v2-badge { background: #d1fae5; color: #065f46; }
+
+    /* Var 3: Balanced Electric Lime (Refined Original) */
+    .v3-lime { background: #84CC16; color: #0f172a; }
+    .v3-dark { background: #18181B; color: #fff; }
+    .v3-badge { background: #ecfccb; color: #3f6212; }
+
+    /* Var 4: Solar Chartreuse */
+    .v4-lime { background: #B5E853; color: #1c1917; }
+    .v4-dark { background: #1C1917; color: #fff; }
+    .v4-badge { background: #fef08a; color: #713f12; }
+
+    /* Var 5: Stealth Mint-Lime */
+    .v5-lime { background: #4ADE80; color: #052e16; }
+    .v5-dark { background: #09090B; color: #fff; }
+    .v5-badge { background: #dcfce7; color: #14532d; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Electric Lime & Obsidian - 5 Variations</h1>
+      <p>Fine-tune the tone, saturation, and contrast for the Uncedo brand identity</p>
+    </header>
+
+    <div class="image-preview-card">
+      <h2>Generated Color Board Image</h2>
+      <img src="brand_color_palettes_v3.png" alt="5 Electric Lime & Obsidian Variations">
+    </div>
+
+    <div class="grid">
+      <!-- Variation 1 -->
+      <div class="palette-card">
+        <div class="palette-title">⚡ 1. Neon Volt & Onyx</div>
+        <div class="palette-desc">Vivid neon acid lime with jet black contrast (High Energy)</div>
+        
+        <div class="swatches">
+          <div class="swatch-item v1-lime">
+            <span>Acid Neon Volt</span>
+            <span class="hex-code">#CCFF00</span>
+          </div>
+          <div class="swatch-item v1-dark">
+            <span>Jet Black Onyx</span>
+            <span class="hex-code">#000000</span>
+          </div>
+        </div>
+
+        <div class="ui-demo">
+          <div class="ui-demo-header">UI Component Preview</div>
+          <button class="demo-button v1-lime">Request Helper</button>
+          <div class="demo-card">
+            <span style="font-size: 0.85rem; font-weight: 600;">Maths Tutoring</span>
+            <span class="demo-badge v1-badge">Active Request</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Variation 2 -->
+      <div class="palette-card">
+        <div class="palette-title">🌿 2. Cyber Emerald Lime</div>
+        <div class="palette-desc">Fresh mint-lime with deep graphite navy (Crisp & Clean)</div>
+        
+        <div class="swatches">
+          <div class="swatch-item v2-lime">
+            <span>Emerald Mint Lime</span>
+            <span class="hex-code">#34D399</span>
+          </div>
+          <div class="swatch-item v2-dark">
+            <span>Graphite Navy</span>
+            <span class="hex-code">#111827</span>
+          </div>
+        </div>
+
+        <div class="ui-demo">
+          <div class="ui-demo-header">UI Component Preview</div>
+          <button class="demo-button v2-lime">Request Helper</button>
+          <div class="demo-card">
+            <span style="font-size: 0.85rem; font-weight: 600;">Maths Tutoring</span>
+            <span class="demo-badge v2-badge">Active Request</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Variation 3 -->
+      <div class="palette-card">
+        <div class="palette-title">🔋 3. Balanced Electric Lime</div>
+        <div class="palette-desc">Refined classic electric lime with matte obsidian charcoal</div>
+        
+        <div class="swatches">
+          <div class="swatch-item v3-lime">
+            <span>Electric Lime</span>
+            <span class="hex-code">#84CC16</span>
+          </div>
+          <div class="swatch-item v3-dark">
+            <span>Matte Obsidian</span>
+            <span class="hex-code">#18181B</span>
+          </div>
+        </div>
+
+        <div class="ui-demo">
+          <div class="ui-demo-header">UI Component Preview</div>
+          <button class="demo-button v3-lime">Request Helper</button>
+          <div class="demo-card">
+            <span style="font-size: 0.85rem; font-weight: 600;">Maths Tutoring</span>
+            <span class="demo-badge v3-badge">Active Request</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Variation 4 -->
+      <div class="palette-card">
+        <div class="palette-title">☀️ 4. Solar Chartreuse</div>
+        <div class="palette-desc">Warm yellow-green lime with rich charcoal slate</div>
+        
+        <div class="swatches">
+          <div class="swatch-item v4-lime">
+            <span>Solar Chartreuse</span>
+            <span class="hex-code">#B5E853</span>
+          </div>
+          <div class="swatch-item v4-dark">
+            <span>Charcoal Slate</span>
+            <span class="hex-code">#1C1917</span>
+          </div>
+        </div>
+
+        <div class="ui-demo">
+          <div class="ui-demo-header">UI Component Preview</div>
+          <button class="demo-button v4-lime">Request Helper</button>
+          <div class="demo-card">
+            <span style="font-size: 0.85rem; font-weight: 600;">Maths Tutoring</span>
+            <span class="demo-badge v4-badge">Active Request</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Variation 5 -->
+      <div class="palette-card">
+        <div class="palette-title">🌲 5. Stealth Mint-Lime</div>
+        <div class="palette-desc">Cool mint-lime green with stealth black (Subtle & Elegant)</div>
+        
+        <div class="swatches">
+          <div class="swatch-item v5-lime">
+            <span>Stealth Mint-Lime</span>
+            <span class="hex-code">#4ADE80</span>
+          </div>
+          <div class="swatch-item v5-dark">
+            <span>Stealth Dark</span>
+            <span class="hex-code">#09090B</span>
+          </div>
+        </div>
+
+        <div class="ui-demo">
+          <div class="ui-demo-header">UI Component Preview</div>
+          <button class="demo-button v5-lime">Request Helper</button>
+          <div class="demo-card">
+            <span style="font-size: 0.85rem; font-weight: 600;">Maths Tutoring</span>
+            <span class="demo-badge v5-badge">Active Request</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</body>
+</html>

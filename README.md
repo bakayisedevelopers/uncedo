@@ -87,6 +87,19 @@ npm install
 firebase deploy --only functions
 ```
 
+### Phase 0 rewards validation
+
+```powershell
+npm install
+npm run validate:rewards:shared
+npm run test:rules
+npm run test:rewards:integration
+npm run test:phase0
+npm test --prefix functions
+```
+
+These commands use the Firebase Emulator and must be run before deploying rewards, referrals, ratings, membership, mastery, or Firestore Rules changes.
+
 ## Notes
 
 - The repository still contains some legacy `Parakleo` strings in code and UI copy. Those are historical product labels, not a separate repo.

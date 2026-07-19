@@ -11,7 +11,7 @@
   },
   "hosting": [
     {
-      "site": "bakayise-uncedo",
+      "site": "bakayise-uncedo-latest",
       "public": "web/dist",
       "ignore": [
         "firebase.json",
@@ -20,20 +20,8 @@
       ],
       "rewrites": [
         {
-          "source": "/ice-config",
-          "function": "getIceConfig"
-        },
-        {
           "source": "/verify-paystack",
           "function": "verifyPaystack"
-        },
-        {
-          "source": "/finalize-session-billing",
-          "function": "finalizeSessionBilling"
-        },
-        {
-          "source": "/mobile-webview-auth",
-          "function": "mobileWebviewAuth"
         },
         {
           "source": "**",
@@ -42,7 +30,7 @@
       ]
     },
     {
-      "site": "uncedo-admin",
+      "site": "bakayise-uncedo-latest-admin",
       "public": "admin/dist",
       "ignore": [
         "firebase.json",

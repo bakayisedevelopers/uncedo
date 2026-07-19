@@ -17,12 +17,17 @@ const {
   isHelperAgreementCurrent,
 } = require('./helperLegalAgreements');
 
-const { ACCOUNT_TYPES, REWARD_REASON_CODES, REWARD_TRANSACTION_DIRECTIONS } = require('../shared/rewards');
+const { ACCOUNT_TYPES, REWARD_REASON_CODES, REWARD_TRANSACTION_DIRECTIONS } = require('./shared/rewards');
 const { seedDefaultRewardConfig, getRewardConfig } = require('./rewards/config');
-const { ensureRewardAccount, applyRewardTransaction, processExpiredCustomerPoints } = require('./rewards/rewardService');
-const { ensureReferralCode, attachReferral, awardReferralStage } = require('./rewards/referralService');
+const { applyRewardTransaction, processExpiredCustomerPoints } = require('./rewards/rewardService');
+const {
+  ensureReferralCode,
+  attachReferral,
+  awardReferralStage,
+  evaluateCustomerProfileCompletionReward,
+} = require('./rewards/referralService');
 const { submitServiceRequestRating, serviceIdsFor } = require('./rewards/ratingService');
-const { incrementCompletedPaid, recalculateMembership } = require('./rewards/progressionService');
+const { incrementCompletedPaid, recalculateMastery, recalculateMembership } = require('./rewards/progressionService');
 
 admin.initializeApp();
 
@@ -1822,7 +1827,10 @@ exports.trackCustomerServiceEvents = onDocumentCreated('customerServiceEvents/{e
   });
 });
 
-exports.promoteScheduledServiceRequests = onSchedule('every 1 minutes', async () => {
+exports.promoteScheduledServiceRequests = onSchedule({
+  schedule: '0 0 * * *',
+  timeZone: 'Africa/Johannesburg',
+}, async () => {
   const now = Date.now();
   const snapshot = await db.collection('serviceRequests')
     .where('status', '==', SERVICE_REQUEST_STATUS.SCHEDULED_PENDING)
@@ -2619,7 +2627,7 @@ async function sendTutorAgreementEmailWithAttachment({
   };
 }
 
-exports.verifyPaystack = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRETS] }, async (req, res) => {
+exports.verifyPaystack = onRequest({ cors: true, invoker: 'public', secrets: [UNCEDO_PAYMENTS_SECRETS] }, async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, message: 'Method not allowed' });
     return;
@@ -2797,10 +2805,8 @@ exports.verifyPaystack = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRE
       isDefault: safeCardRecord.isDefault,
     });
 
-
-    await ensureRewardAccount(db, admin, { get: (ref) => ref.get(), set: (ref, data, opts) => ref.set(data, opts) }, uid, ACCOUNT_TYPES.CUSTOMER).catch(() => null);
     const customerConfig = await getRewardConfig(db, 'customer');
-    await applyRewardTransaction({
+    const paymentMethodReward = await applyRewardTransaction({
       db, admin, userId: uid, accountType: ACCOUNT_TYPES.CUSTOMER,
       direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT,
       points: Number(customerConfig.rewards?.paymentMethodVerified || 50),
@@ -2808,8 +2814,19 @@ exports.verifyPaystack = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRE
       reasonLabel: 'Verified payment method', sourceType: 'paystack_verification', sourceId: createHash('sha256').update(reference).digest('hex').slice(0, 24),
       idempotencyKey: `customer:${uid}:payment-method-verified:${createHash('sha256').update(reference).digest('hex').slice(0, 24)}`,
       metadata: { duplicateMethod: Boolean(duplicateMethod) },
-    }).catch((error) => logger.warn('verified_payment_reward_failed', { uid, error: error.message }));
-    await awardReferralStage({ db, admin, referredUserId: uid, stage: 1 }).catch((error) => logger.warn('referral_stage_one_failed', { uid, error: error.message }));
+      notifyUser: true,
+    }).catch((error) => {
+      logger.warn('verified_payment_reward_failed', { uid, error: error.message });
+      return { applied: false, error: error.message };
+    });
+    const profileCompletionReward = await evaluateCustomerProfileCompletionReward({ db, admin, userId: uid }).catch((error) => {
+      logger.warn('profile_completed_reward_failed', { uid, error: error.message });
+      return { applied: false, error: error.message };
+    });
+    const referralStageOneResult = await awardReferralStage({ db, admin, referredUserId: uid, stage: 1 }).catch((error) => {
+      logger.warn('referral_stage_one_failed', { uid, error: error.message });
+      return { applied: false, error: error.message };
+    });
 
     let refundSucceeded = false;
     let refundMessage = null;
@@ -2909,6 +2926,11 @@ exports.verifyPaystack = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRE
       },
       refunded: refundSucceeded,
       refundMessage,
+      rewardResults: {
+        paymentMethodVerified: paymentMethodReward,
+        profileCompleted: profileCompletionReward,
+        referralStageOne: referralStageOneResult,
+      },
     });
   } catch (error) {
     logger.error('verifyPaystack flow failed.', {
@@ -2956,6 +2978,167 @@ exports.ensureReferralCode = onRequest({ cors: true }, async (req, res) => {
   res.status(200).json({ success: true, code: result.code });
 });
 
+exports.getMyReferralSummary = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
+  const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) { res.status(401).json({ success: false, message: 'Unauthorized request.' }); return; }
+
+  try {
+    const userSnap = await db.collection('users').doc(decoded.uid).get();
+    const user = userSnap.data() || {};
+    const accountType = String(req.body?.accountType || user.activeRole || user.role || '').toLowerCase() === 'helper'
+      ? ACCOUNT_TYPES.HELPER
+      : ACCOUNT_TYPES.CUSTOMER;
+    const referralCodeResult = await ensureReferralCode({
+      db,
+      admin,
+      userId: decoded.uid,
+      accountType,
+      displayName: user.displayName || user.fullName || user.name || decoded.name || '',
+    });
+    const rewardConfig = await getRewardConfig(db, accountType === ACCOUNT_TYPES.HELPER ? 'helper' : 'customer');
+    const referredByMeSnap = await db.collection('referrals')
+      .where('referrerUserId', '==', decoded.uid)
+      .orderBy('createdAt', 'desc')
+      .limit(100)
+      .get();
+    const attributedSnap = await db.collection('referrals').doc(decoded.uid).get();
+
+    const referrals = referredByMeSnap.docs.map((item, index) => {
+      const data = item.data() || {};
+      return {
+        referralId: item.id,
+        status: data.status || 'attributed',
+        attributedAt: data.attributedAt || data.createdAt || null,
+        stageOneQualifiedAt: data.stageOneQualifiedAt || null,
+        stageOneAwardedAt: data.stageOneAwardedAt || null,
+        stageTwoQualifiedAt: data.stageTwoQualifiedAt || null,
+        stageTwoAwardedAt: data.stageTwoAwardedAt || null,
+        displayLabel: `Referred customer ${index + 1}`,
+      };
+    });
+
+    const stageOneQualifiedCount = referrals.filter((item) => item.stageOneQualifiedAt || item.stageOneAwardedAt).length;
+    const stageTwoQualifiedCount = referrals.filter((item) => item.stageTwoQualifiedAt || item.stageTwoAwardedAt).length;
+    const completedCount = referrals.filter((item) => item.stageTwoAwardedAt).length;
+
+    res.status(200).json({
+      success: true,
+      summary: {
+        code: referralCodeResult.code,
+        linkBasePath: '/signup',
+        stageOnePoints: Number(rewardConfig.rewards?.referralStageOne || rewardConfig.rewards?.referralReward || 0),
+        stageTwoPoints: Number(rewardConfig.rewards?.referralStageTwo || rewardConfig.rewards?.referralReward || 0),
+        attributedReferral: attributedSnap.exists ? {
+          referralId: attributedSnap.id,
+          ...(attributedSnap.data() || {}),
+        } : null,
+        totals: {
+          totalAttributed: referrals.length,
+          stageOneQualified: stageOneQualifiedCount,
+          stageTwoQualified: stageTwoQualifiedCount,
+          pending: Math.max(0, referrals.length - completedCount),
+          completed: completedCount,
+        },
+        referrals,
+      },
+    });
+  } catch (error) {
+    logger.warn('referral_summary_failed', { uid: decoded.uid, error: error.message });
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+exports.evaluateCustomerReferralStageOne = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
+  const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) { res.status(401).json({ success: false, message: 'Unauthorized request.' }); return; }
+  try {
+    const result = await awardReferralStage({ db, admin, referredUserId: decoded.uid, stage: 1 });
+    res.status(200).json({ success: true, evaluation: result });
+  } catch (error) {
+    logger.warn('referral_stage_one_evaluation_failed', { uid: decoded.uid, error: error.message });
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+exports.evaluateCustomerProfileRewards = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
+  const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) { res.status(401).json({ success: false, message: 'Unauthorized request.' }); return; }
+  try {
+    const profileCompletion = await evaluateCustomerProfileCompletionReward({ db, admin, userId: decoded.uid });
+    const referralStageOne = await awardReferralStage({ db, admin, referredUserId: decoded.uid, stage: 1 });
+    res.status(200).json({
+      success: true,
+      evaluation: {
+        profileCompletion,
+        referralStageOne,
+      },
+    });
+  } catch (error) {
+    logger.warn('customer_profile_reward_evaluation_failed', { uid: decoded.uid, error: error.message });
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+exports.updatePaymentMethod = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
+  const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) { res.status(401).json({ success: false, message: 'Unauthorized request.' }); return; }
+
+  const action = String(req.body?.action || '').trim().toLowerCase();
+  const methodId = String(req.body?.methodId || '').trim();
+  if (!['set_default', 'remove'].includes(action) || !methodId) {
+    res.status(400).json({ success: false, message: 'Invalid payment-method request.' }); return;
+  }
+
+  const userRef = db.collection('users').doc(decoded.uid);
+  const userSnap = await userRef.get();
+  if (!userSnap.exists) {
+    res.status(404).json({ success: false, message: 'User profile not found.' }); return;
+  }
+
+  const user = userSnap.data() || {};
+  const paymentMethods = Array.isArray(user.paymentMethods) ? [...user.paymentMethods] : [];
+  const methodIndex = paymentMethods.findIndex((method) => String(method?.id || '').trim() === methodId);
+  if (methodIndex < 0) {
+    res.status(404).json({ success: false, message: 'Payment method not found.' }); return;
+  }
+
+  let nextMethods = paymentMethods;
+  if (action === 'set_default') {
+    nextMethods = paymentMethods.map((method) => ({
+      ...method,
+      isDefault: String(method?.id || '').trim() === methodId,
+    }));
+  } else {
+    nextMethods = paymentMethods.filter((method) => String(method?.id || '').trim() !== methodId);
+    if (nextMethods.length && !nextMethods.some((method) => method.isDefault)) {
+      nextMethods[0] = { ...nextMethods[0], isDefault: true };
+    }
+  }
+
+  await userRef.set({
+    paymentMethods: nextMethods,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  res.status(200).json({
+    success: true,
+    paymentMethods: nextMethods.map((method) => ({
+      id: method.id,
+      nickname: method.nickname,
+      brand: method.brand,
+      last4: method.last4,
+      isDefault: Boolean(method.isDefault),
+      reusable: method.reusable === true,
+      signature: method.signature || null,
+      createdAt: method.createdAt || null,
+    })),
+  });
+});
+
 exports.submitServiceRequestRating = onRequest({ cors: true }, async (req, res) => {
   if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
   const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
@@ -2963,16 +3146,16 @@ exports.submitServiceRequestRating = onRequest({ cors: true }, async (req, res) 
   try {
     const result = await submitServiceRequestRating({ db, admin, requestId: String(req.body?.requestId || '').trim(), raterUserId: decoded.uid, score: req.body?.score, comment: req.body?.comment || '' });
     await recalculateMembership({ db, admin, userId: result.ratedUserId, accountType: result.direction === 'customer_to_helper' ? ACCOUNT_TYPES.HELPER : ACCOUNT_TYPES.CUSTOMER }).catch(() => null);
+    if (result.direction === 'customer_to_helper') {
+      for (const serviceId of result.expandedServiceIds || []) {
+        await recalculateMastery({ db, admin, helperId: result.ratedUserId, serviceId }).catch(() => null);
+      }
+    }
     res.status(200).json({ success: true, rating: result });
   } catch (error) { logger.warn('rating_validation_failed', { uid: decoded.uid, error: error.message }); res.status(400).json({ success: false, message: error.message }); }
 });
 
 exports.expireRewardPoints = onSchedule('every 24 hours', async () => processExpiredCustomerPoints({ db, admin, limit: 200 }));
-
-const BILLING_RULES = {
-  PLATFORM_FEE_RATE: 0.27,
-  TUTOR_PAYOUT_RATE: 0.73,
-};
 
 async function chargeAuthorizationWithPaystack({ paystackSecretKey, email, amount, authorizationCode }) {
   if (!authorizationCode) {
@@ -3046,8 +3229,14 @@ function assertValidPayoutInput(input = {}) {
   if (missing.length) {
     throw new Error(`Missing payout field(s): ${missing.join(', ')}`);
   }
-  if (!['identityNumber', 'passportNumber'].includes(input.documentType)) {
-    throw new Error('Choose South African ID or Passport for payout verification.');
+  if (!['personal', 'business'].includes(input.accountType)) {
+    throw new Error('Choose a personal or business payout account.');
+  }
+  if (input.accountType === 'business' && input.documentType !== 'businessRegistrationNumber') {
+    throw new Error('A business registration number is required for business payout accounts.');
+  }
+  if (input.accountType === 'personal' && !['identityNumber', 'passportNumber'].includes(input.documentType)) {
+    throw new Error('Choose South African ID or Passport for personal payout verification.');
   }
 }
 
@@ -3106,6 +3295,7 @@ async function verifyAndCreateTutorTransferRecipient({ paystackSecretKey, payout
     ...payout,
     countryCode: 'ZA',
     currency: 'ZAR',
+    recipientCode: recipient?.data?.recipient_code || '',
     paystackRecipientCode: recipient?.data?.recipient_code || '',
     paystackRecipientId: recipient?.data?.id ? String(recipient.data.id) : '',
     verified: true,
@@ -3140,6 +3330,109 @@ async function initiatePaystackTransfer({ paystackSecretKey, amount, recipientCo
 
   return payload?.data || {};
 }
+
+exports.getHelperPayoutBanks = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRETS] }, async (req, res) => {
+  if (!['GET', 'POST'].includes(req.method)) {
+    res.status(405).json({ success: false, message: 'Method not allowed' });
+    return;
+  }
+
+  const token = getBearerToken(req);
+  const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+
+  try {
+    const userSnap = await db.collection('users').doc(decoded.uid).get();
+    if (!userSnap.exists || !isHelperUserRecord(userSnap.data() || {})) {
+      res.status(403).json({ success: false, message: 'A helper account is required.' });
+      return;
+    }
+
+    const paymentsSecrets = getPaymentsSecrets();
+    const result = await callPaystackApi({
+      paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY,
+      path: '/bank?currency=ZAR&enabled_for_verification=true&perPage=100',
+    });
+    const banks = (Array.isArray(result?.data) ? result.data : [])
+      .filter((bank) => bank?.active !== false && bank?.code && bank?.name)
+      .map((bank) => ({
+        code: String(bank.code),
+        name: String(bank.name),
+        supportedTypes: Array.isArray(bank.supported_types) ? bank.supported_types : [],
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+
+    res.status(200).json({ success: true, banks });
+  } catch (error) {
+    logger.warn('helper_payout_banks_failed', { uid: decoded.uid, error: error.message });
+    res.status(400).json({ success: false, message: error.message || 'Unable to load supported banks.' });
+  }
+});
+
+exports.verifyHelperPayout = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRETS] }, async (req, res) => {
+  if (req.method !== 'POST') {
+    res.status(405).json({ success: false, message: 'Method not allowed' });
+    return;
+  }
+
+  const token = getBearerToken(req);
+  const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+
+  const userRef = db.collection('users').doc(decoded.uid);
+  try {
+    const userSnap = await userRef.get();
+    if (!userSnap.exists || !isHelperUserRecord(userSnap.data() || {})) {
+      res.status(403).json({ success: false, message: 'A helper account is required.' });
+      return;
+    }
+
+    const user = userSnap.data() || {};
+    const payoutInput = normalizePayoutInput(req.body?.payout || req.body || {});
+    assertValidPayoutInput(payoutInput);
+
+    const paymentsSecrets = getPaymentsSecrets();
+    const verifiedPayout = await verifyAndCreateTutorTransferRecipient({
+      paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY,
+      payout: payoutInput,
+      email: decoded.email || user.email || '',
+      uid: decoded.uid,
+    });
+    const payout = {
+      ...verifiedPayout,
+      documentNumber: admin.firestore.FieldValue.delete(),
+      documentNumberLast4: payoutInput.documentNumber.slice(-4),
+    };
+
+    await userRef.set({
+      payout,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    const responsePayout = {
+      ...verifiedPayout,
+      documentNumber: '',
+      documentNumberLast4: payoutInput.documentNumber.slice(-4),
+    };
+    res.status(200).json({
+      success: true,
+      message: verifiedPayout.verificationMessage || 'Payout account verified.',
+      payout: responsePayout,
+    });
+  } catch (error) {
+    logger.warn('helper_payout_verification_failed', { uid: decoded.uid, error: error.message });
+    res.status(400).json({
+      success: false,
+      message: error.message || 'Unable to verify this payout account.',
+    });
+  }
+});
 
 exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRETS] }, async (req, res) => {
   if (req.method !== 'POST') {
@@ -3351,14 +3644,16 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
     const customerConfig = await getRewardConfig(db, 'customer');
     const helperConfig = await getRewardConfig(db, 'helper');
     const expandedServiceIds = serviceIdsFor(updatedRequest);
-    await applyRewardTransaction({ db, admin, userId: request.customerId, accountType: ACCOUNT_TYPES.CUSTOMER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(customerConfig.rewards?.completedPaidBooking || 50), reasonCode: REWARD_REASON_CODES.CUSTOMER_COMPLETED_PAID_BOOKING, reasonLabel: 'Completed paid booking', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `customer:${request.customerId}:request:${requestId}:completed-paid`, requestId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '' }).catch((error) => logger.warn('customer_booking_reward_failed', { requestId, error: error.message }));
-    await applyRewardTransaction({ db, admin, userId: request.customerId, accountType: ACCOUNT_TYPES.CUSTOMER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(customerConfig.rewards?.firstCompletedPaidBooking || 100), reasonCode: REWARD_REASON_CODES.CUSTOMER_FIRST_COMPLETED_PAID_BOOKING, reasonLabel: 'First completed paid booking', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `customer:${request.customerId}:request:first-booking-bonus`, requestId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '' }).catch((error) => logger.info('first_booking_bonus_skipped_or_failed', { requestId, error: error.message }));
+    await applyRewardTransaction({ db, admin, userId: request.customerId, accountType: ACCOUNT_TYPES.CUSTOMER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(customerConfig.rewards?.completedPaidBooking || 50), reasonCode: REWARD_REASON_CODES.CUSTOMER_COMPLETED_PAID_BOOKING, reasonLabel: 'Completed paid booking', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `customer:${request.customerId}:request:${requestId}:completed-paid`, requestId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch((error) => logger.warn('customer_booking_reward_failed', { requestId, error: error.message }));
+    const firstBookingRewardResult = await applyRewardTransaction({ db, admin, userId: request.customerId, accountType: ACCOUNT_TYPES.CUSTOMER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(customerConfig.rewards?.firstCompletedPaidBooking || 100), reasonCode: REWARD_REASON_CODES.CUSTOMER_FIRST_COMPLETED_PAID_BOOKING, reasonLabel: 'First completed paid booking', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `customer:${request.customerId}:request:first-booking-bonus`, requestId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch((error) => { logger.info('first_booking_bonus_skipped_or_failed', { requestId, error: error.message }); return null; });
     await incrementCompletedPaid({ db, admin, userId: request.customerId, accountType: ACCOUNT_TYPES.CUSTOMER, requestId }).catch((error) => logger.warn('customer_membership_recalc_failed', { requestId, error: error.message }));
     if (helperId) {
-      await applyRewardTransaction({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(helperConfig.rewards?.completedPaidJob || 50), reasonCode: REWARD_REASON_CODES.HELPER_COMPLETED_PAID_JOB, reasonLabel: 'Completed paid job', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `helper:${helperId}:request:${requestId}:completed-paid`, requestId, relatedUserId: request.customerId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '' }).catch((error) => logger.warn('helper_booking_reward_failed', { requestId, helperId, error: error.message }));
+      await applyRewardTransaction({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(helperConfig.rewards?.completedPaidJob || 50), reasonCode: REWARD_REASON_CODES.HELPER_COMPLETED_PAID_JOB, reasonLabel: 'Completed paid job', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `helper:${helperId}:request:${requestId}:completed-paid`, requestId, relatedUserId: request.customerId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch((error) => logger.warn('helper_booking_reward_failed', { requestId, helperId, error: error.message }));
       await incrementCompletedPaid({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, requestId, serviceIds: expandedServiceIds, categoryId: request.categoryId || '' }).catch((error) => logger.warn('helper_mastery_recalc_failed', { requestId, helperId, error: error.message }));
     }
-    await awardReferralStage({ db, admin, referredUserId: request.customerId, stage: 2, requestId }).catch((error) => logger.warn('referral_stage_two_failed', { requestId, error: error.message }));
+    if (firstBookingRewardResult) {
+      await awardReferralStage({ db, admin, referredUserId: request.customerId, stage: 2, requestId }).catch((error) => logger.warn('referral_stage_two_failed', { requestId, error: error.message }));
+    }
   }
 
   await Promise.all([
@@ -3513,9 +3808,74 @@ exports.billCustomerServiceCancellation = onRequest({ cors: true, secrets: [UNCE
   const endedAt = Date.now();
 
   if (isPreAssignmentServiceRequestStatus(status)) {
+    await requestRef.set({
+      status: 'canceled',
+      statusDetail: 'Customer canceled the service request before helper assignment.',
+      canceledAt: endedAt,
+      canceledBy: 'customer',
+      canceledReason,
+      helperAssignment: null,
+      helperQueue: [],
+      currentOfferHelperId: null,
+      offerExpiresAt: null,
+      offerToken: null,
+      offerCycleExcludedHelperIds: [],
+      declinedHelperIds: [],
+      matchingStartedAtMs: null,
+      paymentStatus: null,
+      paymentTransactionId: null,
+      cancellationFeeAmount: 0,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    await admin.database().ref(`liveTracking/serviceRequests/${requestId}`).update({
+      status: 'canceled',
+      closedReason: 'customer_canceled_pre_assignment',
+      closedAtMs: endedAt,
+      updatedAtMs: endedAt,
+    }).catch(() => null);
+
+    await Promise.all([
+      db.collection('customerServiceEvents').doc(`request_canceled_${requestId}`).set({
+        customerId: request.customerId,
+        eventType: 'request_canceled',
+        serviceId: request.serviceIds?.[0] || request.selectedPackageId || request.categoryId || '',
+        categoryId: request.categoryId || '',
+        serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
+        requestId,
+        source: 'billCustomerServiceCancellation',
+        metadata: {
+          helperId: '',
+          paymentStatus: 'not_applicable',
+          cancellationAmount: 0,
+          cancellationBillingRule: 'pre_assignment',
+          cancellationDistanceKm: 0,
+          helperPayoutAmount: 0,
+          platformAmount: 0,
+          requestStatus: 'canceled',
+        },
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdAtMs: endedAt,
+        dayBucket: new Date(endedAt).toISOString().slice(0, 10),
+      }, { merge: true }),
+      createUserNotification({
+        userId: request.customerId,
+        title: 'Service canceled',
+        message: 'Your service request was canceled.',
+        type: 'service_canceled',
+        requestId,
+        targetPath: `/customer/requests/${requestId}`,
+        metadata: {
+          paymentStatus: 'not_applicable',
+          cancellationAmount: 0,
+        },
+      }),
+    ]).catch(() => null);
+
+    const updatedSnap = await requestRef.get();
     res.status(200).json({
       success: true,
-      request: { id: requestId, ...request },
+      request: { id: updatedSnap.id, ...updatedSnap.data() },
       charge: { ok: true, reason: null },
       cancellation: {
         requestId,
@@ -3616,38 +3976,134 @@ exports.billCustomerServiceCancellation = onRequest({ cors: true, secrets: [UNCE
     ? Number(wallet.balance || 0)
     : Number((Number(wallet.balance || 0) - cancellationAmount).toFixed(2));
 
+  const pricingSnapshot = {
+    ...(request.pricingSnapshot || {}),
+    subtotal: getServiceQuoteSubtotal(request),
+    travelFee,
+    bookingFee: bookingCharge,
+    bookingFeeRate: SERVICE_BOOKING_FEE_RATE,
+    bookingFeeCap: SERVICE_BOOKING_FEE_CAP,
+    cancellationAmount,
+    cancellationTravelCharge: travelCharge,
+    cancellationDistanceKm: Number(travelledKm.toFixed(2)),
+    cancellationBillingRule: billingRule,
+    finalizedAt: new Date(endedAt).toISOString(),
+  };
+
+  const cancellationPayload = {
+    requestId,
+    helperId,
+    endedAt,
+    paymentStatus,
+    cancellationAmount,
+    cancellationBillingRule: billingRule,
+    cancellationDistanceKm: Number(travelledKm.toFixed(2)),
+    helperPayoutBreakdown,
+    chargedCardLast4: selectedCard?.last4 || null,
+    paymentTransactionId: charge.transactionId || null,
+    walletBalance: nextWalletBalance,
+    walletCurrency: wallet.currency || 'ZAR',
+    pricingSnapshot,
+    liveTrackingClosedReason: 'customer_canceled',
+  };
+
+  const writeBatch = db.batch();
+  writeBatch.set(requestRef, {
+    status: 'canceled',
+    statusDetail: cancellationAmount > 0
+      ? `Customer canceled the service. Cancellation fee charged: R${cancellationAmount.toFixed(2)}.`
+      : 'Customer canceled the service.',
+    canceledAt: endedAt,
+    canceledBy: 'customer',
+    canceledReason,
+    cancellationFeeAmount: cancellationAmount,
+    paymentStatus,
+    paymentTransactionId: charge.transactionId || null,
+    chargedCardLast4: selectedCard?.last4 || null,
+    pricingSnapshot,
+    helperPayoutBreakdown: {
+      ...helperPayoutBreakdown,
+      finalizedAt: pricingSnapshot.finalizedAt,
+    },
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  if (!charge.ok) {
+    writeBatch.set(customerRef, {
+      wallet: {
+        ...wallet,
+        balance: nextWalletBalance,
+        currency: wallet.currency || 'ZAR',
+        updatedAt: new Date().toISOString(),
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+  }
+
+  await writeBatch.commit();
+
+  await admin.database().ref(`liveTracking/serviceRequests/${requestId}`).update({
+    status: 'canceled',
+    closedReason: cancellationPayload.liveTrackingClosedReason,
+    closedAtMs: endedAt,
+    updatedAtMs: endedAt,
+  }).catch(() => null);
+
+  await Promise.all([
+    db.collection('customerServiceEvents').doc(`request_canceled_${requestId}`).set({
+      customerId: request.customerId,
+      eventType: 'request_canceled',
+      serviceId: request.serviceIds?.[0] || request.selectedPackageId || request.categoryId || '',
+      categoryId: request.categoryId || '',
+      serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
+      requestId,
+      source: 'billCustomerServiceCancellation',
+      metadata: {
+        helperId,
+        paymentStatus,
+        cancellationAmount,
+        cancellationBillingRule: billingRule,
+        cancellationDistanceKm: Number(travelledKm.toFixed(2)),
+        helperPayoutAmount: Number(helperPayoutBreakdown.helperAmount || 0),
+        platformAmount: Number(helperPayoutBreakdown.platformAmount || 0),
+        requestStatus: 'canceled',
+      },
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdAtMs: endedAt,
+      dayBucket: new Date(endedAt).toISOString().slice(0, 10),
+    }, { merge: true }),
+    createUserNotification({
+      userId: request.customerId,
+      title: 'Service canceled',
+      message: cancellationAmount > 0
+        ? `Your service request was canceled. Cancellation fee: R${cancellationAmount.toFixed(2)}.`
+        : 'Your service request was canceled.',
+      type: 'service_canceled',
+      requestId,
+      targetPath: `/customer/requests/${requestId}`,
+      metadata: {
+        paymentStatus,
+        cancellationAmount,
+      },
+    }),
+    ...(helperId ? [
+      createUserNotification({
+        userId: helperId,
+        title: 'Job canceled',
+        message: `${request.customerName || 'The customer'} canceled this job. Helper earnings recorded: R${Number(helperPayoutBreakdown.helperAmount || 0).toFixed(2)}.`,
+        type: 'job_canceled',
+        requestId,
+        targetPath: `/provider/jobs/${requestId}`,
+      }),
+    ] : []),
+  ]).catch(() => null);
+
+  const updatedSnap = await requestRef.get();
   res.status(200).json({
     success: true,
-    request: { id: requestId, ...request },
+    request: { id: updatedSnap.id, ...updatedSnap.data() },
     charge: { ok: charge.ok, reason: charge.reason || null },
-    cancellation: {
-      requestId,
-      helperId,
-      endedAt,
-      paymentStatus,
-      cancellationAmount,
-      cancellationBillingRule: billingRule,
-      cancellationDistanceKm: Number(travelledKm.toFixed(2)),
-      helperPayoutBreakdown,
-      chargedCardLast4: selectedCard?.last4 || null,
-      paymentTransactionId: charge.transactionId || null,
-      walletBalance: nextWalletBalance,
-      walletCurrency: wallet.currency || 'ZAR',
-      pricingSnapshot: {
-        ...(request.pricingSnapshot || {}),
-        subtotal: getServiceQuoteSubtotal(request),
-        travelFee,
-        bookingFee: bookingCharge,
-        bookingFeeRate: SERVICE_BOOKING_FEE_RATE,
-        bookingFeeCap: SERVICE_BOOKING_FEE_CAP,
-        cancellationAmount,
-        cancellationTravelCharge: travelCharge,
-        cancellationDistanceKm: Number(travelledKm.toFixed(2)),
-        cancellationBillingRule: billingRule,
-        finalizedAt: new Date(endedAt).toISOString(),
-      },
-      liveTrackingClosedReason: 'customer_canceled',
-    },
+    cancellation: cancellationPayload,
   });
 });
 

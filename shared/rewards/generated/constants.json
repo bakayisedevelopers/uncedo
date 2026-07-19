@@ -1,0 +1,76 @@
+{
+  "SCHEMA_VERSION": 1,
+  "ACCOUNT_TYPES": {
+    "CUSTOMER": "customer",
+    "HELPER": "helper"
+  },
+  "MEMBERSHIP_LEVELS": [
+    "neighbour",
+    "partner",
+    "friend",
+    "family"
+  ],
+  "MASTERY_LEVELS": [
+    "beginner",
+    "specialist",
+    "master",
+    "legend"
+  ],
+  "RATING_DIRECTIONS": {
+    "CUSTOMER_TO_HELPER": "customer_to_helper",
+    "HELPER_TO_CUSTOMER": "helper_to_customer"
+  },
+  "RATING_ROLES": {
+    "CUSTOMER": "customer",
+    "HELPER": "helper"
+  },
+  "REWARD_TRANSACTION_DIRECTIONS": {
+    "CREDIT": "credit",
+    "DEBIT": "debit",
+    "REVERSAL": "reversal",
+    "EXPIRY": "expiry"
+  },
+  "REWARD_TRANSACTION_STATUSES": {
+    "APPLIED": "applied",
+    "REVERSED": "reversed",
+    "EXPIRED": "expired",
+    "VOID": "void"
+  },
+  "REWARD_REASON_CODES": {
+    "PROFILE_COMPLETED": "profile_completed",
+    "PAYMENT_METHOD_VERIFIED": "payment_method_verified",
+    "CUSTOMER_COMPLETED_PAID_BOOKING": "customer_completed_paid_booking",
+    "CUSTOMER_FIRST_COMPLETED_PAID_BOOKING": "customer_first_completed_paid_booking",
+    "HELPER_COMPLETED_PAID_JOB": "helper_completed_paid_job",
+    "RATING_SUBMITTED": "rating_submitted",
+    "RATING_RECEIVED_EFFECT": "rating_received_effect",
+    "REFERRAL_STAGE_ONE": "referral_stage_one",
+    "REFERRAL_STAGE_TWO": "referral_stage_two",
+    "POINTS_EXPIRED": "points_expired",
+    "REVERSAL": "reversal"
+  },
+  "REFERRAL_STATUSES": {
+    "ACTIVE": "active",
+    "ATTRIBUTED": "attributed",
+    "QUALIFIED": "qualified",
+    "REWARDED": "rewarded",
+    "INVALID": "invalid"
+  },
+  "SUPPORTED_EVENT_TYPES": [
+    "profile_completed",
+    "payment_method_verified",
+    "request_completed_paid",
+    "rating_submitted",
+    "referral_stage_one",
+    "referral_stage_two",
+    "points_expired",
+    "reward_reversed"
+  ],
+  "REWARD_CONFIG_DOCS": {
+    "GLOBAL": "global",
+    "CUSTOMER": "customer",
+    "HELPER": "helper",
+    "MEMBERSHIP": "membership",
+    "MASTERY": "mastery"
+  }
+}

@@ -4,7 +4,8 @@
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test helperLegalAgreements.test.js legalAgreements.test.js pricingEngine.test.js subjectExtraction.test.js",
+    "test:emulator": "node --test test/firestore.rules.test.js test/rewards.integration.test.js test/rewards.test.js"
   },
   "engines": {
     "node": "20"

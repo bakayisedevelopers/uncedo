@@ -1,4 +1,4 @@
-const { SCHEMA_VERSION } = require('../../shared/rewards');
+const { SCHEMA_VERSION } = require('../shared/rewards');
 const DEFAULT_REWARD_CONFIG = {
   global: { pointsPerRand: 10, customerPointExpiryMonths: 6, minimumCustomerRedemptionPoints: 100, redemptionIncrementPoints: 10, maximumServiceCreditPercentagePerBooking: 20, featureFlags: { rewardsEnabled: true, referralsEnabled: true, ratingsEnabled: true, expiryEnabled: true, redemptionEnabled: false }, schemaVersion: SCHEMA_VERSION },
   customer: { rewards: { profileCompleted: 20, paymentMethodVerified: 50, firstCompletedPaidBooking: 100, completedPaidBooking: 50, ratingSubmitted: 20, postServicePhoto: 20, referralStageOne: 100, referralStageTwo: 150, dailyQualifyingActivity: 1, sevenDayStreakBonus: 10, thirtyDayStreakBonus: 30, favouriteAction: 1, shareAction: 1 }, ratingReceivedEffects: { 5: 50, 4: 20, 3: -10, 2: -30, 1: -50 }, lowValueCaps: { dailyQualifyingActivity: 1, favouriteActionPerDay: 5, shareActionPerDay: 5 }, schemaVersion: SCHEMA_VERSION },

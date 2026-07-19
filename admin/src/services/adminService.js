@@ -1,7 +1,7 @@
 import { getFirebaseClients } from '../firebase/config';
 import { reconcileOpenServiceRequests } from './requestReconciliationService';
 
-const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID || 'bakayise-uncedo';
+const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID || 'bakayise-uncedo-latest';
 const useFirebaseEmulators = import.meta.env.VITE_USE_FIREBASE_EMULATORS === 'true';
 const firebaseEmulatorHost = import.meta.env.VITE_FIREBASE_EMULATOR_HOST || 'localhost';
 
