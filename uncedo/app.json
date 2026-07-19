@@ -1,0 +1,54 @@
+{
+  "expo": {
+    "name": "Uncedo",
+    "slug": "uncedo-mobile",
+    "scheme": "uncedo",
+    "version": "0.1.0",
+    "icon": "../Logo.png",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "../Logo.png",
+        "backgroundColor": "#ffffff"
+      },
+      "package": "com.anonymous.uncedomobile",
+      "permissions": [
+        "RECORD_AUDIO",
+        "MODIFY_AUDIO_SETTINGS",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ]
+    },
+    "ios": {
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Uncedo uses your microphone so you can speak during live service calls.",
+        "NSSpeechRecognitionUsageDescription": "Uncedo uses speech recognition to turn your voice into text during service calls.",
+        "NSLocationWhenInUseUsageDescription": "Uncedo uses your location to find nearby helpers and route them to your service address."
+      },
+      "bundleIdentifier": "com.anonymous.uncedomobile"
+    },
+    "plugins": [
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Uncedo uses your microphone so you can speak during service calls.",
+          "speechRecognitionPermission": "Uncedo uses speech recognition to turn your voice into text during service calls.",
+          "androidSpeechServicePackages": [
+            "com.google.android.googlequicksearchbox",
+            "com.google.android.as"
+          ]
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "44335672-bb65-43aa-a61b-0a8d1c0e8fd1"
+      }
+    },
+    "owner": "bakayisedevelopers"
+  }
+}
