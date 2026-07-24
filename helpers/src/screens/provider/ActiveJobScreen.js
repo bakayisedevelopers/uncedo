@@ -36,6 +36,7 @@ import {
 } from '../../services/activeJobTrackingService';
 import { watchHelperLocation } from '../../services/helperLocationService';
 import { submitServiceRequestRating } from '../../services/serviceRequestService';
+import { refreshHelperRewards } from '../../services/rewards/rewardClientService';
 import { subscribeToLiveTracking } from '../../services/liveTrackingRealtimeService';
 import { uploadLocalFile } from '../../services/storageService';
 import { colors } from '../../theme/colors';
@@ -981,6 +982,9 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
         score: nextScore,
         comment: '',
       });
+      refreshHelperRewards().catch((error) => {
+        console.warn('Helper reward refresh after rating failed:', error.message);
+      });
       dismissRatingModal();
     } catch (error) {
       Alert.alert('Rating failed', error.message || 'Unable to submit the rating right now.');
@@ -1109,6 +1113,10 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
         Alert.alert('Completion failed', 'Unable to complete this job right now.');
         return;
       }
+
+      refreshHelperRewards().catch((error) => {
+        console.warn('Helper reward refresh after completion failed:', error.message);
+      });
 
       setShowCompletionModal(false);
       setProofPhotos([]);

@@ -202,6 +202,24 @@ export function ProviderProfileScreen({ navigate }) {
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Settings</Text>
         <ProfileRow
+          icon="sparkles-outline"
+          title="Rewards"
+          description="View Uncedo Points, membership, service mastery, ratings, and recognition."
+          onPress={() => navigate({ key: 'HelperRewardsOverview', params: { parentTab: 'Profile' } })}
+        />
+        <ProfileRow
+          icon="gift-outline"
+          title="Referrals"
+          description="Share your public referral code and follow privacy-safe qualification progress."
+          onPress={() => navigate({ key: 'HelperReferrals', params: { parentTab: 'Profile' } })}
+        />
+        <ProfileRow
+          icon="notifications-outline"
+          title="Notifications"
+          description="Open job, payout, and server-authored reward updates."
+          onPress={() => navigate({ key: 'HelperNotifications', params: { parentTab: 'Profile' } })}
+        />
+        <ProfileRow
           icon="person-circle-outline"
           title="Personal details"
           description="Edit your name, phone number, helper type, home address, and business details."

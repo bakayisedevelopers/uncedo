@@ -27,6 +27,7 @@ export const FIREBASE_PUBLIC_CONFIG = {
   ),
 };
 
+export const WEB_APP_BASE_URL = readPublicEnv(process.env.EXPO_PUBLIC_WEB_APP_URL, 'https://uncedo.bakayise.com').replace(/\/+$/, '');
 export const GOOGLE_MAPS_API_KEY = readPublicEnv(
   process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY,
 );

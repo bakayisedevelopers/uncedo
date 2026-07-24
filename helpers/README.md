@@ -95,6 +95,10 @@ C:\Users\Jabu Babb\AppData\Local\Android\Sdk\platform-tools\adb.exe connect 192.
 - Navigation is implemented in `src/navigation/RootNavigator.js`, including the custom route history used for Android hardware back behavior and mobile system-bar insets.
 - The helper agreement flow now reads and writes the live contract records directly in Firebase client-side, including signed acceptance records and the stored acceptance PDF, and blocks profile completion until the latest published version is signed.
 
-## Phase 0 rewards foundation
+## Helper rewards experience
 
-The helper app now submits service-request ratings through the trusted `submitServiceRequestRating` Cloud Function instead of updating customer aggregates from the client. Read-only reward helpers live in `src/services/rewards/rewardClientService.js` for reward accounts, transactions, reward configuration, rating summaries, membership, helper mastery, and referral-code operations. Full rewards dashboards are intentionally deferred.
+The helper app submits service-request ratings through the trusted `submitServiceRequestRating` Cloud Function instead of updating customer aggregates from the client. The Helpers Rewards experience is read-only against the shared Phase 0 rewards foundation: it displays Uncedo Points, paginated ledger history, overall membership, per-service mastery, customer-safe ratings, referrals, performance, and recognition without mixing points with cash earnings or payouts.
+
+`src/services/rewards/rewardClientService.js` is the focused data client for reward accounts, transactions, reward configuration, rating summaries, mastery, and referral endpoints. Reward-sensitive writes remain server-authoritative. Helper reward screens are registered in `src/navigation/RootNavigator.js`; profile, home, earnings, service offerings, completion, rating, and server-authored notification flows link into them.
+
+Points cannot be withdrawn as cash. Helper referral sharing is available, while helper-to-helper qualification remains clearly marked as planned unless trusted backend configuration enables it. Annual recognition is shown only when the backend provides authoritative annual tier data.

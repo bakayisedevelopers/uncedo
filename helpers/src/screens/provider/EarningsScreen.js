@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { Card, EmptyState, MetricCard, SectionHeading, StatusBadge } from '../../components/app/HelperUi';
+import { ActionButton, Card, EmptyState, MetricCard, SectionHeading, StatusBadge } from '../../components/app/HelperUi';
 import { useHelpersApp } from '../../context/HelpersAppContext';
 import { colors } from '../../theme/colors';
 import {
@@ -11,7 +11,7 @@ import {
   getPayoutTone,
 } from '../../utils/payouts';
 
-export function EarningsScreen({ goBack }) {
+export function EarningsScreen({ navigate, goBack }) {
   const { paymentSummary, weeklyGroups } = useHelpersApp();
   const [expandedWeekKey, setExpandedWeekKey] = useState('');
 
@@ -33,6 +33,14 @@ export function EarningsScreen({ goBack }) {
           subtitle="This is the total amount currently owed to you and not yet marked as paid."
         />
         <Text style={styles.walletAmount}>{formatCurrency(paymentSummary.unpaidAmount)}</Text>
+      </Card>
+
+      <Card>
+        <SectionHeading
+          title="Reward Points"
+          subtitle="Uncedo Points are separate from cash earnings, weekly payouts, and your wallet."
+          action={<ActionButton label="Open rewards" tone="secondary" onPress={() => navigate({ key: 'HelperRewardsOverview', params: { parentTab: 'Profile' } })} />}
+        />
       </Card>
 
       <Card>

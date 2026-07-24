@@ -99,6 +99,7 @@ export function ReferralProgressCard({ summary = null }) {
 
 export function RatingDistributionCard({ ratingSummary = null }) {
   const distribution = ratingSummary?.distribution || ratingSummary?.overallDistribution || {};
+  const total = [5, 4, 3, 2, 1].reduce((sum, score) => sum + Number(distribution?.[score] || 0), 0);
 
   return (
     <Card>
@@ -112,7 +113,7 @@ export function RatingDistributionCard({ ratingSummary = null }) {
                 style={[
                   styles.ratingBarFill,
                   {
-                    width: `${Math.max(0, Math.min(100, Number(distribution?.[score] || 0)))}%`,
+                    width: `${total ? Math.max(0, Math.min(100, (Number(distribution?.[score] || 0) / total) * 100)) : 0}%`,
                   },
                 ]}
               />

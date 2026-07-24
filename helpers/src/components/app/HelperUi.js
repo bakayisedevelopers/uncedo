@@ -1,9 +1,9 @@
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { colors } from '../../theme/colors';
 
-export function Screen({ eyebrow = 'Helper', title, description, footerAction, children }) {
+export function Screen({ eyebrow = 'Helper', title, description, footerAction, refreshControl, children }) {
   return (
-    <ScrollView contentContainerStyle={styles.screen}>
+    <ScrollView contentContainerStyle={styles.screen} refreshControl={refreshControl}>
       <View style={styles.hero}>
         <Text style={styles.eyebrow}>{eyebrow}</Text>
         <Text style={styles.title}>{title}</Text>

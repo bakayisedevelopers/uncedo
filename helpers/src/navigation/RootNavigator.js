@@ -30,9 +30,23 @@ import { ServicesOfferedScreen } from '../screens/provider/ServicesOfferedScreen
 import { ServiceOfferingCatalogScreen } from '../screens/provider/SkillCatalogScreen';
 import { ServiceOfferingDetailsScreen } from '../screens/provider/SkillDetailsScreen';
 import { VerificationScreen } from '../screens/provider/VerificationScreen';
+import { HelperHowToEarnScreen } from '../screens/provider/HelperHowToEarnScreen';
+import { HelperMembershipScreen } from '../screens/provider/HelperMembershipScreen';
+import { HelperNotificationsScreen } from '../screens/provider/HelperNotificationsScreen';
+import { HelperPerformanceProgressScreen } from '../screens/provider/HelperPerformanceProgressScreen';
+import { HelperRatingSummaryScreen } from '../screens/provider/HelperRatingSummaryScreen';
+import { HelperRecognitionScreen } from '../screens/provider/HelperRecognitionScreen';
+import { HelperReferralsScreen } from '../screens/provider/HelperReferralsScreen';
+import { HelperRewardHistoryScreen } from '../screens/provider/HelperRewardHistoryScreen';
+import { HelperRewardsOverviewScreen } from '../screens/provider/HelperRewardsOverviewScreen';
+import { HelperServiceMasteryDetailsScreen } from '../screens/provider/HelperServiceMasteryDetailsScreen';
+import { HelperServiceMasteryOverviewScreen } from '../screens/provider/HelperServiceMasteryOverviewScreen';
+import { HelperServiceRatingDetailsScreen } from '../screens/provider/HelperServiceRatingDetailsScreen';
 import { HelperOfferOverlay } from '../components/app/HelperOfferOverlay';
 import { useAuth } from '../context/AuthContext';
 import { useHelpersApp } from '../context/HelpersAppContext';
+import { markAllNotificationsRead, markNotificationRead, subscribeToNotifications } from '../services/notificationService';
+import { resolveHelperRewardNotificationRoute } from './rewardNavigation';
 import { colors } from '../theme/colors';
 
 const rootTabs = [
@@ -61,6 +75,18 @@ const secondaryScreens = {
   JobOffers: JobOffersScreen,
   JobDetails: JobDetailsScreen,
   ActiveJob: ActiveJobScreen,
+  HelperRewardsOverview: HelperRewardsOverviewScreen,
+  HelperRewardHistory: HelperRewardHistoryScreen,
+  HelperMembership: HelperMembershipScreen,
+  HelperServiceMasteryOverview: HelperServiceMasteryOverviewScreen,
+  HelperServiceMasteryDetails: HelperServiceMasteryDetailsScreen,
+  HelperReferrals: HelperReferralsScreen,
+  HelperRatingSummary: HelperRatingSummaryScreen,
+  HelperServiceRatingDetails: HelperServiceRatingDetailsScreen,
+  HelperPerformanceProgress: HelperPerformanceProgressScreen,
+  HelperHowToEarn: HelperHowToEarnScreen,
+  HelperRecognition: HelperRecognitionScreen,
+  HelperNotifications: HelperNotificationsScreen,
 };
 
 const FULLSCREEN_ROUTES = ['Home', 'ActiveJob'];
@@ -142,6 +168,7 @@ export function RootNavigator() {
   const [bottomNavVisible, setBottomNavVisible] = useState(true);
   const [bottomNavHeight, setBottomNavHeight] = useState(BOTTOM_NAV_HEIGHT + bottomSystemInset);
   const [lastActiveJobId, setLastActiveJobId] = useState(null);
+  const [notifications, setNotifications] = useState([]);
   const activeRouteRef = useRef(DEFAULT_ROUTE);
   const routeHistoryRef = useRef([]);
 
@@ -232,6 +259,14 @@ export function RootNavigator() {
   }, [bottomNavVisible, bottomSystemInset]);
 
   useEffect(() => {
+    if (!user?.uid) {
+      setNotifications([]);
+      return () => {};
+    }
+    return subscribeToNotifications(user.uid, setNotifications, () => setNotifications([]));
+  }, [user?.uid]);
+
+  useEffect(() => {
     if (user?.uid) {
       return;
     }
@@ -267,6 +302,12 @@ export function RootNavigator() {
     bottomNavVisible,
     systemInsets,
     onBottomNavVisibilityChange: setBottomNavVisible,
+    notifications,
+    onMarkAllRead: () => markAllNotificationsRead(user.uid).catch(() => null),
+    onOpenNotification: async (notification) => {
+      await markNotificationRead(notification?.id).catch(() => null);
+      openRoute(resolveHelperRewardNotificationRoute(notification));
+    },
   };
 
   return (

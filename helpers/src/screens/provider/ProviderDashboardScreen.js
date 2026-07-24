@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Platform, StatusBar, StyleSheet, useWindowDimensions, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { Pressable, Text } from 'react-native';
 import { HelperHomeCallToActionSheet } from '../../components/app/HelperHomeCallToActionSheet';
 import { HelperHomeMap } from '../../components/app/HelperHomeMap';
 import { useAuth } from '../../context/AuthContext';
@@ -133,6 +135,16 @@ export function ProviderDashboardScreen({
         statusMessage={mapError}
       />
 
+      <Pressable
+        accessibilityLabel="Open Helper Rewards"
+        accessibilityRole="button"
+        onPress={() => navigate({ key: 'HelperRewardsOverview', params: { parentTab: 'Home' } })}
+        style={styles.rewardsShortcut}
+      >
+        <Ionicons color="#9d174d" name="sparkles-outline" size={18} />
+        <Text style={styles.rewardsShortcutText}>Rewards</Text>
+      </Pressable>
+
       <View
         onLayout={(event) => setComposerHeight(event.nativeEvent.layout.height)}
         style={[styles.bottomSheetWrap, { bottom: composerOffset }]}
@@ -162,5 +174,28 @@ const styles = StyleSheet.create({
     position: 'absolute',
     right: 0,
     zIndex: 24,
+  },
+  rewardsShortcut: {
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    borderColor: '#f9a8d4',
+    borderRadius: 999,
+    borderWidth: 1,
+    elevation: 8,
+    flexDirection: 'row',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    position: 'absolute',
+    right: 16,
+    shadowColor: '#831843',
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    top: 16,
+  },
+  rewardsShortcutText: {
+    color: '#9d174d',
+    fontSize: 12,
+    fontWeight: '900',
   },
 });

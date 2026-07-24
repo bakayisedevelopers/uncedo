@@ -1,7 +1,11 @@
+import { useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { ActionButton, Card, EmptyState, SectionHeading, StatusBadge } from '../../components/app/HelperUi';
 import { useHelpersApp } from '../../context/HelpersAppContext';
+import { useAuth } from '../../context/AuthContext';
+import { MasteryBadge } from '../../components/rewards/RewardBadges';
+import { subscribeToHelperMastery } from '../../services/rewards/rewardClientService';
 import { colors } from '../../theme/colors';
 
 function formatStatusLabel(status = 'approved') {
@@ -13,10 +17,18 @@ function formatStatusLabel(status = 'approved') {
 }
 
 export function ServicesOfferedScreen({ navigate, goBack }) {
+  const { user } = useAuth();
   const { helperServiceOfferings, actions, saving, saveError } = useHelpersApp();
+  const [mastery, setMastery] = useState([]);
   const orderedServiceOfferings = [...helperServiceOfferings].sort((left, right) => (
     `${left.serviceName}`.localeCompare(`${right.serviceName}`)
   ));
+  const masteryByService = useMemo(() => new Map(mastery.map((item) => [String(item.serviceId || item.id || ''), item])), [mastery]);
+
+  useEffect(() => {
+    if (!user?.uid) return () => {};
+    return subscribeToHelperMastery(user.uid, setMastery, () => setMastery([]));
+  }, [user?.uid]);
 
   return (
     <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false}>
@@ -77,6 +89,7 @@ export function ServicesOfferedScreen({ navigate, goBack }) {
               <View style={styles.badgeRow}>
                 <StatusBadge label={formatStatusLabel(offering.status)} tone={offering.status === 'approved' ? 'success' : 'warning'} />
                 <StatusBadge label={offering.active ? 'Active' : 'Paused'} tone={offering.active ? 'info' : 'neutral'} />
+                {offering.status === 'approved' ? <MasteryBadge level={masteryByService.get(String(offering.serviceId))?.level || 'beginner'} /> : null}
               </View>
             </View>
           </Pressable>

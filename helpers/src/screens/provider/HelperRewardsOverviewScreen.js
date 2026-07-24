@@ -5,7 +5,7 @@ import { MembershipBadge } from '../../components/rewards/RewardBadges';
 import { PointsBalanceCard, RecognitionCard, ReferralProgressCard, RewardTransactionRow } from '../../components/rewards/RewardWidgets';
 import { useAuth } from '../../context/AuthContext';
 import { useHelpersApp } from '../../context/HelpersAppContext';
-import { refreshHelperRewardBundle } from '../../services/rewards/rewardClientService';
+import { refreshHelperRewardBundle, subscribeToMyRewardAccount, subscribeToRatingSummary } from '../../services/rewards/rewardClientService';
 import { buildMembershipProgressModel, formatPercent, formatPoints, formatPointsToRand } from '../../services/rewards/rewardPresentation';
 import { colors } from '../../theme/colors';
 
@@ -37,6 +37,20 @@ export function HelperRewardsOverviewScreen({ navigate, goBack }) {
   useEffect(() => {
     loadBundle({ forceConfig: true });
   }, [loadBundle]);
+
+  useEffect(() => {
+    if (!user?.uid) return () => {};
+    const stopAccount = subscribeToMyRewardAccount((rewardAccount) => {
+      setBundle((current) => (current ? { ...current, rewardAccount } : current));
+    }, (nextError) => setError(nextError.message || 'Unable to update your reward account.'));
+    const stopRatings = subscribeToRatingSummary(user.uid, (ratingSummary) => {
+      setBundle((current) => (current ? { ...current, ratingSummary } : current));
+    }, (nextError) => setError(nextError.message || 'Unable to update your rating summary.'));
+    return () => {
+      stopAccount?.();
+      stopRatings?.();
+    };
+  }, [user?.uid]);
 
   const rewardAccount = bundle?.rewardAccount || {};
   const ratingSummary = bundle?.ratingSummary || {};

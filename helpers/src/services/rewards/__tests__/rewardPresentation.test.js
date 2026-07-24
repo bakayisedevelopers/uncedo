@@ -8,6 +8,7 @@ import {
   buildReferralLink,
   buildTransactionDisplayModel,
   formatPointsToRand,
+  formatPoints,
   getMasteryDisplayMeta,
   getMembershipDisplayMeta,
   maskReferralDisplay,
@@ -17,6 +18,7 @@ import { REWARD_REASON_CODES } from '../../../shared/rewards.js';
 
 test('formats helper points to rand safely', () => {
   assert.equal(formatPointsToRand(125, 10), 'R12.50');
+  assert.equal(formatPoints(125), '125 pts');
 });
 
 test('maps helper membership display metadata', () => {
@@ -98,6 +100,11 @@ test('falls back safely when helper config is missing', () => {
   assert.ok(sections.length > 0);
 });
 
+test('marks helper opportunities unavailable when rewards are disabled', () => {
+  const sections = buildHowToEarnSections({ rewards: { completedPaidJob: 50 } }, { featureFlags: { rewardsEnabled: false } });
+  assert.equal(sections.flatMap((section) => section.items).every((item) => item.state === 'disabled'), true);
+});
+
 test('maps helper transaction labels for job rewards', () => {
   const display = buildTransactionDisplayModel({
     direction: 'credit',
@@ -108,6 +115,14 @@ test('maps helper transaction labels for job rewards', () => {
 
   assert.equal(display.title, 'Completed and paid job');
   assert.equal(display.signedAmount, '+50');
+});
+
+test('formats expiry and debit ledger states without exposing internal metadata', () => {
+  const display = buildTransactionDisplayModel({ direction: 'expiry', points: 30, reasonCode: REWARD_REASON_CODES.POINTS_EXPIRED, status: 'expired' });
+  assert.equal(display.signedAmount, '-30');
+  assert.equal(display.statusLabel, 'Expired');
+  assert.equal(display.title, 'Points expired');
+  assert.equal(Object.hasOwn(display, 'idempotencyKey'), false);
 });
 
 test('builds helper and customer referral links safely', () => {
@@ -129,10 +144,25 @@ test('summarizes referral counts and masks identities', () => {
     completed: 1,
   });
   assert.equal(maskReferralDisplay({ referredAccountType: 'helper' }, 0), 'Referred helper 1');
+  assert.equal(maskReferralDisplay({ referredAccountType: 'customer' }, 1), 'Referred customer 2');
 });
 
 test('builds planned annual recognition preview safely when tiers are absent', () => {
   const preview = buildAnnualRecognitionPreview({}, {});
   assert.equal(preview.active, false);
   assert.equal(preview.tierLabel, 'Planned');
+});
+
+test('builds active annual recognition state from authoritative account fields only', () => {
+  const preview = buildAnnualRecognitionPreview({ annualPointTiers: [{ minPoints: 100, label: 'Bronze' }] }, { annualRecognition: { points: 50, tier: 'Starter' } });
+  assert.equal(preview.active, true);
+  assert.equal(preview.annualPoints, 50);
+  assert.equal(preview.nextTarget, 100);
+});
+
+test('keeps per-service mastery progress independent for multiple services', () => {
+  const cleaning = buildMasteryProgressModel({ mastery: { level: 'specialist', eligibleCompletedJobCount: 50 }, masteryConfig: { master: { minCompletedPaidJobs: 200, minAverageRating: 4.8, minRatingCount: 40 } }, ratingSummary: { average: 4.7, count: 20 } });
+  const gardening = buildMasteryProgressModel({ mastery: { level: 'beginner', eligibleCompletedJobCount: 0 }, masteryConfig: { specialist: { minCompletedPaidJobs: 50, minAverageRating: 4.6, minRatingCount: 10 } }, ratingSummary: { average: 0, count: 0 } });
+  assert.equal(cleaning.nextLevel, 'master');
+  assert.equal(gardening.nextLevel, 'specialist');
 });
