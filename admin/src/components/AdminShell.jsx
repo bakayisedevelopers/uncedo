@@ -8,6 +8,7 @@ import {
   LogOut,
   Shield,
   Sparkles,
+  Gift,
   Users,
   FileImage,
   X,
@@ -21,6 +22,7 @@ const NAV_ITEMS = [
   { to: '/services', label: 'Services', icon: BadgeCheck },
   { to: '/customers', label: 'Customers', icon: FileImage },
   { to: '/helper-agreements', label: 'Helper agreements', icon: FileText },
+  { to: '/rewards', label: 'Rewards', icon: Gift },
 ];
 
 function NavItem({ to, icon: Icon, label, onClick }) {
@@ -52,6 +54,7 @@ export default function AdminShell() {
     if (location.pathname.startsWith('/services')) return 'Services';
     if (location.pathname.startsWith('/customers')) return 'Customer directory';
     if (location.pathname.startsWith('/helper-agreements')) return 'Helper agreements';
+    if (location.pathname.startsWith('/rewards')) return 'Rewards operations';
     return 'Operations overview';
   }, [location.pathname]);
 

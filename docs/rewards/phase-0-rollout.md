@@ -87,3 +87,16 @@ Do not run the historical migration with `--write` automatically during rollout.
 ## Deferred work
 
 The customer rewards dashboard, helper rewards dashboard, public referral landing page, service-credit redemption, annual helper rewards, and admin rewards dashboard are intentionally not included in Phase 0.
+
+## Phase 3 controlled-pilot rollout
+
+Phase 3 adds a ledger-backed service-credit reservation endpoint, billing-time application/release, an audited rewards-operations route, and server-only operational collections. Keep `rewardConfig/global.featureFlags.redemptionEnabled`, `campaignsEnabled`, and `helperBenefitsEnabled` disabled until the preceding release has been observed in staging.
+
+1. Deploy the Functions and Rules together to a staging project; confirm `reserveServiceCredit`, `releaseServiceCredit`, `adminAdjustReward`, `adminUpdateRewardConfig`, and `adminRewardOperations` authenticate correctly.
+2. Build the transaction collection-group index and populate only bounded `rewardOperationalSummaries/current` documents. Do not make a browser scan of reward accounts or requests.
+3. Release the admin route first in read-only mode. Verify config version records and audit records for a non-financial configuration change.
+4. Enable redemption for internal accounts only. Create a booking, reserve exactly the configured increment, complete payment, then verify one debit and an `applied` redemption. Repeat a failed-payment path and verify one compensating credit and a `released` redemption.
+5. Expand the customer pilot only after payout reconciliation confirms the helper payout did not change when platform-funded credit was applied. Disable `redemptionEnabled` to stop new reservations immediately; existing reservations must be released through the trusted endpoint or controlled recovery job.
+6. Keep campaigns and helper benefits disabled until their qualification/fulfilment workers and operational reviews are separately enabled. Never enable a campaign without an end date and finite point budget.
+
+Rollback: disable the relevant feature flag first, then roll back Functions only if endpoint behavior regresses. Do not alter account totals or redemption status manually; use an audited ledger adjustment/release path. Retain all redemption and audit documents for incident review.

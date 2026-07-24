@@ -10,7 +10,8 @@ import {
   startAfter,
 } from 'firebase/firestore';
 import { getFirebaseClients, getFunctionEndpoint } from '../../firebase/config';
-import { ACCOUNT_TYPES, REWARD_CONFIG_DOCS } from '../../shared/rewards';
+import { ACCOUNT_TYPES } from '../../shared/rewards';
+import { REWARD_CONFIG_DOCS } from '../../shared/rewards';
 
 const configCache = new Map();
 const CONFIG_CACHE_MS = 5 * 60 * 1000;

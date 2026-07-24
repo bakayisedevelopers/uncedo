@@ -15,6 +15,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LoadingState } from '../components/ui/States';
+import { GlassSurface } from '../components/ui/GlassSurface';
 import { SessionRatingPrompt } from '../components/customer/SessionRatingPrompt';
 import { useAuth } from '../context/AuthContext';
 import {
@@ -469,7 +470,7 @@ export function RootNavigator() {
 
         {showBottomNav ? (
           <View pointerEvents="box-none" style={styles.bottomNavSafeArea}>
-            <View style={[styles.bottomNav, { minHeight: bottomNavInset, paddingBottom: bottomSystemInset + 14 }]}>
+            <GlassSurface style={[styles.bottomNav, { minHeight: bottomNavInset, paddingBottom: bottomSystemInset + 14 }]}>
               {bottomNavItems.map((item) => {
                 const isActive = activeTabKey === item.key;
                 return (
@@ -491,7 +492,7 @@ export function RootNavigator() {
                   </Pressable>
                 );
               })}
-            </View>
+            </GlassSurface>
           </View>
         ) : null}
 
@@ -541,11 +542,8 @@ const styles = StyleSheet.create({
   },
   bottomNav: {
     alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.98)',
-    borderColor: colors.border,
     borderTopLeftRadius: 28,
     borderTopRightRadius: 28,
-    borderTopWidth: 1,
     flexDirection: 'row',
     justifyContent: 'space-around',
     overflow: 'hidden',

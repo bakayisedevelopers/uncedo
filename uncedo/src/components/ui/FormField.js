@@ -25,9 +25,9 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   input: {
-    backgroundColor: '#fafafa',
+    backgroundColor: 'rgba(255,255,255,0.58)',
     minHeight: 48,
-    borderColor: colors.border,
+    borderColor: 'rgba(255,255,255,0.76)',
     borderRadius: 16,
     borderWidth: 1,
     color: colors.text,

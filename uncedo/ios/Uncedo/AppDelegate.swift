@@ -33,7 +33,7 @@ public class AppDelegate: ExpoAppDelegate {
 #endif
 
 #if canImport(GoogleMaps)
-    GMSServices.provideAPIKey("AIzaSyDWiZsgclj8unn6dN1OFhqDm4VKwWccusE")
+    GMSServices.provideAPIKey("__GOOGLE_MAPS_API_KEY__")
 #endif
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)

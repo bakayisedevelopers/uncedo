@@ -3,6 +3,7 @@ import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-n
 import { Ionicons } from '@expo/vector-icons';
 import { ServiceSearchOverlay } from '../../components/customer/ServiceSearchOverlay';
 import { ServiceShowcaseCarousel } from '../../components/customer/ServiceShowcaseCarousel';
+import { GlassSurface } from '../../components/ui/GlassSurface';
 import { useAuth } from '../../context/AuthContext';
 import { subscribeToCustomerServiceShowcase } from '../../services/customerServiceDiscoveryService';
 import {
@@ -225,10 +226,12 @@ export function CustomerHomeScreen({
       }
             setSearchVisible(true);
           }}
-          style={styles.searchBar}
+          style={styles.searchPressable}
         >
-          <Ionicons color="#d946ef" name="search-outline" size={18} />
-          <Text style={styles.searchPlaceholder}>Search for a service or package</Text>
+          <GlassSurface style={styles.searchBar}>
+            <Ionicons color="#d946ef" name="search-outline" size={18} />
+            <Text style={styles.searchPlaceholder}>Search for a service or package</Text>
+          </GlassSurface>
         </Pressable>
       </View>
 
@@ -296,10 +299,7 @@ const styles = StyleSheet.create({
   },
   searchBar: {
     alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.96)',
-    borderColor: 'rgba(217,70,239,0.12)',
     borderRadius: 22,
-    borderWidth: 1,
     flexDirection: 'row',
     gap: 10,
     minHeight: 56,
@@ -309,6 +309,9 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.08,
     shadowRadius: 24,
     elevation: 10,
+  },
+  searchPressable: {
+    borderRadius: 22,
   },
   searchPlaceholder: {
     color: '#a21caf',

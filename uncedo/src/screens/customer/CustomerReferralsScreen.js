@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Platform, RefreshControl, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
-import * as Clipboard from 'expo-clipboard';
+import {
+  Clipboard,
+  Platform,
+  RefreshControl,
+  ScrollView,
+  Share,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
@@ -82,7 +90,7 @@ export function CustomerReferralsScreen({ navigate }) {
       return;
     }
 
-    await Clipboard.setStringAsync(String(value));
+    Clipboard.setString(String(value));
     recordRewardUiEvent(user?.uid, label === 'Referral code' ? 'referral_code_copied' : 'referral_link_copied');
     setMessage(`${label} copied.`);
   };

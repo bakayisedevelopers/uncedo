@@ -1,5 +1,6 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { GlassSurface } from './GlassSurface';
 import { colors } from '../../theme/colors';
 
 export function StickyScreenHeader({
@@ -11,7 +12,7 @@ export function StickyScreenHeader({
   style,
 }) {
   return (
-    <View style={[styles.container, style]}>
+    <GlassSurface style={[styles.container, style]}>
       {onBack ? (
         <Pressable accessibilityRole="button" onPress={onBack} style={({ pressed }) => [styles.backButton, pressed && styles.backButtonPressed]}>
           <Ionicons color={colors.brandDark} name="chevron-back" size={18} />
@@ -25,15 +26,12 @@ export function StickyScreenHeader({
       </View>
 
       {children ? <View style={styles.children}>{children}</View> : null}
-    </View>
+    </GlassSurface>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: colors.background,
-    borderBottomColor: colors.border,
-    borderBottomWidth: 1,
     gap: 8,
     paddingHorizontal: 16,
     paddingTop: 12,
@@ -43,8 +41,8 @@ const styles = StyleSheet.create({
   backButton: {
     alignSelf: 'flex-start',
     alignItems: 'center',
-    backgroundColor: colors.surface,
-    borderColor: colors.border,
+    backgroundColor: 'rgba(255,255,255,0.42)',
+    borderColor: 'rgba(255,255,255,0.72)',
     borderRadius: 999,
     borderWidth: 1,
     flexDirection: 'row',

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Image, ImageBackground, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { GlassSurface } from '../ui/GlassSurface';
 import { colors } from '../../theme/colors';
 
 const FALLBACK_RATIOS = [0.78, 1.18, 0.92, 1.28];
@@ -138,28 +139,28 @@ export function ServiceShowcaseCarousel({
                 >
                   <View style={styles.tileTint} />
                   <View style={styles.tileTopRow}>
-                    <View style={styles.pricePill}>
+                    <GlassSurface style={styles.pricePill}>
                       <Text style={styles.pricePillText}>{item.priceLabel}</Text>
-                    </View>
+                    </GlassSurface>
                   </View>
 
-                  <View style={styles.tileBottomChip}>
+                  <GlassSurface style={styles.tileBottomChip}>
                     <Text numberOfLines={1} style={styles.tileTitle}>{item.title}</Text>
-                  </View>
+                  </GlassSurface>
                 </ImageBackground>
               ) : (
                 <View style={[styles.tileMedia, styles.fallbackTile, { height: item.__tileHeight }]}>
                   <View style={styles.fallbackBubbleOne} />
                   <View style={styles.fallbackBubbleTwo} />
                   <View style={styles.tileTopRow}>
-                    <View style={styles.pricePill}>
+                    <GlassSurface style={styles.pricePill}>
                       <Text style={styles.pricePillText}>{item.priceLabel}</Text>
-                    </View>
+                    </GlassSurface>
                   </View>
 
-                  <View style={styles.tileBottomChip}>
+                  <GlassSurface style={styles.tileBottomChip}>
                     <Text numberOfLines={2} style={styles.tileTitle}>{item.title}</Text>
-                  </View>
+                  </GlassSurface>
                 </View>
               )}
             </Pressable>
@@ -209,10 +210,7 @@ const styles = StyleSheet.create({
   },
   pricePill: {
     alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.86)',
-    borderColor: 'rgba(217,70,239,0.40)',
     borderRadius: 999,
-    borderWidth: 1,
     justifyContent: 'center',
     minHeight: 32,
     paddingHorizontal: 10,
@@ -225,10 +223,7 @@ const styles = StyleSheet.create({
   },
   tileBottomChip: {
     alignSelf: 'flex-start',
-    backgroundColor: 'rgba(255,255,255,0.88)',
-    borderColor: 'rgba(217,70,239,0.20)',
     borderRadius: 999,
-    borderWidth: 1,
     maxWidth: '92%',
     paddingHorizontal: 12,
     paddingVertical: 8,

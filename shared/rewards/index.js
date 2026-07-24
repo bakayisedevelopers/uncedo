@@ -9,7 +9,8 @@ const REWARD_TRANSACTION_STATUSES = Object.freeze({ APPLIED: 'applied', REVERSED
 const REWARD_REASON_CODES = Object.freeze({
   PROFILE_COMPLETED: 'profile_completed', PAYMENT_METHOD_VERIFIED: 'payment_method_verified', CUSTOMER_COMPLETED_PAID_BOOKING: 'customer_completed_paid_booking',
   CUSTOMER_FIRST_COMPLETED_PAID_BOOKING: 'customer_first_completed_paid_booking', HELPER_COMPLETED_PAID_JOB: 'helper_completed_paid_job', RATING_SUBMITTED: 'rating_submitted',
-  RATING_RECEIVED_EFFECT: 'rating_received_effect', REFERRAL_STAGE_ONE: 'referral_stage_one', REFERRAL_STAGE_TWO: 'referral_stage_two', POINTS_EXPIRED: 'points_expired', REVERSAL: 'reversal'
+  RATING_RECEIVED_EFFECT: 'rating_received_effect', REFERRAL_STAGE_ONE: 'referral_stage_one', REFERRAL_STAGE_TWO: 'referral_stage_two', POINTS_EXPIRED: 'points_expired', REVERSAL: 'reversal',
+  SERVICE_CREDIT_REDEMPTION: 'service_credit_redemption', SERVICE_CREDIT_RELEASE: 'service_credit_release', ADMIN_ADJUSTMENT: 'admin_adjustment', HELPER_BENEFIT_REDEMPTION: 'helper_benefit_redemption', CAMPAIGN_REWARD: 'campaign_reward'
 });
 const REFERRAL_STATUSES = Object.freeze({ ACTIVE: 'active', ATTRIBUTED: 'attributed', QUALIFIED: 'qualified', REWARDED: 'rewarded', INVALID: 'invalid' });
 const SUPPORTED_EVENT_TYPES = Object.freeze(['profile_completed','payment_method_verified','request_completed_paid','rating_submitted','referral_stage_one','referral_stage_two','points_expired','reward_reversed']);

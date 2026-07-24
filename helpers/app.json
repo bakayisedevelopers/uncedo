@@ -2,7 +2,9 @@
   "expo": {
     "name": "Helpers",
     "slug": "helpers",
+    "scheme": "helpers",
     "version": "0.1.0",
+    "icon": "./assets/bakayise-helpers-icon.jpg",
     "orientation": "portrait",
     "platforms": [
       "android",
@@ -10,7 +12,11 @@
       "web"
     ],
     "android": {
-      "package": "com.bakayisedevelopers.helpers",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/bakayise-helpers-icon.jpg",
+        "backgroundColor": "#ffffff"
+      },
+      "package": "com.bakayise.helpers",
       "permissions": [
         "CAMERA",
         "ACCESS_FINE_LOCATION",
@@ -21,7 +27,7 @@
       ]
     },
     "ios": {
-      "bundleIdentifier": "com.bakayisedevelopers.helpers",
+      "bundleIdentifier": "com.bakayise.helpers",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Uncedo Helpers uses your location while you are travelling to active jobs.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Uncedo Helpers uses your location during active jobs so customers can track your arrival.",

@@ -1,5 +1,6 @@
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { GlassSurface } from '../ui/GlassSurface';
 import { colors } from '../../theme/colors';
 
 export function ServiceSearchOverlay({
@@ -15,7 +16,7 @@ export function ServiceSearchOverlay({
       <View style={styles.overlay}>
         <Pressable style={styles.backdrop} onPress={onClose} />
 
-        <View style={styles.sheet}>
+        <GlassSurface intensity={54} style={styles.sheet}>
           <View style={styles.searchRow}>
             <View style={styles.searchField}>
               <Ionicons color={colors.brand} name="search-outline" size={18} />
@@ -43,28 +44,30 @@ export function ServiceSearchOverlay({
                   accessibilityRole="button"
                   key={item.id}
                   onPress={() => onSelect?.(item)}
-                  style={({ pressed }) => [styles.resultCard, pressed && styles.resultCardPressed]}
+                  style={({ pressed }) => [styles.resultPressable, pressed && styles.resultCardPressed]}
                 >
-                  <View style={styles.resultCopy}>
-                    <Text style={styles.resultTitle}>{item.title}</Text>
-                    <Text style={styles.resultMeta}>
-                      {item.type === 'package' ? 'Package' : 'Service'} - {item.categoryLabel}
-                    </Text>
-                    {item.includedLabels?.length ? (
-                      <Text numberOfLines={1} style={styles.resultDescription}>
-                        {item.includedLabels.join(', ')}
+                  <GlassSurface style={styles.resultCard}>
+                    <View style={styles.resultCopy}>
+                      <Text style={styles.resultTitle}>{item.title}</Text>
+                      <Text style={styles.resultMeta}>
+                        {item.type === 'package' ? 'Package' : 'Service'} - {item.categoryLabel}
                       </Text>
-                    ) : (
-                      <Text numberOfLines={1} style={styles.resultDescription}>
-                        {item.description}
-                      </Text>
-                    )}
-                  </View>
+                      {item.includedLabels?.length ? (
+                        <Text numberOfLines={1} style={styles.resultDescription}>
+                          {item.includedLabels.join(', ')}
+                        </Text>
+                      ) : (
+                        <Text numberOfLines={1} style={styles.resultDescription}>
+                          {item.description}
+                        </Text>
+                      )}
+                    </View>
 
-                  <View style={styles.resultAside}>
-                    <Text style={styles.resultPrice}>{item.priceLabel}</Text>
-                    <Ionicons color={colors.brand} name="chevron-forward" size={16} />
-                  </View>
+                    <View style={styles.resultAside}>
+                      <Text style={styles.resultPrice}>{item.priceLabel}</Text>
+                      <Ionicons color={colors.brand} name="chevron-forward" size={16} />
+                    </View>
+                  </GlassSurface>
                 </Pressable>
               ))
             ) : (
@@ -75,7 +78,7 @@ export function ServiceSearchOverlay({
               </View>
             )}
           </ScrollView>
-        </View>
+        </GlassSurface>
       </View>
     </Modal>
   );
@@ -91,7 +94,6 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
   },
   sheet: {
-    backgroundColor: '#fff7fd',
     borderBottomLeftRadius: 28,
     borderBottomRightRadius: 28,
     maxHeight: '82%',
@@ -111,8 +113,8 @@ const styles = StyleSheet.create({
   },
   searchField: {
     alignItems: 'center',
-    backgroundColor: '#ffffff',
-    borderColor: 'rgba(217,70,239,0.14)',
+    backgroundColor: 'rgba(255,255,255,0.54)',
+    borderColor: 'rgba(255,255,255,0.78)',
     borderRadius: 20,
     borderWidth: 1,
     flex: 1,
@@ -129,8 +131,8 @@ const styles = StyleSheet.create({
   },
   closeButton: {
     alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.92)',
-    borderColor: 'rgba(217,70,239,0.12)',
+    backgroundColor: 'rgba(255,255,255,0.54)',
+    borderColor: 'rgba(255,255,255,0.78)',
     borderRadius: 18,
     borderWidth: 1,
     height: 44,
@@ -143,15 +145,15 @@ const styles = StyleSheet.create({
   },
   resultCard: {
     alignItems: 'center',
-    backgroundColor: '#ffffff',
-    borderColor: 'rgba(217,70,239,0.12)',
     borderRadius: 22,
-    borderWidth: 1,
     flexDirection: 'row',
     gap: 14,
     justifyContent: 'space-between',
     paddingHorizontal: 14,
     paddingVertical: 14,
+  },
+  resultPressable: {
+    borderRadius: 22,
   },
   resultCardPressed: {
     transform: [{ scale: 0.992 }],

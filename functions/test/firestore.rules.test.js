@@ -425,3 +425,21 @@ test('helper weekly payouts are readable only by the owning helper and admin', a
   await assertFails(strangerDb.collection('helperWeeklyPayouts').where('helperId', '==', 'helper-1').get());
   await assertSucceeds(adminDb.collection('helperWeeklyPayouts').get());
 });
+
+test('Phase 3 operational records are owner-readable where appropriate and never client-writable', async () => {
+  await seedDocument('serviceCreditRedemptions/redemption-1', { userId: 'customer-1', status: 'reserved' });
+  await seedDocument('helperRewardRedemptions/benefit-1', { helperId: 'helper-1', status: 'requested' });
+  await seedDocument('helperBenefitTokens/token-1', { helperId: 'helper-1', status: 'issued' });
+  await seedDocument('adminAuditLogs/audit-1', { actorUid: 'admin-user', action: 'reward_adjustment' });
+  const customerDb = authedDb('customer-1');
+  const helperDb = authedDb('helper-1');
+  const strangerDb = authedDb('stranger-1');
+  const adminDb = authedDb('admin-user', { email: 'jabuobed1@gmail.com' });
+  await assertSucceeds(customerDb.doc('serviceCreditRedemptions/redemption-1').get());
+  await assertFails(strangerDb.doc('serviceCreditRedemptions/redemption-1').get());
+  await assertSucceeds(helperDb.doc('helperRewardRedemptions/benefit-1').get());
+  await assertSucceeds(helperDb.doc('helperBenefitTokens/token-1').get());
+  await assertFails(helperDb.doc('helperRewardRedemptions/benefit-1').update({ status: 'fulfilled' }));
+  await assertFails(adminDb.doc('adminAuditLogs/audit-1').update({ action: 'changed' }));
+  await assertSucceeds(adminDb.doc('adminAuditLogs/audit-1').get());
+});

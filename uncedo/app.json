@@ -15,7 +15,7 @@
         "foregroundImage": "../Logo.png",
         "backgroundColor": "#ffffff"
       },
-      "package": "com.anonymous.uncedomobile",
+      "package": "com.bakayise.uncedo",
       "permissions": [
         "RECORD_AUDIO",
         "MODIFY_AUDIO_SETTINGS",
@@ -29,7 +29,7 @@
         "NSSpeechRecognitionUsageDescription": "Uncedo uses speech recognition to turn your voice into text during service calls.",
         "NSLocationWhenInUseUsageDescription": "Uncedo uses your location to find nearby helpers and route them to your service address."
       },
-      "bundleIdentifier": "com.anonymous.uncedomobile"
+      "bundleIdentifier": "com.bakayise.uncedo"
     },
     "plugins": [
       [

@@ -47,7 +47,12 @@
     "REFERRAL_STAGE_ONE": "referral_stage_one",
     "REFERRAL_STAGE_TWO": "referral_stage_two",
     "POINTS_EXPIRED": "points_expired",
-    "REVERSAL": "reversal"
+    "REVERSAL": "reversal",
+    "SERVICE_CREDIT_REDEMPTION": "service_credit_redemption",
+    "SERVICE_CREDIT_RELEASE": "service_credit_release",
+    "ADMIN_ADJUSTMENT": "admin_adjustment",
+    "HELPER_BENEFIT_REDEMPTION": "helper_benefit_redemption",
+    "CAMPAIGN_REWARD": "campaign_reward"
   },
   "REFERRAL_STATUSES": {
     "ACTIVE": "active",

@@ -49,6 +49,11 @@ export const GoogleTaskRemovedBehavior = navigationSdk?.TaskRemovedBehavior || {
 };
 export const GoogleMapView = navigationSdk?.MapView || null;
 export const GoogleNavigationView = navigationSdk?.NavigationView || null;
+export const GoogleMapColorScheme = navigationSdk?.MapColorScheme || {
+  FOLLOW_SYSTEM: 0,
+  LIGHT: 1,
+  DARK: 2,
+};
 export const GoogleCameraPerspective = navigationSdk?.CameraPerspective || {
   TILTED: 0,
   TOP_DOWN_NORTH_UP: 1,

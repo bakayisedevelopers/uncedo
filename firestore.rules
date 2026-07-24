@@ -179,7 +179,9 @@ service cloud.firestore {
 
     match /rewardConfig/{configId} {
       allow read: if signedIn();
-      allow create, update, delete: if isAdmin();
+      // Configuration changes go through the trusted versioning endpoint so
+      // every write has an immutable history and audit entry.
+      allow create, update, delete: if false;
     }
 
     match /rewardAccounts/{userId} {
@@ -232,6 +234,66 @@ service cloud.firestore {
     match /serviceCreditRedemptions/{redemptionId} {
       allow get, list: if isAdmin() || isOwner(resource.data.userId);
       allow create, update, delete: if isAdmin();
+    }
+
+    // Phase 3 operational records are written only by trusted server endpoints.  Admin
+    // clients may inspect their audit trail but must not be able to fabricate awards.
+    match /rewardConfigHistory/{historyId} {
+      allow get, list: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    match /rewardCampaigns/{campaignId} {
+      allow get, list: if isAdmin() || (signedIn() && resource.data.status == 'active' && resource.data.public == true);
+      allow create, update, delete: if false;
+      match /participants/{userId} {
+        allow get: if isAdmin() || isOwner(userId);
+        allow list: if isAdmin();
+        allow create, update, delete: if false;
+      }
+    }
+
+    match /helperRewardBenefits/{benefitId} {
+      allow get, list: if isAdmin() || (signedIn() && resource.data.active == true);
+      allow create, update, delete: if false;
+    }
+
+    match /helperRewardRedemptions/{redemptionId} {
+      allow get: if isAdmin() || isOwner(resource.data.helperId);
+      allow list: if isAdmin() || (signedIn() && resource.data.helperId == request.auth.uid);
+      allow create, update, delete: if false;
+    }
+
+    match /helperBenefitTokens/{tokenId} {
+      allow get: if isAdmin() || isOwner(resource.data.helperId);
+      allow list: if isAdmin() || (signedIn() && resource.data.helperId == request.auth.uid);
+      allow create, update, delete: if false;
+    }
+
+    match /helperRecognitionCycles/{cycleId} {
+      allow get, list: if isAdmin() || (signedIn() && resource.data.status in ['active', 'closed']);
+      allow create, update, delete: if false;
+      match /standings/{helperId} {
+        allow get: if isAdmin() || isOwner(helperId);
+        allow list: if isAdmin();
+        allow create, update, delete: if false;
+      }
+    }
+
+    match /helperRecognitionAwards/{awardId} {
+      allow get: if isAdmin() || isOwner(resource.data.helperId);
+      allow list: if isAdmin() || (signedIn() && resource.data.helperId == request.auth.uid);
+      allow create, update, delete: if false;
+    }
+
+    match /adminAuditLogs/{auditId} {
+      allow get, list: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    match /rewardOperationalSummaries/{summaryId} {
+      allow get, list: if isAdmin();
+      allow create, update, delete: if false;
     }
 
     match /helperWeeklyPayouts/{payoutId} {

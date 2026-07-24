@@ -10,6 +10,7 @@ import {
   requestCustomerLocationPermission,
 } from '../../services/nearbyHelpersMapService';
 import { colors } from '../../theme/colors';
+import { GlassSurface } from '../../components/ui/GlassSurface';
 
 function getInitials(name = '') {
   const parts = String(name || '')
@@ -47,19 +48,25 @@ function ProfileRow({ icon, title, description, onPress, tone = 'default' }) {
       onPress={onPress}
       style={({ pressed }) => [
         styles.row,
-        tone === 'warning' && styles.rowWarning,
-        tone === 'danger' && styles.rowDanger,
         pressed && styles.rowPressed,
       ]}
     >
-      <View style={styles.rowIcon}>
-        <Ionicons color={tone === 'danger' ? colors.danger : colors.brandDark} name={icon} size={18} />
-      </View>
-      <View style={styles.rowBody}>
-        <Text style={styles.rowTitle}>{title}</Text>
-        <Text style={styles.rowDescription}>{description}</Text>
-      </View>
-      <Ionicons color={colors.muted} name="chevron-forward" size={18} />
+      <GlassSurface
+        style={[
+          styles.rowGlass,
+          tone === 'warning' && styles.rowWarning,
+          tone === 'danger' && styles.rowDanger,
+        ]}
+      >
+        <View style={styles.rowIcon}>
+          <Ionicons color={tone === 'danger' ? colors.danger : colors.brandDark} name={icon} size={18} />
+        </View>
+        <View style={styles.rowBody}>
+          <Text style={styles.rowTitle}>{title}</Text>
+          <Text style={styles.rowDescription}>{description}</Text>
+        </View>
+        <Ionicons color={colors.muted} name="chevron-forward" size={18} />
+      </GlassSurface>
     </Pressable>
   );
 }
@@ -143,7 +150,7 @@ export function CustomerProfileScreen({ navigate }) {
         <Text style={styles.subtitle}>Manage your customer details, payment methods, safety settings, and legal documents.</Text>
       </View>
 
-      <View style={styles.identityCard}>
+      <GlassSurface style={styles.identityCard}>
         <View style={styles.identityRow}>
           <View style={styles.avatarWrap}>
             {photoUri ? (
@@ -168,7 +175,7 @@ export function CustomerProfileScreen({ navigate }) {
           <Text style={styles.statusText}>{onboardingStatus.complete ? 'Profile complete' : onboardingStatus.message}</Text>
         </View>
 
-        <View style={styles.locationCard}>
+        <GlassSurface style={styles.locationCard}>
           <View style={styles.locationRow}>
             <Ionicons color={colors.brandDark} name="home-outline" size={16} />
             <Text style={styles.locationLabel}>Saved address</Text>
@@ -188,8 +195,8 @@ export function CustomerProfileScreen({ navigate }) {
           <Pressable accessibilityRole="button" onPress={() => refreshCurrentLocation().catch(() => null)} style={styles.locationAction}>
             <Text style={styles.locationActionText}>{loadingLocation ? 'Refreshing...' : 'Refresh device location'}</Text>
           </Pressable>
-        </View>
-      </View>
+        </GlassSurface>
+      </GlassSurface>
 
       {!onboardingStatus.complete ? (
         <ProfileRow
@@ -276,7 +283,6 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   identityCard: {
-    backgroundColor: '#f8fafc',
     borderColor: 'rgba(217,70,239,0.18)',
     borderRadius: 28,
     borderWidth: 1,
@@ -353,7 +359,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   locationCard: {
-    backgroundColor: '#ffffff',
     borderColor: colors.border,
     borderRadius: 20,
     borderWidth: 1,
@@ -398,8 +403,10 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   row: {
+    borderRadius: 22,
+  },
+  rowGlass: {
     alignItems: 'center',
-    backgroundColor: colors.surface,
     borderColor: colors.border,
     borderRadius: 22,
     borderWidth: 1,

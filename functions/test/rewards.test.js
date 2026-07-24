@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const { DEFAULT_REWARD_CONFIG } = require('../rewards/config');
 const { txIdFromKey } = require('../rewards/rewardService');
 const shared = require('../../shared/rewards');
+const { bookingEligibleSubtotal, hashId } = require('../rewards/phase3Service');
 test('shared constants expose required levels and directions', () => {
   assert.deepEqual(shared.MEMBERSHIP_LEVELS, ['neighbour', 'partner', 'friend', 'family']);
   assert.deepEqual(shared.MASTERY_LEVELS, ['beginner', 'specialist', 'master', 'legend']);
@@ -29,4 +30,17 @@ test('integer point validation rejects fractional values', () => {
 });
 test('referral code normalization removes unsafe characters', () => {
   assert.equal(shared.normalizeReferralCode(' ab-12 uid '), 'AB12UID');
+});
+test('Phase 3 redemption configuration and deterministic identifiers remain safe', () => {
+  assert.equal(DEFAULT_REWARD_CONFIG.global.minimumCustomerRedemptionPoints, 100);
+  assert.equal(DEFAULT_REWARD_CONFIG.global.redemptionIncrementPoints, 10);
+  assert.equal(DEFAULT_REWARD_CONFIG.global.maximumServiceCreditPercentagePerBooking, 20);
+  assert.equal(DEFAULT_REWARD_CONFIG.global.featureFlags.redemptionEnabled, false);
+  assert.equal(hashId('service_credit', 'u1:r1'), hashId('service_credit', 'u1:r1'));
+  assert.notEqual(hashId('service_credit', 'u1:r1'), hashId('service_credit', 'u1:r2'));
+});
+test('Phase 3 only reads trusted pricing snapshot fields for eligible service credit', () => {
+  assert.equal(bookingEligibleSubtotal({ pricingSnapshot: { subtotal: 123.456 } }), 123.46);
+  assert.equal(bookingEligibleSubtotal({ pricingSnapshot: { serviceSubtotal: 75 } }), 75);
+  assert.equal(bookingEligibleSubtotal({ totalAmount: 999 }), 0);
 });

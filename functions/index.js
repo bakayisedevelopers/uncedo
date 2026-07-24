@@ -20,6 +20,7 @@ const {
 const { ACCOUNT_TYPES, REWARD_REASON_CODES, REWARD_TRANSACTION_DIRECTIONS } = require('./shared/rewards');
 const { seedDefaultRewardConfig, getRewardConfig } = require('./rewards/config');
 const { applyRewardTransaction, processExpiredCustomerPoints } = require('./rewards/rewardService');
+const { reserveServiceCredit, finalizeServiceCredit, adminRewardAdjustment, requestHelperBenefit } = require('./rewards/phase3Service');
 const {
   ensureReferralCode,
   attachReferral,
@@ -3082,6 +3083,103 @@ exports.evaluateCustomerProfileRewards = onRequest({ cors: true }, async (req, r
   }
 });
 
+async function getVerifiedRequestUser(req) {
+  const token = getBearerToken(req);
+  const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) return null;
+  const profile = (await db.collection('users').doc(decoded.uid).get()).data() || {};
+  return { uid: decoded.uid, email: decoded.email || '', ...profile };
+}
+
+exports.reserveServiceCredit = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
+  const user = await getVerifiedRequestUser(req); if (!user) return res.status(401).json({ success: false, message: 'Unauthorized request.' });
+  try { const redemption = await reserveServiceCredit({ db, admin, userId: user.uid, requestId: String(req.body?.requestId || ''), requestedPoints: req.body?.points }); res.status(200).json({ success: true, redemption }); }
+  catch (error) { logger.warn('service_credit_reservation_failed', { uid: user.uid, error: error.message }); res.status(400).json({ success: false, message: error.message }); }
+});
+
+exports.releaseServiceCredit = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
+  const user = await getVerifiedRequestUser(req); if (!user) return res.status(401).json({ success: false, message: 'Unauthorized request.' });
+  const requestId = String(req.body?.requestId || ''); const request = (await db.collection('serviceRequests').doc(requestId).get()).data() || {};
+  if (request.customerId !== user.uid) return res.status(403).json({ success: false, message: 'Not allowed.' });
+  try { const redemption = await finalizeServiceCredit({ db, admin, requestId, paymentSucceeded: false, reason: 'customer_released' }); res.status(200).json({ success: true, redemption }); }
+  catch (error) { res.status(400).json({ success: false, message: error.message }); }
+});
+
+exports.adminAdjustReward = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
+  const user = await getVerifiedRequestUser(req); if (!user?.isAdmin && user?.role !== 'admin' && user?.email !== 'jabuobed1@gmail.com') return res.status(403).json({ success: false, message: 'Admin only.' });
+  try { const result = await adminRewardAdjustment({ db, admin, adminUser: user, userId: String(req.body?.userId || ''), accountType: req.body?.accountType, direction: req.body?.direction, points: req.body?.points, reason: req.body?.reason, supportReference: req.body?.supportReference }); res.status(200).json({ success: true, result }); }
+  catch (error) { res.status(400).json({ success: false, message: error.message }); }
+});
+
+function isRewardAdmin(user) {
+  return Boolean(user && (user.isAdmin === true || user.role === 'admin' || user.email === 'jabuobed1@gmail.com'));
+}
+
+function validateRewardConfigPatch(configId, patch) {
+  if (!['global', 'customer', 'helper', 'membership', 'mastery'].includes(configId) || !patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Invalid reward configuration update.');
+  const numbers = ['pointsPerRand', 'customerPointExpiryMonths', 'minimumCustomerRedemptionPoints', 'redemptionIncrementPoints', 'maximumServiceCreditPercentagePerBooking', 'maximumServiceCreditRandPerBooking'];
+  for (const key of numbers) {
+    if (patch[key] !== undefined && (!Number.isFinite(Number(patch[key])) || Number(patch[key]) < 0)) throw new Error(`Invalid ${key}.`);
+  }
+  if (patch.maximumServiceCreditPercentagePerBooking !== undefined && Number(patch.maximumServiceCreditPercentagePerBooking) > 100) throw new Error('Service-credit percentage must be between 0 and 100.');
+  if (patch.pointsPerRand !== undefined && Number(patch.pointsPerRand) < 1) throw new Error('Points-per-Rand must be at least one.');
+}
+
+exports.adminUpdateRewardConfig = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
+  const user = await getVerifiedRequestUser(req); if (!isRewardAdmin(user)) return res.status(403).json({ success: false, message: 'Admin only.' });
+  try {
+    const configId = String(req.body?.configId || ''); const patch = req.body?.patch; const reason = String(req.body?.reason || '').trim();
+    validateRewardConfigPatch(configId, patch); if (!reason) throw new Error('A change reason is required.');
+    const configRef = db.collection('rewardConfig').doc(configId); const historyRef = db.collection('rewardConfigHistory').doc();
+    const result = await db.runTransaction(async (tx) => {
+      const before = (await tx.get(configRef)).data() || {}; const version = Number(before.version || 0) + 1;
+      tx.set(configRef, { ...patch, version, updatedBy: user.uid, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      tx.set(historyRef, { configType: configId, previousValues: before, newValues: patch, changedFields: Object.keys(patch), adminUid: user.uid, reason, version, createdAt: admin.firestore.FieldValue.serverTimestamp() });
+      tx.set(db.collection('adminAuditLogs').doc(historyRef.id), { actorUid: user.uid, action: 'reward_config_updated', targetType: 'reward_config', targetId: configId, reason, correlationId: historyRef.id, createdAt: admin.firestore.FieldValue.serverTimestamp() });
+      return { version, historyId: historyRef.id };
+    });
+    res.status(200).json({ success: true, result });
+  } catch (error) { res.status(400).json({ success: false, message: error.message }); }
+});
+
+exports.adminRewardOperations = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'GET') return res.status(405).json({ success: false, message: 'Method not allowed' });
+  const user = await getVerifiedRequestUser(req); if (!isRewardAdmin(user)) return res.status(403).json({ success: false, message: 'Admin only.' });
+  try {
+    const [summary, configs, transactions] = await Promise.all([
+      db.collection('rewardOperationalSummaries').doc('current').get(),
+      db.collection('rewardConfig').get(),
+      db.collectionGroup('transactions').orderBy('createdAt', 'desc').limit(50).get(),
+    ]);
+    res.status(200).json({ success: true, summary: summary.exists ? summary.data() : {}, config: Object.fromEntries(configs.docs.map((doc) => [doc.id, doc.data()])), transactions: transactions.docs.map((doc) => ({ id: doc.id, userId: doc.ref.parent.parent.id, ...doc.data() })) });
+  } catch (error) { logger.error('admin_reward_operations_failed', { error: error.message }); res.status(500).json({ success: false, message: 'Unable to load reward operations.' }); }
+});
+
+exports.adminUpsertRewardCampaign = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
+  const user = await getVerifiedRequestUser(req); if (!isRewardAdmin(user)) return res.status(403).json({ success: false, message: 'Admin only.' });
+  try {
+    const campaign = req.body?.campaign || {}; const id = String(req.body?.campaignId || '').trim() || db.collection('rewardCampaigns').doc().id;
+    if (!String(campaign.name || '').trim() || !['draft', 'pending_approval', 'active', 'paused', 'ended'].includes(campaign.status)) throw new Error('Campaign name and valid status are required.');
+    if (Number(campaign.maximumTotalPoints || 0) < 0 || Number(campaign.maximumAwardsPerUser || 0) < 0 || Number(campaign.maximumUsers || 0) < 0) throw new Error('Campaign caps cannot be negative.');
+    if (campaign.status === 'active' && (!campaign.startAt || !campaign.endAt || Number(campaign.maximumTotalPoints || 0) < 1)) throw new Error('Active campaigns need dates and a finite point budget.');
+    await db.collection('rewardCampaigns').doc(id).set({ ...campaign, campaignId: id, updatedBy: user.uid, updatedAt: admin.firestore.FieldValue.serverTimestamp(), createdBy: campaign.createdBy || user.uid, createdAt: campaign.createdAt || admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    await db.collection('adminAuditLogs').doc(`campaign_${id}_${Date.now()}`).set({ actorUid: user.uid, action: 'campaign_upserted', targetType: 'reward_campaign', targetId: id, reason: String(req.body?.reason || ''), createdAt: admin.firestore.FieldValue.serverTimestamp() });
+    res.status(200).json({ success: true, campaignId: id });
+  } catch (error) { res.status(400).json({ success: false, message: error.message }); }
+});
+
+exports.requestHelperRewardBenefit = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
+  const user = await getVerifiedRequestUser(req); if (!user) return res.status(401).json({ success: false, message: 'Unauthorized request.' });
+  try { const redemption = await requestHelperBenefit({ db, admin, helperId: user.uid, benefitId: String(req.body?.benefitId || '') }); res.status(200).json({ success: true, redemption }); }
+  catch (error) { res.status(400).json({ success: false, message: error.message }); }
+});
+
 exports.updatePaymentMethod = onRequest({ cors: true }, async (req, res) => {
   if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
   const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
@@ -3507,6 +3605,28 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
     bookingFeeAmount: bookingFee,
   });
   const totalAmount = helperPayoutBreakdown.customerChargeAmount || toRand(quoteTotal + waitingCost + bookingFee);
+  const redemptionId = String(request.serviceCreditRedemptionId || '').trim();
+  let serviceCreditAmount = 0;
+  let serviceCreditPoints = 0;
+  if (redemptionId) {
+    const redemptionSnap = await db.collection('serviceCreditRedemptions').doc(redemptionId).get();
+    const redemption = redemptionSnap.data() || {};
+    if (!redemptionSnap.exists || redemption.userId !== request.customerId || redemption.requestId !== requestId || redemption.status !== 'reserved') {
+      res.status(409).json({ success: false, message: 'The service-credit reservation is no longer valid.' });
+      return;
+    }
+    const globalRewardConfig = await getRewardConfig(db, 'global');
+    const pointsPerRand = Math.max(1, Number(globalRewardConfig.pointsPerRand || 10));
+    const redemptionIncrement = Math.max(1, Number(globalRewardConfig.redemptionIncrementPoints || 10));
+    const eligibleSubtotal = Math.max(0, Number(quoteTotal || 0));
+    const percentageCap = eligibleSubtotal * (Number(globalRewardConfig.maximumServiceCreditPercentagePerBooking || 20) / 100);
+    const randCap = Number(globalRewardConfig.maximumServiceCreditRandPerBooking || 0);
+    const maxCreditRand = randCap > 0 ? Math.min(percentageCap, randCap) : percentageCap;
+    const maximumPoints = Math.floor((maxCreditRand * pointsPerRand) / redemptionIncrement) * redemptionIncrement;
+    serviceCreditPoints = Math.max(0, Math.min(Number(redemption.points || 0), maximumPoints));
+    serviceCreditAmount = toRand(serviceCreditPoints / pointsPerRand);
+  }
+  const cashChargeAmount = toRand(Math.max(0, totalAmount - serviceCreditAmount));
 
   const customerRef = db.collection('users').doc(request.customerId);
   const customerSnap = await customerRef.get();
@@ -3520,7 +3640,7 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
     || null;
 
   let charge = { ok: true, reason: null, transactionId: 'free-request-covered' };
-  if (totalAmount > 0) {
+  if (cashChargeAmount > 0) {
     let paymentsSecrets;
     try {
       paymentsSecrets = getPaymentsSecrets();
@@ -3536,7 +3656,7 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
     charge = await chargeAuthorizationWithPaystack({
       paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY,
       email: customerData.email || request.customerEmail || '',
-      amount: totalAmount,
+      amount: cashChargeAmount,
       authorizationCode: selectedCard?.paystackAuthorizationCode || '',
     });
   }
@@ -3545,7 +3665,7 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
   const wallet = customerData.wallet || { balance: 0, currency: 'ZAR' };
   const nextWalletBalance = charge.ok
     ? Number(wallet.balance || 0)
-    : Number((Number(wallet.balance || 0) - totalAmount).toFixed(2));
+    : Number((Number(wallet.balance || 0) - cashChargeAmount).toFixed(2));
 
   const batch = db.batch();
   batch.set(requestRef, {
@@ -3564,6 +3684,9 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
       bookingFeeCap: SERVICE_BOOKING_FEE_CAP,
       waitingMinutes,
       waitingCost,
+      serviceCreditAmount,
+      serviceCreditPoints,
+      cashChargeAmount,
       finalAmount: totalAmount,
       finalizedAt: new Date(endedAt).toISOString(),
     },
@@ -3603,6 +3726,10 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO
   }
 
   await batch.commit();
+  if (redemptionId) {
+    await finalizeServiceCredit({ db, admin, requestId, paymentSucceeded: charge.ok, appliedPoints: serviceCreditPoints, reason: charge.ok ? 'final_cap' : 'payment_failed' })
+      .catch((error) => logger.error('service_credit_finalization_failed', { requestId, redemptionId, error: error.message }));
+  }
 
   await admin.database().ref(`liveTracking/serviceRequests/${requestId}`).update({
     status: 'completed',

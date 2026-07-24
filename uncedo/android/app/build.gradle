@@ -107,6 +107,28 @@ def enableMinifyInReleaseBuilds = (findProperty('android.enableMinifyInReleaseBu
  * this variant is about 6MiB larger per architecture than default.
  */
 def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
+def desiredAutolinkingPackageName = 'com.bakayise.uncedo'
+
+tasks.register("normalizeAutolinkingPackageName") {
+    doLast {
+        def autolinkingFile = rootProject.layout.buildDirectory.file("generated/autolinking/autolinking.json").get().asFile
+        if (!autolinkingFile.exists()) {
+            return
+        }
+
+        def parsed = new groovy.json.JsonSlurper().parse(autolinkingFile)
+        if (parsed?.project?.android?.packageName == desiredAutolinkingPackageName) {
+            return
+        }
+
+        parsed.project.android.packageName = desiredAutolinkingPackageName
+        autolinkingFile.text = groovy.json.JsonOutput.toJson(parsed)
+    }
+}
+
+tasks.matching { ["generateAutolinkingPackageList", "generateReactNativeEntryPoint", "generateAutolinkingNewArchitectureFiles"].contains(it.name) }.configureEach {
+    dependsOn(tasks.named("normalizeAutolinkingPackageName"))
+}
 
 android {
     ndkVersion rootProject.ext.ndkVersion
@@ -114,9 +136,9 @@ android {
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
 
-    namespace 'com.anonymous.uncedomobile'
+    namespace 'com.bakayise.uncedo'
     defaultConfig {
-        applicationId 'com.anonymous.uncedomobile'
+        applicationId 'com.bakayise.uncedo'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1

@@ -408,6 +408,28 @@ export async function triggerProfileCompletionEvaluation() {
   return res.json().catch(() => null);
 }
 
+// Service credit is reserved by the backend against an existing booking. The
+// client never changes points or computes the final payable amount itself.
+async function serviceCreditRequest(functionName, body) {
+  const { auth } = getFirebaseClients();
+  const token = await auth.currentUser?.getIdToken();
+  if (!token) throw new Error('You must be signed in.');
+  const res = await fetch(getFunctionEndpoint(functionName), {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const payload = await res.json().catch(() => null);
+  if (!res.ok || payload?.success === false) throw new Error(payload?.message || 'Unable to update service credit.');
+  return payload.redemption || payload;
+}
+
+export function reserveServiceCreditForBooking(requestId, points) {
+  return serviceCreditRequest('reserveServiceCredit', { requestId, points: Number(points) });
+}
+
+export function releaseServiceCreditForBooking(requestId) {
+  return serviceCreditRequest('releaseServiceCredit', { requestId });
+}
+
 // ---------------------------------------------------------------------------
 // Cache invalidation helper
 // ---------------------------------------------------------------------------
