@@ -8,11 +8,11 @@
     "test:emulator": "node --test test/firestore.rules.test.js test/rewards.integration.test.js test/rewards.test.js test/financialOperations.emulator.test.js test/helperWallet.emulator.test.js"
   },
   "engines": {
-    "node": "20"
+    "node": "22"
   },
   "dependencies": {
     "firebase-admin": "^12.1.1",
-    "firebase-functions": "^7.2.5",
+    "firebase-functions": "^7.4.0",
     "h3-js": "^4.2.1",
     "mammoth": "^1.13.0",
     "pdfjs-dist": "^4.10.38",
