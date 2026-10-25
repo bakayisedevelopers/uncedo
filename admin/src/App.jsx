@@ -12,6 +12,7 @@ import ServicesPage from './pages/ServicesPage';
 import CustomersPage from './pages/CustomersPage';
 import RewardsPage from './pages/RewardsPage';
 import SupportTicketsPage from './pages/SupportTicketsPage';
+import SupportKnowledgePage from './pages/SupportKnowledgePage';
 
 export default function App() {
   return (
@@ -36,6 +37,7 @@ export default function App() {
         <Route path="/helper-agreements" element={<HelperAgreementsPage />} />
         <Route path="/rewards" element={<RewardsPage />} />
         <Route path="/support" element={<SupportTicketsPage />} />
+        <Route path="/support/knowledge" element={<SupportKnowledgePage />} />
       </Route>
 
       <Route path="*" element={<Navigate to="/dashboard" replace />} />

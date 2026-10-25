@@ -30,6 +30,7 @@ const {
 const { submitServiceRequestRating, serviceIdsFor } = require('./rewards/ratingService');
 const { incrementCompletedPaid, recalculateMastery, recalculateMembership } = require('./rewards/progressionService');
 const { getFunctions } = require('firebase-admin/functions');
+const { isTrustedAdminToken } = require('./security/adminAuthorization');
 // A single-concurrency fractional-CPU profile for Functions that previously
 // failed deployment under the project's regional CPU quota.
 const HALF_CPU_OPTIONS = Object.freeze({ cpu: 0.5, concurrency: 1 });
@@ -98,7 +99,11 @@ const {
 } = require('./paymentMethodStore');
 const { createOrAppendWhatsAppSupportMessage } = require('./whatsapp/supportTicketService');
 const { createWhatsAppSupportMediaUrl } = require('./whatsapp/supportMedia');
+const { appendBoundedConversationTurn } = require('./whatsapp/conversationMemory');
+const { getWhatsAppConversationHistory: queryWhatsAppConversationHistory } = require('./whatsapp/conversationHistory');
 const { createWhatsAppIntentRouter } = require('./whatsapp/aiIntentRouter');
+const { createWhatsAppToolRegistry } = require('./whatsapp/toolRegistry');
+const { retentionDays, retentionExpiryMs, shouldDeleteConversationMessage } = require('./whatsapp/retentionPolicy');
 const {
   isWithinCustomerServiceWindow,
   normalizeWebhookPayload,
@@ -1924,6 +1929,7 @@ exports.persistWhatsAppConversationEvent = onDocumentCreated({
     const statusRef = db.collection('whatsappMessageStatuses').doc(normalized.eventId);
     await statusRef.create({
       ...normalized,
+      retentionExpiresAtMs: retentionExpiryMs(process.env, 'WHATSAPP_STATUS_RETENTION_DAYS'),
       receivedAt: admin.firestore.FieldValue.serverTimestamp(),
     }).catch((error) => {
       if (error?.code !== 6 && error?.code !== 'already-exists') throw error;
@@ -1968,6 +1974,24 @@ exports.persistWhatsAppConversationEvent = onDocumentCreated({
     const timestampMs = normalizeTimestamp(normalized.timestampMs) || Date.now();
     const latestInboundAtMs = Math.max(Number(conversation.lastInboundMessageAtMs || 0), timestampMs);
     const now = admin.firestore.FieldValue.serverTimestamp();
+    const memory = appendBoundedConversationTurn({
+      recentHistory: conversation.recentHistory,
+      conversationSummary: {
+        ...(conversation.conversationSummary || {}),
+        currentMode: conversation.currentMode || 'assistant',
+        currentIntent: conversation.currentIntent || '',
+        selectedServiceId: conversation.selectedServiceId || '',
+        presentedServiceIds: conversation.presentedServiceIds || [],
+        activeServiceRequestId: conversation.activeServiceRequestId || '',
+        activeSupportTicketId: conversation.activeSupportTicketId || '',
+      },
+      turn: messageSnap.exists ? null : {
+        role: 'user',
+        text: normalized.text || normalized.media?.caption || '',
+        type: normalized.type,
+        timestampMs,
+      },
+    });
     transaction.set(identityRef, {
       channel: 'whatsapp',
       phoneNumberId: normalized.phoneNumberId,
@@ -2000,12 +2024,8 @@ exports.persistWhatsAppConversationEvent = onDocumentCreated({
       humanHandoff: Boolean(conversation.humanHandoff),
       aiConsentAtMs: Number(conversation.aiConsentAtMs || 0),
       lastMessageAtMs: Math.max(Number(conversation.lastMessageAtMs || 0), timestampMs),
-      recentHistory: [
-        ...(Array.isArray(conversation.recentHistory) ? conversation.recentHistory : []),
-        ...(messageSnap.exists ? [] : [{ eventId: normalized.eventId, role: 'user', text: normalized.text || normalized.media?.caption || '', type: normalized.type, timestampMs }]),
-      ].filter((turn) => turn && String(turn.text || '').trim())
-        .sort((left, right) => Number(left.timestampMs || 0) - Number(right.timestampMs || 0))
-        .slice(-8),
+      recentHistory: memory.recentHistory,
+      conversationSummary: memory.conversationSummary,
       updatedAt: now,
       createdAt: conversation.createdAt || now,
     }, { merge: true });
@@ -2015,8 +2035,12 @@ exports.persistWhatsAppConversationEvent = onDocumentCreated({
         ...normalized,
         identityId,
         guestPrincipalId: activeGuestPrincipalId,
+        participantUid: existingIdentity.linkedFirebaseUid || null,
+        participantRole: existingIdentity.role || 'guest',
         direction: 'inbound',
         status: 'received',
+        createdAtMs: timestampMs,
+        retentionExpiresAtMs: timestampMs + whatsappRetentionDays('WHATSAPP_MESSAGE_RETENTION_DAYS', 180) * 24 * 60 * 60 * 1000,
         createdAt: now,
       });
       transaction.create(assistantJobRef, {
@@ -2025,6 +2049,7 @@ exports.persistWhatsAppConversationEvent = onDocumentCreated({
         conversationId: identityId,
         status: 'pending',
         attempts: 0,
+        retentionExpiresAtMs: timestampMs + whatsappRetentionDays('WHATSAPP_JOB_RETENTION_DAYS', 30) * 24 * 60 * 60 * 1000,
         createdAt: now,
         updatedAt: now,
       });
@@ -2037,6 +2062,10 @@ exports.persistWhatsAppConversationEvent = onDocumentCreated({
     });
   });
 });
+
+function whatsappRetentionDays(variableName, defaultDays) {
+  return retentionDays({ [variableName]: process.env[variableName] || '' }, variableName) || defaultDays;
+}
 
 function whatsappAiEnabled() {
   return String(process.env.WHATSAPP_AI_ENABLED || '').trim().toLowerCase() === 'true';
@@ -2101,6 +2130,156 @@ async function consumeWhatsAppAiRateLimit(identityId, now = Date.now()) {
   });
 }
 
+async function consumeWhatsAppToolRateLimit(identityId, now = Date.now()) {
+  const minuteBucket = Math.floor(now / 60000);
+  const dayBucket = new Date(now).toISOString().slice(0, 10);
+  const rateRef = db.collection('whatsappToolRateLimits').doc(identityId);
+  return db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(rateRef);
+    const previous = snapshot.data() || {};
+    const minuteCount = Number(previous.minuteBucket) === minuteBucket ? Number(previous.minuteCount || 0) : 0;
+    const dayCount = String(previous.dayBucket || '') === dayBucket ? Number(previous.dayCount || 0) : 0;
+    if (minuteCount >= 4 || dayCount >= 40) return false;
+    transaction.set(rateRef, {
+      minuteBucket, minuteCount: minuteCount + 1, dayBucket, dayCount: dayCount + 1,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      retentionExpiresAtMs: now + 2 * 24 * 60 * 60 * 1000,
+    }, { merge: true });
+    return true;
+  });
+}
+
+async function deleteExpiredWhatsAppCollectionDocuments(collectionName, now, limit = 300) {
+  const snapshot = await db.collection(collectionName).where('retentionExpiresAtMs', '<=', now).limit(limit).get();
+  if (snapshot.empty) return 0;
+  const batch = db.batch();
+  let deletions = 0;
+  for (const document of snapshot.docs) {
+    if (collectionName === 'whatsappMessages') {
+      const message = document.data() || {};
+      const ticketId = String(message.ticketId || message.supportTicketId || '').trim();
+      if (ticketId) {
+        const ticketSnapshot = await db.collection('supportTickets').doc(ticketId).get();
+        if (shouldDeleteConversationMessage(message, ticketSnapshot.exists ? ticketSnapshot.data()?.status || '' : null)) batch.delete(document.ref);
+        else continue;
+      } else batch.delete(document.ref);
+    } else batch.delete(document.ref);
+    deletions += 1;
+  }
+  if (deletions) await batch.commit();
+  return deletions;
+}
+
+async function cleanupExpiredWhatsAppMedia(now, limit = 100) {
+  const snapshot = await db.collection('whatsappMediaAssets').where('retentionExpiresAtMs', '<=', now).limit(limit).get();
+  let deleted = 0;
+  for (const document of snapshot.docs) {
+    const assetRef = document.ref;
+    const initial = document.data() || {};
+    const path = String(initial.storagePath || '');
+    if (!path.startsWith('whatsapp-private/')) continue;
+    const ticketId = String(initial.supportTicketId || '').trim();
+    let effectiveExpiry = Number(initial.retentionExpiresAtMs || 0);
+    if (ticketId) {
+      const ticketSnapshot = await db.collection('supportTickets').doc(ticketId).get();
+      if (!ticketSnapshot.exists) {
+        // A missing ticket may have been deleted through an approved privacy cleanup.
+      } else {
+        const ticket = ticketSnapshot.data() || {};
+        if (!['closed', 'resolved'].includes(String(ticket.status || '').toLowerCase())) continue;
+        effectiveExpiry = Number(ticket.retentionExpiresAtMs || 0);
+      }
+    }
+    if (!effectiveExpiry || effectiveExpiry > now) continue;
+    const claim = await db.runTransaction(async (transaction) => {
+      const current = await transaction.get(assetRef);
+      if (!current.exists) return false;
+      const asset = current.data() || {};
+      if (String(asset.storagePath || '') !== path || String(asset.status || '') !== 'stored'
+        || Number(asset.retentionExpiresAtMs || 0) > now) return false;
+      transaction.set(assetRef, { status: 'deleting', cleanupClaimedAtMs: now }, { merge: true });
+      return true;
+    });
+    if (!claim) continue;
+    try {
+      await admin.storage().bucket().file(path).delete({ ignoreNotFound: true });
+      await assetRef.delete();
+      deleted += 1;
+    } catch (error) {
+      await assetRef.set({ status: 'stored', cleanupFailedAtMs: now, cleanupErrorCode: String(error?.code || 'storage-delete-failed').slice(0, 60) }, { merge: true }).catch(() => null);
+      logger.warn('whatsapp_media_retention_delete_failed', { assetId: document.id, errorCode: String(error?.code || 'storage-delete-failed').slice(0, 60) });
+    }
+  }
+  return deleted;
+}
+
+async function cleanupClosedWhatsAppSupportTickets(now, limit = 50) {
+  const snapshot = await db.collection('supportTickets').where('retentionExpiresAtMs', '<=', now).limit(limit).get();
+  let deleted = 0;
+  for (const ticketDoc of snapshot.docs) {
+    const ticket = ticketDoc.data() || {};
+    if (!['closed', 'resolved'].includes(String(ticket.status || '').toLowerCase())) continue;
+    const messages = await ticketDoc.ref.collection('messages').limit(401).get();
+    const batch = db.batch();
+    for (const message of messages.docs.slice(0, 400)) batch.delete(message.ref);
+    if (messages.size <= 400) batch.delete(ticketDoc.ref);
+    if (!messages.empty || messages.size <= 400) await batch.commit();
+    if (messages.size <= 400) deleted += 1;
+  }
+  return deleted;
+}
+
+async function clearExpiredWhatsAppConversationMemory(now) {
+  const cutoff = now - retentionDays(process.env, 'WHATSAPP_MESSAGE_RETENTION_DAYS') * 24 * 60 * 60 * 1000;
+  const snapshot = await db.collection('whatsappConversations').where('lastInboundMessageAtMs', '<=', cutoff).limit(100).get();
+  let cleared = 0;
+  for (const document of snapshot.docs) {
+    const conversation = document.data() || {};
+    if (conversation.humanHandoff === true || conversation.activeDraftId || conversation.activeServiceRequestId || conversation.activeSupportTicketId) continue;
+    await db.runTransaction(async (transaction) => {
+      const currentSnapshot = await transaction.get(document.ref);
+      const current = currentSnapshot.data() || {};
+      if (!currentSnapshot.exists || current.humanHandoff === true || current.activeDraftId || current.activeServiceRequestId || current.activeSupportTicketId
+        || Number(current.lastInboundMessageAtMs || 0) > cutoff) return;
+      transaction.set(document.ref, {
+        recentHistory: [],
+        conversationSummary: {},
+        memoryClearedAtMs: now,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      cleared += 1;
+    });
+  }
+  return cleared;
+}
+
+exports.cleanupWhatsAppRetention = onSchedule({
+  schedule: 'every day 03:15',
+  timeZone: 'Africa/Johannesburg',
+  maxInstances: 1,
+  ...HALF_CPU_OPTIONS,
+  memory: '256MiB',
+  timeoutSeconds: 300,
+}, async () => {
+  if (String(process.env.WHATSAPP_RETENTION_CLEANUP_ENABLED || '').trim().toLowerCase() !== 'true') {
+    logger.info('whatsapp_retention_cleanup_disabled');
+    return;
+  }
+  const now = Date.now();
+  const counts = {};
+  for (const collectionName of [
+    'whatsappWebhookEvents', 'whatsappAssistantJobs', 'whatsappMessageStatuses',
+    'whatsappToolExecutions', 'whatsappToolRateLimits', 'whatsappRateLimits',
+    'whatsappAuthChallenges', 'whatsappProfileChangeRequests', 'whatsappMessages',
+  ]) {
+    counts[collectionName] = await deleteExpiredWhatsAppCollectionDocuments(collectionName, now, 300);
+  }
+  counts.mediaAssets = await cleanupExpiredWhatsAppMedia(now, 100);
+  counts.supportTickets = await cleanupClosedWhatsAppSupportTickets(now, 50);
+  counts.conversationMemories = await clearExpiredWhatsAppConversationMemory(now);
+  logger.info('whatsapp_retention_cleanup_completed', counts);
+});
+
 function getWhatsAppMetaClient() {
   if (!whatsappMessagingEnabled()) throw new Error('WhatsApp messaging is disabled.');
   const secrets = getWhatsAppSecrets();
@@ -2117,7 +2296,9 @@ function getWhatsAppMetaClient() {
 
 async function processWhatsAppInboundMedia({ identityId, eventId, identity, conversation, inbound }) {
   if (!whatsappMediaEnabled()) return { code: 'disabled' };
-  if (String(process.env.WHATSAPP_MEDIA_RETENTION_ENFORCED || '').trim().toLowerCase() !== 'true') {
+  if (String(process.env.WHATSAPP_MEDIA_RETENTION_ENFORCED || '').trim().toLowerCase() !== 'true'
+    || String(process.env.WHATSAPP_RETENTION_CLEANUP_ENABLED || '').trim().toLowerCase() !== 'true'
+    || String(process.env.WHATSAPP_STORAGE_RETENTION_POLICY_VERIFIED || '').trim().toLowerCase() !== 'true') {
     return { code: 'retention-not-configured' };
   }
   const mediaType = ({ image: 'image', audio: 'audio', document: 'document' })[String(inbound?.type || '').toLowerCase()];
@@ -2170,41 +2351,58 @@ async function processWhatsAppInboundMedia({ identityId, eventId, identity, conv
     requestId,
     supportTicketId,
     retentionEnforced: true,
+    retentionDays: retentionDays(process.env, 'WHATSAPP_MEDIA_RETENTION_DAYS'),
   });
   const draftRef = draftId ? db.collection('serviceRequestDrafts').doc(draftId) : null;
   const ticketRef = supportTicketId ? db.collection('supportTickets').doc(supportTicketId) : null;
-  await db.runTransaction(async (transaction) => {
-    const reads = [transaction.get(assetRef)];
-    if (draftRef) reads.push(transaction.get(draftRef));
-    if (ticketRef) reads.push(transaction.get(ticketRef));
-    const snapshots = await Promise.all(reads);
-    const assetSnapshot = snapshots[0];
-    if (assetSnapshot.exists) return;
-    let index = 1;
-    const currentDraft = draftRef ? snapshots[index++] : null;
-    const currentTicket = ticketRef ? snapshots[index] : null;
-    const draftIsOwned = Boolean(currentDraft?.exists && String(currentDraft.data()?.identityId || '') === identityId);
-    const ticketIsOwned = Boolean(currentTicket?.exists && String(currentTicket.data()?.identityId || '') === identityId);
-    transaction.create(assetRef, {
-      assetId,
-      identityId,
-      sourceEventId: eventId,
-      storagePath: stored.path,
-      mediaType: media.mediaType,
-      mimeType: media.mimeType,
-      size: media.size,
-      requestId: requestId || null,
-      draftId: draftIsOwned ? draftId : null,
-      supportTicketId: ticketIsOwned ? supportTicketId : null,
-      status: 'stored',
-      retentionExpiresAtMs: Date.now() + (30 * 24 * 60 * 60 * 1000),
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  try {
+    await db.runTransaction(async (transaction) => {
+      const reads = [transaction.get(assetRef)];
+      if (draftRef) reads.push(transaction.get(draftRef));
+      if (ticketRef) reads.push(transaction.get(ticketRef));
+      const snapshots = await Promise.all(reads);
+      const assetSnapshot = snapshots[0];
+      if (assetSnapshot.exists) return;
+      let index = 1;
+      const currentDraft = draftRef ? snapshots[index++] : null;
+      const currentTicket = ticketRef ? snapshots[index] : null;
+      const draftIsOwned = Boolean(currentDraft?.exists && String(currentDraft.data()?.identityId || '') === identityId);
+      const ticketIsOwned = Boolean(currentTicket?.exists && String(currentTicket.data()?.identityId || '') === identityId);
+      transaction.create(assetRef, {
+        assetId,
+        identityId,
+        sourceEventId: eventId,
+        storagePath: stored.path,
+        mediaType: media.mediaType,
+        mimeType: media.mimeType,
+        size: media.size,
+        requestId: requestId || null,
+        draftId: draftIsOwned ? draftId : null,
+        supportTicketId: ticketIsOwned ? supportTicketId : null,
+        status: 'stored',
+        retentionExpiresAtMs: retentionExpiryMs(process.env, 'WHATSAPP_MEDIA_RETENTION_DAYS'),
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      if (draftIsOwned) transaction.set(draftRef, {
+        mediaAssetIds: admin.firestore.FieldValue.arrayUnion(assetId),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
     });
-    if (draftIsOwned) transaction.set(draftRef, {
-      mediaAssetIds: admin.firestore.FieldValue.arrayUnion(assetId),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
-  });
+  } catch (error) {
+    // The private object has already been uploaded. Keep a deterministic
+    // retention record if draft/ticket association failed, so it is not orphaned.
+    await assetRef.set({
+      assetId, identityId, sourceEventId: eventId, storagePath: stored.path,
+      mediaType: media.mediaType, mimeType: media.mimeType, size: media.size,
+      requestId: requestId || null, draftId: draftId || null, supportTicketId: supportTicketId || null,
+      status: 'stored', cleanupAfterAssociationFailure: true,
+      retentionExpiresAtMs: retentionExpiryMs(process.env, 'WHATSAPP_MEDIA_RETENTION_DAYS'),
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true }).catch((recordError) => {
+      logger.error('whatsapp_media_retention_record_failed', { assetId, errorCode: String(recordError?.code || 'firestore-write-failed').slice(0, 80) });
+    });
+    throw error;
+  }
   return {
     code: 'stored', assetId, requestId, draftId, supportTicketId,
     mediaType: media.mediaType, mimeType: media.mimeType, size: media.size,
@@ -2218,7 +2416,7 @@ async function associateWhatsAppMediaWithSupportTicket({ assetId, identityId, ti
   const ticketRef = db.collection('supportTickets').doc(String(ticketId));
   return db.runTransaction(async (transaction) => {
     const [assetSnapshot, ticketSnapshot] = await Promise.all([transaction.get(assetRef), transaction.get(ticketRef)]);
-    if (!assetSnapshot.exists || !ticketSnapshot.exists) return false;
+    if (!assetSnapshot.exists || !ticketSnapshot.exists || String(assetSnapshot.data()?.status || '') !== 'stored') return false;
     if (String(assetSnapshot.data()?.identityId || '') !== identityId
       || String(ticketSnapshot.data()?.identityId || '') !== identityId) return false;
     transaction.set(assetRef, { supportTicketId: ticketId, associatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
@@ -2229,7 +2427,14 @@ async function associateWhatsAppMediaWithSupportTicket({ assetId, identityId, ti
 async function applyWhatsAppDeliveryStatusToMessage(messageRef, statusEvent) {
   await db.runTransaction(async (transaction) => {
     const messageSnap = await transaction.get(messageRef);
-    if (!messageSnap.exists || !shouldApplyDeliveryStatus(messageSnap.data() || {}, statusEvent)) return;
+    if (!messageSnap.exists) return;
+    const message = messageSnap.data() || {};
+    if (!shouldApplyDeliveryStatus(message, statusEvent)) return;
+    const ticketMessageId = message.ticketId && message.replyId ? `admin_${String(message.replyId)}` : '';
+    const ticketMessageRef = ticketMessageId
+      ? db.collection('supportTickets').doc(String(message.ticketId)).collection('messages').doc(ticketMessageId)
+      : null;
+    const ticketMessageSnapshot = ticketMessageRef ? await transaction.get(ticketMessageRef) : null;
     transaction.update(messageRef, {
       status: statusEvent.status,
       deliveryStatus: statusEvent.status,
@@ -2238,6 +2443,12 @@ async function applyWhatsAppDeliveryStatusToMessage(messageRef, statusEvent) {
       statusUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
+    if (ticketMessageSnapshot?.exists) transaction.set(ticketMessageRef, {
+      deliveryStatus: statusEvent.status,
+      statusTimestampMs: statusEvent.timestampMs,
+      statusErrors: statusEvent.errors || [],
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
   });
 }
 
@@ -2280,15 +2491,19 @@ function renderWhatsAppCatalog(catalog) {
   return `Available services:\n${rows.join('\n')}${suffix}\n\nTell me which service you need.`.slice(0, 3800);
 }
 
-async function persistWhatsAppAssistantReply({ sourceEventId, identityId, identity, conversationRef, text, interactive = null }) {
+async function persistWhatsAppAssistantReply({ sourceEventId, identityId, identity, conversationRef, text, interactive = null, requireCurrentInbound = true }) {
   const recipient = String(identity?.waId || '').trim();
   const phoneNumberId = String(identity?.phoneNumberId || '').trim();
   const lastInboundAtMs = Number((await conversationRef.get()).data()?.lastInboundMessageAtMs || 0);
   const outboundId = stableEventId(`assistant-reply:${sourceEventId}`);
   const outboundRef = db.collection('whatsappMessages').doc(outboundId);
   const claim = await db.runTransaction(async (transaction) => {
-    const existing = await transaction.get(outboundRef);
-    if (existing.exists) return false;
+    const [existing, conversationSnapshot] = await Promise.all([transaction.get(outboundRef), transaction.get(conversationRef)]);
+    if (existing.exists) return { claimed: false, stale: false };
+    if (!conversationSnapshot.exists
+      || (requireCurrentInbound && String(conversationSnapshot.data()?.lastInboundEventId || '') !== sourceEventId)) {
+      return { claimed: false, stale: true };
+    }
     transaction.create(outboundRef, {
       eventId: outboundId,
       sourceEventId,
@@ -2299,11 +2514,13 @@ async function persistWhatsAppAssistantReply({ sourceEventId, identityId, identi
       type: interactive ? 'interactive' : 'text',
       text: String(text || '').slice(0, 4096),
       status: 'sending',
+      createdAtMs: Date.now(),
+      retentionExpiresAtMs: Date.now() + whatsappRetentionDays('WHATSAPP_MESSAGE_RETENTION_DAYS', 180) * 24 * 60 * 60 * 1000,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
-    return true;
+    return { claimed: true, stale: false };
   });
-  if (!claim) return { sent: false, duplicate: true };
+  if (!claim.claimed) return { sent: false, duplicate: !claim.stale, stale: claim.stale };
 
   try {
     const { secrets, client } = getWhatsAppMetaClient();
@@ -2321,9 +2538,14 @@ async function persistWhatsAppAssistantReply({ sourceEventId, identityId, identi
     await db.runTransaction(async (transaction) => {
       const conversationSnap = await transaction.get(conversationRef);
       const conversation = conversationSnap.data() || {};
-      const history = Array.isArray(conversation.recentHistory) ? conversation.recentHistory : [];
+      const memory = appendBoundedConversationTurn({
+        recentHistory: conversation.recentHistory,
+        conversationSummary: conversation.conversationSummary || {},
+        turn: { role: 'assistant', text: String(text || '').slice(0, 4096), timestampMs: Date.now() },
+      });
       transaction.set(conversationRef, {
-        recentHistory: [...history, { role: 'assistant', text: String(text || '').slice(0, 4096), timestampMs: Date.now() }].slice(-8),
+        recentHistory: memory.recentHistory,
+        conversationSummary: memory.conversationSummary,
         lastMessageAtMs: Date.now(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
@@ -2393,10 +2615,11 @@ async function relayWhatsAppText({ eventId, identityId, identity, conversation, 
   if (!text) return { handled: true, code: 'text-empty' };
   const outboundId = stableEventId(`relay:${eventId}:${recipientIdentityId}`);
   const outboundRef = db.collection('whatsappMessages').doc(outboundId);
+  const sourceMessageRef = db.collection('whatsappMessages').doc(eventId);
   const claimed = await db.runTransaction(async (transaction) => {
-    const [currentRequestSnap, currentRecipientConversation, currentRecipientIdentity, existingOutbound] = await Promise.all([
+    const [currentRequestSnap, currentRecipientConversation, currentRecipientIdentity, existingOutbound, sourceMessageSnap] = await Promise.all([
       transaction.get(requestRef), transaction.get(recipientConversationRef),
-      transaction.get(recipientIdentityRef), transaction.get(outboundRef),
+      transaction.get(recipientIdentityRef), transaction.get(outboundRef), transaction.get(sourceMessageRef),
     ]);
     if (existingOutbound.exists || !currentRequestSnap.exists || !currentRecipientConversation.exists || !currentRecipientIdentity.exists) return false;
     const currentRequest = currentRequestSnap.data() || {};
@@ -2419,8 +2642,15 @@ async function relayWhatsAppText({ eventId, identityId, identity, conversation, 
       type: 'text',
       text,
       status: 'sending',
+      createdAtMs: Date.now(),
+      retentionExpiresAtMs: Date.now() + whatsappRetentionDays('WHATSAPP_MESSAGE_RETENTION_DAYS', 180) * 24 * 60 * 60 * 1000,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
+    if (sourceMessageSnap.exists) transaction.set(sourceMessageRef, {
+      requestId,
+      relayRecipientIdentityId: recipientIdentityId,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
     return true;
   });
   if (!claimed) return { handled: true, code: 'duplicate-or-stale' };
@@ -2451,7 +2681,9 @@ async function relayWhatsAppAttachment({ eventId, identityId, identity, conversa
     return { handled: false };
   }
   if (!whatsappMediaEnabled()) return { handled: true, code: 'media-relay-disabled' };
-  if (String(process.env.WHATSAPP_MEDIA_RETENTION_ENFORCED || '').trim().toLowerCase() !== 'true') {
+  if (String(process.env.WHATSAPP_MEDIA_RETENTION_ENFORCED || '').trim().toLowerCase() !== 'true'
+    || String(process.env.WHATSAPP_RETENTION_CLEANUP_ENABLED || '').trim().toLowerCase() !== 'true'
+    || String(process.env.WHATSAPP_STORAGE_RETENTION_POLICY_VERIFIED || '').trim().toLowerCase() !== 'true') {
     return { handled: true, code: 'retention-not-configured' };
   }
 
@@ -2554,6 +2786,8 @@ async function relayWhatsAppAttachment({ eventId, identityId, identity, conversa
         mimeType: mediaResult.mimeType,
       },
       status: 'sending',
+      createdAtMs: Date.now(),
+      retentionExpiresAtMs: Date.now() + whatsappRetentionDays('WHATSAPP_MESSAGE_RETENTION_DAYS', 180) * 24 * 60 * 60 * 1000,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
     transaction.set(sourceMessageRef, {
@@ -2704,6 +2938,208 @@ async function confirmWhatsAppServiceDraft({ identityId, identity, conversationR
   return outcome;
 }
 
+async function resolveWhatsAppToolAuthorization(identityId, eventIdentity) {
+  const identity = await getWhatsAppIdentityForCurrentSender(identityId, eventIdentity);
+  if (!identity) return { identity: null, authorization: { role: 'guest', verified: false, linked: false } };
+  const uid = String(identity.linkedFirebaseUid || '').trim();
+  if (!uid || !normalizeTimestamp(identity.verifiedAt)) {
+    return { identity, authorization: { role: 'guest', verified: false, linked: false } };
+  }
+  const [linkSnapshot, profileSnapshot] = await Promise.all([
+    db.collection('whatsappUserLinks').doc(uid).get(),
+    db.collection('users').doc(uid).get(),
+  ]);
+  const link = linkSnapshot.data() || {};
+  const profile = profileSnapshot.data() || {};
+  const linked = profileSnapshot.exists
+    && String(link.identityId || '') === identityId
+    && String(link.uid || '') === uid
+    && String(identity.linkedFirebaseUid || '') === uid
+    && normalizeTimestamp(link.linkedAt) > 0;
+  if (!linked) return { identity, authorization: { role: 'guest', verified: false, linked: false } };
+
+  const linkedRole = String(identity.role || link.role || '').trim().toLowerCase();
+  if (linkedRole === 'customer' && profileAllowsRole(profile, 'customer')) {
+    return { identity, authorization: { uid, role: 'customer', verified: true, linked: true } };
+  }
+  if (linkedRole === 'helper' && profileAllowsRole(profile, 'helper')
+    && String(profile.verificationStatus || '').toLowerCase() === 'verified') {
+    return { identity, authorization: { uid, role: 'helper', verified: true, linked: true, helperVerified: true } };
+  }
+  return { identity, authorization: { uid, role: 'guest', verified: false, linked: false } };
+}
+
+function buildWhatsAppAssistantToolRegistry({ identity, authorization, conversationRef, eventId, inbound }) {
+  return createWhatsAppToolRegistry({
+    getCatalogEntries: getLiveServiceCatalogEntries,
+    getSupportArticles: async () => {
+      const snapshot = await db.collection('supportArticles').where('published', '==', true).limit(100).get();
+      return snapshot.docs.map((document) => ({ id: document.id, ...document.data() }));
+    },
+    handlers: {
+      async getMyProfile(_args, context) {
+        const profileSnapshot = await db.collection('users').doc(context.authorization.uid).get();
+        if (!profileSnapshot.exists) return { code: 'profile-not-found' };
+        const profile = profileSnapshot.data() || {};
+        return {
+          firstName: String(profile.firstName || profile.givenName || String(profile.fullName || profile.displayName || '').trim().split(/\s+/)[0] || '').slice(0, 100),
+          lastName: String(profile.lastName || profile.surname || String(profile.fullName || profile.displayName || '').trim().split(/\s+/).slice(1).join(' ') || '').slice(0, 100),
+          email: String(profile.email || '').slice(0, 180),
+          role: context.authorization.role,
+          ...(context.authorization.role === 'helper' ? { verificationStatus: String(profile.verificationStatus || 'pending') } : {}),
+        };
+      },
+      async proposeProfileChange(args, context) {
+        const value = String(args.value || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 80);
+        if (!value || value.length < 1) return { code: 'invalid-value' };
+        const proposalId = stableEventId(`whatsapp-profile-change:${identityId}:${eventId}`);
+        const proposalRef = db.collection('whatsappProfileChangeRequests').doc(proposalId);
+        const nowMs = Date.now();
+        await db.runTransaction(async (transaction) => {
+          const [proposalSnapshot, conversationSnapshot] = await Promise.all([transaction.get(proposalRef), transaction.get(conversationRef)]);
+          if (proposalSnapshot.exists) return;
+          if (!conversationSnapshot.exists || String(conversationSnapshot.data()?.lastInboundEventId || '') !== eventId) return;
+          transaction.create(proposalRef, {
+            proposalId, identityId, uid: context.authorization.uid, role: context.authorization.role,
+            field: args.field, value, status: 'pending', sourceEventId: eventId,
+            expiresAtMs: nowMs + 15 * 60 * 1000, createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            retentionExpiresAtMs: retentionExpiryMs(process.env, 'WHATSAPP_JOB_RETENTION_DAYS', nowMs),
+          });
+          transaction.set(conversationRef, {
+            pendingProfileChange: { proposalId, field: args.field, value, expiresAtMs: nowMs + 15 * 60 * 1000 },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+        });
+        const savedProposal = await proposalRef.get();
+        if (!savedProposal.exists || String(savedProposal.data()?.uid || '') !== context.authorization.uid) return { code: 'stale' };
+        return { code: 'confirmation-required', proposalId, field: args.field, value };
+      },
+      async listMyBookings(_args, context) {
+        const requestIdentity = { ...identity, linkedFirebaseUid: context.authorization.uid, role: context.authorization.role };
+        const requests = await listWhatsAppRequests({ db, identity: requestIdentity, perPrincipalLimit: 25, resultLimit: 5 });
+        return { bookings: requests.map((request) => ({ ...buildWhatsAppRequestSummary(request), createdAtMs: normalizeTimestamp(request.createdAtMs || request.createdAt) })) };
+      },
+      async getBookingStatus(args, context) {
+        const requestIdentity = { ...identity, linkedFirebaseUid: context.authorization.uid, role: context.authorization.role };
+        const access = await getWhatsAppRequestForIdentity({ db, identity: requestIdentity, requestId: args.requestId });
+        if (access.code !== 'found') return { code: 'not-found' };
+        return { code: 'found', booking: buildWhatsAppRequestSummary(access.request) };
+      },
+      async getMyPaymentSummary(args, context) {
+        const requestIdentity = { ...identity, linkedFirebaseUid: context.authorization.uid, role: 'customer' };
+        const access = await getWhatsAppRequestForIdentity({ db, identity: requestIdentity, requestId: args.requestId });
+        if (access.code !== 'found') return { code: 'not-found' };
+        const [paymentSnapshot, financialSnapshot] = await Promise.all([
+          db.collection(PAYMENT_OPERATIONS).doc(access.request.id).get(),
+          db.collection(FINANCIAL_OPERATIONS_COLLECTION).doc(serviceFinancialOperationId(access.request.id)).get(),
+        ]);
+        const payment = paymentSnapshot.exists ? paymentSnapshot.data() || {} : null;
+        const financial = financialSnapshot.exists ? financialSnapshot.data() || {} : null;
+        const state = paymentStateForRequest(access.request, payment, financial);
+        const amount = getFinalPayableAmount(access.request, financial);
+        return {
+          code: 'available', requestId: access.request.id, state,
+          amount: Number.isFinite(Number(amount)) ? Number(amount) : null,
+          currency: String(payment?.currency || financial?.currency || 'ZAR').toUpperCase(),
+          settledAtMs: normalizeTimestamp(payment?.settledAt || payment?.settledAtMs || financial?.settledAtMs) || null,
+        };
+      },
+      async getMyWalletSummary(_args, context) {
+        const walletSnapshot = await helperWalletReference(db, context.authorization.uid).get();
+        return normalizeWalletForClient(walletSnapshot.exists ? walletSnapshot.data() || {} : emptyHelperWallet(context.authorization.uid));
+      },
+      async listMyWalletTransactions(args, context) {
+        const snapshot = await helperWalletReference(db, context.authorization.uid).collection('transactions')
+          .orderBy('createdAtMs', 'desc').limit(args.limit || 10).get();
+        return { transactions: snapshot.docs.map((document) => {
+          const entry = document.data() || {};
+          return {
+            entryType: String(entry.entryType || 'wallet_entry').slice(0, 50),
+            amountMinor: Math.max(0, Number(entry.amountMinor || 0)),
+            availableDeltaMinor: Number(entry.availableDeltaMinor || 0),
+            outstandingCommissionDeltaMinor: Number(entry.outstandingCommissionDeltaMinor || 0),
+            description: String(entry.description || '').slice(0, 240),
+            requestId: String(entry.requestId || '').slice(0, 128),
+            payoutId: String(entry.payoutId || '').slice(0, 128),
+            createdAtMs: Number(entry.createdAtMs || 0),
+          };
+        }) };
+      },
+      async getMyPayoutStatus(_args, context) {
+        const snapshot = await db.collection(HELPER_PAYOUT_COLLECTION).where('helperId', '==', context.authorization.uid).limit(20).get();
+        const payouts = snapshot.docs.map((document) => {
+          const payout = document.data() || {};
+          return {
+            payoutId: document.id,
+            status: String(payout.status || 'unknown').slice(0, 40),
+            amount: Number(payout.amount ?? payout.amountZar ?? payout.totalAmount ?? payout.helperAmount ?? (Number(payout.amountMinor || 0) / 100)) || 0,
+            currency: String(payout.currency || 'ZAR').toUpperCase(),
+            periodStart: String(payout.periodStart || payout.weekStart || '').slice(0, 40),
+            periodEnd: String(payout.periodEnd || payout.weekEnd || '').slice(0, 40),
+            weekKey: String(payout.weekKey || '').slice(0, 40),
+          };
+        }).sort((left, right) => right.weekKey.localeCompare(left.weekKey) || right.payoutId.localeCompare(left.payoutId)).slice(0, 5);
+        return { payouts };
+      },
+      async requestHumanSupport(args, context) {
+        const result = await createOrAppendWhatsAppSupportMessage({
+          db, admin, identityId, conversationRef, eventId,
+          principalId: context.authorization.uid || identity.guestPrincipalId || '',
+          linkedUid: context.authorization.uid || '',
+          role: context.authorization.role === 'guest' ? 'customer' : context.authorization.role,
+          requestId: String((await conversationRef.get()).data()?.activeServiceRequestId || ''),
+          inbound: { ...inbound, text: inbound.text || args.reason }, escalationReason: args.reason,
+        });
+        if (result.stale) return { code: 'stale' };
+        return { code: 'handed_off', ticketId: result.ticketId, duplicate: result.duplicate === true };
+      },
+    },
+  });
+}
+
+function formatWhatsAppToolResult(toolName, result = {}) {
+  if (toolName === 'listAvailableServices') {
+    const list = (result.services || []).map((item) => `• ${item.label}${item.description ? ` — ${item.description}` : ''}`).slice(0, 30);
+    return list.length ? `Available Uncedo services:\n${list.join('\n')}` : 'I could not find any currently published services.';
+  }
+  if (toolName === 'getServiceDetails') return `${result.label || 'Service'}${result.description ? `: ${result.description}` : '.'} I can read the current questionnaire or prepare a quote using the validated booking flow.`;
+  if (toolName === 'getServiceQuestionnaire') return (result.questions || []).length
+    ? `This service asks:\n${result.questions.map((question) => `• ${question.prompt || question.id}${question.required ? ' (required)' : ''}`).join('\n')}`
+    : 'There are no questionnaire fields currently published for that service.';
+  if (toolName === 'getServicePricingInformation') return `The current catalogue lists ${result.pricing?.currency || 'ZAR'} ${Number(result.pricing?.basePrice || 0).toFixed(2)} as the base price. ${result.note || 'A final quote requires validated answers.'}`;
+  if (toolName === 'getSupportKnowledge') return result.found
+    ? result.articles.map((article) => `${article.title}\n${article.content}`).join('\n\n').slice(0, 3000)
+    : 'I could not find an approved Uncedo support article with that information. I can refer this to a support person if you would like.';
+  if (toolName === 'getMyProfile') return `Your Uncedo account is a ${result.role || 'linked'} account${result.firstName ? ` for ${result.firstName}${result.lastName ? ` ${result.lastName}` : ''}` : ''}${result.email ? ` (${result.email})` : ''}.`;
+  if (toolName === 'proposeProfileChange') return `I can change your ${result.field === 'firstName' ? 'first name' : 'surname'} to “${result.value}”. Please confirm this change.`;
+  if (toolName === 'listMyBookings') return formatWhatsAppRequestHistory(result.bookings || []);
+  if (toolName === 'getBookingStatus') return result.code === 'found' ? formatWhatsAppRequestSummary(result.booking) : 'I could not find a booking you are authorized to view.';
+  if (toolName === 'getMyPaymentSummary') return result.code === 'available'
+    ? `Request ${result.requestId} payment is ${result.state}${result.amount === null ? '' : ` for R${Number(result.amount).toFixed(2)} ${result.currency || 'ZAR'}`}.`
+    : 'I could not verify payment information for that booking.';
+  if (toolName === 'getMyWalletSummary') return `Helper wallet: available R${(Number(result.availableMinor || 0) / 100).toFixed(2)}, reserved R${(Number(result.reservedMinor || 0) / 100).toFixed(2)}, outstanding commission R${(Number(result.outstandingCommissionMinor || 0) / 100).toFixed(2)}.`;
+  if (toolName === 'listMyWalletTransactions') return (result.transactions || []).length
+    ? `Recent helper wallet entries:\n${result.transactions.slice(0, 10).map((item) => `• ${item.description || item.entryType}: R${(Number(item.amountMinor || 0) / 100).toFixed(2)}`).join('\n')}`
+    : 'There are no recent helper wallet transactions.';
+  if (toolName === 'getMyPayoutStatus') return (result.payouts || []).length
+    ? `Recent weekly payout records:\n${result.payouts.map((item) => `• ${item.payoutId}: ${item.status}, R${Number(item.amount || 0).toFixed(2)} ${item.currency}`).join('\n')}`
+    : 'I could not find a weekly payout record for this helper account.';
+  if (toolName === 'requestHumanSupport') return `I’ve referred this to Uncedo support. Ticket reference: ${result.ticketId}. AI replies are paused while a support person handles it.`;
+  return 'I could not complete that request safely.';
+}
+
+async function runWhatsAppToolWithTimeout(operation, timeoutMs = 12_000) {
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(operation),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('Tool execution timed out.'), { code: 'tool-timeout' })), timeoutMs); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
   document: 'whatsappAssistantJobs/{jobId}',
   maxInstances: 2,
@@ -2742,6 +3178,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     const identity = identitySnap.data() || {};
     let conversation = conversationSnap.data() || {};
     let inbound = inboundSnap.data() || {};
+    const originalUserText = String(inbound.text || inbound.media?.caption || '').slice(0, 1200);
     if (String(conversation.lastInboundEventId || '') !== eventId) {
       await jobRef.set({ status: 'superseded', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
@@ -2783,6 +3220,67 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     }
 
     const buttonId = String(inbound.interactive?.buttonId || '').trim();
+    const profileChangeAction = buttonId.match(/^wa_profile_(confirm|cancel)_(wa_[a-f0-9]{64})$/i);
+    if (profileChangeAction) {
+      const [, action, proposalId] = profileChangeAction;
+      const proposalRef = db.collection('whatsappProfileChangeRequests').doc(proposalId);
+      const proposalSnapshot = await proposalRef.get();
+      const proposal = proposalSnapshot.data() || {};
+      if (!whatsappAiEnabled() || proposal.identityId !== identityId || Number(proposal.expiresAtMs || 0) <= Date.now()) {
+        await reply('That profile change confirmation is unavailable or expired. No profile change was made.');
+      } else if (action === 'cancel') {
+        await db.runTransaction(async (transaction) => {
+          const [currentProposal, currentConversation] = await Promise.all([transaction.get(proposalRef), transaction.get(conversationRef)]);
+          if (!currentProposal.exists || currentProposal.data()?.status !== 'pending') return;
+          transaction.set(proposalRef, { status: 'cancelled', completedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          if (currentConversation.data()?.pendingProfileChange?.proposalId === proposalId) {
+            transaction.set(conversationRef, { pendingProfileChange: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          }
+        });
+        await reply('The profile change was cancelled. Your account was not changed.');
+      } else {
+        const verified = await resolveWhatsAppToolAuthorization(identityId, identity);
+        const authorization = verified.authorization || {};
+        if (!authorization.uid || authorization.verified !== true || authorization.linked !== true
+          || authorization.role !== proposal.role || !['firstName', 'lastName'].includes(proposal.field)) {
+          await reply('I could not verify the linked account for this change. No profile change was made.');
+        } else {
+          const userRef = db.collection('users').doc(authorization.uid);
+          const auditRef = db.collection('auditEvents').doc(stableEventId(`whatsapp-profile-change:${proposalId}:${authorization.uid}`));
+          const result = await db.runTransaction(async (transaction) => {
+            const [currentProposal, currentConversation, profileSnapshot, auditSnapshot] = await Promise.all([
+              transaction.get(proposalRef), transaction.get(conversationRef), transaction.get(userRef), transaction.get(auditRef),
+            ]);
+            const current = currentProposal.data() || {};
+            const pending = currentConversation.data()?.pendingProfileChange || {};
+            if (!currentProposal.exists || current.status !== 'pending' || current.uid !== authorization.uid
+              || current.identityId !== identityId || pending.proposalId !== proposalId
+              || Number(current.expiresAtMs || 0) <= Date.now() || !profileSnapshot.exists) return { code: 'stale' };
+            if (!['firstName', 'lastName'].includes(current.field)) return { code: 'invalid-field' };
+            const profile = profileSnapshot.data() || {};
+            const oldParts = String(profile.fullName || profile.displayName || '').trim().split(/\s+/).filter(Boolean);
+            let firstName = String(profile.firstName || oldParts[0] || '').trim();
+            let lastName = String(profile.lastName || oldParts.slice(1).join(' ') || '').trim();
+            if (current.field === 'firstName') firstName = String(current.value || '').trim();
+            else lastName = String(current.value || '').trim();
+            if (!firstName) return { code: 'first-name-required' };
+            const fullName = [firstName, lastName].filter(Boolean).join(' ').slice(0, 180);
+            const now = admin.firestore.FieldValue.serverTimestamp();
+            transaction.update(userRef, { firstName, lastName, fullName, displayName: fullName, updatedAt: now });
+            transaction.set(proposalRef, { status: 'completed', completedAt: now }, { merge: true });
+            transaction.set(conversationRef, { pendingProfileChange: admin.firestore.FieldValue.delete(), updatedAt: now }, { merge: true });
+            if (!auditSnapshot.exists) transaction.create(auditRef, {
+              eventType: 'whatsapp_profile_name_changed', actorUid: authorization.uid, identityId,
+              role: authorization.role, changedField: current.field, createdAt: now,
+            });
+            return { code: 'updated' };
+          });
+          await reply(result.code === 'updated' ? 'Your profile name has been updated.' : 'That profile change is no longer current. No change was made.');
+        }
+      }
+      await jobRef.set({ status: 'completed', intent: 'profile_change_confirmation', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
     const cashActionMatch = buttonId.match(/^wa_cash_(confirm|reject)_(wa_[a-f0-9]{64})$/i);
     if (cashActionMatch) {
       const [, action, actionId] = cashActionMatch;
@@ -3588,9 +4086,15 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       geminiApiKey: String(process.env.GEMINI_API_KEY || '').trim(),
       geminiModel: String(process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite').trim(),
     });
+    const toolPrincipal = await resolveWhatsAppToolAuthorization(identityId, identity);
+    const toolIdentity = toolPrincipal.identity || identity;
+    const toolAuthorization = toolPrincipal.authorization;
+    const toolRegistry = buildWhatsAppAssistantToolRegistry({ identity: toolIdentity, authorization: toolAuthorization, conversationRef, eventId, inbound });
+    const availableTools = toolRegistry.definitions({ identity: toolIdentity, authorization: toolAuthorization });
     const intentResult = await model.classify({
       message: inbound,
       recentHistory: Array.isArray(conversation.recentHistory) ? conversation.recentHistory : [],
+      conversationSummary: conversation.conversationSummary || {},
       conversationState: {
         mode: conversation.currentMode,
         intent: conversation.currentIntent,
@@ -3600,7 +4104,111 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       },
       services: catalog.slice(0, 50),
       questions,
+      availableTools,
     });
+
+    const latestConversationSnapshot = await conversationRef.get();
+    if (!latestConversationSnapshot.exists || String(latestConversationSnapshot.data()?.lastInboundEventId || '') !== eventId) {
+      await jobRef.set({ status: 'superseded', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    let selectedTool = String(intentResult.toolName || '').trim();
+    let selectedToolArguments = intentResult.toolArguments || {};
+    if (!selectedTool && ['customer_support', 'provider_support', 'platform_information'].includes(intentResult.intent)) {
+      selectedTool = 'getSupportKnowledge';
+      selectedToolArguments = { query: String(inbound.text || '').slice(0, 300) };
+    }
+    if (selectedTool) {
+      if (selectedTool === 'requestHumanSupport' && !whatsappSupportEnabled()) {
+        await reply('WhatsApp support handoff is not enabled yet. Please use the Uncedo app to contact support.');
+        await jobRef.set({ status: 'completed', intent: intentResult.intent, toolName: selectedTool, reason: 'support_handoff_disabled', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      if (!(await consumeWhatsAppToolRateLimit(identityId))) {
+        await reply('I have reached the safe limit for account lookups in this conversation. Please wait a little and try again.');
+        await jobRef.set({ status: 'rate_limited', intent: intentResult.intent, toolName: selectedTool, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      const argumentHash = createHash('sha256').update(JSON.stringify(selectedToolArguments)).digest('hex');
+      const executionId = stableEventId(`whatsapp-tool:${eventId}:${selectedTool}`);
+      let toolResult = null;
+      let executionCode = 'ok';
+      try {
+        toolResult = await runWhatsAppToolWithTimeout(() => toolRegistry.execute(selectedTool, selectedToolArguments, { identity: toolIdentity, authorization: toolAuthorization, role: toolAuthorization.role, eventId, inbound, originalUserText }));
+      } catch (error) {
+        executionCode = String(error?.code || 'tool-failed').slice(0, 80);
+        logger.warn('whatsapp_ai_tool_execution_failed', { eventId, toolName: selectedTool, errorCode: executionCode });
+      }
+      await db.collection('whatsappToolExecutions').doc(executionId).create({
+        executionId, eventId, identityId, toolName: selectedTool, role: toolAuthorization.role,
+        status: toolResult ? 'completed' : 'failed', resultCode: executionCode,
+        argumentHash, createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        retentionExpiresAtMs: Date.now() + whatsappRetentionDays('WHATSAPP_JOB_RETENTION_DAYS', 30) * 24 * 60 * 60 * 1000,
+      }).catch((error) => {
+        if (error?.code !== 6 && error?.code !== 'already-exists') logger.warn('whatsapp_ai_tool_audit_write_failed', { eventId, toolName: selectedTool });
+      });
+
+      if (selectedTool === 'getSupportKnowledge' && toolResult && toolResult.found !== true
+        && ['customer_support', 'provider_support', 'human_escalation'].includes(intentResult.intent)) {
+        if (whatsappSupportEnabled()) {
+          selectedTool = 'requestHumanSupport';
+          selectedToolArguments = { reason: String(inbound.text || 'Support request').slice(0, 300) };
+          toolResult = await runWhatsAppToolWithTimeout(() => toolRegistry.execute(selectedTool, selectedToolArguments, { identity: toolIdentity, authorization: toolAuthorization, role: toolAuthorization.role, eventId, inbound, originalUserText, escalationRequired: true }));
+          if (inbound.media?.assetId) await associateWhatsAppMediaWithSupportTicket({ assetId: inbound.media.assetId, identityId, ticketId: toolResult.ticketId });
+          const fallbackExecutionId = stableEventId(`whatsapp-tool:${eventId}:${selectedTool}`);
+          await db.collection('whatsappToolExecutions').doc(fallbackExecutionId).create({
+            executionId: fallbackExecutionId, eventId, identityId, toolName: selectedTool, role: toolAuthorization.role,
+            status: 'completed', resultCode: 'handed_off', argumentHash: createHash('sha256').update(JSON.stringify(selectedToolArguments)).digest('hex'),
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            retentionExpiresAtMs: Date.now() + whatsappRetentionDays('WHATSAPP_JOB_RETENTION_DAYS', 30) * 24 * 60 * 60 * 1000,
+          }).catch(() => null);
+        } else {
+          await reply('I could not find approved guidance for this issue. Please contact Uncedo support through the app.');
+          await jobRef.set({ status: 'completed', intent: intentResult.intent, toolName: selectedTool, resultCode: 'knowledge-not-found-support-disabled', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          return;
+        }
+      }
+      if (!toolResult) {
+        const safeError = executionCode === 'escalation-not-authorized'
+          ? 'I can continue helping here. If you want a support person, say “talk to a person” or describe the issue that needs review.'
+          : executionCode === 'identity-verification-required' || executionCode === 'helper-verification-required'
+          ? 'Please verify and link your Uncedo account before I show private account information.'
+          : executionCode === 'tool-permission-denied'
+            ? 'That account action is not available for this WhatsApp identity.'
+            : 'I could not safely retrieve that information right now. Please try again later.';
+        await reply(safeError);
+        await jobRef.set({ status: 'completed', intent: intentResult.intent, toolName: selectedTool, resultCode: executionCode, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      if (toolResult.code === 'stale') {
+        await reply('I received a newer message before I could complete that step. Please send the latest request again.');
+        await jobRef.set({ status: 'superseded', intent: intentResult.intent, toolName: selectedTool, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      const toolText = formatWhatsAppToolResult(selectedTool, toolResult);
+      if (selectedTool === 'requestHumanSupport') {
+        await reply(toolText);
+      } else if (selectedTool === 'getSupportKnowledge' && toolResult.found !== true
+        && ['customer_support', 'provider_support', 'human_escalation'].includes(intentResult.intent)) {
+        await reply(toolText);
+      } else {
+        if (selectedTool === 'proposeProfileChange' && toolResult.code === 'confirmation-required') {
+          await reply(toolText, {
+            type: 'button', body: { text: 'Confirm this profile name change?' }, action: { buttons: [
+              { type: 'reply', reply: { id: `wa_profile_confirm_${toolResult.proposalId}`, title: 'Confirm change' } },
+              { type: 'reply', reply: { id: `wa_profile_cancel_${toolResult.proposalId}`, title: 'Cancel' } },
+            ] },
+          });
+        } else await reply(toolText);
+      }
+      await jobRef.set({
+        status: 'completed', intent: intentResult.intent, toolName: selectedTool,
+        toolResultCode: toolResult.code || 'ok', aiProvider: intentResult.provider || null,
+        aiModel: intentResult.model || null, updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      return;
+    }
 
     if (intentResult.intent === 'greeting') {
       await reply('Hi! I can help you explore Uncedo services or start a service enquiry. What do you need help with?');
@@ -3633,15 +4241,14 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     }
     if (['customer_support', 'provider_support', 'human_escalation'].includes(intentResult.intent)) {
       if (!whatsappSupportEnabled()) {
-        await reply('WhatsApp support tickets are not enabled yet. Please use the Uncedo app to contact the support team.');
+        await reply('I could not safely resolve the request using approved Uncedo guidance. WhatsApp support handoff is not enabled yet; please contact support through the Uncedo app.');
       } else {
         const ticket = await createOrAppendWhatsAppSupportMessage({
           db, admin, identityId, conversationRef, eventId,
           principalId: identity.linkedFirebaseUid || identity.guestPrincipalId || '',
           linkedUid: identity.linkedFirebaseUid || '',
           role: identity.role || (identity.guestPrincipalId ? 'customer' : 'unknown'),
-          requestId: conversation.activeServiceRequestId || '',
-          inbound,
+          requestId: conversation.activeServiceRequestId || '', inbound,
         });
         if (inbound.media?.assetId) await associateWhatsAppMediaWithSupportTicket({ assetId: inbound.media.assetId, identityId, ticketId: ticket.ticketId });
         await reply(`I’ve sent this conversation to Uncedo support. Your ticket reference is ${ticket.ticketId}. AI replies are paused until the support team closes the handoff.`);
@@ -4207,7 +4814,9 @@ exports.notifyWhatsAppHelperOfferOnServiceRequestWrite = onDocumentWritten({
     transaction.create(outboundRef, {
       eventId: outboundId, identityId, phoneNumberId: secrets.phoneNumberId, to: recipient,
       requestId, direction: 'outbound', type: 'template', status: 'sending',
-      templateName, offerRevision, createdAt: now,
+      templateName, offerRevision, createdAtMs: Date.now(),
+      retentionExpiresAtMs: Date.now() + whatsappRetentionDays('WHATSAPP_MESSAGE_RETENTION_DAYS', 180) * 24 * 60 * 60 * 1000,
+      createdAt: now,
     });
     return true;
   });
@@ -4780,12 +5389,7 @@ async function isAdminAuthorizationHeader(req) {
   if (!match) return false;
   try {
     const decoded = await admin.auth().verifyIdToken(match[1]);
-    const userSnap = await db.collection('users').doc(decoded.uid).get();
-    const user = userSnap.exists ? userSnap.data() || {} : {};
-    return decoded.email === 'jabuobed1@gmail.com'
-      || user.isAdmin === true
-      || String(user.role || '').toLowerCase() === 'admin'
-      || (Array.isArray(user.roles) && user.roles.includes('admin'));
+    return isTrustedAdminToken(decoded);
   } catch (error) {
     logger.warn('helper_dispatch_index_rebuild_auth_failed', { error: error.message });
     return false;
@@ -5209,30 +5813,11 @@ function getBearerToken(req) {
 }
 
 function isAllowlistedAdminEmail(email = '') {
-  const normalized = String(email || '').trim().toLowerCase();
-  return ['jabuobed1@gmail.com'].includes(normalized);
+  return isTrustedAdminToken({ email, email_verified: true });
 }
 
 function isAdminToken(decoded = {}) {
-  return Boolean(
-    decoded?.admin === true
-      || decoded?.isAdmin === true
-      || isAllowlistedAdminEmail(decoded?.email),
-  );
-}
-
-function isAdminUserRecord(user = {}) {
-  const roles = new Set(
-    [
-      user?.role,
-      user?.activeRole,
-      ...(Array.isArray(user?.roles) ? user.roles : []),
-    ]
-      .map((value) => String(value || '').trim().toLowerCase())
-      .filter(Boolean),
-  );
-
-  return roles.has('admin');
+  return isTrustedAdminToken(decoded);
 }
 
 function normalizeExtractedText(rawText) {
@@ -5616,21 +6201,25 @@ exports.startWhatsAppAuthChallenge = onCall({
     maxAttempts: 5,
     deliverable,
     consumed: false,
+    deliveryStatus: deliverable ? 'sending' : 'not_sent',
+    retentionExpiresAtMs: retentionExpiryMs(process.env, 'WHATSAPP_AUTH_RETENTION_DAYS'),
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     expiresAt: admin.firestore.Timestamp.fromMillis(Date.now() + 5 * 60 * 1000),
   });
 
   if (deliverable) {
     try {
-      await client.sendTemplate({
+      const delivery = await client.sendTemplate({
         to: input.phoneNumber,
         name: config.templateName,
         languageCode: config.templateLanguage,
         components: [{ type: 'body', parameters: [{ type: 'text', text: code }] }],
       });
+      await challengeRef.set({ deliveryStatus: 'sent', metaMessageId: delivery.messageId || null, deliveredAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     } catch (error) {
-      await challengeRef.set({ deliveryFailed: true, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-      logger.warn('whatsapp_auth_code_delivery_failed', { errorCode: String(error?.code || 'delivery_failed').slice(0, 80) });
+      const deliveryStatus = classifyMetaDeliveryError(error);
+      await challengeRef.set({ deliveryStatus, deliveryFailed: deliveryStatus === 'failed', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      logger.warn('whatsapp_auth_code_delivery_failed', { deliveryStatus, errorCode: String(error?.code || 'delivery_failed').slice(0, 80) });
       throw new HttpsError('unavailable', 'Unable to send a WhatsApp sign-in code right now.');
     }
   }
@@ -5838,16 +6427,44 @@ exports.unlinkWhatsAppIdentity = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, 
   return { unlinked: true };
 });
 
+exports.getWhatsAppConversationHistory = onCall({ maxInstances: 3, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+  const uid = String(request.auth?.uid || '').trim();
+  if (!uid) throw new HttpsError('unauthenticated', 'Sign in to view WhatsApp conversation history.');
+  const requestedIdentityId = String(request.data?.identityId || '').trim();
+  const trustedAdmin = isAdminToken(request.auth?.token || {});
+  let identityId = '';
+  if (trustedAdmin) {
+    identityId = requestedIdentityId;
+  } else {
+    const linkSnapshot = await db.collection('whatsappUserLinks').doc(uid).get();
+    identityId = String(linkSnapshot.data()?.identityId || '').trim();
+    if (!identityId || (requestedIdentityId && requestedIdentityId !== identityId)) {
+      throw new HttpsError('permission-denied', 'This WhatsApp conversation is not linked to your account.');
+    }
+    const identitySnapshot = await db.collection('whatsappIdentities').doc(identityId).get();
+    const identity = identitySnapshot.data() || {};
+    if (!identitySnapshot.exists || String(identity.linkedFirebaseUid || '') !== uid || !normalizeTimestamp(identity.verifiedAt)) {
+      throw new HttpsError('permission-denied', 'A verified WhatsApp identity is required to view conversation history.');
+    }
+  }
+  if (!/^[a-f0-9]{64}$/.test(identityId)) throw new HttpsError('invalid-argument', 'A valid WhatsApp conversation is required.');
+  const result = await queryWhatsAppConversationHistory({
+    db,
+    documentIdField: admin.firestore.FieldPath.documentId(),
+    timestampFactory: (seconds, nanoseconds) => new admin.firestore.Timestamp(seconds, nanoseconds),
+    identityId,
+    pageSize: request.data?.pageSize,
+    cursor: request.data?.cursor,
+  });
+  if (result.code === 'invalid-cursor' || result.code === 'invalid-input') throw new HttpsError('invalid-argument', 'The conversation history cursor is invalid.');
+  return result;
+});
+
 async function requireWhatsAppSupportAdmin(request) {
   const uid = String(request.auth?.uid || '').trim();
   if (!uid) throw new HttpsError('unauthenticated', 'Admin sign-in is required.');
   const token = request.auth?.token || {};
-  const profileSnap = await db.collection('users').doc(uid).get();
-  const profile = profileSnap.exists ? profileSnap.data() || {} : {};
-  const roles = Array.isArray(profile.roles) ? profile.roles.map((value) => String(value || '').toLowerCase()) : [];
-  const allowed = String(token.email || '').toLowerCase() === 'jabuobed1@gmail.com'
-    || token.isAdmin === true || profile.isAdmin === true || String(profile.role || '').toLowerCase() === 'admin' || roles.includes('admin');
-  if (!allowed) throw new HttpsError('permission-denied', 'Admin authorization is required.');
+  if (!isAdminToken(token)) throw new HttpsError('permission-denied', 'Admin authorization is required.');
   return uid;
 }
 
@@ -5866,7 +6483,14 @@ exports.setWhatsAppSupportTicketState = onCall({ maxInstances: 2, ...HALF_CPU_OP
     const conversationRef = ticket.identityId ? db.collection('whatsappConversations').doc(ticket.identityId) : null;
     const conversationSnap = conversationRef ? await transaction.get(conversationRef) : null;
     const now = admin.firestore.FieldValue.serverTimestamp();
-    transaction.set(ticketRef, { status, assignedAdminUid: adminUid, updatedAt: now, statusUpdatedBy: adminUid }, { merge: true });
+    const statusTime = Date.now();
+    transaction.set(ticketRef, {
+      status, assignedAdminUid: adminUid, updatedAt: now, statusUpdatedBy: adminUid,
+      ...(status === 'resolved' || status === 'closed' ? {
+        closedAtMs: statusTime,
+        retentionExpiresAtMs: retentionExpiryMs(process.env, 'WHATSAPP_SUPPORT_RETENTION_DAYS', statusTime),
+      } : { closedAtMs: null, retentionExpiresAtMs: null }),
+    }, { merge: true });
     if (conversationRef && ['resolved', 'closed'].includes(status) && conversationSnap?.exists) {
       transaction.set(conversationRef, { humanHandoff: false, currentMode: 'assistant', activeSupportTicketId: null, updatedAt: now }, { merge: true });
     }
@@ -5877,6 +6501,129 @@ exports.setWhatsAppSupportTicketState = onCall({ maxInstances: 2, ...HALF_CPU_OP
   });
   if (result.code === 'not-found') throw new HttpsError('not-found', 'Support ticket not found.');
   return { ticketId, status };
+});
+
+exports.assignWhatsAppSupportTicket = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+  const adminUid = await requireWhatsAppSupportAdmin(request);
+  const ticketId = String(request.data?.ticketId || '').trim();
+  if (!/^wa_support_[a-f0-9]{32}$/.test(ticketId)) throw new HttpsError('invalid-argument', 'A valid support ticket is required.');
+  const ticketRef = db.collection('supportTickets').doc(ticketId);
+  const outcome = await db.runTransaction(async (transaction) => {
+    const auditRef = db.collection('auditEvents').doc(stableEventId(`whatsapp-support-assigned:${ticketId}:${adminUid}`));
+    const [ticketSnapshot, auditSnapshot] = await Promise.all([transaction.get(ticketRef), transaction.get(auditRef)]);
+    if (!ticketSnapshot.exists) return 'not-found';
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    transaction.set(ticketRef, { assignedAdminUid: adminUid, assignedAt: now, updatedAt: now }, { merge: true });
+    if (!auditSnapshot.exists) transaction.create(auditRef, { eventType: 'whatsapp_support_ticket_assigned', ticketId, actorUid: adminUid, createdAt: now });
+    return 'assigned';
+  });
+  if (outcome === 'not-found') throw new HttpsError('not-found', 'Support ticket not found.');
+  return { ticketId, assignedAdminUid: adminUid };
+});
+
+exports.getWhatsAppSupportTicketDetails = onCall({ maxInstances: 3, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+  await requireWhatsAppSupportAdmin(request);
+  const ticketId = String(request.data?.ticketId || '').trim();
+  if (!/^wa_support_[a-f0-9]{32}$/.test(ticketId)) throw new HttpsError('invalid-argument', 'A valid support ticket is required.');
+  const ticketSnapshot = await db.collection('supportTickets').doc(ticketId).get();
+  if (!ticketSnapshot.exists) throw new HttpsError('not-found', 'Support ticket not found.');
+  const ticket = ticketSnapshot.data() || {};
+  const [identitySnapshot, profileSnapshot, requestSnapshot] = await Promise.all([
+    ticket.identityId ? db.collection('whatsappIdentities').doc(String(ticket.identityId)).get() : null,
+    ticket.linkedUid ? db.collection('users').doc(String(ticket.linkedUid)).get() : null,
+    ticket.requestId ? db.collection('serviceRequests').doc(String(ticket.requestId)).get() : null,
+  ]);
+  const identity = identitySnapshot?.data() || {};
+  const profile = profileSnapshot?.data() || {};
+  const phone = String(identity.waId || '');
+  const requestData = requestSnapshot?.exists ? { id: requestSnapshot.id, ...(requestSnapshot.data() || {}) } : null;
+  return {
+    ticketId,
+    participant: {
+      uid: String(ticket.linkedUid || ''),
+      role: String(ticket.role || 'unknown'),
+      name: String(profile.fullName || profile.displayName || '').slice(0, 120),
+      whatsappMasked: phone.length >= 4 ? `••••${phone.slice(-4)}` : '',
+      linked: Boolean(ticket.linkedUid),
+    },
+    aiSummary: String(ticket.aiSummary || ticket.escalationReason || '').slice(0, 700),
+    booking: requestData ? buildWhatsAppRequestSummary(requestData) : null,
+  };
+});
+
+exports.listWhatsAppSupportArticles = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+  await requireWhatsAppSupportAdmin(request);
+  const snapshot = await db.collection('supportArticles').orderBy('updatedAt', 'desc').limit(100).get();
+  return { articles: snapshot.docs.map((document) => {
+    const article = document.data() || {};
+    return { id: document.id, title: String(article.title || ''), category: String(article.category || ''), content: String(article.content || ''), keywords: Array.isArray(article.keywords) ? article.keywords : [], published: article.published === true, active: article.active !== false, updatedAtMs: normalizeTimestamp(article.updatedAt) };
+  }) };
+});
+
+exports.saveWhatsAppSupportArticle = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+  const adminUid = await requireWhatsAppSupportAdmin(request);
+  const articleId = String(request.data?.articleId || '').trim().toLowerCase();
+  const title = String(request.data?.title || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 180);
+  const category = String(request.data?.category || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 80);
+  const content = String(request.data?.content || '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '').trim().slice(0, 6000);
+  const keywords = [...new Set((Array.isArray(request.data?.keywords) ? request.data.keywords : [])
+    .map((value) => String(value || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 60).toLowerCase()).filter(Boolean))].slice(0, 20);
+  const published = request.data?.published === true;
+  if (!/^[a-z0-9_-]{3,80}$/.test(articleId) || !title || !category || !content) throw new HttpsError('invalid-argument', 'Article ID, title, category and content are required.');
+  const articleRef = db.collection('supportArticles').doc(articleId);
+  const changeDigest = createHash('sha256').update(JSON.stringify({ title, category, content, keywords, published })).digest('hex');
+  const auditRef = db.collection('auditEvents').doc(stableEventId(`support-article:${articleId}:${adminUid}:${changeDigest}`));
+  const now = admin.firestore.FieldValue.serverTimestamp();
+  await db.runTransaction(async (transaction) => {
+    const [existing, auditSnapshot] = await Promise.all([transaction.get(articleRef), transaction.get(auditRef)]);
+    transaction.set(articleRef, {
+      articleId, title, category, content, keywords, published, active: true,
+      createdBy: existing.data()?.createdBy || adminUid,
+      createdAt: existing.data()?.createdAt || now,
+      updatedBy: adminUid, updatedAt: now,
+      revision: Number(existing.data()?.revision || 0) + 1,
+    }, { merge: false });
+    if (!auditSnapshot.exists) transaction.create(auditRef, { eventType: 'whatsapp_support_article_saved', articleId, published, actorUid: adminUid, createdAt: now });
+  });
+  return { articleId, published };
+});
+
+exports.archiveWhatsAppSupportArticle = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+  const adminUid = await requireWhatsAppSupportAdmin(request);
+  const articleId = String(request.data?.articleId || '').trim();
+  if (!/^[a-z0-9_-]{3,80}$/.test(articleId)) throw new HttpsError('invalid-argument', 'A valid support article is required.');
+  const articleRef = db.collection('supportArticles').doc(articleId);
+  await db.runTransaction(async (transaction) => {
+    const existing = await transaction.get(articleRef);
+    if (!existing.exists) throw new HttpsError('not-found', 'Support article not found.');
+    const article = existing.data() || {};
+    const auditRef = db.collection('auditEvents').doc(stableEventId(`support-article-archive:${articleId}:${adminUid}:${Number(article.revision || 0)}`));
+    const auditSnapshot = await transaction.get(auditRef);
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    transaction.set(articleRef, { published: false, active: false, updatedBy: adminUid, updatedAt: now, revision: Number(article.revision || 0) + 1 }, { merge: true });
+    if (!auditSnapshot.exists) transaction.create(auditRef, { eventType: 'whatsapp_support_article_archived', articleId, actorUid: adminUid, createdAt: now });
+  });
+  return { articleId, archived: true };
+});
+
+exports.markWhatsAppSupportTicketRead = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+  const adminUid = await requireWhatsAppSupportAdmin(request);
+  const ticketId = String(request.data?.ticketId || '').trim();
+  if (!/^wa_support_[a-f0-9]{32}$/.test(ticketId)) throw new HttpsError('invalid-argument', 'A valid support ticket is required.');
+  const ticketRef = db.collection('supportTickets').doc(ticketId);
+  const result = await db.runTransaction(async (transaction) => {
+    const ticketSnapshot = await transaction.get(ticketRef);
+    if (!ticketSnapshot.exists) return { code: 'not-found' };
+    transaction.set(ticketRef, {
+      unreadCount: 0,
+      lastReadAtMs: Date.now(),
+      lastReadBy: adminUid,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    return { code: 'read' };
+  });
+  if (result.code === 'not-found') throw new HttpsError('not-found', 'Support ticket not found.');
+  return { ticketId, read: true };
 });
 
 exports.replyToWhatsAppSupportTicket = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
@@ -5909,7 +6656,9 @@ exports.replyToWhatsAppSupportTicket = onCall({ maxInstances: 2, ...HALF_CPU_OPT
     transaction.create(outboundRef, {
       identityId: ticket.identityId, requestId: ticket.requestId || null, to: identity.waId,
       phoneNumberId: identity.phoneNumberId, direction: 'outbound', type: 'human_support_reply',
-      text, status: 'sending', ticketId, replyId, createdBy: adminUid, createdAt: now,
+      text, status: 'sending', ticketId, replyId, createdBy: adminUid, createdAtMs: Date.now(),
+      retentionExpiresAtMs: Date.now() + whatsappRetentionDays('WHATSAPP_MESSAGE_RETENTION_DAYS', 180) * 24 * 60 * 60 * 1000,
+      createdAt: now,
     });
     transaction.create(ticketMessageRef, {
       messageId: replyId, senderType: 'admin', senderUid: adminUid,
@@ -6109,7 +6858,9 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
       transaction.create(outboundRef, {
         eventId: notificationId, identityId: recipient.identityId, requestId, phoneNumberId: secrets.phoneNumberId,
         to: identity.waId, direction: 'outbound', type: 'template', status: 'sending',
-        templateName, createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        templateName, createdAtMs: Date.now(),
+        retentionExpiresAtMs: Date.now() + whatsappRetentionDays('WHATSAPP_MESSAGE_RETENTION_DAYS', 180) * 24 * 60 * 60 * 1000,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
       return true;
     });
@@ -6541,8 +7292,7 @@ exports.verifyPaystack = onRequest({ cors: true, invoker: 'public' }, async (req
 exports.seedRewardConfig = onRequest({ cors: true }, async (req, res) => {
   const token = getBearerToken(req);
   const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
-  const user = decoded?.uid ? (await db.collection('users').doc(decoded.uid).get()).data() : null;
-  if (!decoded?.uid || !(user?.isAdmin === true || user?.role === 'admin' || decoded.email === 'jabuobed1@gmail.com')) {
+  if (!decoded?.uid || !isAdminToken(decoded)) {
     res.status(403).json({ success: false, message: 'Admin only.' }); return;
   }
   await seedDefaultRewardConfig(db, admin);
@@ -6678,8 +7428,51 @@ async function getVerifiedRequestUser(req) {
   const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
   if (!decoded?.uid) return null;
   const profile = (await db.collection('users').doc(decoded.uid).get()).data() || {};
-  return { uid: decoded.uid, email: decoded.email || '', ...profile };
+  return { uid: decoded.uid, email: decoded.email || '', ...profile, isAdmin: isAdminToken(decoded), adminAuthorized: isAdminToken(decoded) };
 }
+
+exports.setTrustedAdminRole = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+  const actorUid = String(request.auth?.uid || '').trim();
+  if (!actorUid) throw new HttpsError('unauthenticated', 'Admin sign-in is required.');
+  if (!isAdminToken(request.auth?.token || {})) throw new HttpsError('permission-denied', 'Trusted administrator authorization is required.');
+  const targetUid = String(request.data?.uid || '').trim();
+  const enabled = request.data?.enabled === true;
+  const operationId = String(request.data?.operationId || randomUUID()).trim();
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(targetUid) || !/^[A-Za-z0-9_-]{8,128}$/.test(operationId)
+    || typeof request.data?.enabled !== 'boolean') {
+    throw new HttpsError('invalid-argument', 'A target user, operation ID, and enabled state are required.');
+  }
+  const auditRef = db.collection('adminAuditLogs').doc(stableEventId(`admin-role:${operationId}`));
+  await auditRef.set({
+    actorUid,
+    targetUid,
+    action: enabled ? 'trusted_admin_role_grant_requested' : 'trusted_admin_role_revoke_requested',
+    operationId,
+    status: 'processing',
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+  try {
+    const target = await admin.auth().getUser(targetUid);
+    const claims = { ...(target.customClaims || {}) };
+    if (enabled) claims.admin = true;
+    else {
+      delete claims.admin;
+      delete claims.isAdmin;
+    }
+    await admin.auth().setCustomUserClaims(targetUid, claims);
+    await auditRef.set({
+      action: enabled ? 'trusted_admin_role_granted' : 'trusted_admin_role_revoked',
+      status: 'completed',
+      completedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    return { uid: targetUid, enabled, tokenRefreshRequired: true };
+  } catch (error) {
+    await auditRef.set({ status: 'failed', errorCode: String(error?.code || 'admin_claim_update_failed').slice(0, 100), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    if (error instanceof HttpsError) throw error;
+    logger.error('trusted_admin_role_update_failed', { actorUid, targetUid, errorCode: String(error?.code || 'unknown').slice(0, 100) });
+    throw new HttpsError('internal', 'The administrator role could not be updated.');
+  }
+});
 
 exports.reserveServiceCredit = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
@@ -6699,13 +7492,13 @@ exports.releaseServiceCredit = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, as
 
 exports.adminAdjustReward = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
-  const user = await getVerifiedRequestUser(req); if (!user?.isAdmin && user?.role !== 'admin' && user?.email !== 'jabuobed1@gmail.com') return res.status(403).json({ success: false, message: 'Admin only.' });
+  const user = await getVerifiedRequestUser(req); if (!user?.adminAuthorized) return res.status(403).json({ success: false, message: 'Admin only.' });
   try { const result = await adminRewardAdjustment({ db, admin, adminUser: user, userId: String(req.body?.userId || ''), accountType: req.body?.accountType, direction: req.body?.direction, points: req.body?.points, reason: req.body?.reason, supportReference: req.body?.supportReference }); res.status(200).json({ success: true, result }); }
   catch (error) { res.status(400).json({ success: false, message: error.message }); }
 });
 
 function isRewardAdmin(user) {
-  return Boolean(user && (user.isAdmin === true || user.role === 'admin' || user.email === 'jabuobed1@gmail.com'));
+  return Boolean(user?.adminAuthorized === true);
 }
 
 function validateRewardConfigPatch(configId, patch) {
@@ -8709,6 +9502,7 @@ async function notifyCashPaymentToHelper({ requestId, attemptId, helperId, amoun
       actionId: stableEventId(`cash-payment-action:${requestId}:${attemptId}:${helperId}:${action}`),
     }));
     await Promise.all(actionRecords.map(({ action, actionId }) => db.collection('whatsappPaymentActions').doc(actionId).set({ actionId, action, requestId, attemptId, helperId, status: 'pending', expiresAtMs: Date.now() + 24 * 60 * 60 * 1000, createdAtMs: Date.now() }, { merge: true })));
+    const identityRef = identityDoc.ref;
     const conversationRef = db.collection('whatsappConversations').doc(identityDoc.id);
     const conversation = (await conversationRef.get().catch(() => null))?.data() || {};
     const lastInboundAtMs = Number(conversation.lastInboundMessageAtMs || 0);
@@ -8724,6 +9518,7 @@ async function notifyCashPaymentToHelper({ requestId, attemptId, helperId, amoun
           identity,
           conversationRef,
           text: body,
+          requireCurrentInbound: false,
           interactive: {
             type: 'button',
             body: { text: body },
@@ -8734,7 +9529,36 @@ async function notifyCashPaymentToHelper({ requestId, attemptId, helperId, amoun
         const templateName = String(process.env.WHATSAPP_CASH_CONFIRMATION_TEMPLATE_NAME || '').trim();
         const languageCode = String(process.env.WHATSAPP_CASH_CONFIRMATION_TEMPLATE_LANGUAGE || '').trim();
         if (templateName && languageCode && configured.approvedTemplateNames.includes(templateName)) {
-          await client.sendTemplate({ to: identity.waId, name: templateName, languageCode, components: [{ type: 'body', parameters: [{ type: 'text', text: requestId }, { type: 'text', text: `R${Number(amount || 0).toFixed(2)}` }] }] });
+          const notificationId = stableEventId(`cash-payment-template:${requestId}:${attemptId}:${identityDoc.id}`);
+          const outboundRef = db.collection('whatsappMessages').doc(notificationId);
+          const claimed = await db.runTransaction(async (transaction) => {
+            const [existing, currentIdentity] = await Promise.all([transaction.get(outboundRef), transaction.get(identityRef)]);
+            if (existing.exists || !currentIdentity.exists) return false;
+            const current = currentIdentity.data() || {};
+            if (String(current.linkedFirebaseUid || '') !== helperId
+              || String(current.role || '').toLowerCase() !== 'helper'
+              || !(Number(current.whatsappNotificationsConsentAtMs || 0) > 0 || current.whatsappNotificationsEnabled === true)
+              || String(current.phoneNumberId || '') !== configured.phoneNumberId) return false;
+            transaction.create(outboundRef, {
+              eventId: notificationId, identityId: identityDoc.id, requestId, attemptId,
+              phoneNumberId: configured.phoneNumberId, to: String(current.waId || ''),
+              direction: 'outbound', type: 'template', templateName,
+              text: body, status: 'sending', createdAtMs: Date.now(),
+              retentionExpiresAtMs: Date.now() + whatsappRetentionDays('WHATSAPP_MESSAGE_RETENTION_DAYS', 180) * 24 * 60 * 60 * 1000,
+              createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+            return true;
+          });
+          if (!claimed) continue;
+          try {
+            const delivery = await client.sendTemplate({ to: identity.waId, name: templateName, languageCode, components: [{ type: 'body', parameters: [{ type: 'text', text: requestId }, { type: 'text', text: `R${Number(amount || 0).toFixed(2)}` }] }] });
+            await outboundRef.set({ status: 'sent', metaMessageId: delivery.messageId || null, sentAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            await reconcileWhatsAppDeliveryStatuses({ metaMessageId: delivery.messageId, recipientId: identity.waId, messageRef: outboundRef });
+          } catch (error) {
+            const deliveryStatus = classifyMetaDeliveryError(error);
+            await outboundRef.set({ status: deliveryStatus, deliveryStatus, errorCode: String(error?.code || 'meta_delivery_unknown').slice(0, 100), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            throw error;
+          }
         }
       }
     } catch (error) {

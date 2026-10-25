@@ -80,6 +80,7 @@ function createWhatsAppWebhookHandler({
             ...normalized,
             status: 'received',
             attemptCount: 0,
+            retentionExpiresAtMs: Date.now() + Math.max(1, Math.min(3650, Number.parseInt(String(process.env.WHATSAPP_EVENT_RETENTION_DAYS || '30'), 10) || 30)) * 24 * 60 * 60 * 1000,
             receivedAt: admin.firestore.FieldValue.serverTimestamp(),
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           });

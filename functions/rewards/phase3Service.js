@@ -7,7 +7,10 @@ const hashId = (prefix, value) => `${prefix}_${createHash('sha256').update(Strin
 const roundRand = (value) => Math.round(Number(value || 0) * 100) / 100;
 
 function assertAdmin(user = {}) {
-  if (!(user?.isAdmin === true || user?.role === 'admin' || user?.email === 'jabuobed1@gmail.com')) throw new Error('Admin access required.');
+  // The caller must derive this marker from a verified Firebase token or a
+  // trusted server-side grant. Profile fields and an unverified email are not
+  // authorization sources.
+  if (user?.adminAuthorized !== true) throw new Error('Admin access required.');
 }
 
 function bookingEligibleSubtotal(request = {}) {

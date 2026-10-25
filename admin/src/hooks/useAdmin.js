@@ -1,54 +1,50 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAuth } from './useAuth';
-import { isEmailAllowlistedAdmin, isUserAdmin } from '../utils/admin';
-import { getUserProfile } from '../services/adminService';
+import { isUserAdmin } from '../utils/admin';
 
 export function useAdmin() {
   const { user, isInitializing } = useAuth();
-  const [profileAdminFlag, setProfileAdminFlag] = useState(null);
-  const [isCheckingProfile, setIsCheckingProfile] = useState(false);
+  const [adminClaims, setAdminClaims] = useState(null);
+  const [isCheckingClaims, setIsCheckingClaims] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
 
-    async function checkProfileAdminFlag() {
-      if (!user?.uid || isEmailAllowlistedAdmin(user?.email) || user?.isAdmin === true) {
-        setProfileAdminFlag(null);
-        setIsCheckingProfile(false);
+    async function checkTrustedAdminClaims() {
+      if (!user?.uid) {
+        setAdminClaims(null);
+        setIsCheckingClaims(false);
         return;
       }
 
-      setIsCheckingProfile(true);
+      setIsCheckingClaims(true);
       try {
-        const profile = await getUserProfile(user.uid);
+        const tokenResult = await user.getIdTokenResult(true);
         if (!cancelled) {
-          setProfileAdminFlag(profile?.isAdmin === true || String(profile?.role || '').toLowerCase() === 'admin');
+          setAdminClaims(tokenResult?.claims || {});
         }
       } catch (_error) {
         if (!cancelled) {
-          setProfileAdminFlag(false);
+          setAdminClaims({});
         }
       } finally {
         if (!cancelled) {
-          setIsCheckingProfile(false);
+          setIsCheckingClaims(false);
         }
       }
     }
 
-    checkProfileAdminFlag();
+    checkTrustedAdminClaims();
 
     return () => {
       cancelled = true;
     };
-  }, [user?.email, user?.isAdmin, user?.uid]);
+  }, [user?.email, user?.emailVerified, user?.uid]);
 
-  const isAdmin = useMemo(() => {
-    if (isUserAdmin(user)) return true;
-    return profileAdminFlag === true;
-  }, [profileAdminFlag, user]);
+  const isAdmin = isUserAdmin(user, adminClaims || {});
 
   return {
     isAdmin,
-    isLoadingAdmin: isInitializing || isCheckingProfile,
+    isLoadingAdmin: isInitializing || isCheckingClaims,
   };
 }

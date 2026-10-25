@@ -124,21 +124,11 @@ function makeHelperVersionDocId(version) {
   return `${HELPER_AGREEMENT_VERSION_PREFIX}${normalizeVersionInput(version).replace(/\s+/g, '_')}`;
 }
 
-function isAdminUser(user = {}, profile = {}) {
-  const roles = new Set(
-    [
-      profile?.role,
-      profile?.activeRole,
-      ...(Array.isArray(profile?.roles) ? profile.roles : []),
-    ]
-      .map((value) => String(value || '').trim().toLowerCase())
-      .filter(Boolean),
-  );
-
+function isAdminUser(user = {}, claims = {}) {
   return Boolean(
-    String(user?.email || '').trim().toLowerCase() === 'jabuobed1@gmail.com'
-      || profile?.isAdmin === true
-      || roles.has('admin')
+    (user?.emailVerified === true && String(user?.email || '').trim().toLowerCase() === 'jabuobed1@gmail.com')
+      || claims?.admin === true
+      || claims?.isAdmin === true
   );
 }
 
@@ -200,9 +190,8 @@ export async function publishHelperAgreementVersion(payload = {}) {
     throw new Error('You must be signed in before accessing helper agreement management.');
   }
 
-  const adminProfileSnap = await getDoc(doc(db, 'users', auth.currentUser.uid));
-  const adminProfile = adminProfileSnap.exists() ? adminProfileSnap.data() || {} : {};
-  if (!isAdminUser(auth.currentUser, adminProfile)) {
+  const tokenResult = await auth.currentUser.getIdTokenResult(true);
+  if (!isAdminUser(auth.currentUser, tokenResult?.claims || {})) {
     throw new Error('Admin access required.');
   }
 

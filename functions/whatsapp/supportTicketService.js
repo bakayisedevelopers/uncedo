@@ -24,12 +24,18 @@ function normalizeSupportMessage(inbound = {}) {
 
 async function createOrAppendWhatsAppSupportMessage({
   db, admin, identityId, conversationRef, eventId, principalId, linkedUid = '', role = 'customer',
-  requestId = '', inbound = {}, now = Date.now(),
+  requestId = '', inbound = {}, escalationReason = '', now = Date.now(),
 } = {}) {
   if (!db || !admin || !identityId || !conversationRef || !eventId) throw new Error('Support ticket context is incomplete.');
   const message = normalizeSupportMessage(inbound);
   return db.runTransaction(async (transaction) => {
-    const currentConversation = await transaction.get(conversationRef);
+    const rootMessageRef = db.collection('whatsappMessages').doc(eventId);
+    const [currentConversation, rootMessageSnapshot] = await Promise.all([
+      transaction.get(conversationRef), transaction.get(rootMessageRef),
+    ]);
+    if (currentConversation.exists && String(currentConversation.data()?.lastInboundEventId || '') !== eventId) {
+      return { ticketId: String(currentConversation.data()?.activeSupportTicketId || ''), duplicate: true, stale: true };
+    }
     const activeTicketId = String(currentConversation.data()?.activeSupportTicketId || '').trim();
     let ticketId = activeTicketId || supportTicketId(identityId, eventId);
     let ticketRef = db.collection('supportTickets').doc(ticketId);
@@ -55,10 +61,19 @@ async function createOrAppendWhatsAppSupportMessage({
       status: isNew ? 'open' : String(currentTicket.data()?.status || 'open'),
       subject: String(message.text || 'WhatsApp support request').split('\n')[0].slice(0, 180),
       lastMessageAtMs: now,
+      lastMessageSenderType: 'user',
+      ...(escalationReason ? { escalationReason: String(escalationReason).slice(0, 300), aiSummary: String(message.text || escalationReason).slice(0, 500) } : {}),
+      unreadCount: Number(currentTicket?.data()?.unreadCount || 0) + 1,
       updatedAt: timestamp,
       ...(isNew ? { createdAt: timestamp, assignedAdminUid: null, sourceEventId: eventId } : {}),
     };
     transaction.set(ticketRef, ticketData, { merge: true });
+    if (rootMessageSnapshot.exists) transaction.set(rootMessageRef, {
+      ticketId,
+      requestId: requestId || rootMessageSnapshot.data()?.requestId || null,
+      supportTicketId: ticketId,
+      updatedAt: timestamp,
+    }, { merge: true });
     transaction.create(ticketMessageRef, {
       messageId: eventId,
       senderType: 'user',

@@ -1,0 +1,70 @@
+{
+  "project": "bakayise-uncedo-latest",
+  "branch": "codex/ai-first-whatsapp-support",
+  "deploymentAuthorized": false,
+  "productionActivationAuthorized": false,
+  "nodeRuntimeUpgrade": "Preserve the separate Node.js 22 rollout; verify its current deployment state before any Functions deploy.",
+  "featureFlagsMustRemainDisabled": [
+    "WHATSAPP_MESSAGING_ENABLED",
+    "WHATSAPP_AI_ENABLED",
+    "WHATSAPP_AUTH_ENABLED",
+    "WHATSAPP_PAYMENTS_ENABLED",
+    "WHATSAPP_RELAY_ENABLED",
+    "WHATSAPP_SUPPORT_ENABLED",
+    "WHATSAPP_MEDIA_ENABLED",
+    "WHATSAPP_TRANSCRIPTION_ENABLED",
+    "WHATSAPP_IMAGE_INTERPRETATION_ENABLED",
+    "WHATSAPP_RETENTION_CLEANUP_ENABLED"
+  ],
+  "functions": {
+    "new": [
+      { "name": "cleanupWhatsAppRetention", "trigger": "scheduled daily at 03:15 Africa/Johannesburg", "enabledByDefault": false },
+      { "name": "getWhatsAppConversationHistory", "trigger": "callable HTTPS", "enabledByDefault": true },
+      { "name": "assignWhatsAppSupportTicket", "trigger": "callable HTTPS", "enabledByDefault": true },
+      { "name": "getWhatsAppSupportTicketDetails", "trigger": "callable HTTPS", "enabledByDefault": true },
+      { "name": "listWhatsAppSupportArticles", "trigger": "callable HTTPS", "enabledByDefault": true },
+      { "name": "saveWhatsAppSupportArticle", "trigger": "callable HTTPS", "enabledByDefault": true },
+      { "name": "archiveWhatsAppSupportArticle", "trigger": "callable HTTPS", "enabledByDefault": true },
+      { "name": "markWhatsAppSupportTicketRead", "trigger": "callable HTTPS", "enabledByDefault": true },
+      { "name": "setTrustedAdminRole", "trigger": "callable HTTPS", "enabledByDefault": true }
+    ],
+    "modifiedExisting": [
+      "persistWhatsAppConversationEvent",
+      "processWhatsAppAssistantJobOnCreate",
+      "startWhatsAppAuthChallenge",
+      "setWhatsAppSupportTicketState",
+      "rebuildHelperDispatchIndex",
+      "adminAdjustReward"
+    ],
+    "excludeDeployedOnly": [
+      "scheduleServiceRequestOfferExpiryOnWrite"
+    ],
+    "deploymentScope": "Explicit targets only after approval. Preserve all deployed Functions absent from local source. Do not deploy Hosting or feature flags in the Functions stage."
+  },
+  "firestore": {
+    "rulesChanged": true,
+    "indexesChanged": true,
+    "indexAddition": "whatsappMessages(identityId ASC, createdAt DESC)",
+    "requiresCompatibilityReview": true
+  },
+  "storage": {
+    "rulesChanged": true,
+    "mediaLifecycleVerified": false,
+    "requiresBucketLifecycleReview": true
+  },
+  "hosting": {
+    "target": "bakayise-uncedo-latest-admin",
+    "source": "admin/",
+    "deployAuthorized": false
+  },
+  "preDeploymentGates": [
+    "Rerun all Functions unit tests and Firebase Firestore/Storage emulator tests after the final changes.",
+    "Confirm Node.js 22 rollout state and preserve its deployment batch manifest.",
+    "Verify custom admin claims for existing administrators through a trusted operator path.",
+    "Review the users collection list rule compatibility/privacy issue before security-rule deployment.",
+    "Verify the Cloud Storage lifecycle policy and retention schedule before enabling media.",
+    "Inspect production function inventory without exposing secret values; preserve deployed-only functions.",
+    "Obtain explicit approval before deploying rules, indexes, Functions, or Hosting.",
+    "Keep WhatsApp, AI, auth, payments, relay, support, media, transcription, image interpretation, and retention cleanup flags disabled until separately configured and approved."
+  ]
+}

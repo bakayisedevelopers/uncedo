@@ -13,16 +13,29 @@ service cloud.firestore {
     function isAdmin() {
       return signedIn()
         && (
-          ('email' in request.auth.token && request.auth.token.email == 'jabuobed1@gmail.com')
+          request.auth.token.get('admin', false) == true
+          || request.auth.token.get('isAdmin', false) == true
           || (
-            exists(/databases/$(database)/documents/users/$(request.auth.uid))
-            && (
-              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('isAdmin', false) == true
-              || get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', '') == 'admin'
-              || ('roles' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data && 'admin' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.roles)
-            )
+            request.auth.token.get('email', '') == 'jabuobed1@gmail.com'
+            && request.auth.token.get('email_verified', false) == true
           )
         );
+    }
+
+    function hasSafeSelfAssignedRoles(data) {
+      return (!('role' in data) || data.role in ['customer', 'student', 'helper', 'provider', 'tutor'])
+        && (!('activeRole' in data) || data.activeRole in ['customer', 'student', 'helper', 'provider', 'tutor'])
+        && (!('roles' in data) || (data.roles is list && data.roles.hasOnly(['customer', 'student', 'helper', 'provider', 'tutor'])));
+    }
+
+    function hasSafeSelfAssignedVerification(data) {
+      return (!('verificationStatus' in data) || data.verificationStatus == 'pending')
+        && (!('payoutVerificationStatus' in data) || data.payoutVerificationStatus == 'pending')
+        && (!('helperVerified' in data) || data.helperVerified == false)
+        && (!('isVerified' in data) || data.isVerified == false)
+        && (!('adminStatus' in data) || data.adminStatus == 'pending')
+        && (!('payout' in data) || !(data.payout is map)
+          || data.payout.get('verificationStatus', 'pending') == 'pending');
     }
 
     function isRequestParticipant(data) {
@@ -50,14 +63,18 @@ service cloud.firestore {
         'completionCounters', 'acceptanceRate', 'cancellationRate', 'completionRate',
         'responseMetrics', 'earningsTotals', 'admin', 'adminNotes', 'blocked',
         'isBlocked', 'suspended', 'isSuspended', 'role', 'roles', 'activeRole',
-        'isAdmin', 'accountStatus', 'restrictedStatus', 'dispatchPaused'
+        'isAdmin', 'adminStatus', 'isStaff', 'staffRole', 'supportRole', 'helperVerified', 'isVerified',
+        'payout', 'payoutVerificationStatus', 'accountStatus', 'restrictedStatus', 'dispatchPaused'
       ]);
     }
 
     match /users/{userId} {
       allow get: if isOwner(userId) || isAdmin() || (signedIn() && resource.data.get('activeRole', '') == 'tutor');
       allow list: if isAdmin() || signedIn();
-      allow create: if isOwner(userId) || isAdmin();
+      allow create: if isAdmin() || (isOwner(userId)
+        && hasSafeSelfAssignedRoles(request.resource.data)
+        && hasSafeSelfAssignedVerification(request.resource.data)
+        && !request.resource.data.keys().hasAny(['admin', 'isAdmin', 'isStaff', 'staffRole', 'supportRole', 'adminNotes']));
       allow update: if isAdmin() || (isOwner(userId) && hasOnlySafeUserFieldChanges());
       allow delete: if isOwner(userId) || isAdmin();
 

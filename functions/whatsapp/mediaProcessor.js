@@ -166,7 +166,7 @@ function privateObjectPath({ identityId, eventId, extension } = {}) {
   return `whatsapp-private/${identityHash}/${eventHash}.${extension}`;
 }
 
-async function storeWhatsAppMedia({ storageBucket, media, identityId, eventId, requestId = '', supportTicketId = '', retentionEnforced = false, now = Date.now() } = {}) {
+async function storeWhatsAppMedia({ storageBucket, media, identityId, eventId, requestId = '', supportTicketId = '', retentionEnforced = false, retentionDays = 30, now = Date.now() } = {}) {
   if (!storageBucket?.file || !media?.buffer || !identityId || !eventId) throw new Error('WhatsApp media storage context is incomplete.');
   if (retentionEnforced !== true) throw new Error('A Storage lifecycle retention policy must be configured before WhatsApp media storage is enabled.');
   const path = privateObjectPath({ identityId, eventId, extension: media.extension });
@@ -184,7 +184,7 @@ async function storeWhatsAppMedia({ storageBucket, media, identityId, eventId, r
           sourceEventHash: createHash('sha256').update(String(eventId)).digest('hex'),
           requestId: String(requestId || '').slice(0, 128),
           supportTicketId: String(supportTicketId || '').slice(0, 128),
-          retentionExpiresAtMs: String(now + 30 * 24 * 60 * 60 * 1000),
+          retentionExpiresAtMs: String(now + Math.max(1, Math.min(3650, Number(retentionDays) || 30)) * 24 * 60 * 60 * 1000),
         },
       },
     });

@@ -13,6 +13,7 @@ import {
   FileImage,
   X,
   Headphones,
+  BookOpen,
 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
 import { logoutUser } from '../services/authService';
@@ -25,6 +26,7 @@ const NAV_ITEMS = [
   { to: '/helper-agreements', label: 'Helper agreements', icon: FileText },
   { to: '/rewards', label: 'Rewards', icon: Gift },
   { to: '/support', label: 'Support inbox', icon: Headphones },
+  { to: '/support/knowledge', label: 'Support knowledge', icon: BookOpen },
 ];
 
 function NavItem({ to, icon: Icon, label, onClick }) {
