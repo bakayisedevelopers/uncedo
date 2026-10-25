@@ -1,5 +1,7 @@
 import { getApp, getApps, initializeApp } from 'firebase/app';
-import { connectAuthEmulator, getAuth, getReactNativePersistence, initializeAuth } from 'firebase/auth';
+import { connectAuthEmulator, getAuth, getReactNativePersistence, initializeAuth, GoogleAuthProvider, signInWithPopup, signInWithCustomToken } from 'firebase/auth';
+import { connectFunctionsEmulator, getFunctions, httpsCallable } from 'firebase/functions';
+import { Platform } from 'react-native';
 import {
   connectFirestoreEmulator,
   collection,
@@ -44,6 +46,11 @@ function getFirebaseAuth(app) {
     return authInstance;
   }
 
+  if (Platform.OS === 'web') {
+    authInstance = getAuth(app);
+    return authInstance;
+  }
+
   try {
     authInstance = initializeAuth(app, {
       persistence: getReactNativePersistence(AsyncStorage),
@@ -61,12 +68,14 @@ export function getFirebaseClients() {
   const db = getFirestore(app);
   const realtimeDb = getDatabase(app);
   const storage = getStorage(app);
+  const functions = getFunctions(app, 'us-central1');
 
   if (USE_FIREBASE_EMULATORS && !emulatorsConnected) {
     connectAuthEmulator(auth, `http://${FIREBASE_EMULATOR_HOST}:9099`, { disableWarnings: true });
     connectFirestoreEmulator(db, FIREBASE_EMULATOR_HOST, 8080);
     connectDatabaseEmulator(realtimeDb, FIREBASE_EMULATOR_HOST, 9000);
     connectStorageEmulator(storage, FIREBASE_EMULATOR_HOST, 9199);
+    connectFunctionsEmulator(functions, FIREBASE_EMULATOR_HOST, 5001);
     emulatorsConnected = true;
   }
 
@@ -76,6 +85,7 @@ export function getFirebaseClients() {
     db,
     realtimeDb,
     storage,
+    functions,
     firestoreModule: {
       collection,
       doc,
@@ -98,6 +108,12 @@ export function getFirebaseClients() {
       remove,
       set,
       update,
+    },
+    authProviders: {
+      GoogleAuthProvider,
+      signInWithPopup,
+      signInWithCustomToken,
+      httpsCallable,
     },
   };
 }

@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Button } from '../../components/ui/Button';
 import { EmptyState, ErrorState, LoadingState } from '../../components/ui/States';
 import { useAuth } from '../../context/AuthContext';
-import { subscribeToCustomerServiceRequests } from '../../services/customerServiceRequestService';
+import { createServicePaymentLink, subscribeToCustomerServiceRequests } from '../../services/customerServiceRequestService';
 import { colors } from '../../theme/colors';
 import { getServiceRequestStatusMeta, getServiceRequestToneStyle } from '../../utils/serviceRequestStatus';
 
@@ -46,6 +46,7 @@ export function CustomerServiceRequestsScreen({ navigate }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState('previous');
+  const [paymentBusyId, setPaymentBusyId] = useState('');
 
   useEffect(
     () =>
@@ -59,8 +60,9 @@ export function CustomerServiceRequestsScreen({ navigate }) {
           setError(nextError.message || 'Unable to load your service requests right now.');
           setLoading(false);
         },
+        user?.whatsappGuestPrincipalIds || [],
       ),
-    [user?.uid],
+    [user?.uid, user?.whatsappGuestPrincipalIds?.join('|')],
   );
 
   const filteredRequests = useMemo(() => {
@@ -134,6 +136,9 @@ export function CustomerServiceRequestsScreen({ navigate }) {
       ) : filteredRequests.map((request) => {
         const statusMeta = getServiceRequestStatusMeta(request.status);
         const toneStyle = getServiceRequestToneStyle(request.status);
+        const paymentStatus = String(request.paymentStatus || '').toLowerCase();
+        const canOpenPayment = String(request.status || '').toLowerCase() === 'completed'
+          && ['unpaid', 'wallet_debt_recorded', 'payment_failed', 'payment_cancelled', 'payment_expired'].includes(paymentStatus);
         const openDetails = () => {
           navigate({
             key: 'ServiceRequestDetails',
@@ -214,6 +219,29 @@ export function CustomerServiceRequestsScreen({ navigate }) {
                   <Text style={styles.dateText}>{formatDate(request.createdAt)}</Text>
                 </View>
               </View>
+              {canOpenPayment ? (
+                <Pressable
+                  accessibilityRole="button"
+                  disabled={paymentBusyId === request.id}
+                  onPress={async (event) => {
+                    event?.stopPropagation?.();
+                    setPaymentBusyId(request.id);
+                    try {
+                      const url = await createServicePaymentLink(request.id);
+                      if (!url) throw new Error('The payment page link was unavailable.');
+                      await Linking.openURL(url);
+                    } catch (paymentError) {
+                      Alert.alert('Payment options unavailable', paymentError?.message || 'Please try again later.');
+                    } finally {
+                      setPaymentBusyId('');
+                    }
+                  }}
+                  style={styles.payButton}
+                >
+                  <Ionicons color="#ffffff" name="card-outline" size={15} />
+                  <Text style={styles.payButtonText}>{paymentBusyId === request.id ? 'Opening…' : 'Payment options'}</Text>
+                </Pressable>
+              ) : null}
             </View>
 
             <View style={styles.cardActions}>
@@ -371,6 +399,8 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 4,
   },
+  payButton: { alignItems: 'center', alignSelf: 'flex-start', backgroundColor: colors.brandDark, borderRadius: 12, flexDirection: 'row', gap: 7, marginTop: 4, paddingHorizontal: 12, paddingVertical: 8 },
+  payButtonText: { color: '#ffffff', fontSize: 11, fontWeight: '900' },
   cardActions: {
     alignItems: 'center',
     flexDirection: 'row',

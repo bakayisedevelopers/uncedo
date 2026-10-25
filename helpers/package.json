@@ -14,6 +14,7 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
+    "web:build": "expo export --platform web --output-dir dist && node scripts/prepare-web-hosting.cjs",
     "test:rewards": "node scripts/run-rewards-tests.cjs",
     "postinstall": "node scripts/fix-expo-modules-core-cpp-runtime.js"
   },

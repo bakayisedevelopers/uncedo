@@ -9,7 +9,6 @@ import {
   query,
   runTransaction,
   serverTimestamp,
-  setDoc,
   updateDoc,
   where,
 } from 'firebase/firestore';
@@ -28,8 +27,7 @@ import {
 import { uploadUserFile } from './storageService';
 import { recordCustomerServiceEvent } from './customerRecommendationService';
 import { getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
-import { computeHelperDerivedStats } from './helperRequestStatsService';
-import { updateLiveTracking } from './liveTrackingRealtimeService';
+import { USE_SERVER_PRICING, USE_SERVER_REQUEST_LIFECYCLE } from '../constants/runtimeConfig';
 
 const ACTIVE_SERVICE_REQUEST_STATUSES = ['collecting_details', 'scheduled_pending', 'matching', 'helper_found', 'accepted', 'driving', 'en_route', 'buying_resources', 'arrived', 'work_started', 'no_helper_available'];
 const CATEGORY_ENGINE_LOOKUP = {
@@ -148,38 +146,6 @@ function normalizeTime(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-async function createUserNotification({
-  userId,
-  title,
-  message,
-  type = 'update',
-  requestId = null,
-  sessionId = null,
-  targetPath = '',
-  metadata = {},
-} = {}) {
-  const normalizedUserId = String(userId || '').trim();
-  if (!normalizedUserId) return null;
-
-  const { db } = getFirebaseClients();
-  const docRef = await addDoc(collection(db, 'notifications'), {
-    userId: normalizedUserId,
-    title: String(title || 'Parakleo update'),
-    message: String(message || 'You have a new update.'),
-    type: String(type || 'update'),
-    requestId: requestId || null,
-    sessionId: sessionId || null,
-    targetPath: targetPath || '',
-    metadata: metadata || {},
-    read: false,
-    readAt: null,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
-
-  return docRef.id;
-}
-
 function buildServiceRequestTitle({ categoryId = '', serviceIds = [], selectedPackageId = '' } = {}) {
   const selectedPackage = selectedPackageId ? getCustomerServiceById(selectedPackageId) : null;
   if (selectedPackage?.label) {
@@ -230,11 +196,26 @@ export function buildServicePricingSnapshot({
 export async function fetchServicePricingQuote({
   categoryId = '',
   serviceIds = [],
+  selectedPackageId = '',
   structuredAnswers = {},
 } = {}) {
   const { auth } = getFirebaseClients();
   if (!auth.currentUser?.uid) {
     throw new Error('You must be signed in to price this service.');
+  }
+
+  if (USE_SERVER_PRICING) {
+    const idToken = await auth.currentUser.getIdToken();
+    const response = await fetch(getFunctionEndpoint('getCustomerServicePricingQuote'), {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ categoryId, serviceIds, selectedPackageId, structuredAnswers }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.success !== true || !payload.quote) {
+      throw new Error(payload?.message || 'Unable to calculate the current service quote.');
+    }
+    return payload.quote;
   }
 
   return buildServicePricingSnapshot({
@@ -284,6 +265,36 @@ export async function createCustomerServiceRequest({ user, location, initialDraf
   const topic = selectedPackage?.label
     || serviceIds.map((serviceId) => getCustomerServiceById(serviceId)?.label || '').filter(Boolean).join(', ')
     || categoryLabel;
+  if (USE_SERVER_REQUEST_LIFECYCLE) {
+    const { auth } = getFirebaseClients();
+    const currentUser = auth.currentUser;
+    if (!currentUser?.uid || currentUser.uid !== user.uid) {
+      throw new Error('Your customer session has changed. Please sign in again.');
+    }
+    const requestId = doc(collection(db, 'serviceRequests')).id;
+    const idToken = await currentUser.getIdToken();
+    const response = await fetch(getFunctionEndpoint('createCustomerServiceRequest'), {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        requestId,
+        categoryId,
+        serviceIds,
+        selectedPackageId,
+        structuredAnswers: draft.structuredAnswers || {},
+        serviceAddress: draft.serviceAddress || '',
+        location: resolvedLocation,
+        timingPreference: draft.timingPreference || 'now',
+        scheduledForText: draft.scheduledForText || '',
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.success !== true) {
+      throw new Error(payload?.message || 'Unable to start this service request.');
+    }
+    return payload.requestId || requestId;
+  }
+
   const existingSnap = await getDocs(
     query(
       collection(db, 'serviceRequests'),
@@ -291,12 +302,9 @@ export async function createCustomerServiceRequest({ user, location, initialDraf
       where('status', 'in', ACTIVE_SERVICE_REQUEST_STATUSES),
     ),
   );
-
-  await Promise.all(existingSnap.docs.map((item) => updateDoc(item.ref, {
-    status: 'expired',
-    statusDetail: 'Previous service request expired by a new request.',
-    updatedAt: serverTimestamp(),
-  })));
+  if (!existingSnap.empty) {
+    throw new Error('You already have an active service request. Complete or cancel it before starting another.');
+  }
 
   const docRef = await addDoc(collection(db, 'serviceRequests'), {
     customerId: user.uid,
@@ -363,6 +371,20 @@ export async function updateCustomerServiceRequest(requestId, updates = {}) {
   }
 
   const { db } = getFirebaseClients();
+  if (USE_SERVER_REQUEST_LIFECYCLE) {
+    const { auth } = getFirebaseClients();
+    const currentUser = auth.currentUser;
+    const idToken = await currentUser?.getIdToken();
+    if (!idToken) throw new Error('You must be signed in to update this request.');
+    const response = await fetch(getFunctionEndpoint('updateCustomerServiceRequestDraft'), {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId, ...updates }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.success !== true) throw new Error(payload?.message || 'Unable to update this service request.');
+    return payload;
+  }
   await updateDoc(doc(db, 'serviceRequests', requestId), {
     ...updates,
     updatedAt: serverTimestamp(),
@@ -432,6 +454,7 @@ export async function saveCustomerServiceQuotePreview({
   requestId,
   categoryId,
   serviceIds,
+  selectedPackageId = '',
   structuredAnswers = {},
   aiUsageSnapshot = null,
   selectedPortfolioReferences = [],
@@ -442,9 +465,38 @@ export async function saveCustomerServiceQuotePreview({
     throw new Error('Service request id is required.');
   }
 
+  if (USE_SERVER_REQUEST_LIFECYCLE) {
+    const { auth, db } = getFirebaseClients();
+    const idToken = await auth.currentUser?.getIdToken();
+    if (!idToken) throw new Error('You must be signed in to request a service quote.');
+    const response = await fetch(getFunctionEndpoint('quoteCustomerServiceRequest'), {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        requestId, categoryId, serviceIds, selectedPackageId, structuredAnswers,
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.success !== true) {
+      const error = new Error(payload?.message || 'Unable to calculate a service quote.');
+      error.code = payload?.code || '';
+      error.missingQuestionIds = payload?.missingQuestionIds || [];
+      throw error;
+    }
+    const requestRef = doc(db, 'serviceRequests', requestId);
+    await updateDoc(requestRef, {
+      aiUsageSnapshot,
+      selectedPortfolioReferences,
+      referenceAttachments,
+      updatedAt: serverTimestamp(),
+    });
+    return payload.quote;
+  }
+
   const pricingSnapshot = await fetchServicePricingQuote({
     categoryId,
     serviceIds,
+    selectedPackageId,
     structuredAnswers,
   });
 
@@ -453,8 +505,8 @@ export async function saveCustomerServiceQuotePreview({
   const existingSnap = await getDoc(requestRef);
   const existingRequest = existingSnap.exists() ? existingSnap.data() || {} : {};
   const existingPayload = existingRequest.requestPayload || {};
-  const selectedPackageId = String(existingRequest.selectedPackageId || existingPayload.selectedPackageId || '').trim();
-  const summary = buildServiceRequestSummary({ categoryId, serviceIds, selectedPackageId, structuredAnswers });
+  const resolvedPackageId = String(selectedPackageId || existingRequest.selectedPackageId || existingPayload.selectedPackageId || '').trim();
+  const summary = buildServiceRequestSummary({ categoryId, serviceIds, selectedPackageId: resolvedPackageId, structuredAnswers });
   const timingDetails = deriveTimingDetails(structuredAnswers);
   const serviceAddress = existingPayload.serviceAddress || existingRequest.serviceAddress || '';
   const location = await resolveRequestLocation({
@@ -466,6 +518,7 @@ export async function saveCustomerServiceQuotePreview({
   await updateDoc(requestRef, {
     categoryId,
     serviceIds,
+    selectedPackageId: resolvedPackageId,
     serviceSummary: summary,
     structuredAnswers,
     selectedPortfolioReferences,
@@ -486,7 +539,7 @@ export async function saveCustomerServiceQuotePreview({
     requestPayload: {
       categoryId,
       serviceIds,
-      selectedPackageId,
+      selectedPackageId: resolvedPackageId,
       summary,
       structuredAnswers,
       selectedPortfolioReferences,
@@ -517,15 +570,38 @@ export async function finalizeCustomerServiceRequest({
   callId,
   categoryId,
   serviceIds,
+  selectedPackageId = '',
+  approvedQuote = null,
   structuredAnswers = {},
   aiUsageSnapshot = null,
   selectedPortfolioReferences = [],
   referenceAttachments = [],
   serviceOverrides = {},
 }) {
+  if (USE_SERVER_REQUEST_LIFECYCLE) {
+    const { auth } = getFirebaseClients();
+    const idToken = await auth.currentUser?.getIdToken();
+    if (!idToken || !auth.currentUser?.uid) throw new Error('You must be signed in to submit this service request.');
+    if (!approvedQuote) throw new Error('Review the current quote before submitting the request.');
+    const response = await fetch(getFunctionEndpoint('confirmCustomerServiceRequest'), {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId, callId, approvedQuote }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.success !== true) {
+      const error = new Error(payload?.message || 'Unable to submit this service request.');
+      error.code = payload?.code || '';
+      error.quote = payload?.quote || null;
+      throw error;
+    }
+    return payload.pricingSnapshot || payload.request?.pricingSnapshot || null;
+  }
+
   const pricingSnapshot = await fetchServicePricingQuote({
     categoryId,
     serviceIds,
+    selectedPackageId,
     structuredAnswers,
   });
   const timingDetails = deriveTimingDetails(structuredAnswers);
@@ -546,8 +622,8 @@ export async function finalizeCustomerServiceRequest({
   const existingSnap = await getDoc(requestRef);
   const existingRequest = existingSnap.exists() ? existingSnap.data() || {} : {};
   const existingPayload = existingRequest.requestPayload || {};
-  const selectedPackageId = String(existingRequest.selectedPackageId || existingPayload.selectedPackageId || '').trim();
-  const summary = buildServiceRequestSummary({ categoryId, serviceIds, selectedPackageId, structuredAnswers });
+  const resolvedPackageId = String(selectedPackageId || existingRequest.selectedPackageId || existingPayload.selectedPackageId || '').trim();
+  const summary = buildServiceRequestSummary({ categoryId, serviceIds, selectedPackageId: resolvedPackageId, structuredAnswers });
   const serviceAddress = existingPayload.serviceAddress || existingRequest.serviceAddress || '';
   const location = await resolveRequestLocation({
     location: existingPayload.location || existingRequest.location || null,
@@ -558,6 +634,7 @@ export async function finalizeCustomerServiceRequest({
   await updateDoc(requestRef, {
     categoryId,
     serviceIds,
+    selectedPackageId: resolvedPackageId,
     subject: categoryLabel,
     topic: serviceLabels.join(', ') || categoryLabel,
     description: summary,
@@ -584,7 +661,7 @@ export async function finalizeCustomerServiceRequest({
     requestPayload: {
       categoryId,
       serviceIds,
-      selectedPackageId,
+      selectedPackageId: resolvedPackageId,
       summary,
       structuredAnswers,
       selectedPortfolioReferences,
@@ -605,7 +682,7 @@ export async function finalizeCustomerServiceRequest({
     recordCustomerServiceEvent({
       customerId,
       eventType: 'request_submitted',
-      serviceId: serviceIds[0] || selectedPackageId || categoryId,
+      serviceId: serviceIds[0] || resolvedPackageId || categoryId,
       categoryId,
       serviceIds,
       source: 'customer_call',
@@ -651,23 +728,31 @@ export function subscribeToServiceRequestById(requestId, callback, onError) {
   );
 }
 
-export function subscribeToCustomerServiceRequests(customerId, callback, onError) {
+export function subscribeToCustomerServiceRequests(customerId, callback, onError, guestPrincipalIds = []) {
   if (!customerId) {
     callback([]);
     return () => {};
   }
 
   const { db } = getFirebaseClients();
-  const requestsQuery = query(collection(db, 'serviceRequests'), where('customerId', '==', customerId));
-  return onSnapshot(
-    requestsQuery,
+  const principals = [...new Set([customerId, ...(Array.isArray(guestPrincipalIds) ? guestPrincipalIds : [])]
+    .map((value) => String(value || '').trim()).filter(Boolean))].slice(0, 10);
+  const itemsById = new Map();
+  const unsubs = principals.map((principalId) => onSnapshot(
+    query(collection(db, 'serviceRequests'), where('customerId', '==', principalId)),
     (snapshot) => {
-      const items = snapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
+      for (const item of snapshot.docs) itemsById.set(item.id, { id: item.id, ...item.data() });
+      const currentIds = new Set(snapshot.docs.map((item) => item.id));
+      for (const [id, item] of itemsById) {
+        if (item.customerId === principalId && !currentIds.has(id)) itemsById.delete(id);
+      }
+      const items = [...itemsById.values()];
       items.sort((left, right) => normalizeTime(right.createdAt) - normalizeTime(left.createdAt));
       callback(items);
     },
     onError,
-  );
+  ));
+  return () => unsubs.forEach((unsubscribe) => unsubscribe());
 }
 
 export async function cancelServiceRequestByCustomer({ requestId, reason }) {
@@ -689,89 +774,18 @@ export async function cancelServiceRequestByCustomer({ requestId, reason }) {
   }
 
   const request = requestSnap.data() || {};
-  if (String(request.customerId || '').trim() !== currentUserId) {
-    throw new Error('Only the customer can cancel this request.');
-  }
-
   const normalizedStatus = String(request.status || '').toLowerCase();
   if (['completed', 'canceled'].includes(normalizedStatus)) {
     return { id: requestSnap.id, ...request };
   }
 
-  const helperId = String(request?.helperAssignment?.helperId || '').trim();
   const canceledReason = String(reason || '').trim();
-  const isPreAssignment = ['collecting_details', 'scheduled_pending', 'matching', 'helper_found', 'no_helper_available'].includes(normalizedStatus);
-  const isPostAssignment = ['accepted', 'driving', 'en_route', 'buying_resources', 'arrived', 'work_started'].includes(normalizedStatus);
-
-  if (!isPreAssignment && !isPostAssignment) {
+  const cancelableStatuses = [
+    'collecting_details', 'scheduled_pending', 'matching', 'helper_found', 'no_helper_available',
+    'accepted', 'driving', 'en_route', 'buying_resources', 'arrived', 'work_started',
+  ];
+  if (!cancelableStatuses.includes(normalizedStatus)) {
     throw new Error('This request cannot be canceled from its current state.');
-  }
-
-  const endedAt = Date.now();
-
-  if (isPreAssignment) {
-    await updateDoc(requestRef, {
-      status: 'canceled',
-      statusDetail: 'Customer canceled the service request before helper assignment.',
-      canceledAt: endedAt,
-      canceledBy: 'customer',
-      canceledReason,
-      helperAssignment: null,
-      helperQueue: [],
-      currentOfferHelperId: null,
-      offerExpiresAt: null,
-      offerToken: null,
-      offerCycleExcludedHelperIds: [],
-      declinedHelperIds: [],
-      matchingStartedAtMs: null,
-      paymentStatus: null,
-      paymentTransactionId: null,
-      cancellationFeeAmount: 0,
-      updatedAt: serverTimestamp(),
-    });
-
-    await updateLiveTracking(requestId, {
-      status: 'canceled',
-      closedReason: 'customer_canceled_pre_assignment',
-      closedAtMs: endedAt,
-      updatedAtMs: endedAt,
-    }).catch(() => null);
-
-    await recordCustomerServiceEvent({
-      customerId: request.customerId,
-      eventType: 'request_canceled',
-      serviceId: request.serviceIds?.[0] || request.selectedPackageId || request.categoryId || '',
-      categoryId: request.categoryId || '',
-      serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
-      requestId,
-      source: 'customer_cancel_frontend',
-      metadata: {
-        helperId: '',
-        paymentStatus: 'not_applicable',
-        cancellationAmount: 0,
-        cancellationBillingRule: 'pre_assignment',
-        cancellationDistanceKm: 0,
-        helperPayoutAmount: 0,
-        platformAmount: 0,
-        requestStatus: 'canceled',
-      },
-    }).catch(() => null);
-
-    await createUserNotification({
-      userId: request.customerId,
-      title: 'Service canceled',
-      message: 'Your service request was canceled.',
-      type: 'service_canceled',
-      requestId,
-      targetPath: `/customer/requests/${requestId}`,
-      metadata: {
-        paymentStatus: 'not_applicable',
-        cancellationAmount: 0,
-      },
-    }).catch(() => null);
-
-    const updatedSnap = await getDoc(requestRef);
-    return updatedSnap.exists() ? { id: updatedSnap.id, ...updatedSnap.data() } : null;
   }
 
   const response = await fetch(getFunctionEndpoint('billCustomerServiceCancellation'), {
@@ -790,108 +804,23 @@ export async function cancelServiceRequestByCustomer({ requestId, reason }) {
   if (!response.ok || payload?.success === false) {
     throw new Error(payload?.message || 'Unable to cancel this request.');
   }
-
-  const cancellation = payload?.cancellation || {};
-  const helperPayoutBreakdown = cancellation.helperPayoutBreakdown || {};
-  const paymentStatus = String(cancellation.paymentStatus || '').trim() || 'not_applicable';
-  const cancellationAmount = Number(cancellation.cancellationAmount || 0) || 0;
-  const chargedCardLast4 = cancellation.chargedCardLast4 || null;
-  const paymentTransactionId = cancellation.paymentTransactionId || null;
-  const pricingSnapshot = cancellation.pricingSnapshot || {};
-
-  const customerRef = doc(db, 'users', request.customerId);
-  await updateDoc(requestRef, {
-    status: 'canceled',
-    statusDetail: cancellationAmount > 0
-      ? `Customer canceled the service. Cancellation fee charged: R${cancellationAmount.toFixed(2)}.`
-      : 'Customer canceled the service.',
-    canceledAt: cancellation.endedAt || endedAt,
-    canceledBy: 'customer',
-    canceledReason,
-    cancellationFeeAmount: cancellationAmount,
-    paymentStatus,
-    paymentTransactionId,
-    chargedCardLast4,
-    pricingSnapshot,
-    helperPayoutBreakdown: {
-      ...helperPayoutBreakdown,
-      finalizedAt: pricingSnapshot.finalizedAt || new Date(cancellation.endedAt || endedAt).toISOString(),
-    },
-    updatedAt: serverTimestamp(),
-  });
-
-  if (paymentStatus === 'wallet_debt_recorded') {
-    await setDoc(customerRef, {
-      wallet: {
-        ...(request?.wallet || {}),
-        balance: Number(cancellation.walletBalance || 0),
-        currency: cancellation.walletCurrency || 'ZAR',
-        updatedAt: new Date().toISOString(),
-      },
-      updatedAt: serverTimestamp(),
-    }, { merge: true });
-  }
-
-  await updateLiveTracking(requestId, {
-    status: 'canceled',
-    closedReason: cancellation.liveTrackingClosedReason || 'customer_canceled',
-    closedAtMs: cancellation.endedAt || endedAt,
-    updatedAtMs: cancellation.endedAt || endedAt,
-  }).catch(() => null);
-
-  await recordCustomerServiceEvent({
-    customerId: request.customerId,
-    eventType: 'request_canceled',
-    serviceId: request.serviceIds?.[0] || request.selectedPackageId || request.categoryId || '',
-    categoryId: request.categoryId || '',
-    serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
-    requestId,
-    source: 'customer_cancel_frontend',
-    metadata: {
-      helperId,
-      paymentStatus,
-      cancellationAmount,
-      cancellationBillingRule: cancellation.cancellationBillingRule || '',
-      cancellationDistanceKm: Number(cancellation.cancellationDistanceKm || 0),
-      helperPayoutAmount: Number(helperPayoutBreakdown.helperAmount || 0),
-      platformAmount: Number(helperPayoutBreakdown.platformAmount || 0),
-      requestStatus: 'canceled',
-    },
-  }).catch(() => null);
-
-  await Promise.all([
-    createUserNotification({
-      userId: request.customerId,
-      title: 'Service canceled',
-      message: cancellationAmount > 0
-        ? `Your service request was canceled. Cancellation fee: R${cancellationAmount.toFixed(2)}.`
-        : 'Your service request was canceled.',
-      type: 'service_canceled',
-      requestId,
-      targetPath: `/customer/requests/${requestId}`,
-      metadata: {
-        paymentStatus,
-        cancellationAmount,
-      },
-    }),
-    ...(helperId ? [
-      createUserNotification({
-        userId: helperId,
-        title: 'Job canceled',
-        message: `${request.customerName || 'The customer'} canceled this job. Helper earnings recorded: R${Number(helperPayoutBreakdown.helperAmount || 0).toFixed(2)}.`,
-        type: 'job_canceled',
-        requestId,
-        targetPath: `/provider/jobs/${requestId}`,
-      }),
-    ] : []),
-  ]).catch(() => null);
-
-  if (helperId) {
-    await computeHelperDerivedStats(helperId).catch(() => null);
-  }
-
   const updatedSnap = await getDoc(requestRef);
   return updatedSnap.exists() ? { id: updatedSnap.id, ...updatedSnap.data() } : null;
+}
+
+export async function createServicePaymentLink(requestId) {
+  const { auth } = getFirebaseClients();
+  const currentUser = auth.currentUser;
+  const idToken = await currentUser?.getIdToken();
+  if (!idToken) throw new Error('Sign in before opening request payment options.');
+  const response = await fetch(getFunctionEndpoint('createServicePaymentSession'), {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ requestId }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.success !== true) throw new Error(payload?.message || 'Unable to open payment options.');
+  return String(payload.url || '');
 }
 
 export async function submitServiceRequestRating({ requestId, score, comment = '' }) {

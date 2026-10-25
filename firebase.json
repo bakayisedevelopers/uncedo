@@ -18,6 +18,22 @@
         "**/.*",
         "**/node_modules/**"
       ],
+      "headers": [
+        {
+          "source": "/payment",
+          "headers": [
+            { "key": "Cache-Control", "value": "no-store, max-age=0" },
+            { "key": "Referrer-Policy", "value": "no-referrer" },
+            { "key": "X-Content-Type-Options", "value": "nosniff" }
+          ]
+        },
+        {
+          "source": "/index.html",
+          "headers": [
+            { "key": "Referrer-Policy", "value": "no-referrer" }
+          ]
+        }
+      ],
       "rewrites": [
         {
           "source": "/verify-paystack",
@@ -38,6 +54,57 @@
         "**/node_modules/**"
       ],
       "rewrites": [
+        {
+          "source": "**",
+          "destination": "/index.html"
+        }
+      ]
+    },
+    {
+      "site": "bakayise-uncedo-latest-helpers",
+      "public": "helpers/dist",
+      "ignore": [
+        "firebase.json",
+        "**/.*"
+      ],
+      "headers": [
+        {
+          "source": "/",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "no-cache, max-age=0, must-revalidate"
+            }
+          ]
+        },
+        {
+          "source": "/index.html",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "no-cache, max-age=0, must-revalidate"
+            }
+          ]
+        },
+        {
+          "source": "/app.html",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "no-cache, max-age=0, must-revalidate"
+            }
+          ]
+        }
+      ],
+      "rewrites": [
+        {
+          "source": "/sign-in",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/sign-up",
+          "destination": "/app.html"
+        },
         {
           "source": "**",
           "destination": "/index.html"

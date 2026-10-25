@@ -302,10 +302,18 @@ service cloud.firestore {
       allow create, update, delete: if isAdmin();
     }
 
+    function isLinkedWhatsAppGuestCustomer(customerId) {
+      return signedIn()
+        && customerId is string
+        && exists(/databases/$(database)/documents/whatsappGuestOwnership/$(customerId))
+        && get(/databases/$(database)/documents/whatsappGuestOwnership/$(customerId)).data.uid == request.auth.uid;
+    }
+
     function isServiceRequestParticipant(data) {
       return signedIn()
         && (
           data.get('customerId', '') == request.auth.uid
+          || isLinkedWhatsAppGuestCustomer(data.get('customerId', ''))
           || (data.get('helperAssignment', null) != null && data.helperAssignment.get('helperId', '') == request.auth.uid)
           || data.get('currentOfferHelperId', '') == request.auth.uid
           || data.get('studentId', '') == request.auth.uid
@@ -328,7 +336,7 @@ service cloud.firestore {
 
     function isCustomerUpdatingOwnServiceRequest() {
       return signedIn()
-        && resource.data.customerId == request.auth.uid
+        && (resource.data.customerId == request.auth.uid || isLinkedWhatsAppGuestCustomer(resource.data.customerId))
         && request.resource.data.customerId == resource.data.customerId
         && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
           'helperAssignment', 'currentOfferHelperId', 'helperQueue', 'offerToken', 'offerExpiresAt',
@@ -339,21 +347,14 @@ service cloud.firestore {
     }
 
     function isOfferedHelperAcceptingServiceRequest() {
-      return signedIn()
-        && resource.data.currentOfferHelperId == request.auth.uid
-        && request.resource.data.status == 'accepted'
-        && request.resource.data.currentOfferHelperId == null
-        && request.resource.data.helperAssignment != null
-        && request.resource.data.helperAssignment.helperId == request.auth.uid
-        && (!('paymentStatus' in request.resource.data) || request.resource.data.paymentStatus == resource.data.paymentStatus)
-        && (!('helperPayoutBreakdown' in request.resource.data) || request.resource.data.helperPayoutBreakdown == resource.data.helperPayoutBreakdown);
+      // Offer acceptance is performed by an authenticated backend operation so
+      // app and WhatsApp actions share token, revision, expiry, and concurrency checks.
+      return false;
     }
 
     function isOfferedHelperDecliningServiceRequest() {
-      return signedIn()
-        && resource.data.currentOfferHelperId == request.auth.uid
-        && request.resource.data.currentOfferHelperId == null
-        && request.auth.uid in request.resource.data.declinedHelperIds;
+      // Offer decline is performed by the same authenticated backend operation.
+      return false;
     }
 
     function isAssignedHelperUpdatingStatus() {
@@ -362,6 +363,9 @@ service cloud.firestore {
         && resource.data.helperAssignment.helperId == request.auth.uid
         && request.resource.data.helperAssignment.helperId == resource.data.helperAssignment.helperId
         && request.resource.data.customerId == resource.data.customerId
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'completionProofAttachments', 'completionProofCount', 'completionProofCapturedAt', 'updatedAt'
+        ])
         && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
           'customerId', 'pricingSnapshot', 'paymentStatus', 'paymentTransactionId',
           'chargedCardLast4', 'helperPayoutBreakdown', 'cancellationFeeAmount',
@@ -378,6 +382,16 @@ service cloud.firestore {
         || isOfferedHelperDecliningServiceRequest()
         || isAssignedHelperUpdatingStatus();
       allow delete: if isAdmin();
+    }
+
+    match /supportTickets/{ticketId} {
+      allow get, list: if isAdmin();
+      allow create, update, delete: if false;
+
+      match /messages/{messageId} {
+        allow get, list: if isAdmin();
+        allow create, update, delete: if false;
+      }
     }
 
     match /{document=**} {

@@ -2,7 +2,7 @@
   "scripts": {
     "validate:rewards:shared": "node scripts/validate-reward-shared.cjs",
     "test:constants": "node scripts/validate-reward-constants.js",
-    "test:rules": "firebase emulators:exec --project demo-uncedo-phase0 --only auth,firestore \"node --test functions/test/firestore.rules.test.js\"",
+    "test:rules": "firebase emulators:exec --project demo-uncedo-phase0 --only auth,firestore,storage \"node --test functions/test/firestore.rules.test.js\"",
     "test:rewards:integration": "firebase emulators:exec --project demo-uncedo-phase0 --only auth,firestore \"node --test functions/test/rewards.integration.test.js functions/test/rewards.test.js\"",
     "test:phase0": "npm run test:rules && npm run test:rewards:integration"
   },

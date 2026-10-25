@@ -1,5 +1,6 @@
 import { getApp, getApps, initializeApp } from 'firebase/app';
 import { connectAuthEmulator, getAuth, getReactNativePersistence, initializeAuth } from 'firebase/auth';
+import { connectFunctionsEmulator, getFunctions, httpsCallable } from 'firebase/functions';
 import {
   connectFirestoreEmulator,
   collection,
@@ -62,12 +63,14 @@ export function getFirebaseClients() {
   const db = getFirestore(app);
   const realtimeDb = getDatabase(app);
   const storage = getStorage(app);
+  const functions = getFunctions(app, 'us-central1');
 
   if (USE_FIREBASE_EMULATORS && !emulatorsConnected) {
     connectAuthEmulator(auth, `http://${FIREBASE_EMULATOR_HOST}:9099`, { disableWarnings: true });
     connectFirestoreEmulator(db, FIREBASE_EMULATOR_HOST, 8080);
     connectDatabaseEmulator(realtimeDb, FIREBASE_EMULATOR_HOST, 9000);
     connectStorageEmulator(storage, FIREBASE_EMULATOR_HOST, 9199);
+    connectFunctionsEmulator(functions, FIREBASE_EMULATOR_HOST, 5001);
     emulatorsConnected = true;
   }
 
@@ -77,6 +80,7 @@ export function getFirebaseClients() {
     db,
     realtimeDb,
     storage,
+    functions,
     firestoreModule: {
       collection,
       doc,
@@ -92,6 +96,7 @@ export function getFirebaseClients() {
       updateDoc,
       where,
       writeBatch,
+      httpsCallable,
     },
     realtimeDbModule: {
       onValue,

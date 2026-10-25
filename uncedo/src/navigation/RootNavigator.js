@@ -338,9 +338,10 @@ export function RootNavigator() {
       },
       (error) => {
         console.warn('subscribeToCustomerServiceRequests error:', error);
-      }
+      },
+      user.whatsappGuestPrincipalIds || [],
     );
-  }, [user?.uid]);
+  }, [user?.uid, user?.whatsappGuestPrincipalIds?.join('|')]);
 
   useEffect(() => {
     if (activeRequest) {

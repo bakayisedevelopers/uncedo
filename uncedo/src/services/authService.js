@@ -1,11 +1,15 @@
 import {
   createUserWithEmailAndPassword,
   deleteUser,
+  GoogleAuthProvider,
   onAuthStateChanged,
   signInWithEmailAndPassword,
+  signInWithPopup,
+  signInWithCustomToken,
   signOut,
   updateProfile,
 } from 'firebase/auth';
+import { httpsCallable } from 'firebase/functions';
 import { getFirebaseClients } from '../firebase/config';
 import { deleteUserProfile, getUserProfile, upsertCustomerProfile } from './userService';
 
@@ -90,6 +94,55 @@ export async function signupWithEmail({ name, email, password }) {
   });
 
   return normalizeCustomerUser(credential.user, profile || {});
+}
+
+export async function loginWithGoogle() {
+  const { auth } = getFirebaseClients();
+  if (typeof window === 'undefined') throw new Error('Google sign-in is available in the web app only until native OAuth is configured.');
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+  const credential = await signInWithPopup(auth, provider);
+  const profile = await upsertCustomerProfile({
+    uid: credential.user.uid,
+    email: credential.user.email,
+    displayName: credential.user.displayName || '',
+  });
+  if (isHelperProfile(profile)) {
+    await signOut(auth);
+    throw buildHelperBlockedError();
+  }
+  return normalizeCustomerUser(credential.user, profile || {});
+}
+
+function whatsappAuthEnabled() {
+  return String(process.env.EXPO_PUBLIC_WHATSAPP_AUTH_ENABLED || '').trim().toLowerCase() === 'true';
+}
+
+export async function startWhatsAppAuthChallenge({ phoneNumber, mode = 'login', name = '', email = '' }) {
+  if (!whatsappAuthEnabled()) throw new Error('WhatsApp sign-in is awaiting Meta authentication configuration.');
+  const { functions } = getFirebaseClients();
+  const call = httpsCallable(functions, 'startWhatsAppAuthChallenge');
+  const result = await call({ phoneNumber, mode, role: 'customer', name, email });
+  return result.data;
+}
+
+export async function completeWhatsAppAuthChallenge({ challengeId, code }) {
+  if (!whatsappAuthEnabled()) throw new Error('WhatsApp sign-in is awaiting Meta authentication configuration.');
+  const { auth, functions } = getFirebaseClients();
+  const complete = httpsCallable(functions, 'completeWhatsAppAuthChallenge');
+  const result = await complete({ challengeId, code });
+  const credential = await signInWithCustomToken(auth, result.data.customToken);
+  const profile = await upsertCustomerProfile({
+    uid: credential.user.uid,
+    email: credential.user.email,
+    displayName: credential.user.displayName || '',
+  });
+  const token = await credential.user.getIdTokenResult();
+  if (token.claims.whatsappAuthenticated === true) {
+    await httpsCallable(functions, 'linkWhatsAppIdentity')({});
+  }
+  const savedProfile = await getUserProfile(credential.user.uid);
+  return normalizeCustomerUser(credential.user, savedProfile || profile || {});
 }
 
 export async function logoutUser() {

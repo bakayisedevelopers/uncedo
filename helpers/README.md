@@ -13,9 +13,12 @@ This folder contains the Expo React Native app for helpers.
 - Route-based active job tracking with in-app travel status updates
 - Android active-job guidance now uses the Google Navigation SDK through the official React Native package, while the helper dashboard uses a stable static map preview and the existing live-tracking pipeline still keeps customer/helper tracking in sync.
 - Accepted jobs seed `liveTracking/serviceRequests/{requestId}` in Realtime Database immediately, then update helper movement, destination, route geometry, and closure status through the same tracking node.
+- Provider offer acceptance and decline use the authenticated `respondToServiceRequestOffer` Cloud Function. Responses include the current offer token and revision so the backend can reject stale and expired actions; Cloud Tasks expires pending offers after the existing 30-second window.
 - Earnings, wallet balance, cancellation-aware payouts, and completed jobs grouped by week
 - Automatic Monday helper payout batching backed by Firestore payout records
 - Map-driven job and route views
+- Browser build served from a dedicated Firebase Hosting site. It uses the same helper identity, profile-completion steps, and pending/verified status checks as the mobile app.
+- The Helpers website opens on a dedicated responsive landing page at `/`, with separate `/sign-in` and `/sign-up` routes. This marketing-style entry page is web-only; native apps continue to open the existing authentication flow.
 
 ## Stack
 
@@ -34,9 +37,14 @@ npm run start
 npm run android
 npm run ios
 npm run web
+npm run web:build
 ```
 
 `npm run start`, `npm run android`, `npm run ios`, and `npm run web` now auto-run the Google Maps key preparation script before Expo starts so local map builds do not keep the native placeholder key.
+
+`npm run web:build` exports the helper application into `helpers/dist/app.html` and prepares a separate static landing page as `helpers/dist/index.html`. The Firebase Hosting root serves the landing page; `/sign-in` and `/sign-up` serve the Expo auth app. Native Google Navigation SDK guidance is unavailable in the browser; web builds use a no-op navigation adapter.
+
+Browser Google sign-in uses Firebase Authentication and stays disabled until the Google provider and OAuth client are configured in Firebase. WhatsApp OTP sign-in remains unavailable until the matching Cloud Functions and approved Meta authentication template are configured; the button reports this state while its feature flag is false.
 
 The helper Android app now requires React Native new architecture and Android core-library desugaring because the Google Navigation SDK depends on them.
 

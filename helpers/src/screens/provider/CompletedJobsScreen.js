@@ -80,6 +80,7 @@ export function CompletedJobsScreen({ navigate }) {
     <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false}>
       <Text style={styles.title}>Services</Text>
       <Text style={styles.subtitle}>Track every accepted, completed, canceled, or active customer service request.</Text>
+      <ActionButton label="Cash payment confirmations" onPress={() => navigate('CashPaymentConfirmations')} />
 
       <View style={styles.tabRow}>
         {TAB_OPTIONS.map((tab) => {

@@ -198,6 +198,7 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
         const quote = await fetchServicePricingQuote({
           categoryId,
           serviceIds,
+          selectedPackageId,
           structuredAnswers,
         });
         if (!cancelled) {
@@ -275,6 +276,8 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
         callId: '',
         categoryId,
         serviceIds,
+        selectedPackageId,
+        approvedQuote: pricePreview,
         structuredAnswers,
       });
 
@@ -296,6 +299,7 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
         },
       });
     } catch (nextError) {
+      if (nextError?.quote) setPricePreview(nextError.quote);
       setError(nextError.message || 'Unable to continue with this service.');
       setSubmitting(false);
       return;

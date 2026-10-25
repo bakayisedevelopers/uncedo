@@ -55,10 +55,12 @@ export default function LandingPage() {
             </p>
 
             <div className="mt-8 flex flex-wrap items-center gap-3">
-              <CTAButton>
-                <Download className="mr-2 h-4 w-4" />
-                Download Uncedo App
-              </CTAButton>
+              <Link to="/sign-up">
+                <CTAButton>
+                  <Download className="mr-2 h-4 w-4" />
+                  Create a customer account
+                </CTAButton>
+              </Link>
             </div>
 
             <div className="mt-8 grid gap-3 text-sm text-zinc-700 sm:grid-cols-3">

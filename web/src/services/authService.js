@@ -1,0 +1,132 @@
+import {
+  GoogleAuthProvider,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signInWithCustomToken,
+  signInWithPopup,
+  signOut,
+  updateProfile,
+} from 'firebase/auth';
+import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { auth, db, firebaseConfigured, whatsappAuthEnabled } from '../firebase/config';
+
+function requireFirebase() {
+  if (!firebaseConfigured || !auth || !db) {
+    throw new Error('Customer sign-in is not configured yet. Please contact Uncedo support.');
+  }
+}
+
+function hasHelperRole(profile = {}) {
+  const roles = [profile.role, profile.activeRole, ...(Array.isArray(profile.roles) ? profile.roles : [])]
+    .map((value) => String(value || '').toLowerCase());
+  return roles.some((role) => ['helper', 'provider', 'tutor'].includes(role));
+}
+
+export async function ensureCustomerProfile(firebaseUser) {
+  requireFirebase();
+  const userRef = doc(db, 'users', firebaseUser.uid);
+  const existing = await getDoc(userRef);
+  const profile = existing.exists() ? existing.data() : {};
+  if (hasHelperRole(profile)) {
+    await signOut(auth);
+    throw new Error('This is a helper account. Please sign in through Uncedo Helpers.');
+  }
+
+  const displayName = String(profile.fullName || profile.displayName || firebaseUser.displayName || '').trim();
+  const defaults = {
+    uid: firebaseUser.uid,
+    email: firebaseUser.email || '',
+    fullName: displayName,
+    displayName,
+    role: 'customer',
+    activeRole: 'customer',
+    roles: ['customer'],
+    phoneNumber: '',
+    paymentMethods: [],
+    customerProfile: {
+      accountType: '',
+      customerType: '',
+      serviceAddress: '',
+      discoverySource: '',
+      preferredServiceCategories: [],
+      businessName: '',
+      businessEmail: '',
+      businessCategory: '',
+    },
+  };
+  await setDoc(userRef, {
+    ...defaults,
+    ...profile,
+    uid: firebaseUser.uid,
+    email: firebaseUser.email || profile.email || '',
+    fullName: profile.fullName || defaults.fullName,
+    displayName: profile.displayName || defaults.displayName,
+    role: 'customer',
+    activeRole: 'customer',
+    roles: ['customer'],
+    customerProfile: { ...defaults.customerProfile, ...(profile.customerProfile || {}) },
+    createdAt: existing.exists() ? profile.createdAt || serverTimestamp() : serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
+  const saved = await getDoc(userRef);
+  return { uid: firebaseUser.uid, ...saved.data() };
+}
+
+export async function signInWithEmail({ email, password }) {
+  requireFirebase();
+  const credential = await signInWithEmailAndPassword(auth, email.trim(), password);
+  const profile = await ensureCustomerProfile(credential.user);
+  return { firebaseUser: credential.user, profile };
+}
+
+export async function signUpWithEmail({ name, email, password }) {
+  requireFirebase();
+  const credential = await createUserWithEmailAndPassword(auth, email.trim(), password);
+  await updateProfile(credential.user, { displayName: name.trim() });
+  const profile = await ensureCustomerProfile(credential.user);
+  return { firebaseUser: credential.user, profile };
+}
+
+export async function signInWithGoogle() {
+  requireFirebase();
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+  const credential = await signInWithPopup(auth, provider);
+  const profile = await ensureCustomerProfile(credential.user);
+  return { firebaseUser: credential.user, profile };
+}
+
+export async function requestWhatsAppAuthCode({ phoneNumber, mode = 'login', name = '', email = '' }) {
+  requireFirebase();
+  if (!whatsappAuthEnabled) throw new Error('WhatsApp sign-in will be available after Uncedo finishes configuring its verified WhatsApp authentication service.');
+  const { getFunctions, httpsCallable } = await import('firebase/functions');
+  const callable = httpsCallable(getFunctions(auth.app, 'us-central1'), 'startWhatsAppAuthChallenge');
+  const result = await callable({ phoneNumber, mode, role: 'customer', name, email });
+  return result.data;
+}
+
+export async function verifyWhatsAppAuthCode({ challengeId, code }) {
+  requireFirebase();
+  if (!whatsappAuthEnabled) throw new Error('WhatsApp sign-in is not configured yet.');
+  const { getFunctions, httpsCallable } = await import('firebase/functions');
+  const callable = httpsCallable(getFunctions(auth.app, 'us-central1'), 'completeWhatsAppAuthChallenge');
+  const result = await callable({ challengeId, code });
+  const credential = await signInWithCustomToken(auth, result.data.customToken);
+  const profile = await ensureCustomerProfile(credential.user);
+  await httpsCallable(getFunctions(auth.app, 'us-central1'), 'linkWhatsAppIdentity')({});
+  const linkedProfile = await ensureCustomerProfile(credential.user);
+  return { firebaseUser: credential.user, profile: linkedProfile || profile };
+}
+
+export async function updateCustomerProfile(uid, updates) {
+  requireFirebase();
+  const userRef = doc(db, 'users', uid);
+  await setDoc(userRef, { ...updates, updatedAt: serverTimestamp() }, { merge: true });
+  const saved = await getDoc(userRef);
+  return { uid, ...saved.data() };
+}
+
+export async function signOutCustomer() {
+  requireFirebase();
+  await signOut(auth);
+}

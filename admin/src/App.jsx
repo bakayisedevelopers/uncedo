@@ -11,6 +11,7 @@ import ServiceDetailsPage from './pages/ServiceDetailsPage';
 import ServicesPage from './pages/ServicesPage';
 import CustomersPage from './pages/CustomersPage';
 import RewardsPage from './pages/RewardsPage';
+import SupportTicketsPage from './pages/SupportTicketsPage';
 
 export default function App() {
   return (
@@ -34,6 +35,7 @@ export default function App() {
         <Route path="/customers" element={<CustomersPage />} />
         <Route path="/helper-agreements" element={<HelperAgreementsPage />} />
         <Route path="/rewards" element={<RewardsPage />} />
+        <Route path="/support" element={<SupportTicketsPage />} />
       </Route>
 
       <Route path="*" element={<Navigate to="/dashboard" replace />} />

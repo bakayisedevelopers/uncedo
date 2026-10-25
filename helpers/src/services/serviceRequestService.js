@@ -4,9 +4,6 @@ import {
   getDoc,
   onSnapshot,
   query,
-  runTransaction,
-  serverTimestamp,
-  updateDoc,
   where,
 } from 'firebase/firestore';
 import { getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
@@ -14,7 +11,6 @@ import { updateLiveTracking } from './liveTrackingRealtimeService';
 import { logInfo } from './logger';
 import {
   computeHelperDerivedStats,
-  recordHelperOfferLifecycleEvent,
   syncHelperOfferSnapshot,
 } from './helperRequestStatsService';
 import {
@@ -170,6 +166,8 @@ export function mapServiceRequestToOffer(request) {
     requestedServiceOfferings: getRequestedServiceLabels(request.categoryId, request.serviceIds),
     payoutEstimate: mapPricingTotal(request.pricingSnapshot),
     offerExpiresAt: Number(request.offerExpiresAt || 0),
+    offerToken: String(request.offerToken || ''),
+    offerRevision: Number(request.offerRevision || 0),
     area: request.requestPayload?.serviceAddress || request.serviceAddress || 'Location pending',
     status: request.status || 'helper_found',
     statusDetail: request.statusDetail || '',
@@ -358,108 +356,38 @@ export function subscribeToHelperServiceRequests(helperId, callback, onError) {
 export async function acceptServiceRequestOffer({
   requestId,
   helperId,
-  helperName,
-  helperEmail,
+  offerToken,
+  offerRevision,
 }) {
   if (!requestId || !helperId) {
     throw new Error('A request and helper session are required.');
   }
 
-  const { db } = getFirebaseClients();
+  const { auth, db } = getFirebaseClients();
+  if (!auth.currentUser?.uid || auth.currentUser.uid !== helperId) {
+    throw new Error('Your helper session has changed. Please sign in again.');
+  }
   const requestRef = doc(db, 'serviceRequests', requestId);
   const helperRef = doc(db, 'users', helperId);
-
-  await runTransaction(db, async (transaction) => {
-    const [requestSnap, helperSnap] = await Promise.all([
-      transaction.get(requestRef),
-      transaction.get(helperRef),
-    ]);
-
-    if (!requestSnap.exists()) {
-      throw new Error('Service request not found.');
-    }
-
-    const request = requestSnap.data() || {};
-    const helper = helperSnap.exists() ? helperSnap.data() || {} : {};
-    const now = Date.now();
-
-    if (String(request.status || '').toLowerCase() !== 'helper_found') {
-      throw new Error('This request is no longer waiting for a helper response.');
-    }
-
-    if (request.currentOfferHelperId !== helperId) {
-      throw new Error('This request is no longer assigned to you.');
-    }
-
-    if (Number(request.offerExpiresAt || 0) <= now) {
-      throw new Error('This helper offer has expired.');
-    }
-
-    const acceptedAt = new Date().toISOString();
-
-    transaction.update(requestRef, {
-      status: 'accepted',
-      statusDetail: 'Helper accepted and is preparing to travel.',
-      currentOfferHelperId: null,
-      offerExpiresAt: null,
-      offerToken: null,
-      offerCycleExcludedHelperIds: [],
-      declinedHelperIds: [],
-      helperQueue: Array.isArray(request.helperQueue)
-        ? request.helperQueue.filter((item) => item !== helperId)
-        : [],
-      helperAssignment: {
-        helperId,
-        helperName: helperName || helper.fullName || helper.displayName || 'Helper',
-        helperEmail: helperEmail || helper.email || '',
-        helperPhone: helper.phoneNumber || '',
-        helperPhoto: String(helper.profilePhoto || helper.selfieUrl || helper.photoURL || '').trim(),
-        acceptedAt,
-        categoryId: request.categoryId || '',
-        serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
-      },
-      updatedAt: serverTimestamp(),
-    });
-
-    transaction.set(helperRef, {
-      activeServiceRequestId: requestId,
-      updatedAt: serverTimestamp(),
-    }, { merge: true });
+  const idToken = await auth.currentUser.getIdToken();
+  const response = await fetch(getFunctionEndpoint('respondToServiceRequestOffer'), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ requestId, action: 'accept', offerToken, offerRevision }),
   });
-
-  logInfo('service-request.accept-helper-write', 'Updated helper assignment state', {
-    helperId,
-    requestId,
-    traceLabel: 'helpers:serviceRequestService:acceptServiceRequestOffer',
-  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.success === false) {
+    throw new Error(payload?.message || 'Unable to accept this helper offer right now.');
+  }
 
   const [refreshed, helperSnapshot] = await Promise.all([
     getDoc(requestRef),
     getDoc(helperRef),
   ]);
   const acceptedRequest = refreshed.exists() ? { id: refreshed.id, ...refreshed.data() } : null;
-
-  if (acceptedRequest) {
-    const offeredAtMs = normalizeTime(
-      acceptedRequest.lastOfferAt
-      || acceptedRequest.offerExpiresAt
-      || acceptedRequest.helperAssignment?.acceptedAt
-      || Date.now(),
-    ) || Date.now();
-    const acceptedAtMs = normalizeTime(acceptedRequest.helperAssignment?.acceptedAt || Date.now()) || Date.now();
-    await recordHelperOfferLifecycleEvent({
-      helperId,
-      requestId,
-      offerRevision: Number(acceptedRequest.offerRevision || 0) || 0,
-      categoryId: acceptedRequest.categoryId || '',
-      serviceIds: Array.isArray(acceptedRequest.serviceIds) ? acceptedRequest.serviceIds : [],
-      outcome: 'accepted',
-      offeredAtMs,
-      closedAtMs: acceptedAtMs,
-      responseMinutes: Math.max(0, Number(((acceptedAtMs - offeredAtMs) / 60000).toFixed(2))),
-      sourceStatus: 'accepted',
-    }).catch(() => null);
-  }
 
   if (acceptedRequest) {
     await seedAcceptedLiveTracking({
@@ -473,133 +401,65 @@ export async function acceptServiceRequestOffer({
   return acceptedRequest;
 }
 
-export async function declineServiceRequestOffer({ requestId, helperId }) {
+export async function declineServiceRequestOffer({ requestId, helperId, offerToken, offerRevision }) {
   if (!requestId || !helperId) {
     throw new Error('A request and helper session are required.');
   }
 
-  const { db } = getFirebaseClients();
-  const requestRef = doc(db, 'serviceRequests', requestId);
-
-  await runTransaction(db, async (transaction) => {
-    const requestSnap = await transaction.get(requestRef);
-    if (!requestSnap.exists()) {
-      throw new Error('Service request not found.');
-    }
-
-    const request = requestSnap.data() || {};
-    if (String(request.status || '').toLowerCase() !== 'helper_found') {
-      throw new Error('This request is no longer waiting for a helper response.');
-    }
-
-    if (request.currentOfferHelperId !== helperId) {
-      throw new Error('This request is no longer assigned to you.');
-    }
-
-    const nextQueue = Array.isArray(request.helperQueue)
-      ? request.helperQueue.filter((item) => item !== helperId)
-      : [];
-    const nextExcludedHelperIds = Array.from(new Set(
-      [...(Array.isArray(request.offerCycleExcludedHelperIds) ? request.offerCycleExcludedHelperIds : []), helperId]
-        .map((item) => String(item || '').trim())
-        .filter(Boolean),
-    ));
-    const nextDeclinedHelperIds = Array.from(new Set(
-      [...(Array.isArray(request.declinedHelperIds) ? request.declinedHelperIds : []), helperId]
-        .map((item) => String(item || '').trim())
-        .filter(Boolean),
-    ));
-
-    transaction.update(requestRef, {
-      status: 'matching',
-      statusDetail: 'Helper declined. Matching the next helper.',
-      helperQueue: nextQueue,
-      currentOfferHelperId: null,
-      offerExpiresAt: null,
-      offerToken: null,
-      offerCycleExcludedHelperIds: nextExcludedHelperIds,
-      declinedHelperIds: nextDeclinedHelperIds,
-      updatedAt: serverTimestamp(),
-    });
-  });
-
-  const refreshed = await getDoc(requestRef);
-  const refreshedRequest = refreshed.exists() ? { id: refreshed.id, ...refreshed.data() } : null;
-  if (refreshedRequest) {
-    await recordHelperOfferLifecycleEvent({
-      helperId,
-      requestId,
-      offerRevision: Number(refreshedRequest.offerRevision || 0) || 0,
-      categoryId: refreshedRequest.categoryId || '',
-      serviceIds: Array.isArray(refreshedRequest.serviceIds) ? refreshedRequest.serviceIds : [],
-      outcome: 'declined',
-      offeredAtMs: normalizeTime(refreshedRequest.lastOfferAt || Date.now()) || Date.now(),
-      closedAtMs: Date.now(),
-      sourceStatus: String(refreshedRequest.status || 'matching').toLowerCase(),
-    }).catch(() => null);
+  const { auth, db } = getFirebaseClients();
+  if (!auth.currentUser?.uid || auth.currentUser.uid !== helperId) {
+    throw new Error('Your helper session has changed. Please sign in again.');
   }
-  return refreshedRequest;
+  const idToken = await auth.currentUser.getIdToken();
+  const response = await fetch(getFunctionEndpoint('respondToServiceRequestOffer'), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ requestId, action: 'decline', offerToken, offerRevision }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.success === false) {
+    throw new Error(payload?.message || 'Unable to decline this helper offer right now.');
+  }
+
+  const refreshed = await getDoc(doc(db, 'serviceRequests', requestId));
+  return refreshed.exists() ? { id: refreshed.id, ...refreshed.data() } : null;
+}
+
+async function callHelperServiceRequestAction({ requestId, helperId, action, status = '', reason = '' }) {
+  if (!requestId || !helperId) throw new Error('A request and helper session are required.');
+  const { auth } = getFirebaseClients();
+  if (!auth.currentUser?.uid || auth.currentUser.uid !== helperId) {
+    throw new Error('Your helper session has changed. Please sign in again.');
+  }
+  const token = await auth.currentUser.getIdToken();
+  const response = await fetch(getFunctionEndpoint('updateHelperServiceRequest'), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ requestId, action, status, reason }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.success === false) {
+    throw new Error(payload?.message || 'Unable to update this service request right now.');
+  }
+  return payload.request || null;
 }
 
 export async function updateHelperActiveRequestStatus({ requestId, helperId, status }) {
   if (!requestId || !helperId || !status) {
     throw new Error('A request, helper, and status are required.');
   }
-
-  const normalizedStatus = String(status || '').toLowerCase();
-  let statusDetail = '';
-  switch (normalizedStatus) {
-    case 'en_route':
-      statusDetail = 'Helper is on the way.';
-      break;
-    case 'driving':
-      statusDetail = 'Helper is driving to your location.';
-      break;
-    case 'buying_resources':
-      statusDetail = 'Helper stopped to buy resources before arrival.';
-      break;
-    case 'arrived':
-      statusDetail = 'Helper has arrived.';
-      break;
-    case 'work_started':
-      statusDetail = 'The job is now in progress.';
-      break;
-    case 'completed':
-      statusDetail = 'Service completed.';
-      break;
-    default:
-      statusDetail = '';
-  }
-
-  const { db } = getFirebaseClients();
-  const requestRef = doc(db, 'serviceRequests', requestId);
-  const helperRef = doc(db, 'users', helperId);
-
-  const updates = {
-    status: normalizedStatus,
-    statusDetail,
-    updatedAt: serverTimestamp(),
-  };
-
-  if (normalizedStatus === 'arrived') {
-    updates.arrivedAt = serverTimestamp();
-  } else if (normalizedStatus === 'work_started') {
-    updates.workStartedAt = serverTimestamp();
-  }
-
-  await updateDoc(requestRef, updates);
-
-  if (normalizedStatus === 'completed') {
-    logInfo('service-request.complete-helper-write', 'Clearing helper active request state', {
-      helperId,
-      requestId,
-      traceLabel: 'helpers:serviceRequestService:updateHelperActiveRequestStatus',
-    });
-    await updateDoc(helperRef, {
-      activeServiceRequestId: null,
-      updatedAt: serverTimestamp(),
-    });
-  }
+  return callHelperServiceRequestAction({
+    requestId,
+    helperId,
+    action: 'transition',
+    status: String(status || '').toLowerCase(),
+  });
 }
 
 export async function finalizeServiceRequestBilling({ requestId }) {
@@ -637,27 +497,11 @@ export async function cancelServiceRequest({ requestId, helperId, reason }) {
     throw new Error('A request and helper session are required to cancel.');
   }
 
-  const { db } = getFirebaseClients();
-  const requestRef = doc(db, 'serviceRequests', requestId);
-  const helperRef = doc(db, 'users', helperId);
-
-  await runTransaction(db, async (transaction) => {
-    const requestSnap = await transaction.get(requestRef);
-    if (!requestSnap.exists()) return;
-
-    transaction.update(requestRef, {
-      status: 'canceled',
-      statusDetail: 'Helper canceled the session.',
-      canceledBy: 'helper',
-      canceledReason: reason || '',
-      canceledAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-
-    transaction.update(helperRef, {
-      activeServiceRequestId: null,
-      updatedAt: serverTimestamp(),
-    });
+  await callHelperServiceRequestAction({
+    requestId,
+    helperId,
+    action: 'cancel',
+    reason: String(reason || ''),
   });
 
   await computeHelperDerivedStats(helperId).catch(() => null);
@@ -667,6 +511,35 @@ export async function cancelServiceRequest({ requestId, helperId, reason }) {
     requestId,
     traceLabel: 'helpers:serviceRequestService:cancelServiceRequest',
   });
+}
+
+export async function getPendingCashPaymentConfirmations() {
+  const { auth } = getFirebaseClients();
+  const currentUser = auth.currentUser;
+  const token = await currentUser?.getIdToken();
+  if (!token) throw new Error('Sign in to review payment confirmations.');
+  const response = await fetch(getFunctionEndpoint('getHelperCashPaymentConfirmations'), {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.success !== true) throw new Error(payload?.message || 'Unable to load payment confirmations.');
+  return Array.isArray(payload.confirmations) ? payload.confirmations : [];
+}
+
+export async function respondToCashPaymentConfirmation({ requestId, attemptId, action }) {
+  const { auth } = getFirebaseClients();
+  const currentUser = auth.currentUser;
+  const token = await currentUser?.getIdToken();
+  if (!token) throw new Error('Sign in before confirming a cash payment.');
+  const response = await fetch(getFunctionEndpoint('respondToCashServicePayment'), {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ requestId, attemptId, action }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.success !== true) throw new Error(payload?.message || 'This payment confirmation is no longer active.');
+  return payload;
 }
 
 export async function submitServiceRequestRating({ requestId, score, comment = '' }) {

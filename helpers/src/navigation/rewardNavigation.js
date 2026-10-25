@@ -4,6 +4,10 @@ export function resolveHelperRewardNotificationRoute(notification = {}) {
   const metadata = notification?.metadata || {};
   const serviceId = String(notification?.serviceId || metadata?.serviceId || '').trim();
 
+  if (targetPath.includes('/cash-payments') || type.includes('cash_payment_confirmation')) {
+    return { key: 'CashPaymentConfirmations', params: { parentTab: 'Services' } };
+  }
+
   if (targetPath.includes('/rewards/history') || type.includes('reversal') || type.includes('points_expired')) {
     return { key: 'HelperRewardHistory', params: { parentTab: 'Profile' } };
   }

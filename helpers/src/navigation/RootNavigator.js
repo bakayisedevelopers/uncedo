@@ -14,9 +14,11 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { ProviderLoginScreen } from '../screens/auth/ProviderLoginScreen';
+import { HelperWebEntryScreen } from '../screens/auth/HelperWebLandingScreen';
 import { ActiveJobScreen } from '../screens/provider/ActiveJobScreen';
 import { AgreementScreen } from '../screens/provider/AgreementScreen';
 import { CompletedJobsScreen } from '../screens/provider/CompletedJobsScreen';
+import { CashPaymentConfirmationsScreen } from '../screens/provider/CashPaymentConfirmationsScreen';
 import { EarningsScreen } from '../screens/provider/EarningsScreen';
 import { JobOffersScreen } from '../screens/provider/JobOffersScreen';
 import { JobDetailsScreen } from '../screens/provider/JobDetailsScreen';
@@ -70,6 +72,7 @@ const secondaryScreens = {
   ServiceOfferingCatalog: ServiceOfferingCatalogScreen,
   ServiceOfferingDetails: ServiceOfferingDetailsScreen,
   Earnings: EarningsScreen,
+  CashPaymentConfirmations: CashPaymentConfirmationsScreen,
   Agreement: AgreementScreen,
   Verification: VerificationScreen,
   JobOffers: JobOffersScreen,
@@ -285,7 +288,7 @@ export function RootNavigator() {
   }
 
   if (!user?.uid) {
-    return <ProviderLoginScreen />;
+    return Platform.OS === 'web' ? <HelperWebEntryScreen /> : <ProviderLoginScreen />;
   }
 
   const ActiveScreen = rootScreens[activeRoute.key] || secondaryScreens[activeRoute.key] || ProviderDashboardScreen;

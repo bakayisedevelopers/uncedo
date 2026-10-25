@@ -1,11 +1,11 @@
 const { onDocumentCreated, onDocumentWritten } = require('firebase-functions/v2/firestore');
-const { onRequest } = require('firebase-functions/v2/https');
+const { onCall, onRequest, HttpsError } = require('firebase-functions/v2/https');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
-const { defineSecret } = require('firebase-functions/params');
+const { onTaskDispatched } = require('firebase-functions/v2/tasks');
 const { logger } = require('firebase-functions');
 const admin = require('firebase-admin');
 const { Resend } = require('resend');
-const { createHash, randomUUID } = require('crypto');
+const { createHash, createHmac, randomUUID, timingSafeEqual } = require('crypto');
 const h3 = require('h3-js');
 const {
   normalizeServiceCatalogEntry: normalizeMarketplaceServiceCatalogEntry,
@@ -29,10 +29,115 @@ const {
 } = require('./rewards/referralService');
 const { submitServiceRequestRating, serviceIdsFor } = require('./rewards/ratingService');
 const { incrementCompletedPaid, recalculateMastery, recalculateMembership } = require('./rewards/progressionService');
+const { getFunctions } = require('firebase-admin/functions');
+// A single-concurrency fractional-CPU profile for Functions that previously
+// failed deployment under the project's regional CPU quota.
+const HALF_CPU_OPTIONS = Object.freeze({ cpu: 0.5, concurrency: 1 });
+const {
+  FINANCIAL_OPERATIONS_COLLECTION,
+  PAYSTACK_TRANSFER_REFERENCES_COLLECTION,
+  claimPayoutTransfer,
+  claimPaystackRefund,
+  claimServiceFinancialOperation,
+  classifyPaystackTransaction,
+  classifyPaystackTransfer,
+  executePayoutTransferAttempt,
+  executeServiceChargeAttempt,
+  helperPayoutOperationId,
+  recordPayoutObservation,
+  recordPaystackRefundObservation,
+  recordServiceGatewayObservation,
+  serviceFinancialOperationId,
+  settleServiceFinancialOperation,
+} = require('./financialOperationService');
+const {
+  PAYMENT_OPERATIONS,
+  PAYMENT_SESSIONS,
+  beginServicePaymentAttempt,
+  cancelCashPaymentSelection,
+  cancelSavedCardPaymentConfirmation,
+  claimSavedCardPayment,
+  createServicePaymentSession,
+  getFinalPayableAmount,
+  normalizeMinorAmount,
+  paymentStateForRequest,
+  rejectCashPayment,
+  recordCheckoutInitialization,
+  reportCashPayment,
+  resolveServicePaymentSession,
+  revokeServicePaymentSession,
+  safePaymentReceipt,
+  settleRequestPayment,
+} = require('./requestPaymentService');
+const { createCategoryPricingEngine } = require('./shared/categoryPricingEngineFactory.cjs');
+const {
+  getQuestionnaireForSelection,
+  normalizeAndValidateAnswers,
+  quoteFromCatalogEntries,
+  quoteFromFirestore,
+} = require('./serviceRequestPricing');
+const { createMarketplaceRequestOperations } = require('./marketplaceRequestOperations');
+const { createServiceRequestOfferOperations } = require('./serviceRequestOfferOperations');
+const { calculateCustomerCancellationTerms, cancellationQuoteMatches } = require('./serviceRequestCancellation');
+const {
+  getServerPaymentMethod,
+  getServerPaymentMethods,
+  migrateLegacyPaymentMethods,
+  storeReusablePaymentMethod,
+  updateSavedPaymentMethod,
+} = require('./paymentMethodStore');
+const { createOrAppendWhatsAppSupportMessage } = require('./whatsapp/supportTicketService');
+const { createWhatsAppSupportMediaUrl } = require('./whatsapp/supportMedia');
+const { createWhatsAppIntentRouter } = require('./whatsapp/aiIntentRouter');
+const {
+  isWithinCustomerServiceWindow,
+  normalizeWebhookPayload,
+  stableEventId,
+  verifyWebhookChallenge,
+  verifyWebhookSignature,
+} = require('./whatsapp/metaWebhook');
+const { createWhatsAppWebhookHandler } = require('./whatsapp/webhookHandler');
+const { createMetaWhatsAppClient } = require('./whatsapp/metaClient');
+const {
+  isWhatsAppCancellationEnabled,
+  isWhatsAppImageInterpretationEnabled,
+  isWhatsAppMediaEnabled,
+  isWhatsAppMessagingEnabled,
+  isWhatsAppTranscriptionEnabled,
+} = require('./whatsapp/featureFlags');
+const { canAccessWhatsAppRequest } = require('./whatsapp/participantAccess');
+const { getWhatsAppRequestForIdentity, listWhatsAppRequests } = require('./whatsapp/requestAccessService');
+const { parseWhatsAppCommand } = require('./whatsapp/commandParser');
+const { isExpectedWhatsAppRelayRecipient, isWhatsAppRelayRequestOpen } = require('./whatsapp/relayAuthorization');
+const { buildWhatsAppPaymentSummary, formatWhatsAppPaymentSummary } = require('./whatsapp/paymentSummary');
+const { buildWhatsAppRequestSummary, formatWhatsAppRequestHistory, formatWhatsAppRequestSummary } = require('./whatsapp/requestSummary');
+const { downloadMetaMedia, storeWhatsAppMedia } = require('./whatsapp/mediaProcessor');
+const { transcribeWhatsAppAudio } = require('./whatsapp/transcription');
+const { extractWhatsAppDocumentText } = require('./whatsapp/documentExtractor');
+const { classifyMetaDeliveryError, shouldApplyDeliveryStatus } = require('./whatsapp/deliveryStatus');
+const {
+  constantTimeHashMatch,
+  generateWhatsAppOtp,
+  hashWhatsAppOtp,
+  normalizeWhatsAppAuthInput,
+  profileAllowsRole,
+} = require('./whatsapp/authChallenge');
+const {
+  buildWhatsAppGuestPrincipalId,
+  buildWhatsAppIdentityId,
+  normalizeWhatsAppIdentityPhone,
+} = require('./whatsapp/identityLink');
+const {
+  evaluateOfferExpiry,
+  evaluateHelperRequestTransition,
+  normalizeRevision,
+  normalizeTimestamp,
+} = require('./serviceRequestOfferLogic');
 
 admin.initializeApp();
 
 const db = admin.firestore();
+const marketplaceRequestOperations = createMarketplaceRequestOperations({ db, admin });
 
 async function createUserNotification({
   userId,
@@ -63,6 +168,36 @@ async function createUserNotification({
 
   const ref = await db.collection('notifications').add(notification);
   return { id: ref.id, ...notification };
+}
+
+async function createUserNotificationOnce({
+  notificationId,
+  ...notificationInput
+}) {
+  const userId = String(notificationInput.userId || '').trim();
+  const normalizedId = String(notificationId || '').trim();
+  if (!userId || !normalizedId) return null;
+  const notificationRef = db.collection('notifications').doc(normalizedId);
+  const result = await db.runTransaction(async (transaction) => {
+    const existing = await transaction.get(notificationRef);
+    if (existing.exists) return false;
+    transaction.create(notificationRef, {
+      userId,
+      title: String(notificationInput.title || 'Uncedo update'),
+      message: String(notificationInput.message || 'You have a new update.'),
+      type: String(notificationInput.type || 'update'),
+      requestId: notificationInput.requestId || null,
+      sessionId: notificationInput.sessionId || null,
+      targetPath: notificationInput.targetPath || '',
+      metadata: notificationInput.metadata || {},
+      read: false,
+      readAt: null,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    return true;
+  });
+  return result ? { id: notificationRef.id } : { id: notificationRef.id, duplicate: true };
 }
 
 function buildEmailEventId(namespace, ...parts) {
@@ -179,8 +314,6 @@ function computeStoredHelperPayoutBreakdown(request = {}) {
   return null;
 }
 
-const UNCEDO_PAYMENTS_SECRETS = defineSecret('UNCEDO_PAYMENTS_SECRETS');
-const UNCEDO_EMAIL_SECRETS = defineSecret('UNCEDO_EMAIL_SECRETS');
 const MATCHING_TIMEOUT_MS = 3 * 60 * 1000;
 const OFFER_TIMEOUT_MS = 30 * 1000;
 const HELPER_REOFFER_COOLDOWN_MS = OFFER_TIMEOUT_MS * 2;
@@ -233,6 +366,13 @@ const PRE_ASSIGNMENT_SERVICE_REQUEST_STATUSES = new Set([
   SERVICE_REQUEST_STATUS.HELPER_FOUND,
   SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE,
 ]);
+const serviceRequestOfferOperations = createServiceRequestOfferOperations({
+  db,
+  admin,
+  isHelperUserRecord,
+  acceptedStatus: SERVICE_REQUEST_STATUS.ACCEPTED,
+  matchingStatus: SERVICE_REQUEST_STATUS.MATCHING,
+});
 const POST_ASSIGNMENT_SERVICE_REQUEST_STATUSES = new Set([
   SERVICE_REQUEST_STATUS.ACCEPTED,
   'driving',
@@ -1513,6 +1653,2196 @@ function resolveNextServiceHelperSelection(request = {}, candidateQueue = [], no
   };
 }
 
+exports.getCustomerServicePricingQuote = onRequest({ cors: true, maxInstances: 5, concurrency: 20, timeoutSeconds: 30 }, async (req, res) => {
+  if (req.method !== 'POST') {
+    res.status(405).json({ success: false, message: 'Method not allowed.' });
+    return;
+  }
+  const token = getBearerToken(req);
+  const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+  try {
+    const quote = await quoteFromFirestore({
+      db,
+      categoryId: req.body?.categoryId,
+      serviceIds: req.body?.serviceIds,
+      selectedPackageId: req.body?.selectedPackageId,
+      structuredAnswers: req.body?.structuredAnswers || {},
+      strictUnknownAnswers: true,
+    });
+    res.status(200).json({ success: true, quote });
+  } catch (error) {
+    const status = error.code === 'missing-required-answers' ? 400 : 422;
+    res.status(status).json({
+      success: false,
+      message: error.message || 'Unable to quote this service.',
+      missingQuestionIds: error.missingQuestionIds || [],
+    });
+  }
+});
+
+exports.quoteCustomerServiceRequest = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  const token = getBearerToken(req);
+  const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) return res.status(401).json({ success: false, message: 'Unauthorized request.' });
+  const requestId = String(req.body?.requestId || '').trim();
+  if (!requestId) return res.status(400).json({ success: false, message: 'A request ID is required.' });
+  try {
+    const update = await marketplaceRequestOperations.updateDraft({
+      requestId,
+      principalId: decoded.uid,
+      categoryId: req.body?.categoryId,
+      serviceIds: req.body?.serviceIds,
+      selectedPackageId: req.body?.selectedPackageId,
+      structuredAnswers: req.body?.structuredAnswers || {},
+      location: req.body?.location,
+      serviceAddress: req.body?.serviceAddress,
+      timingPreference: req.body?.timingPreference,
+      scheduledForText: req.body?.scheduledForText,
+    });
+    if (update.code !== 'updated') return res.status(update.code === 'not-owner' ? 403 : 409).json({ success: false, code: update.code, message: update.message || 'This request cannot be quoted in its current state.', missingQuestionIds: update.missingQuestionIds || [] });
+    const result = await marketplaceRequestOperations.quoteDraft({ requestId, principalId: decoded.uid });
+    if (result.code !== 'quoted') return res.status(result.code === 'not-owner' ? 403 : 422).json({ success: false, code: result.code, message: result.message || 'The request is missing valid information for a quote.', missingQuestionIds: result.missingQuestionIds || [] });
+    return res.status(200).json({ success: true, quote: result.quote, quoteExpiresAtMs: result.quoteExpiresAtMs });
+  } catch (error) {
+    logger.warn('customer_service_request_quote_failed', { requestId, uid: decoded.uid, errorCode: String(error?.code || 'quote_failed').slice(0, 100) });
+    return res.status(500).json({ success: false, message: 'Unable to calculate this service quote right now.' });
+  }
+});
+
+exports.updateCustomerServiceRequestDraft = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  const token = getBearerToken(req);
+  const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) return res.status(401).json({ success: false, message: 'Unauthorized request.' });
+  const requestId = String(req.body?.requestId || '').trim();
+  if (!requestId) return res.status(400).json({ success: false, message: 'A request ID is required.' });
+  try {
+    const result = await marketplaceRequestOperations.updateDraft({
+      requestId,
+      principalId: decoded.uid,
+      categoryId: req.body?.categoryId,
+      serviceIds: req.body?.serviceIds,
+      selectedPackageId: req.body?.selectedPackageId,
+      structuredAnswers: req.body?.structuredAnswers,
+      location: req.body?.location,
+      serviceAddress: req.body?.serviceAddress,
+      timingPreference: req.body?.timingPreference,
+      scheduledForText: req.body?.scheduledForText,
+    });
+    const status = result.code === 'updated' ? 200 : result.code === 'not-owner' ? 403 : result.code === 'request-not-found' ? 404 : 409;
+    return res.status(status).json({ success: result.code === 'updated', ...result });
+  } catch (error) {
+    logger.warn('customer_service_request_draft_update_failed', { requestId, uid: decoded.uid, errorCode: String(error?.code || 'draft_update_failed').slice(0, 100) });
+    return res.status(500).json({ success: false, message: 'Unable to update this request right now.' });
+  }
+});
+
+exports.createCustomerServiceRequest = onRequest({ cors: true, maxInstances: 5, concurrency: 20, timeoutSeconds: 30 }, async (req, res) => {
+  if (req.method !== 'POST') {
+    res.status(405).json({ success: false, message: 'Method not allowed.' });
+    return;
+  }
+  const token = getBearerToken(req);
+  const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+
+  const requestId = String(req.body?.requestId || '').trim();
+  const categoryId = String(req.body?.categoryId || '').trim().toLowerCase();
+  const serviceIds = [...new Set((Array.isArray(req.body?.serviceIds) ? req.body.serviceIds : [])
+    .map((value) => String(value || '').trim().toLowerCase()).filter(Boolean))];
+  const selectedPackageId = String(req.body?.selectedPackageId || '').trim().toLowerCase();
+  const structuredAnswers = req.body?.structuredAnswers && typeof req.body.structuredAnswers === 'object' && !Array.isArray(req.body.structuredAnswers)
+    ? req.body.structuredAnswers
+    : {};
+  if (!/^[A-Za-z0-9_-]{8,180}$/.test(requestId) || !categoryId || !serviceIds.length || serviceIds.length > 30) {
+    res.status(400).json({ success: false, message: 'A valid service selection is required.' });
+    return;
+  }
+
+  try {
+    const result = await marketplaceRequestOperations.createDraft({
+      requestId,
+      principalId: decoded.uid,
+      profile: { fullName: decoded.name || '', email: decoded.email || '', phoneNumber: decoded.phone_number || '' },
+      categoryId,
+      serviceIds,
+      selectedPackageId,
+      structuredAnswers,
+      location: req.body?.location || null,
+      serviceAddress: String(req.body?.serviceAddress || '').trim(),
+      timingPreference: String(req.body?.timingPreference || '').trim(),
+      scheduledForText: String(req.body?.scheduledForText || '').trim(),
+      intakeMode: 'guided_chat',
+      source: 'customer_request_backend',
+    });
+
+    if (result.code === 'active-request') {
+      res.status(409).json({ success: false, code: result.code, activeRequestId: result.activeRequestId, message: 'You already have an active service request.' });
+      return;
+    }
+    if (result.code === 'request-id-conflict') {
+      res.status(409).json({ success: false, code: result.code, message: 'This request could not be created. Please start again.' });
+      return;
+    }
+    if (!['created', 'already-created'].includes(result.code)) {
+      res.status(422).json({ success: false, code: result.code, message: result.message || 'The selected service is not available.' });
+      return;
+    }
+    res.status(200).json({ success: true, idempotent: result.code === 'already-created', requestId: result.requestId || result.request?.id });
+  } catch (error) {
+    logger.error('customer_service_request_creation_failed', {
+      requestId,
+      uid: decoded.uid,
+      errorCode: String(error?.code || 'request_creation_failed').slice(0, 120),
+    });
+    res.status(500).json({ success: false, message: 'Unable to start this service request right now.' });
+  }
+});
+
+exports.confirmCustomerServiceRequest = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+  if (req.method !== 'POST') {
+    res.status(405).json({ success: false, message: 'Method not allowed.' });
+    return;
+  }
+  const token = getBearerToken(req);
+  const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+
+  const requestId = String(req.body?.requestId || '').trim();
+  const callId = String(req.body?.callId || '').trim();
+  const approvedQuote = req.body?.approvedQuote;
+  if (!requestId || !approvedQuote || !Number.isFinite(Number(approvedQuote.total))) {
+    res.status(400).json({ success: false, message: 'A request ID and approved quote are required.' });
+    return;
+  }
+
+  try {
+    const requestRef = db.collection('serviceRequests').doc(requestId);
+    const outcome = await marketplaceRequestOperations.confirmDraft({
+      requestId,
+      principalId: decoded.uid,
+      approvedQuote,
+      callId,
+      source: 'customer_request_backend',
+    });
+
+    if (outcome.code === 'not-owner') {
+      res.status(403).json({ success: false, code: outcome.code, message: 'Only the request owner can submit this request.' });
+      return;
+    }
+    if (outcome.code === 'request-not-found') {
+      res.status(404).json({ success: false, code: outcome.code, message: 'Service request not found.' });
+      return;
+    }
+    if (outcome.code === 'already-submitted') {
+      res.status(200).json({ success: true, idempotent: true, request: outcome.request, pricingSnapshot: outcome.request.pricingSnapshot });
+      return;
+    }
+    if (outcome.code === 'quote-changed') {
+      res.status(409).json({ success: false, code: outcome.code, message: 'The service price changed. Review and approve the updated quote.', quote: outcome.quote });
+      return;
+    }
+    if (outcome.code === 'active-request') {
+      res.status(409).json({ success: false, code: outcome.code, message: 'You already have another active service request.', activeRequestId: outcome.activeRequestId });
+      return;
+    }
+    if (outcome.code !== 'submitted') {
+      res.status(422).json({ success: false, code: outcome.code, message: outcome.message || 'The service request is not ready to submit.', missingQuestionIds: outcome.missingQuestionIds || [] });
+      return;
+    }
+    const submittedSnap = await db.collection('serviceRequests').doc(requestId).get();
+    res.status(200).json({
+      success: true,
+      request: submittedSnap.exists ? { id: submittedSnap.id, ...submittedSnap.data() } : null,
+      pricingSnapshot: outcome.quote,
+    });
+  } catch (error) {
+    logger.error('customer_service_request_confirmation_failed', {
+      requestId,
+      uid: decoded.uid,
+      errorCode: String(error?.code || 'request_confirmation_failed').slice(0, 120),
+    });
+    res.status(500).json({ success: false, message: 'Unable to submit this service request right now.' });
+  }
+});
+
+exports.whatsappWebhook = onRequest({
+  invoker: 'public',
+  maxInstances: 3,
+  memory: '256MiB',
+  timeoutSeconds: 30,
+  ...HALF_CPU_OPTIONS,
+}, createWhatsAppWebhookHandler({
+  getSecrets: getWhatsAppSecrets,
+  isMessagingEnabled: whatsappMessagingEnabled,
+  verifyWebhookChallenge,
+  verifyWebhookSignature,
+  normalizeWebhookPayload,
+  db,
+  admin,
+  logger,
+}));
+
+exports.persistWhatsAppConversationEvent = onDocumentCreated({
+  document: 'whatsappWebhookEvents/{eventId}',
+  maxInstances: 4,
+  concurrency: 20,
+  retry: false,
+}, async (event) => {
+  const normalized = event.data?.data();
+  if (!normalized) return;
+  const eventRef = event.data.ref;
+  if (!whatsappMessagingEnabled()) {
+    await eventRef.set({ status: 'ignored_disabled', processedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    return;
+  }
+
+  if (normalized.eventType === 'message_status') {
+    const statusRef = db.collection('whatsappMessageStatuses').doc(normalized.eventId);
+    await statusRef.create({
+      ...normalized,
+      receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }).catch((error) => {
+      if (error?.code !== 6 && error?.code !== 'already-exists') throw error;
+    });
+    const matchingMessages = await db.collection('whatsappMessages')
+      .where('metaMessageId', '==', normalized.messageId).limit(5).get();
+    for (const messageDoc of matchingMessages.docs) {
+      if (String(messageDoc.data()?.to || '') !== String(normalized.recipientId || '')) continue;
+      await applyWhatsAppDeliveryStatusToMessage(messageDoc.ref, normalized);
+    }
+    await eventRef.update({ status: 'persisted', processedAt: admin.firestore.FieldValue.serverTimestamp() });
+    return;
+  }
+  if (normalized.eventType !== 'message') {
+    await eventRef.update({ status: 'ignored', processedAt: admin.firestore.FieldValue.serverTimestamp() });
+    return;
+  }
+
+  const identityId = buildWhatsAppIdentityId({
+    phoneNumberId: normalized.phoneNumberId,
+    phoneNumber: `+${normalized.from}`,
+    stableEventId,
+  });
+  const guestPrincipalId = buildWhatsAppGuestPrincipalId(identityId);
+  const identityRef = db.collection('whatsappIdentities').doc(identityId);
+  const conversationRef = db.collection('whatsappConversations').doc(identityId);
+  const messageRef = db.collection('whatsappMessages').doc(normalized.eventId);
+  const assistantJobRef = db.collection('whatsappAssistantJobs').doc(normalized.eventId);
+
+  await db.runTransaction(async (transaction) => {
+    const [identitySnap, conversationSnap, messageSnap, eventSnap] = await Promise.all([
+      transaction.get(identityRef),
+      transaction.get(conversationRef),
+      transaction.get(messageRef),
+      transaction.get(eventRef),
+    ]);
+    if (!eventSnap.exists || eventSnap.data()?.status === 'persisted') return;
+
+    const existingIdentity = identitySnap.data() || {};
+    const activeGuestPrincipalId = String(existingIdentity.guestPrincipalId || guestPrincipalId);
+    const conversation = conversationSnap.data() || {};
+    const timestampMs = normalizeTimestamp(normalized.timestampMs) || Date.now();
+    const latestInboundAtMs = Math.max(Number(conversation.lastInboundMessageAtMs || 0), timestampMs);
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    transaction.set(identityRef, {
+      channel: 'whatsapp',
+      phoneNumberId: normalized.phoneNumberId,
+      waId: normalized.from,
+      guestPrincipalId: activeGuestPrincipalId,
+      linkedFirebaseUid: existingIdentity.linkedFirebaseUid || null,
+      role: existingIdentity.role || null,
+      verifiedAt: existingIdentity.verifiedAt || null,
+      profileName: normalized.profileName || existingIdentity.profileName || '',
+      lastSeenAtMs: timestampMs,
+      updatedAt: now,
+      createdAt: existingIdentity.createdAt || now,
+    }, { merge: true });
+    transaction.set(conversationRef, {
+      channel: 'whatsapp',
+      identityId,
+      linkedFirebaseUid: conversation.linkedFirebaseUid || existingIdentity.linkedFirebaseUid || null,
+      currentMode: conversation.currentMode || 'assistant',
+      currentIntent: conversation.currentIntent || null,
+      activeDraftId: conversation.activeDraftId || null,
+      activeServiceRequestId: conversation.activeServiceRequestId || null,
+      activeSupportTicketId: conversation.activeSupportTicketId || null,
+      lastInboundEventId: timestampMs > Number(conversation.lastInboundMessageAtMs || 0)
+        || (timestampMs === Number(conversation.lastInboundMessageAtMs || 0)
+          && normalized.eventId > String(conversation.lastInboundEventId || ''))
+        ? normalized.eventId
+        : conversation.lastInboundEventId || null,
+      lastInboundMessageAtMs: latestInboundAtMs,
+      customerServiceWindowExpiresAtMs: latestInboundAtMs + (24 * 60 * 60 * 1000),
+      humanHandoff: Boolean(conversation.humanHandoff),
+      aiConsentAtMs: Number(conversation.aiConsentAtMs || 0),
+      lastMessageAtMs: Math.max(Number(conversation.lastMessageAtMs || 0), timestampMs),
+      recentHistory: [
+        ...(Array.isArray(conversation.recentHistory) ? conversation.recentHistory : []),
+        ...(messageSnap.exists ? [] : [{ eventId: normalized.eventId, role: 'user', text: normalized.text || normalized.media?.caption || '', type: normalized.type, timestampMs }]),
+      ].filter((turn) => turn && String(turn.text || '').trim())
+        .sort((left, right) => Number(left.timestampMs || 0) - Number(right.timestampMs || 0))
+        .slice(-8),
+      updatedAt: now,
+      createdAt: conversation.createdAt || now,
+    }, { merge: true });
+
+    if (!messageSnap.exists) {
+      transaction.create(messageRef, {
+        ...normalized,
+        identityId,
+        guestPrincipalId: activeGuestPrincipalId,
+        direction: 'inbound',
+        status: 'received',
+        createdAt: now,
+      });
+      transaction.create(assistantJobRef, {
+        eventId: normalized.eventId,
+        identityId,
+        conversationId: identityId,
+        status: 'pending',
+        attempts: 0,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+    transaction.update(eventRef, {
+      status: 'persisted',
+      identityId,
+      processedAt: now,
+      updatedAt: now,
+    });
+  });
+});
+
+function whatsappAiEnabled() {
+  return String(process.env.WHATSAPP_AI_ENABLED || '').trim().toLowerCase() === 'true';
+}
+
+function whatsappMessagingEnabled() {
+  return isWhatsAppMessagingEnabled(process.env);
+}
+
+function whatsappMediaEnabled() {
+  return isWhatsAppMediaEnabled(process.env);
+}
+
+function whatsappImageInterpretationEnabled() {
+  return isWhatsAppImageInterpretationEnabled(process.env);
+}
+
+function whatsappCancellationEnabled() {
+  return isWhatsAppCancellationEnabled(process.env);
+}
+
+function whatsappTranscriptionEnabled() {
+  return isWhatsAppTranscriptionEnabled(process.env);
+}
+
+function requestPaymentsEnabled() {
+  return String(process.env.REQUEST_PAYMENTS_ENABLED || '').trim().toLowerCase() === 'true';
+}
+
+function whatsappPaymentsEnabled() {
+  return requestPaymentsEnabled()
+    && whatsappMessagingEnabled()
+    && String(process.env.WHATSAPP_PAYMENTS_ENABLED || '').trim().toLowerCase() === 'true';
+}
+
+async function consumeWhatsAppAiRateLimit(identityId, now = Date.now()) {
+  const minuteBucket = Math.floor(now / 60000);
+  const dayBucket = new Date(now).toISOString().slice(0, 10);
+  const rateRef = db.collection('whatsappRateLimits').doc(identityId);
+  return db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(rateRef);
+    const previous = snapshot.data() || {};
+    const minuteCount = Number(previous.minuteBucket) === minuteBucket ? Number(previous.minuteCount || 0) : 0;
+    const dayCount = String(previous.dayBucket || '') === dayBucket ? Number(previous.dayCount || 0) : 0;
+    if (minuteCount >= 8 || dayCount >= 100) return false;
+    transaction.set(rateRef, {
+      minuteBucket,
+      minuteCount: minuteCount + 1,
+      dayBucket,
+      dayCount: dayCount + 1,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    return true;
+  });
+}
+
+function getWhatsAppMetaClient() {
+  if (!whatsappMessagingEnabled()) throw new Error('WhatsApp messaging is disabled.');
+  const secrets = getWhatsAppSecrets();
+  return {
+    secrets,
+    client: createMetaWhatsAppClient({
+      accessToken: secrets.accessToken,
+      phoneNumberId: secrets.phoneNumberId,
+      graphApiVersion: secrets.graphApiVersion,
+      approvedTemplateNames: secrets.approvedTemplateNames,
+    }),
+  };
+}
+
+async function processWhatsAppInboundMedia({ identityId, eventId, identity, conversation, inbound }) {
+  if (!whatsappMediaEnabled()) return { code: 'disabled' };
+  if (String(process.env.WHATSAPP_MEDIA_RETENTION_ENFORCED || '').trim().toLowerCase() !== 'true') {
+    return { code: 'retention-not-configured' };
+  }
+  const mediaType = ({ image: 'image', audio: 'audio', document: 'document' })[String(inbound?.type || '').toLowerCase()];
+  if (!mediaType || !inbound?.media?.mediaId) return { code: 'unsupported' };
+
+  const assetId = stableEventId(`media:${eventId}`);
+  const assetRef = db.collection('whatsappMediaAssets').doc(assetId);
+  const existingAsset = await assetRef.get();
+  if (existingAsset.exists) {
+    const asset = existingAsset.data() || {};
+    if (String(asset.identityId || '') !== identityId || String(asset.sourceEventId || '') !== eventId
+      || !String(asset.storagePath || '').startsWith('whatsapp-private/')) return { code: 'conflict' };
+    const [buffer] = await admin.storage().bucket().file(asset.storagePath).download();
+    return { code: 'stored', assetId, asset, buffer, mediaType: asset.mediaType, mimeType: asset.mimeType, storagePath: asset.storagePath, duplicate: true };
+  }
+
+  const { secrets } = getWhatsAppMetaClient();
+  const media = await downloadMetaMedia({
+    mediaId: inbound.media.mediaId,
+    mediaType,
+    mimeType: inbound.media.mimeType,
+    sha256: inbound.media.sha256,
+    accessToken: secrets.accessToken,
+    graphApiVersion: secrets.graphApiVersion,
+  });
+
+  let requestId = '';
+  let draftId = '';
+  let supportTicketId = '';
+  if (conversation.activeServiceRequestId) {
+    const requestAccess = await getWhatsAppRequestForIdentity({ db, identity, requestId: conversation.activeServiceRequestId });
+    if (requestAccess.code === 'found') requestId = requestAccess.request.id;
+  }
+  if (conversation.activeDraftId) {
+    const candidate = String(conversation.activeDraftId || '').trim();
+    const draftSnapshot = await db.collection('serviceRequestDrafts').doc(candidate).get();
+    if (draftSnapshot.exists && String(draftSnapshot.data()?.identityId || '') === identityId) draftId = candidate;
+  }
+  if (conversation.activeSupportTicketId) {
+    const candidate = String(conversation.activeSupportTicketId || '').trim();
+    const ticketSnapshot = await db.collection('supportTickets').doc(candidate).get();
+    if (ticketSnapshot.exists && String(ticketSnapshot.data()?.identityId || '') === identityId) supportTicketId = candidate;
+  }
+
+  const stored = await storeWhatsAppMedia({
+    storageBucket: admin.storage().bucket(),
+    media,
+    identityId,
+    eventId,
+    requestId,
+    supportTicketId,
+    retentionEnforced: true,
+  });
+  const draftRef = draftId ? db.collection('serviceRequestDrafts').doc(draftId) : null;
+  const ticketRef = supportTicketId ? db.collection('supportTickets').doc(supportTicketId) : null;
+  await db.runTransaction(async (transaction) => {
+    const reads = [transaction.get(assetRef)];
+    if (draftRef) reads.push(transaction.get(draftRef));
+    if (ticketRef) reads.push(transaction.get(ticketRef));
+    const snapshots = await Promise.all(reads);
+    const assetSnapshot = snapshots[0];
+    if (assetSnapshot.exists) return;
+    let index = 1;
+    const currentDraft = draftRef ? snapshots[index++] : null;
+    const currentTicket = ticketRef ? snapshots[index] : null;
+    const draftIsOwned = Boolean(currentDraft?.exists && String(currentDraft.data()?.identityId || '') === identityId);
+    const ticketIsOwned = Boolean(currentTicket?.exists && String(currentTicket.data()?.identityId || '') === identityId);
+    transaction.create(assetRef, {
+      assetId,
+      identityId,
+      sourceEventId: eventId,
+      storagePath: stored.path,
+      mediaType: media.mediaType,
+      mimeType: media.mimeType,
+      size: media.size,
+      requestId: requestId || null,
+      draftId: draftIsOwned ? draftId : null,
+      supportTicketId: ticketIsOwned ? supportTicketId : null,
+      status: 'stored',
+      retentionExpiresAtMs: Date.now() + (30 * 24 * 60 * 60 * 1000),
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    if (draftIsOwned) transaction.set(draftRef, {
+      mediaAssetIds: admin.firestore.FieldValue.arrayUnion(assetId),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+  });
+  return {
+    code: 'stored', assetId, requestId, draftId, supportTicketId,
+    mediaType: media.mediaType, mimeType: media.mimeType, size: media.size,
+    buffer: media.buffer, storagePath: stored.path, duplicate: stored.duplicate,
+  };
+}
+
+async function associateWhatsAppMediaWithSupportTicket({ assetId, identityId, ticketId }) {
+  if (!assetId || !identityId || !ticketId) return false;
+  const assetRef = db.collection('whatsappMediaAssets').doc(String(assetId));
+  const ticketRef = db.collection('supportTickets').doc(String(ticketId));
+  return db.runTransaction(async (transaction) => {
+    const [assetSnapshot, ticketSnapshot] = await Promise.all([transaction.get(assetRef), transaction.get(ticketRef)]);
+    if (!assetSnapshot.exists || !ticketSnapshot.exists) return false;
+    if (String(assetSnapshot.data()?.identityId || '') !== identityId
+      || String(ticketSnapshot.data()?.identityId || '') !== identityId) return false;
+    transaction.set(assetRef, { supportTicketId: ticketId, associatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    return true;
+  });
+}
+
+async function applyWhatsAppDeliveryStatusToMessage(messageRef, statusEvent) {
+  await db.runTransaction(async (transaction) => {
+    const messageSnap = await transaction.get(messageRef);
+    if (!messageSnap.exists || !shouldApplyDeliveryStatus(messageSnap.data() || {}, statusEvent)) return;
+    transaction.update(messageRef, {
+      status: statusEvent.status,
+      deliveryStatus: statusEvent.status,
+      statusTimestampMs: statusEvent.timestampMs,
+      statusErrors: statusEvent.errors || [],
+      statusUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  });
+}
+
+async function reconcileWhatsAppDeliveryStatuses({ metaMessageId, recipientId, messageRef }) {
+  const id = String(metaMessageId || '').trim();
+  if (!id || !recipientId || !messageRef) return;
+  const statuses = await db.collection('whatsappMessageStatuses')
+    .where('messageId', '==', id).limit(10).get();
+  const relevant = statuses.docs
+    .map((doc) => doc.data() || {})
+    .filter((statusEvent) => String(statusEvent.recipientId || '') === String(recipientId))
+    .sort((left, right) => Number(left.timestampMs || 0) - Number(right.timestampMs || 0));
+  for (const statusEvent of relevant) await applyWhatsAppDeliveryStatusToMessage(messageRef, statusEvent);
+}
+
+function getWhatsAppQuestionnaireServices(service, catalog) {
+  const includedIds = Array.isArray(service?.includedServiceIds) ? service.includedServiceIds : [];
+  return catalog.filter((item) => item.id === service.id || includedIds.includes(item.id));
+}
+
+function getWhatsAppServiceIds(service) {
+  const includedIds = Array.isArray(service?.includedServiceIds) ? service.includedServiceIds : [];
+  return includedIds.length ? includedIds : [service.id];
+}
+
+function renderWhatsAppQuestion(question) {
+  const prompt = String(question?.prompt || 'Please provide this detail.').trim();
+  const options = (Array.isArray(question?.options) ? question.options : [])
+    .map((option) => String(option?.label || option?.value || '').trim())
+    .filter(Boolean);
+  return options.length ? `${prompt}\nOptions: ${options.join(', ')}` : prompt;
+}
+
+function renderWhatsAppCatalog(catalog) {
+  const rows = catalog.slice(0, 18).map((service) => {
+    const category = String(service.categoryName || service.categoryId || '').trim();
+    return `• ${service.label}${category ? ` (${category})` : ''}`;
+  });
+  const suffix = catalog.length > rows.length ? '\nSend the service name you want to ask about or book.' : '';
+  return `Available services:\n${rows.join('\n')}${suffix}\n\nTell me which service you need.`.slice(0, 3800);
+}
+
+async function persistWhatsAppAssistantReply({ sourceEventId, identityId, identity, conversationRef, text, interactive = null }) {
+  const recipient = String(identity?.waId || '').trim();
+  const phoneNumberId = String(identity?.phoneNumberId || '').trim();
+  const lastInboundAtMs = Number((await conversationRef.get()).data()?.lastInboundMessageAtMs || 0);
+  const outboundId = stableEventId(`assistant-reply:${sourceEventId}`);
+  const outboundRef = db.collection('whatsappMessages').doc(outboundId);
+  const claim = await db.runTransaction(async (transaction) => {
+    const existing = await transaction.get(outboundRef);
+    if (existing.exists) return false;
+    transaction.create(outboundRef, {
+      eventId: outboundId,
+      sourceEventId,
+      identityId,
+      phoneNumberId,
+      to: recipient,
+      direction: 'outbound',
+      type: interactive ? 'interactive' : 'text',
+      text: String(text || '').slice(0, 4096),
+      status: 'sending',
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    return true;
+  });
+  if (!claim) return { sent: false, duplicate: true };
+
+  try {
+    const { secrets, client } = getWhatsAppMetaClient();
+    if (phoneNumberId !== secrets.phoneNumberId) throw new Error('WhatsApp sender number does not match configured phone number.');
+    const delivery = interactive
+      ? await client.sendInteractive({ to: recipient, interactive, lastInboundAtMs })
+      : await client.sendText({ to: recipient, text, lastInboundAtMs });
+    await outboundRef.set({
+      status: 'sent',
+      metaMessageId: delivery.messageId || null,
+      sentAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    await reconcileWhatsAppDeliveryStatuses({ metaMessageId: delivery.messageId, recipientId: recipient, messageRef: outboundRef });
+    await db.runTransaction(async (transaction) => {
+      const conversationSnap = await transaction.get(conversationRef);
+      const conversation = conversationSnap.data() || {};
+      const history = Array.isArray(conversation.recentHistory) ? conversation.recentHistory : [];
+      transaction.set(conversationRef, {
+        recentHistory: [...history, { role: 'assistant', text: String(text || '').slice(0, 4096), timestampMs: Date.now() }].slice(-8),
+        lastMessageAtMs: Date.now(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+    });
+    return { sent: true };
+  } catch (error) {
+    const deliveryStatus = classifyMetaDeliveryError(error);
+    await outboundRef.set({
+      status: deliveryStatus,
+      deliveryStatus,
+      errorCode: String(error?.code || 'whatsapp_send_failed').slice(0, 120),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    throw error;
+  }
+}
+
+async function relayWhatsAppText({ eventId, identityId, identity, conversation, inbound, conversationRef }) {
+  const requestId = String(conversation.activeServiceRequestId || '').trim();
+  if (!requestId) return { handled: false };
+  if (String(inbound?.type || '').toLowerCase() !== 'text') return { handled: true, code: 'media-not-supported' };
+  const requestRef = db.collection('serviceRequests').doc(requestId);
+  const requestSnap = await requestRef.get();
+  if (!requestSnap.exists) return { handled: false };
+  const request = requestSnap.data() || {};
+  const helperId = String(request.helperAssignment?.helperId || '').trim();
+  if (!helperId || !isWhatsAppRelayRequestOpen(request)) {
+    return { handled: false };
+  }
+  const senderRole = String(identity.role || (identity.guestPrincipalId ? 'customer' : '')).toLowerCase();
+  const senderUid = String(identity.linkedFirebaseUid || '').trim();
+  const customerId = String(request.customerId || '').trim();
+  const guestOwnerUid = senderRole === 'customer' && senderUid && customerId.startsWith('guest_')
+    ? String((await db.collection('whatsappGuestOwnership').doc(customerId).get()).data()?.uid || '')
+    : '';
+  if (!canAccessWhatsAppRequest({ request, identity, guestOwnerUid })) {
+    return { handled: false };
+  }
+
+  let recipientIdentityId = '';
+  if (senderRole === 'customer') {
+    const helperLink = await db.collection('whatsappUserLinks').doc(helperId).get();
+    recipientIdentityId = String(helperLink.data()?.identityId || '').trim();
+  } else {
+    recipientIdentityId = String(request.originIdentityId || '').trim();
+    if (!recipientIdentityId && customerId && !customerId.startsWith('guest_')) {
+      const customerLink = await db.collection('whatsappUserLinks').doc(customerId).get();
+      recipientIdentityId = String(customerLink.data()?.identityId || '').trim();
+    }
+  }
+  if (!recipientIdentityId || recipientIdentityId === identityId) return { handled: true, code: 'recipient-not-linked' };
+  const recipientIdentityRef = db.collection('whatsappIdentities').doc(recipientIdentityId);
+  const recipientConversationRef = db.collection('whatsappConversations').doc(recipientIdentityId);
+  const [recipientIdentitySnap, recipientConversationSnap] = await Promise.all([
+    recipientIdentityRef.get(), recipientConversationRef.get(),
+  ]);
+  if (!recipientIdentitySnap.exists || !recipientConversationSnap.exists) return { handled: true, code: 'recipient-not-found' };
+  const recipientIdentity = recipientIdentitySnap.data() || {};
+  const recipientConversation = recipientConversationSnap.data() || {};
+  const recipientIsExpected = isExpectedWhatsAppRelayRecipient({ senderRole, customerId, helperId, recipientIdentity });
+  if (String(recipientIdentity.phoneNumberId || '') !== String(identity.phoneNumberId || '')
+    || !String(recipientIdentity.waId || '').trim() || !recipientIsExpected) return { handled: true, code: 'recipient-invalid' };
+  const recipientLastInbound = Number(recipientConversation.lastInboundMessageAtMs || 0);
+  if (!isWithinCustomerServiceWindow(recipientLastInbound)) return { handled: true, code: 'recipient-window-closed' };
+
+  const text = String(inbound.text || inbound.media?.caption || '').trim().slice(0, 4096);
+  if (!text) return { handled: true, code: 'text-empty' };
+  const outboundId = stableEventId(`relay:${eventId}:${recipientIdentityId}`);
+  const outboundRef = db.collection('whatsappMessages').doc(outboundId);
+  const claimed = await db.runTransaction(async (transaction) => {
+    const [currentRequestSnap, currentRecipientConversation, currentRecipientIdentity, existingOutbound] = await Promise.all([
+      transaction.get(requestRef), transaction.get(recipientConversationRef),
+      transaction.get(recipientIdentityRef), transaction.get(outboundRef),
+    ]);
+    if (existingOutbound.exists || !currentRequestSnap.exists || !currentRecipientConversation.exists || !currentRecipientIdentity.exists) return false;
+    const currentRequest = currentRequestSnap.data() || {};
+    const currentRecipient = currentRecipientIdentity.data() || {};
+    const stillExpectedParticipant = isExpectedWhatsAppRelayRecipient({ senderRole, customerId, helperId, recipientIdentity: currentRecipient });
+    if (String(currentRequest.customerId || '') !== customerId
+      || String(currentRequest.helperAssignment?.helperId || '') !== helperId
+      || !stillExpectedParticipant
+      || !isWhatsAppRelayRequestOpen(currentRequest)) return false;
+    const nextLastInbound = Number(currentRecipientConversation.data()?.lastInboundMessageAtMs || 0);
+    if (!isWithinCustomerServiceWindow(nextLastInbound)) return false;
+    transaction.create(outboundRef, {
+      eventId: outboundId,
+      sourceEventId: eventId,
+      identityId: recipientIdentityId,
+      requestId,
+      phoneNumberId: String(identity.phoneNumberId || ''),
+      to: String(recipientIdentity.waId || ''),
+      direction: 'relay',
+      type: 'text',
+      text,
+      status: 'sending',
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    return true;
+  });
+  if (!claimed) return { handled: true, code: 'duplicate-or-stale' };
+
+  try {
+    const { client } = getWhatsAppMetaClient();
+    const delivery = await client.sendText({ to: recipientIdentity.waId, text, lastInboundAtMs: recipientLastInbound });
+    await outboundRef.set({ status: 'sent', deliveryStatus: 'accepted', metaMessageId: delivery.messageId || null, sentAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    await reconcileWhatsAppDeliveryStatuses({ metaMessageId: delivery.messageId, recipientId: recipientIdentity.waId, messageRef: outboundRef });
+    await conversationRef.set({ currentMode: 'provider_relay', activeServiceRequestId: requestId, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    return { handled: true, sent: true };
+  } catch (error) {
+    const deliveryStatus = classifyMetaDeliveryError(error);
+    await outboundRef.set({
+      status: deliveryStatus,
+      deliveryStatus,
+      errorCode: String(error?.code || 'meta_delivery_unknown').slice(0, 100),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    logger.warn('whatsapp_relay_delivery_failed', { requestId, eventId, deliveryStatus, errorCode: String(error?.code || 'unknown').slice(0, 80) });
+    return { handled: true, code: deliveryStatus === 'outcome_unknown' ? 'delivery-unknown' : 'delivery-failed' };
+  }
+}
+
+async function relayWhatsAppAttachment({ eventId, identityId, identity, conversation, inbound, conversationRef }) {
+  const requestId = String(conversation.activeServiceRequestId || '').trim();
+  if (!requestId || !['image', 'audio', 'document'].includes(String(inbound?.type || '').toLowerCase())) {
+    return { handled: false };
+  }
+  if (!whatsappMediaEnabled()) return { handled: true, code: 'media-relay-disabled' };
+  if (String(process.env.WHATSAPP_MEDIA_RETENTION_ENFORCED || '').trim().toLowerCase() !== 'true') {
+    return { handled: true, code: 'retention-not-configured' };
+  }
+
+  const requestAccess = await getWhatsAppRequestForIdentity({ db, identity, requestId });
+  if (requestAccess.code !== 'found') return { handled: true, code: 'request-not-authorized' };
+  const request = requestAccess.request;
+  const helperId = String(request.helperAssignment?.helperId || '').trim();
+  if (!helperId || !isWhatsAppRelayRequestOpen(request)) return { handled: true, code: 'relay-closed' };
+  const senderRole = String(identity.role || (identity.guestPrincipalId ? 'customer' : '')).toLowerCase();
+  const customerId = String(request.customerId || '').trim();
+  const senderUid = String(identity.linkedFirebaseUid || '').trim();
+  let recipientIdentityId = '';
+  let expectedRecipientRole = '';
+  if (senderRole === 'customer') {
+    const helperLink = await db.collection('whatsappUserLinks').doc(helperId).get();
+    recipientIdentityId = String(helperLink.data()?.identityId || '').trim();
+    expectedRecipientRole = 'helper';
+  } else if (senderRole === 'helper' && senderUid === helperId) {
+    recipientIdentityId = String(request.originIdentityId || '').trim();
+    if (!recipientIdentityId && customerId && !customerId.startsWith('guest_')) {
+      const customerLink = await db.collection('whatsappUserLinks').doc(customerId).get();
+      recipientIdentityId = String(customerLink.data()?.identityId || '').trim();
+    }
+    expectedRecipientRole = 'customer';
+  } else {
+    return { handled: true, code: 'request-not-authorized' };
+  }
+  if (!recipientIdentityId || recipientIdentityId === identityId) return { handled: true, code: 'recipient-not-linked' };
+  const recipientIdentityRef = db.collection('whatsappIdentities').doc(recipientIdentityId);
+  const recipientConversationRef = db.collection('whatsappConversations').doc(recipientIdentityId);
+  const [recipientIdentitySnap, recipientConversationSnap] = await Promise.all([
+    recipientIdentityRef.get(), recipientConversationRef.get(),
+  ]);
+  if (!recipientIdentitySnap.exists || !recipientConversationSnap.exists) return { handled: true, code: 'recipient-not-found' };
+  const recipientIdentity = recipientIdentitySnap.data() || {};
+  const recipientConversation = recipientConversationSnap.data() || {};
+  const isExpectedParticipant = expectedRecipientRole === String(recipientIdentity.role || '').toLowerCase()
+    && isExpectedWhatsAppRelayRecipient({ senderRole, customerId, helperId, recipientIdentity });
+  if (!isExpectedParticipant
+    || String(recipientIdentity.phoneNumberId || '') !== String(identity.phoneNumberId || '')
+    || !String(recipientIdentity.waId || '').trim()) return { handled: true, code: 'recipient-invalid' };
+  const recipientLastInbound = Number(recipientConversation.lastInboundMessageAtMs || 0);
+  if (!isWithinCustomerServiceWindow(recipientLastInbound)) return { handled: true, code: 'recipient-window-closed' };
+
+  let mediaResult;
+  try {
+    mediaResult = await processWhatsAppInboundMedia({ identityId, eventId, identity, conversation, inbound });
+  } catch (error) {
+    logger.warn('whatsapp_relay_media_download_failed', { eventId, errorCode: String(error?.code || 'media_processing_failed').slice(0, 80) });
+    return { handled: true, code: 'media-processing-failed' };
+  }
+  if (mediaResult.code !== 'stored' || !Buffer.isBuffer(mediaResult.buffer)) {
+    return { handled: true, code: mediaResult.code === 'disabled' ? 'media-relay-disabled' : 'media-processing-failed' };
+  }
+
+  const outboundId = stableEventId(`relay:${eventId}:${recipientIdentityId}`);
+  const outboundRef = db.collection('whatsappMessages').doc(outboundId);
+  const sourceMessageRef = db.collection('whatsappMessages').doc(eventId);
+  const caption = String(inbound.media?.caption || '').trim().slice(0, 1024);
+  const mediaAssetRef = db.collection('whatsappMediaAssets').doc(mediaResult.assetId);
+  const claim = await db.runTransaction(async (transaction) => {
+    const [currentRequestSnap, currentRecipientConversation, currentRecipientIdentity, existingOutbound, assetSnap] = await Promise.all([
+      transaction.get(db.collection('serviceRequests').doc(requestId)),
+      transaction.get(recipientConversationRef),
+      transaction.get(recipientIdentityRef),
+      transaction.get(outboundRef),
+      transaction.get(mediaAssetRef),
+    ]);
+    if (existingOutbound.exists || !currentRequestSnap.exists || !currentRecipientConversation.exists
+      || !currentRecipientIdentity.exists || !assetSnap.exists) return false;
+    const currentRequest = currentRequestSnap.data() || {};
+    const currentRecipient = currentRecipientIdentity.data() || {};
+    if (String(currentRequest.customerId || '') !== customerId
+      || String(currentRequest.helperAssignment?.helperId || '') !== helperId
+      || !isExpectedWhatsAppRelayRecipient({ senderRole, customerId, helperId, recipientIdentity: currentRecipient })
+      || String(currentRecipient.waId || '') !== String(recipientIdentity.waId || '')
+      || String(currentRecipient.phoneNumberId || '') !== String(identity.phoneNumberId || '')
+      || !isWhatsAppRelayRequestOpen(currentRequest)) return false;
+    const nextLastInbound = Number(currentRecipientConversation.data()?.lastInboundMessageAtMs || 0);
+    if (!isWithinCustomerServiceWindow(nextLastInbound)) return false;
+    const currentAsset = assetSnap.data() || {};
+    if (String(currentAsset.identityId || '') !== identityId
+      || String(currentAsset.sourceEventId || '') !== eventId
+      || String(currentAsset.requestId || '') !== requestId
+      || String(currentAsset.status || '') !== 'stored') return false;
+    transaction.create(outboundRef, {
+      eventId: outboundId,
+      sourceEventId: eventId,
+      identityId: recipientIdentityId,
+      requestId,
+      phoneNumberId: String(identity.phoneNumberId || ''),
+      to: String(recipientIdentity.waId || ''),
+      direction: 'relay',
+      type: inbound.type,
+      text: caption,
+      media: {
+        assetId: mediaResult.assetId,
+        storagePath: mediaResult.storagePath,
+        mediaType: mediaResult.mediaType,
+        mimeType: mediaResult.mimeType,
+      },
+      status: 'sending',
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    transaction.set(sourceMessageRef, {
+      media: {
+        assetId: mediaResult.assetId,
+        storagePath: mediaResult.storagePath,
+        mediaType: mediaResult.mediaType,
+        mimeType: mediaResult.mimeType,
+        caption,
+      },
+      requestId,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    return true;
+  });
+  if (!claim) return { handled: true, code: 'duplicate-or-stale' };
+
+  try {
+    const { client, secrets } = getWhatsAppMetaClient();
+    if (String(identity.phoneNumberId || '') !== secrets.phoneNumberId) throw new Error('WhatsApp sender number does not match configured phone number.');
+    const delivery = await client.sendMedia({
+      to: recipientIdentity.waId,
+      buffer: mediaResult.buffer,
+      mimeType: mediaResult.mimeType,
+      mediaType: mediaResult.mediaType,
+      filename: inbound.media?.filename || `attachment.${mediaResult.storagePath.split('.').pop()}`,
+      caption,
+      lastInboundAtMs: recipientLastInbound,
+    });
+    await outboundRef.set({
+      status: 'sent', deliveryStatus: 'accepted', metaMessageId: delivery.messageId || null,
+      sentAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    await reconcileWhatsAppDeliveryStatuses({ metaMessageId: delivery.messageId, recipientId: recipientIdentity.waId, messageRef: outboundRef });
+    await conversationRef.set({ currentMode: 'provider_relay', activeServiceRequestId: requestId, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    return { handled: true, sent: true };
+  } catch (error) {
+    const deliveryStatus = classifyMetaDeliveryError(error);
+    await outboundRef.set({
+      status: deliveryStatus, deliveryStatus,
+      errorCode: String(error?.code || 'meta_media_delivery_unknown').slice(0, 100),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    return { handled: true, code: deliveryStatus === 'outcome_unknown' ? 'delivery-unknown' : 'delivery-failed' };
+  }
+}
+
+async function syncWhatsAppCanonicalRequestDraft({ identityId, identity, draftRef, service, serviceIds, selectedPackageId, answers, location }) {
+  const previousDraftSnap = await draftRef.get();
+  const previousDraft = previousDraftSnap.exists ? previousDraftSnap.data() || {} : {};
+  const principalId = String(previousDraft.principalId || identity.linkedFirebaseUid || identity.guestPrincipalId || '').trim();
+  if (!principalId) return { code: 'identity-unavailable' };
+  const requestId = `wa_req_${createHash('sha256').update(draftRef.id).digest('hex').slice(0, 32)}`;
+  const profile = {
+    fullName: String(identity.profileName || '').trim() || 'WhatsApp customer',
+    phoneNumber: String(identity.waId || '').trim(),
+  };
+  const created = await marketplaceRequestOperations.createDraft({
+    requestId,
+    principalId,
+    profile,
+    categoryId: service.categoryId,
+    serviceIds,
+    selectedPackageId,
+    structuredAnswers: answers,
+    location,
+    intakeMode: 'whatsapp',
+    source: 'whatsapp',
+    channel: 'whatsapp',
+    identityId,
+  });
+  if (!['created', 'already-created'].includes(created.code)) return created;
+  const updated = await marketplaceRequestOperations.updateDraft({
+    requestId,
+    principalId,
+    categoryId: service.categoryId,
+    serviceIds,
+    selectedPackageId,
+    structuredAnswers: answers,
+    location,
+  });
+  if (updated.code !== 'updated') return updated;
+  await draftRef.set({ requestId, principalId, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  return { code: 'ready', requestId };
+}
+
+async function confirmWhatsAppServiceDraft({ identityId, identity, conversationRef, draftRef }) {
+  const [conversationSnap, draftSnap] = await Promise.all([conversationRef.get(), draftRef.get()]);
+  if (!conversationSnap.exists || !draftSnap.exists) return { code: 'draft-not-found' };
+  const conversation = conversationSnap.data() || {};
+  const draft = draftSnap.data() || {};
+  if (String(conversation.activeDraftId || '') !== draftRef.id || String(draft.identityId || '') !== identityId) {
+    return { code: 'draft-not-owned' };
+  }
+  if (draft.status === 'confirmed' && draft.requestId) return { code: 'already-confirmed', requestId: draft.requestId };
+  if (draft.status !== 'quoted' || Number(draft.quoteExpiresAtMs || 0) < Date.now()) return { code: 'quote-expired' };
+  const principalId = String(draft.principalId || identity.linkedFirebaseUid || identity.guestPrincipalId || '').trim();
+  const requestId = String(draft.requestId || '').trim();
+  if (!principalId || !requestId) return { code: 'identity-unavailable' };
+
+  const outcome = await marketplaceRequestOperations.confirmDraft({
+    requestId,
+    principalId,
+    approvedQuote: draft.quoteSnapshot || {},
+    quoteExpiresAtMs: Number(draft.quoteExpiresAtMs || 0),
+    source: 'whatsapp',
+  });
+  if (outcome.code === 'quote-changed') {
+    const refreshedQuote = await marketplaceRequestOperations.quoteDraft({ requestId, principalId });
+    const quote = refreshedQuote.code === 'quoted' ? refreshedQuote.quote : outcome.quote;
+    const quoteExpiresAtMs = refreshedQuote.code === 'quoted'
+      ? refreshedQuote.quoteExpiresAtMs
+      : Date.now() + (15 * 60 * 1000);
+    await draftRef.set({
+      quoteSnapshot: quote,
+      questionnaireVersion: quote?.questionnaireVersion || '',
+      serviceCatalogVersion: quote?.serviceCatalogVersion || '',
+      quoteExpiresAtMs,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    return { ...outcome, quote, quoteExpiresAtMs };
+  }
+  if (outcome.code === 'submitted' || outcome.code === 'already-submitted') {
+    await db.runTransaction(async (transaction) => {
+      const currentConversation = await transaction.get(conversationRef);
+      const currentDraft = await transaction.get(draftRef);
+      if (!currentDraft.exists || String(currentDraft.data()?.identityId || '') !== identityId) return;
+      transaction.set(draftRef, {
+        status: 'confirmed',
+        requestId,
+        confirmedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      if (currentConversation.exists) {
+        transaction.set(conversationRef, {
+          currentMode: 'active_booking',
+          activeServiceRequestId: requestId,
+          activeDraftId: null,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+      }
+    });
+    return { code: outcome.code === 'submitted' ? 'confirmed' : 'already-confirmed', requestId };
+  }
+  if (outcome.code === 'active-request') return { code: 'active-request', requestId: outcome.activeRequestId };
+  return outcome;
+}
+
+exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
+  document: 'whatsappAssistantJobs/{jobId}',
+  maxInstances: 2,
+  ...HALF_CPU_OPTIONS,
+  memory: '256MiB',
+  timeoutSeconds: 60,
+  retry: false,
+}, async (event) => {
+  const jobRef = event.data?.ref;
+  const initialJob = event.data?.data();
+  if (!jobRef || !initialJob) return;
+  if (!whatsappMessagingEnabled()) {
+    await jobRef.set({ status: 'disabled', reason: 'whatsapp_messaging_disabled', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    return;
+  }
+
+  const claim = await db.runTransaction(async (transaction) => {
+    const jobSnap = await transaction.get(jobRef);
+    if (!jobSnap.exists || jobSnap.data()?.status !== 'pending') return false;
+    transaction.update(jobRef, { status: 'processing', startedAt: admin.firestore.FieldValue.serverTimestamp() });
+    return true;
+  });
+  if (!claim) return;
+
+  try {
+    const identityId = String(initialJob.identityId || '').trim();
+    const eventId = String(initialJob.eventId || event.params.jobId || '').trim();
+    if (!identityId || !eventId) throw new Error('WhatsApp assistant job context is incomplete.');
+    const identityRef = db.collection('whatsappIdentities').doc(identityId);
+    const conversationRef = db.collection('whatsappConversations').doc(identityId);
+    const inboundRef = db.collection('whatsappMessages').doc(eventId);
+    const [identitySnap, conversationSnap, inboundSnap] = await Promise.all([
+      identityRef.get(), conversationRef.get(), inboundRef.get(),
+    ]);
+    if (!identitySnap.exists || !conversationSnap.exists || !inboundSnap.exists) throw new Error('WhatsApp conversation context is unavailable.');
+    const identity = identitySnap.data() || {};
+    let conversation = conversationSnap.data() || {};
+    let inbound = inboundSnap.data() || {};
+    if (String(conversation.lastInboundEventId || '') !== eventId) {
+      await jobRef.set({ status: 'superseded', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    const reply = async (text, interactive = null) => {
+      await persistWhatsAppAssistantReply({
+        sourceEventId: eventId,
+        identityId,
+        identity,
+        conversationRef,
+        text,
+        interactive,
+      });
+    };
+
+    if (conversation.humanHandoff === true) {
+      let mediaResult = null;
+      if (inbound.media) {
+        try {
+          mediaResult = await processWhatsAppInboundMedia({ identityId, eventId, identity, conversation, inbound });
+          if (mediaResult.code === 'stored') inbound = { ...inbound, media: { ...inbound.media, assetId: mediaResult.assetId, storagePath: mediaResult.storagePath || mediaResult.asset?.storagePath || '' } };
+        } catch (error) {
+          logger.warn('whatsapp_support_media_processing_failed', { eventId, errorCode: String(error?.code || 'media_processing_failed').slice(0, 80) });
+        }
+      }
+      await createOrAppendWhatsAppSupportMessage({
+        db, admin, identityId, conversationRef, eventId,
+        principalId: identity.linkedFirebaseUid || identity.guestPrincipalId || '',
+        linkedUid: identity.linkedFirebaseUid || '',
+        role: identity.role || (identity.guestPrincipalId ? 'customer' : 'unknown'),
+        requestId: conversation.activeServiceRequestId || '',
+        inbound,
+      }).catch((error) => logger.warn('whatsapp_support_message_append_failed', { eventId, errorCode: String(error?.code || 'ticket_write_failed').slice(0, 80) }));
+      const mediaNote = inbound.media && mediaResult?.code !== 'stored' ? ' I could not securely attach that media yet; please describe the issue in text.' : '';
+      await reply(`Your message is with the Uncedo support team. AI responses are paused while a person is handling this conversation.${mediaNote}`);
+      await jobRef.set({ status: 'completed', intent: 'human_escalation', reason: 'human_handoff_active', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    const buttonId = String(inbound.interactive?.buttonId || '').trim();
+    const cashActionMatch = buttonId.match(/^wa_cash_(confirm|reject)_(wa_[a-f0-9]{64})$/i);
+    if (cashActionMatch) {
+      const [, action, actionId] = cashActionMatch;
+      const actionRef = db.collection('whatsappPaymentActions').doc(actionId);
+      const actionSnap = await actionRef.get();
+      const paymentAction = actionSnap.exists ? actionSnap.data() || {} : null;
+      const helperId = String(identity.linkedFirebaseUid || '');
+      if (String(identity.role || '').toLowerCase() !== 'helper' || !paymentAction || paymentAction.helperId !== helperId
+        || Number(paymentAction.expiresAtMs || 0) <= Date.now() || paymentAction.action !== action) {
+        await reply('That payment confirmation is unavailable or expired. Open the helper app to review pending cash confirmations.');
+      } else {
+        const result = await handleCashPaymentConfirmation({ requestId: paymentAction.requestId, attemptId: paymentAction.attemptId, helperId, action });
+        await actionRef.set({ status: result.action === 'settled' || result.action === 'rejected' ? 'completed' : 'stale', respondedAtMs: Date.now(), responseEventId: eventId }, { merge: true });
+        await reply(result.action === 'settled'
+          ? 'Cash payment confirmed. The request is marked paid.'
+          : result.action === 'rejected'
+            ? 'You reported that payment was not received. The request remains unpaid.'
+            : 'This confirmation is no longer current. Check the helper app for the latest payment status.');
+      }
+      await jobRef.set({ status: 'completed', intent: 'cash_payment_confirmation', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    const cashPaidButton = buttonId.match(/^wa_cash_paid_([a-f0-9]{40})$/i);
+    if (cashPaidButton) {
+      const pending = conversation.pendingCashPayment || {};
+      const attemptId = cashPaidButton[1];
+      if (pending.identityId !== identityId || pending.attemptId !== attemptId || Number(pending.expiresAtMs || 0) <= Date.now()) {
+        await reply('That cash payment prompt expired. Send “payment methods” to review the current request again.');
+      } else {
+        const result = await reportCashPayment({ db, admin, requestId: pending.requestId, customerId: String(identity.linkedFirebaseUid || identity.guestPrincipalId || ''), attemptId });
+        if (result.action === 'reported' || result.action === 'already-reported') {
+          const helperId = String(result.request?.helperAssignment?.helperId || '');
+          await notifyCashPaymentToHelper({ requestId: pending.requestId, attemptId, helperId, amount: pending.amount });
+          await reply('Thanks. I’ve asked your assigned helper to confirm the amount received. The request remains unpaid until the helper confirms.');
+        } else {
+          await reply('I could not submit that payment report. Check the payment status or contact support.');
+        }
+      }
+      await jobRef.set({ status: 'completed', intent: 'cash_payment_report', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (['wa_payment_cash', 'wa_payment_card', 'wa_payment_saved'].includes(buttonId)) {
+      const pending = conversation.pendingPaymentSelection || {};
+      if (pending.identityId !== identityId || Number(pending.expiresAtMs || 0) <= Date.now()) {
+        await reply('That payment selection expired. Send “payment methods” again to review the current request.');
+        await jobRef.set({ status: 'completed', intent: 'payment_selection_expired', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      const context = await getWhatsAppPaymentContext({ identityId, identity, requestId: pending.requestId });
+      if (context.code !== 'available') {
+        await reply(context.code === 'already-paid' ? 'This request is already paid.' : 'This request is no longer payable. Ask “payment status” or contact support.');
+        await jobRef.set({ status: 'completed', intent: 'payment_selection', reason: context.code, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      if (buttonId === 'wa_payment_cash') {
+        const session = await createWhatsAppPaymentSession(context);
+        const resolved = session.code === 'created' ? await resolveServicePaymentSession({ db, token: session.token }) : null;
+        const begun = resolved?.code === 'available' ? await beginServicePaymentAttempt({ db, admin, sessionRef: resolved.sessionRef, session: resolved.session, method: 'cash', idempotencyKey: `wa-cash-select:${eventId}` }) : { action: session.code };
+        if (!['created', 'existing'].includes(begun.action)) {
+          await reply('Another payment is already being handled or this request is no longer payable. Send “payment status” for the current state.');
+        } else {
+          await conversationRef.set({
+            pendingPaymentSelection: admin.firestore.FieldValue.delete(),
+            pendingCashPayment: { identityId, requestId: pending.requestId, attemptId: begun.attempt.attemptId, amount: Number(begun.attempt.amount), expiresAtMs: Date.now() + 20 * 60 * 1000 },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+          await reply(`Pay R${Number(begun.attempt.amount).toFixed(2)} directly to your assigned helper by cash, EFT or bank transfer. When you have paid, tap “I have paid”. The payment is not confirmed until your helper verifies receipt.`, {
+            type: 'button', body: { text: 'Tell Uncedo after you pay the assigned helper directly.' }, action: { buttons: [
+              { type: 'reply', reply: { id: `wa_cash_paid_${begun.attempt.attemptId}`, title: 'I have paid' } },
+              { type: 'reply', reply: { id: 'wa_payment_cancel', title: 'Cancel' } },
+            ] },
+          });
+        }
+      } else if (buttonId === 'wa_payment_card') {
+        const session = await createWhatsAppPaymentSession(context);
+        if (session.code === 'created') {
+          const paymentUrl = `${String(process.env.CUSTOMER_PAYMENT_URL || 'https://uncedo.bakayise.com/payment').replace(/\/$/, '')}?token=${encodeURIComponent(session.token)}`;
+          await conversationRef.set({ pendingPaymentSelection: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          await reply(`Pay R${Number(context.amount).toFixed(2)} securely by card using this request-specific Uncedo payment link: ${paymentUrl}\nThe link expires in 20 minutes.`);
+        } else await reply('I could not create a payment link for this request. Please try again or contact support.');
+      } else if (context.cards.length) {
+        await conversationRef.set({ pendingPaymentSelection: { ...pending, selectingSavedCard: true }, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        await reply('Choose a saved card. I will show the amount and ask you to confirm before any charge is attempted.', {
+          type: 'list', body: { text: `Request ${pending.requestId} · R${Number(context.amount).toFixed(2)} ZAR` }, action: { button: 'Choose card', sections: [{ title: 'Saved cards', rows: context.cards.slice(0, 10).map((card) => ({ id: `wa_saved_card_${card.id}`, title: `${card.brand} •••• ${card.last4}`.slice(0, 24), description: card.isDefault ? 'Default payment card' : 'Saved payment card' })) }] },
+        });
+      } else {
+        await reply('There are no eligible saved cards linked to this WhatsApp identity. Choose Cash or New card instead.');
+      }
+      await jobRef.set({ status: 'completed', intent: 'payment_selection', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    const savedCardChoice = String(inbound.interactive?.listId || '').match(/^wa_saved_card_([A-Za-z0-9_-]{1,128})$/);
+    if (savedCardChoice) {
+      const pending = conversation.pendingPaymentSelection || {};
+      if (pending.identityId !== identityId || !pending.selectingSavedCard || Number(pending.expiresAtMs || 0) <= Date.now()) {
+        await reply('That saved-card selection expired. Send “payment methods” to start again.');
+        await jobRef.set({ status: 'completed', intent: 'saved_card_selection_expired', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      const context = await getWhatsAppPaymentContext({ identityId, identity, requestId: pending.requestId });
+      const card = context.cards?.find((item) => item.id === savedCardChoice[1]);
+      if (!card || !context.ownerUid || context.ownerUid !== String(identity.linkedFirebaseUid || '')) {
+        await reply('A saved card is available only after this WhatsApp identity is linked to the customer account that owns it.');
+        await jobRef.set({ status: 'completed', intent: 'saved_card_unavailable', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      const session = await createWhatsAppPaymentSession(context);
+      const resolved = session.code === 'created' ? await resolveServicePaymentSession({ db, token: session.token }) : null;
+      const begun = resolved?.code === 'available' ? await beginServicePaymentAttempt({ db, admin, sessionRef: resolved.sessionRef, session: resolved.session, method: 'saved_card', selectedCardId: card.id, idempotencyKey: `wa-saved-card:${eventId}` }) : { action: session.code };
+      if (!['created', 'existing'].includes(begun.action)) {
+        await reply('Another payment is active or this request is no longer payable. No saved-card charge was made.');
+      } else {
+        await conversationRef.set({
+          pendingPaymentSelection: admin.firestore.FieldValue.delete(),
+          pendingSavedCardPayment: { identityId, requestId: pending.requestId, attemptId: begun.attempt.attemptId, expiresAtMs: Date.now() + 10 * 60 * 1000 },
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        await reply(`Please review before paying: request ${pending.requestId}, R${Number(begun.attempt.amount).toFixed(2)} ZAR, ${card.brand} ending ${card.last4}. This will charge the saved card only after you confirm.`, {
+          type: 'button', body: { text: 'Confirm this saved-card charge?' }, action: { buttons: [
+            { type: 'reply', reply: { id: `wa_saved_confirm_${begun.attempt.attemptId}`, title: 'Confirm payment' } },
+            { type: 'reply', reply: { id: 'wa_saved_cancel', title: 'Cancel' } },
+          ] },
+        });
+      }
+      await jobRef.set({ status: 'completed', intent: 'saved_card_confirmation', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    const savedCardConfirm = buttonId.match(/^wa_saved_confirm_([a-f0-9]{40})$/i);
+    if (savedCardConfirm || buttonId === 'wa_saved_cancel' || buttonId === 'wa_payment_cancel') {
+      const pending = conversation.pendingSavedCardPayment || conversation.pendingCashPayment || {};
+      if (buttonId !== 'wa_saved_cancel' && buttonId !== 'wa_payment_cancel'
+        && (pending.identityId !== identityId || pending.attemptId !== savedCardConfirm?.[1] || Number(pending.expiresAtMs || 0) <= Date.now())) {
+        await reply('That payment confirmation expired. No card was charged. Send “payment methods” to review the current balance.');
+      } else if (buttonId === 'wa_saved_cancel') {
+        await conversationRef.set({ pendingSavedCardPayment: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        await reply('No saved-card charge was made.');
+      } else if (buttonId === 'wa_payment_cancel') {
+        await conversationRef.set({ pendingCashPayment: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        await reply('No payment was reported.');
+      } else {
+        const context = await getWhatsAppPaymentContext({ identityId, identity, requestId: pending.requestId });
+        const selectedAttemptSnap = await db.collection(PAYMENT_OPERATIONS).doc(pending.requestId).collection('attempts').doc(pending.attemptId).get();
+        const selectedCardId = String(selectedAttemptSnap.data()?.selectedCardId || '');
+        const card = context.ownerUid
+          ? await getServerPaymentMethod({ db, admin, uid: context.ownerUid, methodId: selectedCardId })
+          : null;
+        if (!card || context.ownerUid !== String(identity.linkedFirebaseUid || '') || !['available'].includes(context.code)) {
+          await reply('I could not verify the linked saved card or current request. No charge was made.');
+        } else {
+          let paystackSecretKey = '';
+          try { paystackSecretKey = getPaymentsSecrets().PAYSTACK_SECRET_KEY; } catch { await reply('Saved-card payments are temporarily unavailable. No charge was initiated.'); }
+          if (paystackSecretKey) {
+            const reference = getRequestPaymentReference(pending.requestId, pending.attemptId);
+            const claim = await claimSavedCardPayment({ db, admin, requestId: pending.requestId, attemptId: pending.attemptId, gatewayReference: reference });
+            if (['charge', 'reconcile'].includes(claim.action)) {
+              const outcome = await executeServiceChargeAttempt({
+                operation: { ...claim.attempt, requestId: pending.requestId, operationId: `payment_${pending.requestId}`, gatewayReference: reference },
+                action: claim.action,
+                email: String((await db.collection('users').doc(context.ownerUid).get()).data()?.email || ''),
+                authorizationCode: card.paystackAuthorizationCode,
+                paystack: { chargeAuthorization: (input) => chargeAuthorizationWithPaystack({ paystackSecretKey, ...input }), verifyTransaction: (input) => verifyPaystackTransaction({ paystackSecretKey, ...input }) },
+              });
+              const result = await settleRequestPayment({ db, admin, requestId: pending.requestId, attemptId: pending.attemptId, outcome: outcome.outcome, gatewayTransactionId: outcome.transaction?.id ? String(outcome.transaction.id) : '', gatewayReference: reference, providerStatus: outcome.transaction?.status || outcome.outcome });
+              if (['settled', 'already-paid'].includes(result.action)) await issuePaidRequestPostEffects({ requestId: pending.requestId, paymentResult: result });
+              await reply(result.action === 'settled' || result.action === 'already-paid'
+                ? `Payment confirmed. Receipt ${result.receiptId || 'recorded'}.`
+                : result.action === 'failed' ? 'Paystack confirmed that the saved-card payment failed. You can try a different method.' : 'Paystack has not confirmed the result yet. I will not retry the charge while it is uncertain.');
+            } else await reply(claim.action === 'already-paid' ? 'This request has already been paid.' : 'This payment confirmation is no longer active. No new charge was started.');
+          }
+        }
+        await conversationRef.set({ pendingSavedCardPayment: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      }
+      await jobRef.set({ status: 'completed', intent: 'saved_card_payment', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (buttonId === 'wa_cancel_abort') {
+      await conversationRef.set({ pendingCancellation: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      await reply('The request has not been canceled.');
+      await jobRef.set({ status: 'completed', intent: 'cancellation_aborted', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    const typedCancellationConfirmation = inbound.type === 'text'
+      && /^(?:confirm cancellation|confirm cancel|yes, cancel it)$/i.test(String(inbound.text || '').trim());
+    if (buttonId === 'wa_cancel_confirm' || typedCancellationConfirmation) {
+      const pending = conversation.pendingCancellation || null;
+      if (!whatsappCancellationEnabled()) {
+        await reply('WhatsApp cancellation is not enabled yet. Please use the Uncedo app or contact support.');
+        await jobRef.set({ status: 'completed', intent: 'cancellation', reason: 'whatsapp_cancellation_disabled', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      if (!pending || String(pending.identityId || '') !== identityId || Number(pending.expiresAtMs || 0) <= Date.now()) {
+        await conversationRef.set({ pendingCancellation: admin.firestore.FieldValue.delete() }, { merge: true });
+        await reply('That cancellation confirmation expired. Send “cancel my booking” to review the current request and any applicable fee.');
+        await jobRef.set({ status: 'completed', intent: 'cancellation', reason: 'confirmation_expired', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      const preview = await getWhatsAppCustomerCancellationPreview({ identityId, identity, requestId: pending.requestId });
+      if (preview.code !== 'eligible') {
+        await conversationRef.set({ pendingCancellation: admin.firestore.FieldValue.delete() }, { merge: true });
+        await reply(preview.code === 'already-cancelled'
+          ? 'This request is already canceled.'
+          : preview.code === 'already-completed'
+            ? 'This request is already completed and cannot be canceled.'
+            : 'This request cannot be canceled from its current state. I have not changed it.');
+        await jobRef.set({ status: 'completed', intent: 'cancellation', reason: preview.code, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      if (!cancellationQuoteMatches(pending, preview)) {
+        const refreshed = {
+          identityId,
+          requestId: preview.requestId,
+          status: preview.status,
+          cancellationAmount: preview.cancellationAmount,
+          billingRule: preview.billingRule,
+          expiresAtMs: Date.now() + 5 * 60 * 1000,
+        };
+        await conversationRef.set({ pendingCancellation: refreshed, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        const feeText = Number(preview.cancellationAmount || 0) > 0
+          ? `The current cancellation fee is R${Number(preview.cancellationAmount).toFixed(2)} ZAR.`
+          : 'There is no cancellation fee under the current request state.';
+        await reply(`The request state or fee changed. ${feeText} Review and confirm again if you still want to cancel.`, {
+          type: 'button', body: { text: feeText }, action: { buttons: [
+            { type: 'reply', reply: { id: 'wa_cancel_confirm', title: 'Confirm cancel' } },
+            { type: 'reply', reply: { id: 'wa_cancel_abort', title: 'Keep booking' } },
+          ] },
+        });
+        await jobRef.set({ status: 'completed', intent: 'cancellation', reason: 'terms_changed', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      const result = await cancelCustomerServiceRequestFromWhatsApp({
+        identityId,
+        identity,
+        requestId: pending.requestId,
+        expectedCancellation: { status: preview.status, cancellationAmount: preview.cancellationAmount },
+      });
+      if (result.statusCode === 200 && result.body?.success === true) {
+        await db.runTransaction(async (transaction) => {
+          const currentConversation = await transaction.get(conversationRef);
+          const current = currentConversation.data() || {};
+          const patch = { pendingCancellation: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+          if (String(current.activeServiceRequestId || '') === String(pending.requestId)) patch.activeServiceRequestId = null;
+          transaction.set(conversationRef, patch, { merge: true });
+        });
+        const fee = Number(result.body.cancellation?.cancellationAmount ?? preview.cancellationAmount ?? 0);
+        const reconciliation = result.body.charge?.pendingReconciliation === true;
+        const chargeConfirmed = result.body.charge?.ok === true;
+        await reply(fee <= 0
+          ? 'Your request was canceled. No cancellation fee was recorded.'
+          : reconciliation
+            ? `Your request was canceled. The applicable fee is R${fee.toFixed(2)} ZAR. Its payment result is still being verified; Uncedo will not start another charge while it is unresolved.`
+            : chargeConfirmed
+              ? `Your request was canceled. The cancellation fee of R${fee.toFixed(2)} ZAR was confirmed as paid.`
+              : `Your request was canceled. The applicable fee is R${fee.toFixed(2)} ZAR, but payment was not confirmed. Please check payment status in the Uncedo app or contact support.`);
+      } else if (result.statusCode === 409 && result.body?.code === 'cancellation-terms-changed') {
+        const currentPreview = result.body.cancellationPreview || preview;
+        const refreshed = {
+          identityId, requestId: pending.requestId, status: currentPreview.status,
+          cancellationAmount: currentPreview.cancellationAmount, billingRule: currentPreview.billingRule,
+          expiresAtMs: Date.now() + 5 * 60 * 1000,
+        };
+        await conversationRef.set({ pendingCancellation: refreshed }, { merge: true });
+        await reply(`The cancellation fee changed to R${Number(currentPreview.cancellationAmount || 0).toFixed(2)} ZAR. Please confirm again if you want to continue.`, {
+          type: 'button', body: { text: `Updated cancellation fee: R${Number(currentPreview.cancellationAmount || 0).toFixed(2)} ZAR.` }, action: { buttons: [
+            { type: 'reply', reply: { id: 'wa_cancel_confirm', title: 'Confirm cancel' } },
+            { type: 'reply', reply: { id: 'wa_cancel_abort', title: 'Keep booking' } },
+          ] },
+        });
+      } else {
+        await reply('I could not complete the cancellation. The request was not confirmed as canceled. Please check the Uncedo app or contact support before trying again.');
+      }
+      await jobRef.set({ status: 'completed', intent: 'cancellation', resultCode: result.body?.code || null, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    const explicitSupportRequest = inbound.type === 'text'
+      && /^(?:support|human support|human agent|talk to support|speak to a person|contact support)$/i.test(String(inbound.text || '').trim());
+    if (explicitSupportRequest) {
+      if (!whatsappSupportEnabled()) {
+        await reply('WhatsApp human support is not available yet. Please use the Uncedo app to contact support.');
+      } else {
+        const ticket = await createOrAppendWhatsAppSupportMessage({
+          db, admin, identityId, conversationRef, eventId,
+          principalId: identity.linkedFirebaseUid || identity.guestPrincipalId || '',
+          linkedUid: identity.linkedFirebaseUid || '',
+          role: identity.role || (identity.guestPrincipalId ? 'customer' : 'unknown'),
+          requestId: conversation.activeServiceRequestId || '',
+          inbound,
+        });
+        if (inbound.media?.assetId) await associateWhatsAppMediaWithSupportTicket({ assetId: inbound.media.assetId, identityId, ticketId: ticket.ticketId });
+        await reply(`I’ve sent this conversation to Uncedo support. Your ticket reference is ${ticket.ticketId}. AI replies are paused until the support team closes the handoff.`);
+      }
+      await jobRef.set({ status: 'completed', intent: 'human_escalation', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    const offerActionMatch = buttonId.match(/^wa_offer_(accept|decline)_(wa_[a-f0-9]{64})$/i);
+    if (offerActionMatch) {
+      const [, action, actionId] = offerActionMatch;
+      if (String(identity.role || '').toLowerCase() !== 'helper' || !identity.linkedFirebaseUid) {
+        await reply('Please link and verify your Uncedo helper account before responding to offers on WhatsApp.');
+        await jobRef.set({ status: 'completed', intent: 'helper_offer', errorCode: 'helper_identity_unlinked', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      const actionRef = db.collection('whatsappOfferActions').doc(actionId);
+      const actionSnap = await actionRef.get();
+      const offerAction = actionSnap.exists ? actionSnap.data() || {} : null;
+      if (!offerAction || offerAction.helperId !== identity.linkedFirebaseUid) {
+        await reply('That helper offer action is invalid or belongs to another helper.');
+        await jobRef.set({ status: 'completed', intent: 'helper_offer', errorCode: 'offer_action_not_authorized', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      const outcome = await serviceRequestOfferOperations.respond({
+        requestId: offerAction.requestId,
+        helperId: identity.linkedFirebaseUid,
+        offerToken: offerAction.offerToken,
+        offerRevision: offerAction.offerRevision,
+        action,
+      });
+      if (outcome.didApply) {
+        await recordHelperOfferLifecycleEvent({
+          helperId: identity.linkedFirebaseUid,
+          requestId: offerAction.requestId,
+          offerRevision: offerAction.offerRevision,
+          categoryId: outcome.categoryId,
+          serviceIds: outcome.serviceIds,
+          outcome: action === 'accept' ? 'accepted' : 'declined',
+          offeredAtMs: outcome.offerStartedAtMs,
+          closedAtMs: Date.now(),
+          responseMinutes: Math.max(0, Number(((Date.now() - outcome.offerStartedAtMs) / 60000).toFixed(2))),
+          sourceStatus: action === 'accept' ? 'accepted' : 'matching',
+        }).catch((error) => logger.warn('whatsapp_helper_offer_stats_failed', { requestId: offerAction.requestId, error: error.message }));
+      }
+      const replyText = outcome.error
+        ? outcome.error === 'offer-expired'
+          ? 'This helper offer has expired. Uncedo will continue matching the request.'
+          : outcome.error === 'helper-already-has-active-request'
+            ? 'You already have an active service request, so this offer was not accepted.'
+            : 'This helper offer is no longer available.'
+        : action === 'accept'
+          ? 'You accepted the service offer. The request is now assigned to you.'
+          : 'You declined the service offer. Uncedo will look for the next eligible helper.';
+      await reply(replyText);
+      if (!outcome.error && action === 'accept') {
+        await conversationRef.set({
+          currentMode: 'provider_relay',
+          currentIntent: 'provider_relay',
+          activeServiceRequestId: offerAction.requestId,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+      }
+      await actionRef.set({
+        lastResponseEventId: eventId,
+        lastResponseAction: action,
+        lastResponseAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastResponseError: outcome.error || null,
+      }, { merge: true });
+      await jobRef.set({ status: 'completed', intent: 'helper_offer', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    const commandText = inbound.type === 'text' ? String(inbound.text || '').trim() : '';
+    const helperCashResponse = commandText.match(/^(?:confirm cash|cash received|reject cash|cash not received)(?: payment)?\s+(?:request\s+)?([A-Za-z0-9_-]{6,128})$/i);
+    if (helperCashResponse) {
+      const helperId = String(identity.linkedFirebaseUid || '');
+      const action = /^(?:reject cash|cash not received)/i.test(commandText) ? 'reject' : 'confirm';
+      const requestId = helperCashResponse[1];
+      const requestSnap = String(identity.role || '').toLowerCase() === 'helper' && helperId
+        ? await db.collection('serviceRequests').doc(requestId).get().catch(() => null)
+        : null;
+      if (!requestSnap?.exists || String(requestSnap.data()?.helperAssignment?.helperId || '') !== helperId) {
+        await reply('I could not verify that you are the assigned helper for this request.');
+      } else {
+        const paymentSnap = await db.collection(PAYMENT_OPERATIONS).doc(requestId).get();
+        const payment = paymentSnap.data() || {};
+        if (payment.status !== 'awaiting_cash_confirmation' || !payment.activeAttemptId) {
+          await reply('There is no pending cash confirmation for that request.');
+        } else {
+          const result = await handleCashPaymentConfirmation({ requestId, attemptId: String(payment.activeAttemptId), helperId, action });
+          await reply(result.action === 'settled'
+            ? 'Cash payment confirmed. The request is now marked paid.'
+            : result.action === 'rejected'
+              ? 'Payment not confirmed. The request remains unpaid.'
+              : 'That cash payment confirmation is no longer active.');
+        }
+      }
+      await jobRef.set({ status: 'completed', intent: 'cash_payment_confirmation', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (/^(?:i have paid|i paid|paid the helper|cash paid)$/i.test(commandText)) {
+      const pending = conversation.pendingCashPayment || {};
+      if (pending.identityId !== identityId || Number(pending.expiresAtMs || 0) <= Date.now()) {
+        await reply('I do not have an active cash payment report for this conversation. Send “payment methods” to start again.');
+      } else {
+        const result = await reportCashPayment({ db, admin, requestId: pending.requestId, customerId: String(identity.linkedFirebaseUid || identity.guestPrincipalId || ''), attemptId: pending.attemptId });
+        if (result.action === 'reported' || result.action === 'already-reported') {
+          const helperId = String(result.request?.helperAssignment?.helperId || '');
+          await notifyCashPaymentToHelper({ requestId: pending.requestId, attemptId: pending.attemptId, helperId, amount: pending.amount });
+          await reply('I’ve asked your assigned helper to confirm the amount received. The request remains unpaid until the helper confirms.');
+        } else await reply('I could not submit that payment report. Check payment status or contact support.');
+      }
+      await jobRef.set({ status: 'completed', intent: 'cash_payment_report', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    const command = parseWhatsAppCommand(commandText);
+    if (command?.type === 'booking_history') {
+      const requests = await listWhatsAppRequests({ db, identity, perPrincipalLimit: 25, resultLimit: 5 });
+      await reply(formatWhatsAppRequestHistory(requests));
+      await jobRef.set({ status: 'completed', intent: 'booking_history', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (command?.type === 'booking_status' || command?.type === 'booking_details') {
+      const requestId = String(command.requestId || conversation.activeServiceRequestId || '').trim();
+      const result = requestId ? await getWhatsAppRequestForIdentity({ db, identity, requestId }) : { code: 'not-found' };
+      if (result.code === 'forbidden') {
+        await reply('I could not verify access to that service request. Please sign in to the Uncedo app or contact support.');
+      } else if (result.code !== 'found') {
+        await reply('I could not find a request linked to this WhatsApp conversation. Ask “booking history” to see your recent requests, or use the Uncedo app.');
+      } else {
+        await reply(formatWhatsAppRequestSummary(buildWhatsAppRequestSummary(result.request)));
+      }
+      await jobRef.set({ status: 'completed', intent: command.type, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (command?.type === 'payment_status') {
+      let requestId = String(command.requestId || conversation.activeServiceRequestId || '').trim();
+      if (!requestId && !command.requestId) {
+        const history = await listWhatsAppRequests({ db, identity, perPrincipalLimit: 25, resultLimit: 5 });
+        const finalized = history.filter((request) => ['completed', 'canceled', 'cancelled'].includes(String(request.status || '').toLowerCase()));
+        if (finalized.length === 1) requestId = String(finalized[0].id || '');
+      }
+      const result = requestId ? await getWhatsAppRequestForIdentity({ db, identity, requestId }) : { code: 'not-found' };
+      if (result.code === 'forbidden') {
+        await reply('I could not verify access to that payment record. Please sign in to the Uncedo app or contact support.');
+      } else if (result.code !== 'found') {
+        await reply('I could not identify one of your completed requests. Ask “booking history”, then send “payment status request <reference>”.');
+      } else {
+        const request = result.request;
+        const [operationSnap, paymentSnap] = await Promise.all([
+          db.collection(FINANCIAL_OPERATIONS_COLLECTION).doc(serviceFinancialOperationId(request.id)).get(),
+          db.collection(PAYMENT_OPERATIONS).doc(request.id).get(),
+        ]);
+        const operation = paymentSnap.exists ? paymentSnap.data() || {} : operationSnap.exists ? operationSnap.data() || {} : null;
+        const summary = buildWhatsAppPaymentSummary({ request, operation });
+        await reply(formatWhatsAppPaymentSummary(summary));
+      }
+      await jobRef.set({ status: 'completed', intent: 'payment_status', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (command?.type === 'cancellation_request') {
+      if (!whatsappCancellationEnabled()) {
+        await reply('WhatsApp cancellation is not enabled yet. Please use the Uncedo app, or reply “support” for help.');
+        await jobRef.set({ status: 'completed', intent: 'cancellation', reason: 'whatsapp_cancellation_disabled', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      const role = String(identity.role || (identity.guestPrincipalId ? 'customer' : '')).toLowerCase();
+      if (role !== 'customer') {
+        await reply('Only the customer who created a request can cancel it through WhatsApp.');
+        await jobRef.set({ status: 'completed', intent: 'cancellation', reason: 'customer_role_required', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      let targetRequestId = String(command.requestId || conversation.activeServiceRequestId || '').trim();
+      if (!targetRequestId && !command.requestId) {
+        const recent = await listWhatsAppRequests({ db, identity, perPrincipalLimit: 25, resultLimit: 10 });
+        const eligible = recent.filter((item) => [...PRE_ASSIGNMENT_SERVICE_REQUEST_STATUSES, ...POST_ASSIGNMENT_SERVICE_REQUEST_STATUSES]
+          .includes(String(item.status || '').toLowerCase()));
+        if (eligible.length === 1) targetRequestId = String(eligible[0].id || '');
+        else if (eligible.length > 1) {
+          await reply('You have more than one request that may be canceled. Send “cancel request <reference>” using the reference from “booking history”.');
+          await jobRef.set({ status: 'completed', intent: 'cancellation', reason: 'request_selection_required', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          return;
+        }
+      }
+      const preview = targetRequestId
+        ? await getWhatsAppCustomerCancellationPreview({ identityId, identity, requestId: targetRequestId })
+        : { code: 'not-found' };
+      if (preview.code !== 'eligible') {
+        await reply(preview.code === 'forbidden'
+          ? 'I could not verify that you own this request.'
+          : preview.code === 'already-cancelled'
+            ? 'This request is already canceled.'
+            : preview.code === 'already-completed'
+              ? 'This request is already completed and cannot be canceled.'
+              : preview.code === 'not-cancellable'
+                ? 'This request cannot be canceled from its current state.'
+                : 'I could not identify a request to cancel. Ask “booking history” or include the request reference.');
+        await jobRef.set({ status: 'completed', intent: 'cancellation', reason: preview.code, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      const pendingCancellation = {
+        identityId,
+        requestId: preview.requestId,
+        status: preview.status,
+        cancellationAmount: preview.cancellationAmount,
+        billingRule: preview.billingRule,
+        expiresAtMs: Date.now() + 5 * 60 * 1000,
+      };
+      await conversationRef.set({ pendingCancellation, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      const feeText = Number(preview.cancellationAmount || 0) > 0
+        ? `The current cancellation fee is R${Number(preview.cancellationAmount).toFixed(2)} ZAR.`
+        : 'There is no cancellation fee under the current request state.';
+      await reply(`${feeText} Cancel request ${preview.requestId}? Nothing will change until you confirm.`, {
+        type: 'button', body: { text: `${feeText} Confirm only if you want to cancel this service request.` }, action: { buttons: [
+          { type: 'reply', reply: { id: 'wa_cancel_confirm', title: 'Confirm cancel' } },
+          { type: 'reply', reply: { id: 'wa_cancel_abort', title: 'Keep booking' } },
+        ] },
+      });
+      await jobRef.set({ status: 'completed', intent: 'cancellation', requestId: preview.requestId, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    if (command?.type === 'payment_initiation') {
+      if (!whatsappPaymentsEnabled()) {
+        await reply('WhatsApp payment options are not enabled yet. You can still ask “payment status” to check a recorded result.');
+        await jobRef.set({ status: 'completed', intent: 'payment_help', reason: 'whatsapp_payments_disabled', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      const role = String(identity.role || (identity.guestPrincipalId ? 'customer' : '')).toLowerCase();
+      if (role !== 'customer') {
+        await reply('Only the customer who owns a request can choose its payment method.');
+        await jobRef.set({ status: 'completed', intent: 'payment_help', reason: 'customer_role_required', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      let candidates = [];
+      const directRequestId = String(conversation.activeServiceRequestId || '').trim();
+      if (directRequestId) {
+        const context = await getWhatsAppPaymentContext({ identityId, identity, requestId: directRequestId });
+        if (context.code === 'available') candidates = [context];
+      }
+      if (!candidates.length) {
+        const history = await listWhatsAppRequests({ db, identity, perPrincipalLimit: 25, resultLimit: 8 });
+        for (const item of history) {
+          if (String(item.status || '').toLowerCase() !== 'completed') continue;
+          const context = await getWhatsAppPaymentContext({ identityId, identity, requestId: item.id });
+          if (context.code === 'available') candidates.push(context);
+        }
+      }
+      if (candidates.length !== 1) {
+        await reply(candidates.length > 1
+          ? 'You have more than one unpaid completed request. Send “payment status request <reference>” and use the reference from your booking history, or open the request-specific payment link in the Uncedo app.'
+          : 'I could not find an unpaid completed request linked to this WhatsApp identity. Send “booking history” or “payment status” for help.');
+        await jobRef.set({ status: 'completed', intent: 'payment_help', reason: candidates.length > 1 ? 'request_selection_required' : 'no_payable_request', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      const context = candidates[0];
+      const pendingPaymentSelection = { identityId, requestId: context.request.id, amount: context.amount, expiresAtMs: Date.now() + 10 * 60 * 1000 };
+      await conversationRef.set({ pendingPaymentSelection, currentMode: 'payment', currentIntent: 'payment_method_selection', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      const methodButtons = [
+        { type: 'reply', reply: { id: 'wa_payment_cash', title: 'Cash / transfer' } },
+        { type: 'reply', reply: { id: 'wa_payment_card', title: 'New card' } },
+        ...(context.cards.length ? [{ type: 'reply', reply: { id: 'wa_payment_saved', title: 'Saved card' } }] : []),
+      ];
+      await reply(`Choose how to pay for request ${context.request.publicRequestReference || context.request.id}. Amount due: R${Number(context.amount).toFixed(2)} ZAR.`, {
+        type: 'button', body: { text: 'Choose a payment method. Saved-card payment always requires a separate confirmation.' }, action: { buttons: methodButtons },
+      });
+      await jobRef.set({ status: 'completed', intent: 'payment_method_selection', requestId: context.request.id, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    const relayCommand = inbound.type === 'text'
+      && /^(?:\/assistant|assistant|help|talk to uncedo|ask uncedo|return to assistant)$/i.test(commandText);
+    const helperChatCommand = /^(?:message helper|talk to helper|return to helper)$/i.test(commandText);
+    if (helperChatCommand && conversation.activeServiceRequestId) {
+      if (!whatsappRelayEnabled()) {
+        await reply('WhatsApp message relay is not enabled yet. Please use the Uncedo app chat for this request.');
+      } else {
+        await conversationRef.set({ currentMode: 'provider_relay', currentIntent: 'provider_relay', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        await reply('You can message your assigned helper here. Ordinary messages will be relayed without AI.');
+      }
+      await jobRef.set({ status: 'completed', intent: 'provider_relay', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (relayCommand && conversation.activeServiceRequestId) {
+      await conversationRef.set({ currentMode: 'assistant', currentIntent: null, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      conversation = { ...conversation, currentMode: 'assistant' };
+    } else if (['active_booking', 'provider_relay'].includes(String(conversation.currentMode || '').toLowerCase())
+      && whatsappRelayEnabled()) {
+      const relayResult = String(inbound?.type || '').toLowerCase() === 'text'
+        ? await relayWhatsAppText({ eventId, identityId, identity, conversation, inbound, conversationRef })
+        : await relayWhatsAppAttachment({ eventId, identityId, identity, conversation, inbound, conversationRef });
+      if (relayResult.handled) {
+        if (relayResult.code === 'recipient-window-closed') {
+          await reply('I could not deliver that message because the other participant’s WhatsApp service window is closed. They need to message Uncedo first, or you can use the app chat.');
+        } else if (relayResult.code === 'recipient-not-linked' || relayResult.code === 'recipient-not-found') {
+          await reply('The other participant is not currently reachable on WhatsApp. Please use the Uncedo app chat for this request.');
+        } else if (relayResult.code === 'delivery-unknown') {
+          await reply('I could not confirm delivery of that message, so I will not send it again automatically. Please check the Uncedo app chat or try again after confirming whether it arrived.');
+        } else if (relayResult.code === 'delivery-failed') {
+          await reply('WhatsApp rejected that message, and I have not resent it. Please use the Uncedo app chat or try again later.');
+        } else if (relayResult.code === 'text-empty') {
+          await reply('WhatsApp relay currently supports text messages. Please use the Uncedo app for attachments.');
+        } else if (relayResult.code === 'media-not-supported') {
+          await reply('WhatsApp relay attachments are not available yet. Please use the Uncedo app chat to share images, voice notes or documents.');
+        } else if (relayResult.code === 'media-relay-disabled') {
+          await reply('WhatsApp attachment relay is not enabled yet. Please use the Uncedo app chat for media.');
+        } else if (relayResult.code === 'retention-not-configured') {
+          await reply('Secure media retention is not configured yet, so I did not download or forward the attachment. Please use the Uncedo app chat.');
+        } else if (relayResult.code === 'request-not-authorized') {
+          await reply('I could not verify that this WhatsApp identity is a participant in the active service request.');
+        } else if (relayResult.code === 'relay-closed') {
+          await reply('This request is no longer open for WhatsApp message relay. Please use the Uncedo app or contact support.');
+        } else if (relayResult.code === 'media-processing-failed') {
+          await reply('I could not safely process that attachment. It was not forwarded. Please use the Uncedo app chat or describe the issue in text.');
+        }
+        await jobRef.set({ status: 'completed', intent: 'provider_relay', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+    } else if (['active_booking', 'provider_relay'].includes(String(conversation.currentMode || '').toLowerCase())) {
+      await reply('WhatsApp messaging relay is not enabled yet. Please use the Uncedo app chat for this request.');
+      await jobRef.set({ status: 'completed', intent: 'provider_relay', reason: 'whatsapp_relay_disabled', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    if (!whatsappAiEnabled()) {
+      if (relayCommand) await reply('The WhatsApp assistant is not enabled yet. You can still use the Uncedo app, or send “status” to check this request.');
+      await jobRef.set({ status: 'disabled', reason: 'whatsapp_ai_disabled', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    const conversationDraftId = String(conversation.activeDraftId || '').trim();
+    const activeDraftRef = conversationDraftId ? db.collection('serviceRequestDrafts').doc(conversationDraftId) : null;
+    const draftSnap = activeDraftRef ? await activeDraftRef.get() : null;
+    const activeDraft = draftSnap?.exists ? draftSnap.data() || {} : null;
+
+    if (buttonId === 'wa_ai_consent_yes') {
+      await conversationRef.set({ aiConsentAtMs: Date.now(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      await reply('Thanks. You can now ask about Uncedo services or start a service enquiry.');
+      await jobRef.set({ status: 'completed', intent: 'ai_consent', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (buttonId === 'wa_ai_consent_no') {
+      await conversationRef.set({ aiConsentAtMs: 0, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      await reply('Understood. I will not use AI for this conversation. You can continue using the Uncedo app.');
+      await jobRef.set({ status: 'completed', intent: 'ai_consent_declined', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (buttonId === 'wa_draft_edit') {
+      if (!activeDraft || !activeDraftRef) {
+        await reply('There is no active quotation to edit. Tell me which service you need.');
+      } else {
+        await activeDraftRef.set({ status: 'collecting', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        await reply('Tell me what you would like to change, and I will update the service details.');
+      }
+      await jobRef.set({ status: 'completed', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (buttonId === 'wa_draft_confirm' || (activeDraft?.status === 'quoted' && /^(yes|confirm|confirm booking|book it)$/i.test(String(inbound.text || '').trim()))) {
+      if (!activeDraft || !activeDraftRef) {
+        await reply('I could not find the current quotation. Please tell me which service you want to book.');
+      } else {
+        const confirmation = await confirmWhatsAppServiceDraft({ identityId, identity, conversationRef, draftRef: activeDraftRef });
+        if (confirmation.code === 'confirmed' || confirmation.code === 'already-confirmed') {
+          await reply(`Your service request is confirmed${confirmation.requestId ? ` (reference ${confirmation.requestId})` : ''}. The matching system will look for an eligible helper.`);
+        } else if (confirmation.code === 'quote-changed') {
+          const quote = confirmation.quote || {};
+          await reply(`The service details or quote have changed. The current quote is R${Number(quote.total || 0).toFixed(2)} ${quote.currency || 'ZAR'}. Please confirm again.`, {
+            type: 'button',
+            body: { text: `Current quote: R${Number(quote.total || 0).toFixed(2)} ${quote.currency || 'ZAR'}. Confirm to submit this request.` },
+            action: { buttons: [
+              { type: 'reply', reply: { id: 'wa_draft_confirm', title: 'Confirm' } },
+              { type: 'reply', reply: { id: 'wa_draft_edit', title: 'Edit details' } },
+            ] },
+          });
+        } else if (confirmation.code === 'active-request') {
+          await reply(`You already have an active Uncedo request (${confirmation.requestId}). I have not created another request.`);
+        } else {
+          await reply('I could not confirm this quotation. It may have expired or the service details changed. Please send the service details again.');
+        }
+      }
+      await jobRef.set({ status: 'completed', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    if (!Number(conversation.aiConsentAtMs || 0)) {
+      const consentText = 'Uncedo can use its configured AI services (OpenAI GPT-6 Luna, with Google Gemini as a fallback) to interpret your messages and service details. Conversation details may be stored to handle an enquiry or request. Please do not send payment card details or unrelated sensitive information. Do you agree to continue with AI assistance?';
+      await reply(consentText, {
+        type: 'button',
+        body: { text: consentText },
+        action: { buttons: [
+          { type: 'reply', reply: { id: 'wa_ai_consent_yes', title: 'Agree' } },
+          { type: 'reply', reply: { id: 'wa_ai_consent_no', title: 'No thanks' } },
+        ] },
+      });
+      await jobRef.set({ status: 'completed', intent: 'ai_consent_required', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    if (inbound.type === 'image' || inbound.type === 'audio' || inbound.type === 'document') {
+      let mediaResult;
+      try {
+        mediaResult = await processWhatsAppInboundMedia({ identityId, eventId, identity, conversation, inbound });
+      } catch (error) {
+        logger.warn('whatsapp_media_processing_failed', { eventId, errorCode: String(error?.code || 'media_processing_failed').slice(0, 80) });
+        mediaResult = { code: 'failed' };
+      }
+      if (mediaResult.code !== 'stored') {
+        const message = mediaResult.code === 'retention-not-configured'
+          ? 'Secure media retention is not configured yet, so I did not download or store that file. Please describe the service details in text.'
+          : mediaResult.code === 'disabled'
+            ? 'WhatsApp media intake is not enabled yet. Please describe the service details in text or use the Uncedo app.'
+            : 'I could not safely process that file. Please describe the service details in text or contact support.';
+        await reply(message);
+        await jobRef.set({ status: 'completed', intent: 'media_intake', reason: mediaResult.code, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      inbound = { ...inbound, media: { ...inbound.media, assetId: mediaResult.assetId, storagePath: mediaResult.storagePath || '' } };
+      if (inbound.type === 'audio') {
+        if (!whatsappTranscriptionEnabled()) {
+          await reply('I received the voice note, but voice transcription is not enabled yet. Please send the service details as text.');
+          await jobRef.set({ status: 'completed', intent: 'media_intake', reason: 'transcription_disabled', mediaAssetId: mediaResult.assetId, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          return;
+        }
+        try {
+          inbound = {
+            ...inbound,
+            type: 'text',
+            text: await transcribeWhatsAppAudio({
+              buffer: mediaResult.buffer,
+              mimeType: mediaResult.mimeType,
+              apiKey: process.env.OPENAI_API_KEY,
+              model: process.env.WHATSAPP_TRANSCRIPTION_MODEL,
+            }),
+          };
+        } catch (error) {
+          logger.warn('whatsapp_voice_transcription_failed', { eventId, errorCode: String(error?.code || 'transcription_failed').slice(0, 80) });
+          await reply('I could not transcribe that voice note. Please send the service details as text.');
+          await jobRef.set({ status: 'completed', intent: 'media_intake', reason: 'transcription_failed', mediaAssetId: mediaResult.assetId, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          return;
+        }
+      } else if (inbound.type === 'image') {
+        const caption = String(inbound.media?.caption || '').trim();
+        const mayInterpretImage = whatsappImageInterpretationEnabled();
+        if (!caption && !mayInterpretImage) {
+          await reply('I received the image securely, but image interpretation is not enabled. Please describe what you need and include the relevant details in text.');
+          await jobRef.set({ status: 'completed', intent: 'media_intake', reason: 'image_interpretation_unavailable', mediaAssetId: mediaResult.assetId, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          return;
+        }
+        inbound = {
+          ...inbound,
+          type: 'text',
+          text: caption || 'The customer attached an image for service context.',
+          mediaBuffer: mayInterpretImage ? mediaResult.buffer : null,
+          mediaMimeType: mayInterpretImage ? mediaResult.mimeType : '',
+        };
+      } else {
+        try {
+          const documentText = await extractWhatsAppDocumentText({
+            buffer: mediaResult.buffer,
+            mimeType: mediaResult.mimeType,
+          });
+          const caption = String(inbound.media?.caption || '').trim();
+          inbound = {
+            ...inbound,
+            type: 'text',
+            text: [caption, `Untrusted extracted document text: ${documentText}`].filter(Boolean).join('\n').slice(0, 9000),
+          };
+        } catch (error) {
+          logger.info('whatsapp_document_extraction_unavailable', { eventId, mimeType: mediaResult.mimeType, errorCode: String(error?.code || 'document_extraction_failed').slice(0, 80) });
+          await reply('I received the document securely, but could not safely extract text from this format. Please describe the relevant details in text or contact support.');
+          await jobRef.set({ status: 'completed', intent: 'media_intake', reason: 'document_extraction_unavailable', mediaAssetId: mediaResult.assetId, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          return;
+        }
+      }
+    }
+
+    if (inbound.type !== 'text') {
+      if (inbound.type === 'location') {
+        if (activeDraft && activeDraftRef && inbound.location) {
+          await activeDraftRef.set({ location: inbound.location, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          if (activeDraft.requestId) {
+            await marketplaceRequestOperations.updateDraft({
+              requestId: activeDraft.requestId,
+              principalId: String(identity.linkedFirebaseUid || identity.guestPrincipalId || ''),
+              categoryId: activeDraft.categoryId,
+              serviceIds: activeDraft.serviceIds,
+              selectedPackageId: activeDraft.selectedPackageId || '',
+              structuredAnswers: activeDraft.structuredAnswers || {},
+              location: inbound.location,
+            });
+          }
+          await reply('Thanks, I saved that location for your current service enquiry. Send the remaining service details when you are ready.');
+        } else {
+          await reply('I received your location. Tell me what service you need so I can guide you.');
+        }
+      } else {
+        await reply('I can currently process text and location messages. Please describe the service details in text for now.');
+      }
+      await jobRef.set({ status: 'completed', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    const catalog = (await getLiveServiceCatalogEntries())
+      .filter((service) => service.active === true && service.approved === true);
+    const selectedService = activeDraft ? catalog.find((service) => service.id === activeDraft.serviceId) : null;
+    const questionServices = selectedService ? getWhatsAppQuestionnaireServices(selectedService, catalog) : [];
+    const questions = selectedService
+      ? getQuestionnaireForSelection({ services: questionServices, selectedPackageId: selectedService.id })
+      : [];
+    if (!(await consumeWhatsAppAiRateLimit(identityId))) {
+      await reply('I have reached the message limit for this WhatsApp conversation. Please wait a little before trying again.');
+      await jobRef.set({ status: 'rate_limited', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    const model = createWhatsAppIntentRouter({
+      openAiApiKey: String(process.env.OPENAI_API_KEY || '').trim(),
+      openAiModel: String(process.env.OPENAI_MODEL || 'gpt-6-luna').trim(),
+      geminiApiKey: String(process.env.GEMINI_API_KEY || '').trim(),
+      geminiModel: String(process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite').trim(),
+    });
+    const intentResult = await model.classify({
+      message: inbound,
+      recentHistory: Array.isArray(conversation.recentHistory) ? conversation.recentHistory : [],
+      conversationState: {
+        mode: conversation.currentMode,
+        intent: conversation.currentIntent,
+        selectedServiceId: activeDraft?.serviceId || '',
+        answers: activeDraft?.structuredAnswers || {},
+        missingQuestionIds: activeDraft?.missingQuestionIds || [],
+      },
+      services: catalog.slice(0, 50),
+      questions,
+    });
+
+    if (intentResult.intent === 'greeting') {
+      await reply('Hi! I can help you explore Uncedo services or start a service enquiry. What do you need help with?');
+      await jobRef.set({ status: 'completed', intent: intentResult.intent, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (intentResult.intent === 'service_discovery') {
+      await reply(renderWhatsAppCatalog(catalog));
+      await jobRef.set({ status: 'completed', intent: intentResult.intent, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (intentResult.intent === 'service_information' && intentResult.serviceId) {
+      const info = catalog.find((service) => service.id === intentResult.serviceId);
+      await reply(info ? `${info.label}${info.description ? `: ${info.description}` : '.'} Ask me for a price or say you would like to book it.` : renderWhatsAppCatalog(catalog));
+      await jobRef.set({ status: 'completed', intent: intentResult.intent, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (intentResult.intent === 'booking_status') {
+      const requestId = String(conversation.activeServiceRequestId || '').trim();
+      const result = requestId ? await getWhatsAppRequestForIdentity({ db, identity, requestId }) : { code: 'not-found' };
+      if (result.code === 'found') await reply(formatWhatsAppRequestSummary(buildWhatsAppRequestSummary(result.request)));
+      else await reply('I could not verify a request linked to this WhatsApp conversation. Ask “booking history” or use the Uncedo app.');
+      await jobRef.set({ status: 'completed', intent: intentResult.intent, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (['payment_question', 'payment_initiation'].includes(intentResult.intent)) {
+      await reply('I can report a payment status that is already recorded, but payment initiation through WhatsApp is not available yet. Ask “payment status” or use the Uncedo app payment flow.');
+      await jobRef.set({ status: 'completed', intent: intentResult.intent, reason: 'payment_initiation_not_connected', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (['customer_support', 'provider_support', 'human_escalation'].includes(intentResult.intent)) {
+      if (!whatsappSupportEnabled()) {
+        await reply('WhatsApp support tickets are not enabled yet. Please use the Uncedo app to contact the support team.');
+      } else {
+        const ticket = await createOrAppendWhatsAppSupportMessage({
+          db, admin, identityId, conversationRef, eventId,
+          principalId: identity.linkedFirebaseUid || identity.guestPrincipalId || '',
+          linkedUid: identity.linkedFirebaseUid || '',
+          role: identity.role || (identity.guestPrincipalId ? 'customer' : 'unknown'),
+          requestId: conversation.activeServiceRequestId || '',
+          inbound,
+        });
+        if (inbound.media?.assetId) await associateWhatsAppMediaWithSupportTicket({ assetId: inbound.media.assetId, identityId, ticketId: ticket.ticketId });
+        await reply(`I’ve sent this conversation to Uncedo support. Your ticket reference is ${ticket.ticketId}. AI replies are paused until the support team closes the handoff.`);
+      }
+      await jobRef.set({ status: 'completed', intent: intentResult.intent, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (!['service_booking', 'price_enquiry'].includes(intentResult.intent)) {
+      await reply('I can answer public service questions, collect service booking details, and help with booking history/status and recorded payment status. WhatsApp cancellation changes, payment initiation, account management, and unsupported actions still need the Uncedo app or support team.');
+      await jobRef.set({ status: 'completed', intent: intentResult.intent, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    const serviceId = selectedService?.id || intentResult.serviceId;
+    const service = catalog.find((item) => item.id === serviceId);
+    if (!service || intentResult.confidence < 0.45) {
+      await reply(renderWhatsAppCatalog(catalog));
+      await jobRef.set({ status: 'completed', intent: intentResult.intent, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (service.requiresPortfolioSelection) {
+      await reply(`${service.label} needs a customer selection that is not available in this WhatsApp flow yet. Please complete that request in the Uncedo app.`);
+      await jobRef.set({ status: 'completed', intent: intentResult.intent, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    const selectedQuestionServices = getWhatsAppQuestionnaireServices(service, catalog);
+    const serviceQuestions = getQuestionnaireForSelection({ services: selectedQuestionServices, selectedPackageId: service.id });
+    const allowedQuestionIds = new Set(serviceQuestions.map((question) => question.id));
+    const incomingAnswers = Object.fromEntries(Object.entries(intentResult.extractedAnswers || {}).filter(([key]) => allowedQuestionIds.has(key)));
+    const baseAnswers = activeDraft?.serviceId === service.id && activeDraft?.structuredAnswers
+      ? activeDraft.structuredAnswers
+      : {};
+    let validation;
+    try {
+      validation = normalizeAndValidateAnswers({
+        answers: { ...baseAnswers, ...incomingAnswers },
+        questions: serviceQuestions,
+        strictUnknown: true,
+      });
+    } catch (error) {
+      await reply('I could not validate one of those answers against this service questionnaire. Please restate the service details or choose an option from the questionnaire.');
+      await jobRef.set({ status: 'completed', intent: intentResult.intent, errorCode: 'invalid_questionnaire_answer', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    const serviceIds = getWhatsAppServiceIds(service);
+    const selectedPackageId = ['bundle', 'package'].includes(String(service.type || '').toLowerCase()) ? service.id : '';
+    const draftId = stableEventId(`draft:${identityId}`);
+    const draftRef = db.collection('serviceRequestDrafts').doc(draftId);
+    const currentMediaAssetId = String(inbound.media?.assetId || '').trim();
+    const currentMediaAssetRef = currentMediaAssetId ? db.collection('whatsappMediaAssets').doc(currentMediaAssetId) : null;
+    const now = Date.now();
+    if (validation.missingRequired.length) {
+      const missingQuestion = serviceQuestions.find((question) => question.id === validation.missingRequired[0]);
+      let canonicalRequestId = String(activeDraft?.requestId || '').trim();
+      if (intentResult.intent === 'service_booking') {
+        const requestDraft = await syncWhatsAppCanonicalRequestDraft({
+          identityId,
+          identity,
+          draftRef,
+          service,
+          serviceIds,
+          selectedPackageId,
+          answers: validation.answers,
+          location: activeDraft?.location || null,
+        });
+        if (requestDraft.code !== 'ready') {
+          await reply(requestDraft.code === 'active-request'
+            ? `You already have an active Uncedo request (${requestDraft.activeRequestId}). I have not started another one.`
+            : 'I could not start this request yet. Please check your active requests or contact Uncedo support.');
+          await jobRef.set({ status: 'completed', intent: intentResult.intent, errorCode: requestDraft.code, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          return;
+        }
+        canonicalRequestId = requestDraft.requestId;
+      }
+      await db.runTransaction(async (transaction) => {
+        transaction.set(draftRef, {
+          identityId,
+          status: 'collecting',
+          intent: intentResult.intent,
+          serviceId: service.id,
+          categoryId: service.categoryId,
+          serviceIds,
+          selectedPackageId,
+          requestId: canonicalRequestId || null,
+          structuredAnswers: validation.answers,
+          ...(currentMediaAssetId ? { mediaAssetIds: admin.firestore.FieldValue.arrayUnion(currentMediaAssetId) } : {}),
+          missingQuestionIds: validation.missingRequired,
+          questionnaireVersion: stableEventId(JSON.stringify(serviceQuestions)),
+          location: activeDraft?.serviceId === service.id ? activeDraft.location || null : null,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          createdAt: activeDraft?.createdAt || admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        if (currentMediaAssetRef) transaction.set(currentMediaAssetRef, {
+          draftId,
+          requestId: canonicalRequestId || null,
+          associatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        transaction.set(conversationRef, {
+          currentMode: 'booking_intake',
+          currentIntent: intentResult.intent,
+          activeDraftId: draftId,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+      });
+      await reply(missingQuestion ? renderWhatsAppQuestion(missingQuestion) : 'Please provide the remaining required service details.');
+      await jobRef.set({ status: 'completed', intent: intentResult.intent, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    let quote = quoteFromCatalogEntries({
+      entries: catalog,
+      categoryId: service.categoryId,
+      serviceIds,
+      selectedPackageId,
+      structuredAnswers: validation.answers,
+      strictUnknownAnswers: true,
+    });
+    const isBooking = intentResult.intent === 'service_booking';
+    const replyText = `${service.label}: ${isBooking ? 'quotation' : 'indicative estimate'} R${Number(quote.total || 0).toFixed(2)} ${quote.currency || 'ZAR'}. This amount comes from the current Uncedo pricing calculation.${isBooking ? ' Confirm to submit this request, or edit the details.' : ' To book this service, tell me you would like to book it.'}`;
+    let canonicalRequestId = String(activeDraft?.requestId || '').trim();
+    let quoteExpiresAtMs = now + (15 * 60 * 1000);
+    if (isBooking) {
+      const requestDraft = await syncWhatsAppCanonicalRequestDraft({
+        identityId,
+        identity,
+        draftRef,
+        service,
+        serviceIds,
+        selectedPackageId,
+        answers: validation.answers,
+        location: activeDraft?.location || null,
+      });
+      if (requestDraft.code !== 'ready') {
+        await reply(requestDraft.code === 'active-request'
+          ? `You already have an active Uncedo request (${requestDraft.activeRequestId}). I have not started another one.`
+          : 'I could not start this request yet. Please check your active requests or contact Uncedo support.');
+        await jobRef.set({ status: 'completed', intent: intentResult.intent, errorCode: requestDraft.code, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      canonicalRequestId = requestDraft.requestId;
+      const canonicalQuote = await marketplaceRequestOperations.quoteDraft({
+        requestId: canonicalRequestId,
+        principalId: String(activeDraft?.principalId || identity.linkedFirebaseUid || identity.guestPrincipalId || '').trim(),
+      });
+      if (canonicalQuote.code !== 'quoted') {
+        await reply(canonicalQuote.code === 'invalid-service-answers'
+          ? 'I still need valid answers to the service questionnaire before I can quote this request.'
+          : 'I could not prepare a current quote. Please check the service details and try again.');
+        await jobRef.set({ status: 'completed', intent: intentResult.intent, errorCode: canonicalQuote.code, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      quote = canonicalQuote.quote;
+      quoteExpiresAtMs = canonicalQuote.quoteExpiresAtMs;
+    }
+    await db.runTransaction(async (transaction) => {
+      transaction.set(draftRef, {
+        identityId,
+        status: isBooking ? 'quoted' : 'estimate_ready',
+        intent: intentResult.intent,
+        serviceId: service.id,
+        categoryId: service.categoryId,
+        serviceIds,
+        selectedPackageId,
+        requestId: canonicalRequestId || null,
+        structuredAnswers: validation.answers,
+        ...(currentMediaAssetId ? { mediaAssetIds: admin.firestore.FieldValue.arrayUnion(currentMediaAssetId) } : {}),
+        missingQuestionIds: [],
+        questionnaireVersion: quote.questionnaireVersion,
+        serviceCatalogVersion: quote.serviceCatalogVersion,
+        quoteSnapshot: quote,
+        quoteExpiresAtMs,
+        location: activeDraft?.serviceId === service.id ? activeDraft.location || null : null,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdAt: activeDraft?.createdAt || admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      if (currentMediaAssetRef) transaction.set(currentMediaAssetRef, {
+        draftId,
+        requestId: canonicalRequestId || null,
+        associatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      transaction.set(conversationRef, {
+        currentMode: isBooking ? 'quote_pending' : 'public_information',
+        currentIntent: intentResult.intent,
+        activeDraftId: draftId,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+    });
+    if (isBooking) {
+      await reply(replyText, {
+        type: 'button',
+        body: { text: `${service.label}: R${Number(quote.total || 0).toFixed(2)} ${quote.currency || 'ZAR'}. Confirm to submit this request, or edit the details.` },
+        action: { buttons: [
+          { type: 'reply', reply: { id: 'wa_draft_confirm', title: 'Confirm' } },
+          { type: 'reply', reply: { id: 'wa_draft_edit', title: 'Edit details' } },
+        ] },
+      });
+    } else {
+      await reply(replyText);
+    }
+    await jobRef.set({
+      status: 'completed',
+      intent: intentResult.intent,
+      aiProvider: intentResult.provider || null,
+      aiModel: intentResult.model || null,
+      fallbackUsed: intentResult.provider === 'gemini',
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+  } catch (error) {
+    logger.error('whatsapp_assistant_job_failed', {
+      jobId: event.params.jobId,
+      errorCode: String(error?.code || 'assistant_processing_failed').slice(0, 120),
+      // Deliberately omit inbound content, phone numbers, prompts, and credentials.
+    });
+    await jobRef.set({
+      status: 'failed',
+      errorCode: String(error?.code || 'assistant_processing_failed').slice(0, 120),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true }).catch(() => null);
+  }
+});
+
 exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{requestId}', async (event) => {
   const afterData = event.data.after.exists ? event.data.after.data() : null;
   if (!afterData) return;
@@ -1640,7 +3970,479 @@ exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{reques
   });
 });
 
-exports.syncServiceRequestAssignmentState = onDocumentWritten('serviceRequests/{requestId}', async (event) => {
+exports.scheduleServiceRequestOfferExpiryOnServiceRequestWrite = onDocumentWritten({
+  document: 'serviceRequests/{requestId}',
+  ...HALF_CPU_OPTIONS,
+}, async (event) => {
+  const before = event.data.before.exists ? event.data.before.data() : null;
+  const after = event.data.after.exists ? event.data.after.data() : null;
+  if (!after || String(after.status || '').toLowerCase() !== SERVICE_REQUEST_STATUS.HELPER_FOUND) return;
+
+  const requestId = String(event.params.requestId || '').trim();
+  const helperId = String(after.currentOfferHelperId || '').trim();
+  const offerToken = String(after.offerToken || '').trim();
+  const offerRevision = normalizeRevision(after.offerRevision);
+  const expiresAtMs = normalizeTimestamp(after.offerExpiresAt);
+  if (!requestId || !helperId || !offerToken || !offerRevision || !expiresAtMs) return;
+  if (
+    before
+    && String(before.status || '').toLowerCase() === SERVICE_REQUEST_STATUS.HELPER_FOUND
+    && String(before.offerToken || '') === offerToken
+    && normalizeRevision(before.offerRevision) === offerRevision
+  ) return;
+
+  const taskId = `offer-expiry_${createHash('sha256').update(`${requestId}:${offerRevision}`).digest('hex').slice(0, 32)}`;
+  const delaySeconds = Math.max(0, Math.ceil((expiresAtMs - Date.now()) / 1000) + 1);
+  try {
+    await getFunctions().taskQueue('expireServiceRequestOffer').enqueue({
+      requestId,
+      helperId,
+      offerToken,
+      offerRevision,
+      expiresAtMs,
+    }, {
+      id: taskId,
+      scheduleDelaySeconds: delaySeconds,
+      dispatchDeadlineSeconds: 30,
+    });
+  } catch (error) {
+    if (String(error?.code || '').includes('task-already-exists')) {
+      logger.info('service_request_offer_expiry_task_already_scheduled', { requestId, offerRevision });
+      return;
+    }
+    logger.error('service_request_offer_expiry_task_schedule_failed', {
+      requestId,
+      offerRevision,
+      error: error?.message || 'unknown_error',
+    });
+    throw error;
+  }
+});
+
+exports.expireServiceRequestOffer = onTaskDispatched({
+  retryConfig: { maxAttempts: 5, minBackoffSeconds: 5, maxBackoffSeconds: 60 },
+  rateLimits: { maxConcurrentDispatches: 50, maxDispatchesPerSecond: 20 },
+  ...HALF_CPU_OPTIONS,
+}, async (event) => {
+  const input = event.data || {};
+  const requestId = String(input.requestId || '').trim();
+  const helperId = String(input.helperId || '').trim();
+  const offerToken = String(input.offerToken || '').trim();
+  const offerRevision = normalizeRevision(input.offerRevision);
+  if (!requestId || !helperId || !offerToken || !offerRevision) {
+    logger.warn('service_request_offer_expiry_task_invalid_payload');
+    return;
+  }
+
+  const requestRef = db.collection('serviceRequests').doc(requestId);
+  const result = await db.runTransaction(async (transaction) => {
+    const requestSnap = await transaction.get(requestRef);
+    if (!requestSnap.exists) return { expired: false, reason: 'request-not-found' };
+    const request = requestSnap.data() || {};
+    const decision = evaluateOfferExpiry(request, { helperId, offerToken, offerRevision }, Date.now());
+    if (!decision.shouldExpire) return { expired: false, reason: decision.code };
+
+    const helperQueue = (Array.isArray(request.helperQueue) ? request.helperQueue : [])
+      .map((value) => String(value || '').trim())
+      .filter((value) => value && value !== helperId);
+    const offerCycleExcludedHelperIds = [...new Set([
+      ...(Array.isArray(request.offerCycleExcludedHelperIds) ? request.offerCycleExcludedHelperIds : []),
+      helperId,
+    ].map((value) => String(value || '').trim()).filter(Boolean))];
+
+    transaction.update(requestRef, {
+      status: SERVICE_REQUEST_STATUS.MATCHING,
+      statusDetail: 'Helper offer expired. Matching the next helper.',
+      helperQueue,
+      currentOfferHelperId: null,
+      offerExpiresAt: null,
+      offerToken: null,
+      offerCycleExcludedHelperIds,
+      lastOfferResponse: {
+        helperId,
+        offerToken,
+        offerRevision,
+        action: 'expired',
+        respondedAtMs: Date.now(),
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    return {
+      expired: true,
+      categoryId: request.categoryId || '',
+      serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
+      offeredAtMs: normalizeTimestamp(request.lastOfferAt) || Date.now(),
+    };
+  });
+
+  if (result.expired) {
+    await recordHelperOfferLifecycleEvent({
+      helperId,
+      requestId,
+      offerRevision,
+      categoryId: result.categoryId,
+      serviceIds: result.serviceIds,
+      outcome: 'expired',
+      offeredAtMs: result.offeredAtMs,
+      closedAtMs: Date.now(),
+      responseMinutes: null,
+      sourceStatus: 'matching',
+    }).catch((error) => logger.warn('helper_offer_expiry_stats_failed', { requestId, helperId, error: error.message }));
+  }
+
+  logger.info('service_request_offer_expiry_task_finished', {
+    requestId,
+    helperId,
+    offerRevision,
+    expired: result.expired,
+    reason: result.reason || null,
+  });
+});
+
+function whatsappNotificationsEnabled() {
+  return String(process.env.WHATSAPP_NOTIFICATIONS_ENABLED || '').trim().toLowerCase() === 'true';
+}
+
+function whatsappRelayEnabled() {
+  return String(process.env.WHATSAPP_RELAY_ENABLED || '').trim().toLowerCase() === 'true';
+}
+
+function whatsappSupportEnabled() {
+  return String(process.env.WHATSAPP_SUPPORT_ENABLED || '').trim().toLowerCase() === 'true';
+}
+
+exports.notifyWhatsAppHelperOfferOnServiceRequestWrite = onDocumentWritten({
+  document: 'serviceRequests/{requestId}',
+  maxInstances: 2,
+  ...HALF_CPU_OPTIONS,
+}, async (event) => {
+  if (!whatsappNotificationsEnabled() || !whatsappMessagingEnabled()) return;
+  const before = event.data.before.exists ? event.data.before.data() || {} : null;
+  const after = event.data.after.exists ? event.data.after.data() || {} : null;
+  if (!after || String(after.status || '').toLowerCase() !== SERVICE_REQUEST_STATUS.HELPER_FOUND) return;
+  const requestId = String(event.params.requestId || '').trim();
+  const helperId = String(after.currentOfferHelperId || '').trim();
+  const offerToken = String(after.offerToken || '').trim();
+  const offerRevision = normalizeRevision(after.offerRevision);
+  if (!requestId || !helperId || !offerToken || !offerRevision) return;
+  if (before
+    && String(before.currentOfferHelperId || '') === helperId
+    && String(before.offerToken || '') === offerToken
+    && normalizeRevision(before.offerRevision) === offerRevision) return;
+
+  const linkSnap = await db.collection('whatsappUserLinks').doc(helperId).get();
+  if (!linkSnap.exists) return;
+  const identityId = String(linkSnap.data()?.identityId || '').trim();
+  if (!identityId) return;
+  const identityRef = db.collection('whatsappIdentities').doc(identityId);
+  const [identitySnap, conversationSnap] = await Promise.all([
+    identityRef.get(), db.collection('whatsappConversations').doc(identityId).get(),
+  ]);
+  if (!identitySnap.exists || !conversationSnap.exists) return;
+  const identity = identitySnap.data() || {};
+  if (String(identity.linkedFirebaseUid || '') !== helperId
+    || String(identity.role || '').toLowerCase() !== 'helper'
+    || !(Number(identity.whatsappNotificationsConsentAtMs || 0) > 0 || identity.whatsappNotificationsEnabled === true)) return;
+
+  const secrets = getWhatsAppSecrets();
+  const templateName = String(process.env.WHATSAPP_HELPER_OFFER_TEMPLATE_NAME || '').trim();
+  const languageCode = String(process.env.WHATSAPP_HELPER_OFFER_TEMPLATE_LANGUAGE || '').trim();
+  if (!secrets.accessToken || !secrets.phoneNumberId || !secrets.graphApiVersion
+    || !templateName || !languageCode || !secrets.approvedTemplateNames.includes(templateName)) {
+    logger.info('whatsapp_helper_offer_notification_not_configured', { requestId, offerRevision });
+    return;
+  }
+  if (String(identity.phoneNumberId || '') !== secrets.phoneNumberId) return;
+  const recipient = String(identity.waId || '').trim();
+  if (!recipient) return;
+
+  const acceptActionId = stableEventId(`helper-offer-action:${requestId}:${offerRevision}:accept`);
+  const declineActionId = stableEventId(`helper-offer-action:${requestId}:${offerRevision}:decline`);
+  const outboundId = stableEventId(`helper-offer-notification:${requestId}:${offerRevision}:${helperId}`);
+  const outboundRef = db.collection('whatsappMessages').doc(outboundId);
+  const acceptRef = db.collection('whatsappOfferActions').doc(acceptActionId);
+  const declineRef = db.collection('whatsappOfferActions').doc(declineActionId);
+  const claimed = await db.runTransaction(async (transaction) => {
+    const [outboundSnap, currentRequestSnap, acceptSnap, declineSnap] = await Promise.all([
+      transaction.get(outboundRef), transaction.get(db.collection('serviceRequests').doc(requestId)),
+      transaction.get(acceptRef), transaction.get(declineRef),
+    ]);
+    if (outboundSnap.exists || !currentRequestSnap.exists) return false;
+    const current = currentRequestSnap.data() || {};
+    if (current.status !== SERVICE_REQUEST_STATUS.HELPER_FOUND
+      || String(current.currentOfferHelperId || '') !== helperId
+      || String(current.offerToken || '') !== offerToken
+      || normalizeRevision(current.offerRevision) !== offerRevision
+      || normalizeTimestamp(current.offerExpiresAt) <= Date.now()) return false;
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    const actionData = {
+      requestId, helperId, identityId, offerToken, offerRevision,
+      expiresAtMs: normalizeTimestamp(current.offerExpiresAt),
+      createdAt: now,
+    };
+    if (!acceptSnap.exists) transaction.create(acceptRef, { ...actionData, action: 'accept' });
+    if (!declineSnap.exists) transaction.create(declineRef, { ...actionData, action: 'decline' });
+    transaction.create(outboundRef, {
+      eventId: outboundId, identityId, phoneNumberId: secrets.phoneNumberId, to: recipient,
+      requestId, direction: 'outbound', type: 'template', status: 'sending',
+      templateName, offerRevision, createdAt: now,
+    });
+    return true;
+  });
+  if (!claimed) return;
+
+  const bodySummary = String(after.serviceSummary || after.subject || 'Uncedo service request').trim().slice(0, 500);
+  const indicativeTotal = toRand(after.pricingSnapshot?.total ?? after.pricingSnapshot?.finalAmount ?? 0);
+  try {
+    const client = createMetaWhatsAppClient({
+      accessToken: secrets.accessToken,
+      phoneNumberId: secrets.phoneNumberId,
+      graphApiVersion: secrets.graphApiVersion,
+      approvedTemplateNames: secrets.approvedTemplateNames,
+    });
+    const delivery = await client.sendTemplate({
+      to: recipient,
+      name: templateName,
+      languageCode,
+      components: [
+        { type: 'body', parameters: [
+          { type: 'text', text: bodySummary },
+          { type: 'text', text: formatMoney(indicativeTotal) },
+        ] },
+        { type: 'button', sub_type: 'quick_reply', index: '0', parameters: [{ type: 'payload', payload: `wa_offer_accept_${acceptActionId}` }] },
+        { type: 'button', sub_type: 'quick_reply', index: '1', parameters: [{ type: 'payload', payload: `wa_offer_decline_${declineActionId}` }] },
+      ],
+    });
+    await outboundRef.set({ status: 'sent', metaMessageId: delivery.messageId || null, sentAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    await reconcileWhatsAppDeliveryStatuses({ metaMessageId: delivery.messageId, recipientId: recipient, messageRef: outboundRef });
+  } catch (error) {
+    const deliveryStatus = classifyMetaDeliveryError(error);
+    await outboundRef.set({
+      status: deliveryStatus,
+      deliveryStatus,
+      errorCode: String(error?.code || 'meta_delivery_unknown').slice(0, 100),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    logger.warn('whatsapp_helper_offer_delivery_failed', { requestId, offerRevision, deliveryStatus, errorCode: String(error?.code || 'unknown').slice(0, 80) });
+  }
+});
+
+exports.respondToServiceRequestOffer = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') {
+    res.status(405).json({ success: false, message: 'Method not allowed.' });
+    return;
+  }
+
+  const token = getBearerToken(req);
+  const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+
+  const requestId = String(req.body?.requestId || '').trim();
+  const offerToken = String(req.body?.offerToken || '').trim();
+  const offerRevision = normalizeRevision(req.body?.offerRevision);
+  const action = String(req.body?.action || '').trim().toLowerCase();
+  if (!requestId || !offerToken || !offerRevision || !['accept', 'decline'].includes(action)) {
+    res.status(400).json({ success: false, message: 'A valid offer action is required.' });
+    return;
+  }
+
+  const helperId = decoded.uid;
+  const requestRef = db.collection('serviceRequests').doc(requestId);
+  try {
+    const operation = await serviceRequestOfferOperations.respond({
+      requestId, helperId, offerToken, offerRevision, action,
+    });
+
+    if (operation.error) {
+      const status = operation.error === 'request-not-found' ? 404 : operation.error === 'helper-account-required' ? 403 : 409;
+      res.status(status).json({ success: false, message: operation.error === 'request-not-found'
+        ? 'Service request not found.'
+        : operation.error === 'helper-account-required'
+          ? 'A helper account is required to respond to this offer.'
+          : operation.error === 'helper-already-has-active-request'
+            ? 'You already have an active service request.'
+            : operation.error === 'offer-expired'
+              ? 'This helper offer has expired.'
+              : 'This helper offer is no longer current.' });
+      return;
+    }
+
+    if (operation.didApply) {
+      await recordHelperOfferLifecycleEvent({
+        helperId,
+        requestId,
+        offerRevision,
+        categoryId: operation.categoryId,
+        serviceIds: operation.serviceIds,
+        outcome: action === 'accept' ? 'accepted' : 'declined',
+        offeredAtMs: operation.offerStartedAtMs,
+        closedAtMs: Date.now(),
+        responseMinutes: Math.max(0, Number(((Date.now() - operation.offerStartedAtMs) / 60000).toFixed(2))),
+        sourceStatus: action === 'accept' ? 'accepted' : 'matching',
+      }).catch((error) => logger.warn('helper_offer_response_stats_failed', { requestId, helperId, error: error.message }));
+    }
+
+    const refreshed = await requestRef.get();
+    res.status(200).json({
+      success: true,
+      idempotent: Boolean(operation.idempotent),
+      request: refreshed.exists ? { id: refreshed.id, ...refreshed.data() } : null,
+    });
+  } catch (error) {
+    logger.error('service_request_offer_response_failed', {
+      requestId,
+      helperId,
+      action,
+      error: error?.message || 'unknown_error',
+    });
+    res.status(500).json({ success: false, message: 'Unable to process this helper offer right now.' });
+  }
+});
+
+exports.updateHelperServiceRequest = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
+  if (req.method !== 'POST') {
+    res.status(405).json({ success: false, message: 'Method not allowed.' });
+    return;
+  }
+  const token = getBearerToken(req);
+  const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+
+  const requestId = String(req.body?.requestId || '').trim();
+  const action = String(req.body?.action || 'transition').trim().toLowerCase();
+  const nextStatus = String(req.body?.status || '').trim().toLowerCase();
+  const reason = String(req.body?.reason || '').trim().slice(0, 500);
+  if (!requestId || !['transition', 'cancel'].includes(action) || (action === 'transition' && !nextStatus)) {
+    res.status(400).json({ success: false, message: 'A valid service request action is required.' });
+    return;
+  }
+
+  const helperId = decoded.uid;
+  const requestRef = db.collection('serviceRequests').doc(requestId);
+  const helperRef = db.collection('users').doc(helperId);
+  const financialOperationRef = db.collection(FINANCIAL_OPERATIONS_COLLECTION).doc(serviceFinancialOperationId(requestId));
+  try {
+    const result = await db.runTransaction(async (transaction) => {
+      const [requestSnap, helperSnap, financialOperationSnap] = await Promise.all([
+        transaction.get(requestRef),
+        transaction.get(helperRef),
+        transaction.get(financialOperationRef),
+      ]);
+      if (!requestSnap.exists) return { error: 'request-not-found', status: 404 };
+      if (!helperSnap.exists || !isHelperUserRecord(helperSnap.data() || {})) {
+        return { error: 'helper-account-required', status: 403 };
+      }
+      const request = requestSnap.data() || {};
+      const helper = helperSnap.data() || {};
+      if (String(request?.helperAssignment?.helperId || '') !== helperId) {
+        return { error: 'not-assigned-helper', status: 403 };
+      }
+      if (financialOperationSnap.exists) {
+        return { error: 'financial-operation-already-claimed', status: 409 };
+      }
+
+      if (action === 'cancel') {
+        const cancelableStatuses = new Set(['accepted', 'driving', 'en_route', 'buying_resources', 'arrived', 'work_started']);
+        if (!cancelableStatuses.has(String(request.status || '').toLowerCase())) {
+          return { error: 'request-not-cancelable', status: 409 };
+        }
+        transaction.update(requestRef, {
+          status: SERVICE_REQUEST_STATUS.CANCELED,
+          statusDetail: 'Helper canceled the session.',
+          canceledBy: 'helper',
+          canceledReason: reason,
+          canceledAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          financialOperationId: serviceFinancialOperationId(requestId),
+        });
+        transaction.create(financialOperationRef, {
+          operationId: serviceFinancialOperationId(requestId),
+          requestId,
+          operationType: 'helper_cancellation',
+          status: 'settled_no_charge',
+          finalOutcome: 'no_charge',
+          paymentStatus: 'not_applicable',
+          paymentSettled: true,
+          settlementApplied: true,
+          createdAtMs: Date.now(),
+          updatedAtMs: Date.now(),
+        });
+        transaction.set(helperRef, {
+          activeServiceRequestId: null,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        return { changed: true };
+      }
+
+      if (nextStatus === 'completed') {
+        return { error: 'billing-finalization-required', status: 409 };
+      }
+
+      const decision = evaluateHelperRequestTransition(request, { helperId, nextStatus });
+      if (!decision.ok) return { error: decision.code, status: decision.code === 'not-assigned-helper' ? 403 : 409 };
+      const statusDetails = {
+        en_route: 'Helper is on the way.',
+        driving: 'Helper is driving to your location.',
+        buying_resources: 'Helper stopped to buy resources before arrival.',
+        arrived: 'Helper has arrived.',
+        work_started: 'The job is now in progress.',
+        completed: 'Service completed.',
+      };
+      const updates = {
+        status: nextStatus,
+        statusDetail: statusDetails[nextStatus],
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+      if (nextStatus === 'arrived') updates.arrivedAt = admin.firestore.FieldValue.serverTimestamp();
+      if (nextStatus === 'work_started') updates.workStartedAt = admin.firestore.FieldValue.serverTimestamp();
+      transaction.update(requestRef, updates);
+
+      if (nextStatus === 'completed') {
+        transaction.set(helperRef, {
+          activeServiceRequestId: null,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+      }
+      return { changed: true };
+    });
+
+    if (result.error) {
+      const messages = {
+        'request-not-found': 'Service request not found.',
+        'helper-account-required': 'A helper account is required for this action.',
+        'not-assigned-helper': 'You are not assigned to this service request.',
+        'request-not-cancelable': 'This service request can no longer be canceled by the helper.',
+        'financial-operation-already-claimed': 'A financial or closure operation is already being processed for this request.',
+        'billing-finalization-required': 'Complete this request through the billing finalization flow.',
+        'invalid-current-status': 'This service request is not active.',
+        'invalid-status-transition': 'That service request status change is not allowed.',
+      };
+      res.status(result.status).json({ success: false, message: messages[result.error] || 'This service request action is not allowed.' });
+      return;
+    }
+    const refreshed = await requestRef.get();
+    res.status(200).json({ success: true, request: refreshed.exists ? { id: refreshed.id, ...refreshed.data() } : null });
+  } catch (error) {
+    logger.error('helper_service_request_action_failed', {
+      requestId,
+      helperId,
+      action,
+      error: error?.message || 'unknown_error',
+    });
+    res.status(500).json({ success: false, message: 'Unable to update this service request right now.' });
+  }
+});
+
+exports.syncServiceRequestAssignmentState = onDocumentWritten({
+  document: 'serviceRequests/{requestId}',
+  ...HALF_CPU_OPTIONS,
+}, async (event) => {
   const before = event.data.before.exists ? event.data.before.data() : null;
   const after = event.data.after.exists ? event.data.after.data() : null;
   if (!after) return;
@@ -1650,14 +4452,48 @@ exports.syncServiceRequestAssignmentState = onDocumentWritten('serviceRequests/{
   const afterStatus = String(after?.status || '').toLowerCase();
   const helperId = after?.helperAssignment?.helperId || before?.helperAssignment?.helperId || null;
 
-  if (afterStatus === SERVICE_REQUEST_STATUS.ACCEPTED && helperId) {
+  if (afterStatus === SERVICE_REQUEST_STATUS.ACCEPTED && helperId && beforeStatus !== SERVICE_REQUEST_STATUS.ACCEPTED) {
     logger.info('service_request_assignment_state_write', {
       requestId,
       helperId,
       afterStatus,
       traceLabel: 'functions:syncServiceRequestAssignmentState:accepted',
     });
-    await Promise.all([
+    const customerId = after.customerId || before?.customerId || null;
+    const helperName = after?.helperAssignment?.helperName || 'A helper';
+    const acceptedAtMs = normalizeTimestamp(after?.helperAssignment?.acceptedAt) || Date.now();
+    const customerLocation = normalizeCoordinate(after.location || after.requestPayload?.location || null);
+    const helperSnapshot = await db.collection('users').doc(helperId).get();
+    const helperLocation = getLiveLocationSnapshot(helperSnapshot.data() || {});
+    const initialTracking = {
+      requestId,
+      helperId,
+      customerId: customerId || '',
+      helperLocation,
+      customerLocation,
+      destination: customerLocation,
+      routeSnapshot: {
+        routeCoordinates: [],
+        routeSteps: [],
+        encodedPolyline: '',
+        overviewEncodedPolyline: '',
+        distanceMeters: null,
+        durationSeconds: null,
+        routeProvider: '',
+        lastRouteOrigin: helperLocation,
+        lastDestination: customerLocation,
+        lastSuccessfulRouteFetchAtMs: 0,
+      },
+      distanceTravelledMeters: 0,
+      status: after.status || 'accepted',
+      acceptedAtMs,
+      startedAtMs: acceptedAtMs,
+      updatedAtMs: Date.now(),
+    };
+    const acceptedNotificationRef = customerId
+      ? db.collection('notifications').doc(`request_accepted_${requestId}_${helperId}`)
+      : null;
+    const effects = [
       db.collection('users').doc(helperId).set({
         activeServiceRequestId: requestId,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -1667,15 +4503,25 @@ exports.syncServiceRequestAssignmentState = onDocumentWritten('serviceRequests/{
         available: false,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true }),
-      createUserNotification({
-        userId: after.customerId || before?.customerId || null,
+      admin.database().ref(`liveTracking/serviceRequests/${requestId}`).update(initialTracking),
+    ];
+    if (acceptedNotificationRef) {
+      effects.push(acceptedNotificationRef.set({
+        userId: customerId,
         title: 'Helper selected',
-        message: `${after?.helperAssignment?.helperName || 'A helper'} accepted your request.`,
+        message: `${helperName} accepted your request.`,
         type: 'request_accepted',
         requestId,
+        sessionId: null,
         targetPath: `/customer/requests/${requestId}`,
-      }),
-    ]);
+        metadata: {},
+        read: false,
+        readAt: null,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true }));
+    }
+    await Promise.all(effects);
     return;
   }
 
@@ -1709,7 +4555,10 @@ exports.syncServiceRequestAssignmentState = onDocumentWritten('serviceRequests/{
   }
 });
 
-exports.trackCustomerServiceEvents = onDocumentCreated('customerServiceEvents/{eventId}', async (event) => {
+exports.trackCustomerServiceEvents = onDocumentCreated({
+  document: 'customerServiceEvents/{eventId}',
+  ...HALF_CPU_OPTIONS,
+}, async (event) => {
   const rawEvent = event.data?.data();
   if (!rawEvent) return;
 
@@ -1869,7 +4718,10 @@ exports.promoteScheduledServiceRequests = onSchedule({
 
 
 
-exports.syncHelperDispatchIndexOnServiceOfferingWrite = onDocumentWritten('helperServices/{offeringId}', async (event) => {
+exports.syncHelperDispatchIndexOnServiceOfferingWrite = onDocumentWritten({
+  document: 'helperServices/{offeringId}',
+  ...HALF_CPU_OPTIONS,
+}, async (event) => {
   const before = event.data.before.exists ? event.data.before.data() : null;
   const after = event.data.after.exists ? event.data.after.data() : null;
   const helperId = String(after?.helperId || before?.helperId || '').trim();
@@ -1877,7 +4729,10 @@ exports.syncHelperDispatchIndexOnServiceOfferingWrite = onDocumentWritten('helpe
   await syncHelperDispatchIndexById(helperId);
 });
 
-exports.syncHelperDispatchIndex = onDocumentWritten('users/{uid}', async (event) => {
+exports.syncHelperDispatchIndex = onDocumentWritten({
+  document: 'users/{uid}',
+  ...HALF_CPU_OPTIONS,
+}, async (event) => {
   const after = event.data.after.exists ? event.data.after.data() : null;
   const helperId = event.params.uid;
 
@@ -1915,7 +4770,7 @@ async function isAdminAuthorizationHeader(req) {
   }
 }
 
-exports.rebuildHelperDispatchIndex = onRequest({ cors: true }, async (req, res) => {
+exports.rebuildHelperDispatchIndex = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
   if (!(await isAdminAuthorizationHeader(req))) {
     res.status(403).json({ ok: false, error: 'Admin authorization required.' });
     return;
@@ -2511,27 +5366,6 @@ function getServiceHelperPayoutBreakdown(request = {}, options = {}) {
   };
 }
 
-function parseGroupedSecretJson(name, rawValue) {
-  const value = String(rawValue || '').trim();
-  if (!value) {
-    return {};
-  }
-
-  try {
-    const parsed = JSON.parse(value);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('Grouped secret JSON must be an object.');
-    }
-    return parsed;
-  } catch (error) {
-    logger.warn('Grouped secret JSON is missing or invalid; falling back to legacy secrets.', {
-      secretName: name,
-      error: error.message,
-    });
-    return {};
-  }
-}
-
 function assertRequiredSecrets(groupName, secrets, requiredKeys) {
   const missingKeys = requiredKeys.filter((key) => !secrets[key]);
   if (missingKeys.length) {
@@ -2540,28 +5374,741 @@ function assertRequiredSecrets(groupName, secrets, requiredKeys) {
 }
 
 function getPaymentsSecrets() {
-  const groupedSecrets = parseGroupedSecretJson(
-    'UNCEDO_PAYMENTS_SECRETS',
-    UNCEDO_PAYMENTS_SECRETS.value(),
-  );
   const secrets = {
-    PAYSTACK_SECRET_KEY: String(groupedSecrets.PAYSTACK_SECRET_KEY || '').trim(),
+    PAYSTACK_SECRET_KEY: String(process.env.PAYSTACK_SECRET_KEY || '').trim(),
   };
 
-  assertRequiredSecrets('UNCEDO_PAYMENTS_SECRETS', secrets, ['PAYSTACK_SECRET_KEY']);
+  assertRequiredSecrets('functions/.env', secrets, ['PAYSTACK_SECRET_KEY']);
   return secrets;
 }
 
 function getEmailSecrets() {
-  const groupedSecrets = parseGroupedSecretJson('UNCEDO_EMAIL_SECRETS', UNCEDO_EMAIL_SECRETS.value());
   const secrets = {
-    RESEND_API_KEY: String(groupedSecrets.RESEND_API_KEY || '').trim(),
-    EMAIL_FROM: String(groupedSecrets.EMAIL_FROM || '').trim(),
+    RESEND_API_KEY: String(process.env.RESEND_API_KEY || '').trim(),
+    EMAIL_FROM: String(process.env.EMAIL_FROM || '').trim(),
   };
 
-  assertRequiredSecrets('UNCEDO_EMAIL_SECRETS', secrets, ['RESEND_API_KEY', 'EMAIL_FROM']);
+  assertRequiredSecrets('functions/.env', secrets, ['RESEND_API_KEY', 'EMAIL_FROM']);
   return secrets;
 }
+
+function getWhatsAppSecrets() {
+  return {
+    accessToken: String(process.env.WHATSAPP_ACCESS_TOKEN || '').trim(),
+    phoneNumberId: String(process.env.WHATSAPP_PHONE_NUMBER_ID || '').trim(),
+    verifyToken: String(process.env.WHATSAPP_VERIFY_TOKEN || '').trim(),
+    appSecret: String(process.env.META_APP_SECRET || '').trim(),
+    graphApiVersion: String(process.env.GRAPH_API_VERSION || '').trim(),
+    approvedTemplateNames: String(process.env.APPROVED_TEMPLATE_NAMES || '')
+      .split(',')
+      .map((name) => name.trim())
+      .filter(Boolean),
+  };
+}
+
+function getWhatsAppAuthConfiguration() {
+  const whatsapp = getWhatsAppSecrets();
+  return {
+    ...whatsapp,
+    messagingEnabled: whatsappMessagingEnabled(),
+    enabled: String(process.env.WHATSAPP_AUTH_ENABLED || '').trim().toLowerCase() === 'true',
+    templateName: String(process.env.WHATSAPP_AUTH_TEMPLATE_NAME || '').trim(),
+    templateLanguage: String(process.env.WHATSAPP_AUTH_TEMPLATE_LANGUAGE || '').trim(),
+  };
+}
+
+function getWhatsAppAuthClient(config) {
+  if (!config.messagingEnabled) throw new HttpsError('failed-precondition', 'WhatsApp messaging is disabled.');
+  if (!config.enabled) throw new HttpsError('failed-precondition', 'WhatsApp authentication is not configured.');
+  if (!config.accessToken || !config.phoneNumberId || !config.graphApiVersion || !config.appSecret) {
+    throw new HttpsError('failed-precondition', 'WhatsApp authentication is not configured.');
+  }
+  if (!config.templateName || !config.templateLanguage || !config.approvedTemplateNames.includes(config.templateName)) {
+    throw new HttpsError('failed-precondition', 'The approved WhatsApp authentication template is not configured.');
+  }
+  return createMetaWhatsAppClient({
+    accessToken: config.accessToken,
+    phoneNumberId: config.phoneNumberId,
+    graphApiVersion: config.graphApiVersion,
+    approvedTemplateNames: config.approvedTemplateNames,
+  });
+}
+
+async function consumeWhatsAppAuthRateLimit({ key, limit, windowMs }) {
+  const ref = db.collection('whatsappAuthRateLimits').doc(key);
+  const now = Date.now();
+  await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(ref);
+    const data = snapshot.exists ? snapshot.data() || {} : {};
+    const windowStartedAt = Number(data.windowStartedAt || 0);
+    const count = now - windowStartedAt < windowMs ? Number(data.count || 0) : 0;
+    if (count >= limit) {
+      throw new HttpsError('resource-exhausted', 'Too many code requests. Please try again later.');
+    }
+    transaction.set(ref, {
+      windowStartedAt: count ? windowStartedAt : now,
+      count: count + 1,
+      expiresAt: admin.firestore.Timestamp.fromMillis(now + windowMs),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+  });
+}
+
+function getAuthRequestIpHash(request) {
+  const rawRequest = request?.rawRequest;
+  const ip = String(rawRequest?.ip || rawRequest?.socket?.remoteAddress || 'unknown').trim();
+  return createHash('sha256').update(`wa-auth-ip:${ip}`).digest('hex');
+}
+
+async function getFirebaseUserByPhoneNumber(phoneNumber) {
+  try {
+    return await admin.auth().getUserByPhoneNumber(phoneNumber);
+  } catch (error) {
+    if (error?.code === 'auth/user-not-found') return null;
+    throw error;
+  }
+}
+
+async function getFirebaseUserByEmail(email) {
+  try {
+    return await admin.auth().getUserByEmail(email);
+  } catch (error) {
+    if (error?.code === 'auth/user-not-found') return null;
+    throw error;
+  }
+}
+
+function sanitizeAuthDisplayName(name) {
+  return String(name || '').trim().replace(/[\x00-\x1f\x7f]/g, '').slice(0, 120);
+}
+
+async function buildWhatsAppAuthUserProfile({ uid, role, email, name, phoneNumber }) {
+  const now = admin.firestore.FieldValue.serverTimestamp();
+  const base = {
+    uid,
+    email,
+    fullName: name,
+    displayName: name,
+    role,
+    activeRole: role,
+    roles: [role],
+    phoneNumber,
+    phoneNumberVerified: true,
+    phoneNumberVerifiedAt: now,
+    whatsappPhoneNumber: phoneNumber,
+    whatsappVerifiedAt: now,
+    createdAt: now,
+    updatedAt: now,
+  };
+  if (role === 'customer') {
+    return {
+      ...base,
+      customerProfile: {
+        accountType: '',
+        customerType: '',
+        serviceAddress: '',
+        discoverySource: '',
+        preferredServiceCategories: [],
+        businessName: '',
+        businessEmail: email,
+        businessCategory: '',
+      },
+      paymentMethods: [],
+      studentProfile: { grade: null, curriculum: '', discoverySource: '' },
+    };
+  }
+  const agreementSnap = await db.collection('legalDocuments').doc('helper_agreement').get().catch(() => null);
+  const agreementDocument = agreementSnap?.exists ? agreementSnap.data() || {} : {};
+  const agreementVersion = String(agreementDocument.currentVersion || '1.0.1').trim();
+  const agreementVersionId = String(agreementDocument.currentVersionId || `helper_agreement_${agreementVersion}`).trim();
+  const nameParts = name.split(/\s+/).filter(Boolean);
+  return {
+    ...base,
+    firstName: nameParts[0] || '',
+    lastName: nameParts.slice(1).join(' '),
+    providerType: '',
+    businessName: '',
+    verificationStatus: 'pending',
+    onlineStatus: 'offline',
+    profilePhoto: '',
+    services: [],
+    agreement: {
+      documentId: 'helper_agreement',
+      title: agreementDocument.title || 'Helper Agreement',
+      legalEntityName: agreementDocument.legalEntityName || LEGAL_ENTITY_NAME,
+      acceptedVersion: '',
+      requiredVersion: agreementVersion,
+      requiredVersionId: agreementVersionId,
+      currentVersion: agreementVersion,
+      currentVersionId: agreementVersionId,
+      currentVersionAccepted: false,
+      acceptedCurrentVersion: false,
+      acceptedAt: null,
+    },
+    payout: { bankName: '', accountHolder: '', accountNumber: '', recipientCode: '', verificationStatus: 'pending' },
+  };
+}
+
+exports.startWhatsAppAuthChallenge = onCall({
+  maxInstances: 2,
+  ...HALF_CPU_OPTIONS,
+  memory: '256MiB',
+  timeoutSeconds: 30,
+}, async (request) => {
+  const config = getWhatsAppAuthConfiguration();
+  const client = getWhatsAppAuthClient(config);
+  let input;
+  try {
+    input = normalizeWhatsAppAuthInput(request.data || {});
+  } catch (error) {
+    throw new HttpsError('invalid-argument', error.message);
+  }
+  const challengeId = randomUUID();
+  const code = generateWhatsAppOtp();
+  const phoneHash = createHash('sha256').update(`wa-auth-phone:${input.phoneNumber}`).digest('hex');
+  await Promise.all([
+    consumeWhatsAppAuthRateLimit({ key: `phone_${phoneHash}`, limit: 3, windowMs: 60 * 60 * 1000 }),
+    consumeWhatsAppAuthRateLimit({ key: `ip_${getAuthRequestIpHash(request)}`, limit: 10, windowMs: 60 * 60 * 1000 }),
+  ]);
+
+  let deliverable = true;
+  const existingPhoneUser = await getFirebaseUserByPhoneNumber(input.phoneNumber);
+  if (input.mode === 'login') {
+    const profileSnap = existingPhoneUser ? await db.collection('users').doc(existingPhoneUser.uid).get() : null;
+    deliverable = Boolean(existingPhoneUser && profileSnap?.exists && profileAllowsRole(profileSnap.data(), input.role));
+  } else {
+    const existingEmailUser = await getFirebaseUserByEmail(input.email);
+    deliverable = !existingPhoneUser && !existingEmailUser;
+  }
+
+  const challengeRef = db.collection('whatsappAuthChallenges').doc(challengeId);
+  await challengeRef.set({
+    phoneNumber: input.phoneNumber,
+    phoneHash,
+    role: input.role,
+    mode: input.mode,
+    name: sanitizeAuthDisplayName(input.name),
+    email: input.email,
+    codeHash: hashWhatsAppOtp({ challengeId, code, secret: config.appSecret }),
+    attempts: 0,
+    maxAttempts: 5,
+    deliverable,
+    consumed: false,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    expiresAt: admin.firestore.Timestamp.fromMillis(Date.now() + 5 * 60 * 1000),
+  });
+
+  if (deliverable) {
+    try {
+      await client.sendTemplate({
+        to: input.phoneNumber,
+        name: config.templateName,
+        languageCode: config.templateLanguage,
+        components: [{ type: 'body', parameters: [{ type: 'text', text: code }] }],
+      });
+    } catch (error) {
+      await challengeRef.set({ deliveryFailed: true, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      logger.warn('whatsapp_auth_code_delivery_failed', { errorCode: String(error?.code || 'delivery_failed').slice(0, 80) });
+      throw new HttpsError('unavailable', 'Unable to send a WhatsApp sign-in code right now.');
+    }
+  }
+  return { challengeId, expiresInSeconds: 300 };
+});
+
+exports.completeWhatsAppAuthChallenge = onCall({
+  maxInstances: 2,
+  ...HALF_CPU_OPTIONS,
+  memory: '256MiB',
+  timeoutSeconds: 30,
+}, async (request) => {
+  const challengeId = String(request.data?.challengeId || '').trim();
+  const code = String(request.data?.code || '').trim();
+  if (!/^[0-9a-f-]{36}$/i.test(challengeId) || !/^\d{6}$/.test(code)) {
+    throw new HttpsError('invalid-argument', 'The verification code is invalid or expired.');
+  }
+  const challengeRef = db.collection('whatsappAuthChallenges').doc(challengeId);
+  const challengeOutcome = await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(challengeRef);
+    if (!snapshot.exists) return null;
+    const challenge = snapshot.data() || {};
+    const now = Date.now();
+    if (challenge.consumed || challenge.expiresAt?.toMillis?.() <= now || Number(challenge.attempts || 0) >= Number(challenge.maxAttempts || 5)) return null;
+    const config = getWhatsAppAuthConfiguration();
+    const candidateHash = hashWhatsAppOtp({ challengeId, code, secret: config.appSecret });
+    const valid = constantTimeHashMatch(challenge.codeHash, candidateHash);
+    if (!valid) {
+      transaction.set(challengeRef, { attempts: admin.firestore.FieldValue.increment(1), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return { valid: false };
+    }
+    transaction.set(challengeRef, { consumed: true, consumedAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    return { valid: true, challenge };
+  });
+  if (!challengeOutcome?.valid || !challengeOutcome.challenge?.deliverable) {
+    throw new HttpsError('unauthenticated', 'The verification code is invalid or expired.');
+  }
+  const challenge = challengeOutcome.challenge;
+  let userRecord;
+  if (challenge.mode === 'signup') {
+    try {
+      userRecord = await admin.auth().createUser({
+        email: challenge.email,
+        phoneNumber: challenge.phoneNumber,
+        displayName: challenge.name,
+        emailVerified: false,
+      });
+    } catch (error) {
+      logger.warn('whatsapp_auth_account_creation_failed', { errorCode: String(error?.code || 'account_creation_failed').slice(0, 80) });
+      throw new HttpsError('already-exists', 'Unable to create an account with those details. Sign in or contact Uncedo support.');
+    }
+    const profile = await buildWhatsAppAuthUserProfile({
+      uid: userRecord.uid,
+      role: challenge.role,
+      email: challenge.email,
+      name: challenge.name,
+      phoneNumber: challenge.phoneNumber,
+    });
+    await db.collection('users').doc(userRecord.uid).set(profile, { merge: false });
+  } else {
+    userRecord = await getFirebaseUserByPhoneNumber(challenge.phoneNumber);
+    const profileSnap = userRecord ? await db.collection('users').doc(userRecord.uid).get() : null;
+    if (!userRecord || !profileSnap?.exists || !profileAllowsRole(profileSnap.data(), challenge.role)) {
+      throw new HttpsError('unauthenticated', 'The verification code is invalid or expired.');
+    }
+  }
+  const token = await admin.auth().createCustomToken(userRecord.uid, {
+    role: challenge.role,
+    whatsappAuthenticated: true,
+  });
+  return { customToken: token, role: challenge.role };
+});
+
+exports.linkWhatsAppIdentity = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+  const uid = String(request.auth?.uid || '').trim();
+  if (!uid || request.auth?.token?.whatsappAuthenticated !== true) {
+    throw new HttpsError('unauthenticated', 'Verify your WhatsApp number before linking it to Uncedo.');
+  }
+  const role = String(request.auth.token.role || '').trim().toLowerCase();
+  if (!['customer', 'helper'].includes(role)) throw new HttpsError('permission-denied', 'The verified account role is not supported.');
+  const authUser = await admin.auth().getUser(uid);
+  let phone;
+  try {
+    phone = normalizeWhatsAppIdentityPhone(authUser.phoneNumber || '');
+  } catch (_) {
+    throw new HttpsError('failed-precondition', 'The Firebase account does not have a verified WhatsApp phone number.');
+  }
+  const phoneNumberId = String(getWhatsAppSecrets().phoneNumberId || '').trim();
+  if (!phoneNumberId) throw new HttpsError('failed-precondition', 'WhatsApp identity linking is not configured.');
+  const identityId = buildWhatsAppIdentityId({ phoneNumberId, phoneNumber: phone.phoneNumber, stableEventId });
+  const identityRef = db.collection('whatsappIdentities').doc(identityId);
+  const conversationRef = db.collection('whatsappConversations').doc(identityId);
+  const userRef = db.collection('users').doc(uid);
+  const userLinkRef = db.collection('whatsappUserLinks').doc(uid);
+  const auditRef = db.collection('auditEvents').doc(stableEventId(`whatsapp-identity-link:${identityId}:${uid}`));
+
+  const result = await db.runTransaction(async (transaction) => {
+    const [identitySnap, conversationSnap, profileSnap, userLinkSnap, auditSnap] = await Promise.all([
+      transaction.get(identityRef), transaction.get(conversationRef), transaction.get(userRef),
+      transaction.get(userLinkRef), transaction.get(auditRef),
+    ]);
+    const identity = identitySnap.data() || {};
+    const guestPrincipalId = String(identity.guestPrincipalId || buildWhatsAppGuestPrincipalId(identityId));
+    const guestLinkRef = db.collection('whatsappGuestOwnership').doc(guestPrincipalId);
+    const guestLinkSnap = await transaction.get(guestLinkRef);
+    if (!profileSnap.exists || !profileAllowsRole(profileSnap.data() || {}, role)) return { code: 'role-mismatch' };
+    const currentOwner = String(identity.linkedFirebaseUid || '').trim();
+    if (identity.relinkRequiresSupport === true) return { code: 'identity-recovery-required' };
+    if (currentOwner && currentOwner !== uid) return { code: 'identity-linked-elsewhere' };
+    const existingUserLink = userLinkSnap.data() || {};
+    if (userLinkSnap.exists && String(existingUserLink.identityId || '') !== identityId) return { code: 'account-linked-elsewhere' };
+    const guestOwner = String(guestLinkSnap.data()?.uid || '').trim();
+    if (guestOwner && guestOwner !== uid) return { code: 'guest-history-linked-elsewhere' };
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    transaction.set(identityRef, {
+      channel: 'whatsapp', phoneNumberId, waId: phone.waId, guestPrincipalId,
+      linkedFirebaseUid: uid, role, verifiedAt: now, whatsappPhoneNumber: phone.phoneNumber,
+      guestAccessRevokedAt: null,
+      updatedAt: now, createdAt: identity.createdAt || now,
+    }, { merge: true });
+    transaction.set(conversationRef, {
+      channel: 'whatsapp', identityId, linkedFirebaseUid: uid, currentMode: conversationSnap.data()?.currentMode || 'assistant',
+      updatedAt: now, createdAt: conversationSnap.data()?.createdAt || now,
+    }, { merge: true });
+    transaction.set(userLinkRef, { uid, identityId, role, guestPrincipalId, phoneHash: createHash('sha256').update(phone.phoneNumber).digest('hex'), linkedAt: userLinkSnap.data()?.linkedAt || now, updatedAt: now }, { merge: true });
+    transaction.set(guestLinkRef, { uid, identityId, role, linkedAt: guestLinkSnap.data()?.linkedAt || now, updatedAt: now }, { merge: true });
+    transaction.set(userRef, {
+      whatsappPhoneNumber: phone.phoneNumber,
+      whatsappVerifiedAt: now,
+      whatsappGuestPrincipalIds: admin.firestore.FieldValue.arrayUnion(guestPrincipalId),
+      updatedAt: now,
+    }, { merge: true });
+    if (!auditSnap.exists) transaction.create(auditRef, {
+      eventType: 'whatsapp_identity_linked', actorUid: uid, identityId, role,
+      phoneHash: createHash('sha256').update(phone.phoneNumber).digest('hex'), createdAt: now,
+    });
+    return { code: currentOwner === uid ? 'already-linked' : 'linked', identityId, guestPrincipalId };
+  });
+  if (result.code === 'role-mismatch') throw new HttpsError('permission-denied', 'This WhatsApp identity cannot be linked to the selected account role.');
+  if (result.code === 'identity-linked-elsewhere' || result.code === 'account-linked-elsewhere' || result.code === 'guest-history-linked-elsewhere') {
+    throw new HttpsError('already-exists', 'This WhatsApp identity or its history is already linked to another Uncedo account. Contact support if you believe this is an error.');
+  }
+  if (result.code === 'identity-recovery-required') throw new HttpsError('failed-precondition', 'This WhatsApp identity needs account recovery before it can be linked again.');
+  return { identityId: result.identityId, guestPrincipalId: result.guestPrincipalId, linked: true, idempotent: result.code === 'already-linked' };
+});
+
+exports.unlinkWhatsAppIdentity = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+  const uid = String(request.auth?.uid || '').trim();
+  const authTime = Number(request.auth?.token?.auth_time || 0);
+  const recentAuth = authTime > 0 && Date.now() / 1000 - authTime <= 10 * 60;
+  const verifiedSession = request.auth?.token?.whatsappAuthenticated === true;
+  const verifiedEmailRecovery = request.auth?.token?.email_verified === true;
+  if (!uid || !recentAuth || !(verifiedSession || verifiedEmailRecovery)) {
+    throw new HttpsError('unauthenticated', 'Sign in again with WhatsApp or a verified email account before unlinking.');
+  }
+  const userLinkRef = db.collection('whatsappUserLinks').doc(uid);
+  const userRef = db.collection('users').doc(uid);
+  const linkSnap = await userLinkRef.get();
+  if (!linkSnap.exists) return { unlinked: false, idempotent: true };
+  const link = linkSnap.data() || {};
+  const identityId = String(link.identityId || '').trim();
+  const guestPrincipalId = String(link.guestPrincipalId || '').trim();
+  const identityRef = db.collection('whatsappIdentities').doc(identityId);
+  const conversationRef = db.collection('whatsappConversations').doc(identityId);
+  const guestLinkRef = db.collection('whatsappGuestOwnership').doc(guestPrincipalId);
+  const auditRef = db.collection('auditEvents').doc(stableEventId(`whatsapp-identity-unlink:${identityId}:${uid}:${authTime}`));
+  await db.runTransaction(async (transaction) => {
+    const [identitySnap, conversationSnap, profileSnap, auditSnap] = await Promise.all([
+      transaction.get(identityRef), transaction.get(conversationRef), transaction.get(userRef), transaction.get(auditRef),
+    ]);
+    const identity = identitySnap.data() || {};
+    if (String(identity.linkedFirebaseUid || '') !== uid) throw new HttpsError('permission-denied', 'This WhatsApp identity is not linked to your account.');
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    transaction.set(identityRef, { linkedFirebaseUid: null, role: null, verifiedAt: null, updatedAt: now }, { merge: true });
+    transaction.set(conversationRef, {
+      linkedFirebaseUid: null,
+      currentMode: 'assistant',
+      currentIntent: null,
+      activeDraftId: null,
+      activeServiceRequestId: null,
+      activeSupportTicketId: null,
+      humanHandoff: false,
+      updatedAt: now,
+    }, { merge: true });
+    transaction.delete(userLinkRef);
+    const oldIds = Array.isArray(profileSnap.data()?.whatsappGuestPrincipalIds) ? profileSnap.data().whatsappGuestPrincipalIds : [];
+    const nextGuestPrincipalId = `guest_${randomUUID()}`;
+    transaction.set(identityRef, {
+      guestPrincipalId: nextGuestPrincipalId,
+      previousOwnerUid: uid,
+      guestAccessRevokedAt: now,
+      updatedAt: now,
+    }, { merge: true });
+    transaction.set(userRef, {
+      whatsappPhoneNumber: null,
+      whatsappVerifiedAt: null,
+      // Keep historical guest ownership on this account. New WhatsApp use gets
+      // a fresh guest principal, so a reassigned number cannot inherit history.
+      whatsappGuestPrincipalIds: oldIds,
+      updatedAt: now,
+    }, { merge: true });
+    if (!oldIds.includes(guestPrincipalId)) logger.warn('whatsapp_identity_unlink_missing_guest_index', { uid, identityId });
+    if (!auditSnap.exists) transaction.create(auditRef, { eventType: 'whatsapp_identity_unlinked', actorUid: uid, identityId, role: link.role || null, createdAt: now });
+  });
+  return { unlinked: true };
+});
+
+async function requireWhatsAppSupportAdmin(request) {
+  const uid = String(request.auth?.uid || '').trim();
+  if (!uid) throw new HttpsError('unauthenticated', 'Admin sign-in is required.');
+  const token = request.auth?.token || {};
+  const profileSnap = await db.collection('users').doc(uid).get();
+  const profile = profileSnap.exists ? profileSnap.data() || {} : {};
+  const roles = Array.isArray(profile.roles) ? profile.roles.map((value) => String(value || '').toLowerCase()) : [];
+  const allowed = String(token.email || '').toLowerCase() === 'jabuobed1@gmail.com'
+    || token.isAdmin === true || profile.isAdmin === true || String(profile.role || '').toLowerCase() === 'admin' || roles.includes('admin');
+  if (!allowed) throw new HttpsError('permission-denied', 'Admin authorization is required.');
+  return uid;
+}
+
+exports.setWhatsAppSupportTicketState = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+  const adminUid = await requireWhatsAppSupportAdmin(request);
+  const ticketId = String(request.data?.ticketId || '').trim();
+  const status = String(request.data?.status || '').trim().toLowerCase();
+  if (!/^wa_support_[a-f0-9]{32}$/.test(ticketId) || !['open', 'in_progress', 'waiting_on_customer', 'resolved', 'closed'].includes(status)) {
+    throw new HttpsError('invalid-argument', 'A valid support ticket and status are required.');
+  }
+  const ticketRef = db.collection('supportTickets').doc(ticketId);
+  const result = await db.runTransaction(async (transaction) => {
+    const ticketSnap = await transaction.get(ticketRef);
+    if (!ticketSnap.exists) return { code: 'not-found' };
+    const ticket = ticketSnap.data() || {};
+    const conversationRef = ticket.identityId ? db.collection('whatsappConversations').doc(ticket.identityId) : null;
+    const conversationSnap = conversationRef ? await transaction.get(conversationRef) : null;
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    transaction.set(ticketRef, { status, assignedAdminUid: adminUid, updatedAt: now, statusUpdatedBy: adminUid }, { merge: true });
+    if (conversationRef && ['resolved', 'closed'].includes(status) && conversationSnap?.exists) {
+      transaction.set(conversationRef, { humanHandoff: false, currentMode: 'assistant', activeSupportTicketId: null, updatedAt: now }, { merge: true });
+    }
+    transaction.create(db.collection('auditEvents').doc(stableEventId(`support-ticket-state:${ticketId}:${status}:${adminUid}:${Date.now()}`)), {
+      eventType: 'whatsapp_support_ticket_state_changed', ticketId, status, actorUid: adminUid, createdAt: now,
+    });
+    return { code: 'updated' };
+  });
+  if (result.code === 'not-found') throw new HttpsError('not-found', 'Support ticket not found.');
+  return { ticketId, status };
+});
+
+exports.replyToWhatsAppSupportTicket = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+  const adminUid = await requireWhatsAppSupportAdmin(request);
+  if (!whatsappSupportEnabled() || !whatsappMessagingEnabled()) throw new HttpsError('failed-precondition', 'WhatsApp support messaging is disabled.');
+  const ticketId = String(request.data?.ticketId || '').trim();
+  const replyId = String(request.data?.replyId || '').trim();
+  const text = String(request.data?.text || '').trim().slice(0, 3500);
+  if (!/^wa_support_[a-f0-9]{32}$/.test(ticketId) || !/^[A-Za-z0-9_-]{8,100}$/.test(replyId) || !text) {
+    throw new HttpsError('invalid-argument', 'A valid ticket, reply ID and reply message are required.');
+  }
+  const ticketRef = db.collection('supportTickets').doc(ticketId);
+  const ticketMessageRef = ticketRef.collection('messages').doc(`admin_${replyId}`);
+  const outboundRef = db.collection('whatsappMessages').doc(stableEventId(`support-reply:${ticketId}:${replyId}`));
+  const claim = await db.runTransaction(async (transaction) => {
+    const [ticketSnap, outboundSnap] = await Promise.all([transaction.get(ticketRef), transaction.get(outboundRef)]);
+    if (!ticketSnap.exists) return { code: 'not-found' };
+    if (outboundSnap.exists) return { code: 'already-sent' };
+    const ticket = ticketSnap.data() || {};
+    if (['resolved', 'closed'].includes(String(ticket.status || '').toLowerCase())) return { code: 'closed' };
+    if (!ticket.identityId) return { code: 'identity-missing' };
+    const identityRef = db.collection('whatsappIdentities').doc(ticket.identityId);
+    const conversationRef = db.collection('whatsappConversations').doc(ticket.identityId);
+    const [identitySnap, conversationSnap] = await Promise.all([transaction.get(identityRef), transaction.get(conversationRef)]);
+    if (!identitySnap.exists || !conversationSnap.exists) return { code: 'identity-missing' };
+    const identity = identitySnap.data() || {};
+    const conversation = conversationSnap.data() || {};
+    if (!identity.waId || identity.phoneNumberId !== getWhatsAppSecrets().phoneNumberId) return { code: 'identity-invalid' };
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    transaction.create(outboundRef, {
+      identityId: ticket.identityId, requestId: ticket.requestId || null, to: identity.waId,
+      phoneNumberId: identity.phoneNumberId, direction: 'outbound', type: 'human_support_reply',
+      text, status: 'sending', ticketId, replyId, createdBy: adminUid, createdAt: now,
+    });
+    transaction.create(ticketMessageRef, {
+      messageId: replyId, senderType: 'admin', senderUid: adminUid,
+      text, type: 'text', createdAt: now, createdAtMs: Date.now(), deliveryStatus: 'sending',
+    });
+    transaction.set(ticketRef, { status: 'waiting_on_customer', lastMessageAtMs: Date.now(), updatedAt: now }, { merge: true });
+    return {
+      code: 'claimed', to: String(identity.waId), identityId: ticket.identityId,
+      lastInboundAtMs: Number(conversation.lastInboundMessageAtMs || 0),
+      phoneNumberId: String(identity.phoneNumberId),
+    };
+  });
+  if (claim.code === 'not-found') throw new HttpsError('not-found', 'Support ticket not found.');
+  if (claim.code === 'already-sent') return { ticketId, replyId, idempotent: true };
+  if (claim.code !== 'claimed') throw new HttpsError('failed-precondition', 'This support ticket cannot receive a WhatsApp reply.');
+
+  try {
+    const { client, secrets } = getWhatsAppMetaClient();
+    let delivery;
+    if (isWithinCustomerServiceWindow(claim.lastInboundAtMs)) {
+      delivery = await client.sendText({ to: claim.to, text, lastInboundAtMs: claim.lastInboundAtMs });
+    } else {
+      const templateName = String(process.env.WHATSAPP_SUPPORT_REPLY_TEMPLATE_NAME || '').trim();
+      const languageCode = String(process.env.WHATSAPP_SUPPORT_REPLY_TEMPLATE_LANGUAGE || '').trim();
+      if (!templateName || !languageCode || !secrets.approvedTemplateNames.includes(templateName)) {
+        await outboundRef.set({ status: 'blocked_template_required', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        await ticketMessageRef.set({ deliveryStatus: 'blocked_template_required', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        throw new HttpsError('failed-precondition', 'An approved support reply template is required outside the WhatsApp customer-service window.');
+      }
+      delivery = await client.sendTemplate({ to: claim.to, name: templateName, languageCode, components: [{ type: 'body', parameters: [{ type: 'text', text }] }] });
+    }
+    await outboundRef.set({ status: 'sent', metaMessageId: delivery.messageId || null, sentAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    await reconcileWhatsAppDeliveryStatuses({ metaMessageId: delivery.messageId, recipientId: claim.to, messageRef: outboundRef });
+    await ticketMessageRef.set({ deliveryStatus: 'sent', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    return { ticketId, replyId, sent: true };
+  } catch (error) {
+    if (error instanceof HttpsError) throw error;
+    const deliveryStatus = classifyMetaDeliveryError(error);
+    await outboundRef.set({ status: deliveryStatus, deliveryStatus, errorCode: String(error?.code || 'meta_delivery_unknown').slice(0, 100), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    await ticketMessageRef.set({ deliveryStatus, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    throw new HttpsError('unavailable', deliveryStatus === 'outcome_unknown'
+      ? 'WhatsApp could not confirm the reply delivery. It is held for review to avoid duplicates.'
+      : 'WhatsApp rejected the reply. It is recorded as failed and was not automatically resent.');
+  }
+});
+
+exports.getWhatsAppSupportMediaUrl = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+  await requireWhatsAppSupportAdmin(request);
+  const ticketId = String(request.data?.ticketId || '').trim();
+  const messageId = String(request.data?.messageId || '').trim();
+  const result = await createWhatsAppSupportMediaUrl({
+    db,
+    storageBucket: admin.storage().bucket(),
+    ticketId,
+    messageId,
+  });
+  if (result.code === 'not-found' || result.code === 'media-not-found') throw new HttpsError('not-found', 'Support attachment not found.');
+  if (result.code !== 'available') throw new HttpsError('permission-denied', 'This attachment is not available for this support ticket.');
+  return { url: result.url, expiresAtMs: result.expiresAtMs, mimeType: result.mimeType };
+});
+
+exports.setWhatsAppNotificationPreference = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+  const uid = String(request.auth?.uid || '').trim();
+  const enabled = request.data?.enabled === true;
+  const authTime = Number(request.auth?.token?.auth_time || 0);
+  const recentlyAuthenticated = authTime > 0 && Date.now() / 1000 - authTime <= 10 * 60;
+  if (!uid || !recentlyAuthenticated) throw new HttpsError('unauthenticated', 'Sign in again before changing WhatsApp notification preferences.');
+  const userLinkRef = db.collection('whatsappUserLinks').doc(uid);
+  const userLinkSnap = await userLinkRef.get();
+  if (!userLinkSnap.exists) throw new HttpsError('failed-precondition', 'Link your WhatsApp identity before changing notification preferences.');
+  const identityId = String(userLinkSnap.data()?.identityId || '').trim();
+  const identityRef = db.collection('whatsappIdentities').doc(identityId);
+  const nowMs = Date.now();
+  const result = await db.runTransaction(async (transaction) => {
+    const identitySnap = await transaction.get(identityRef);
+    if (!identitySnap.exists || String(identitySnap.data()?.linkedFirebaseUid || '') !== uid) return { code: 'not-linked' };
+    transaction.set(identityRef, {
+      whatsappNotificationsEnabled: enabled,
+      whatsappNotificationsConsentAtMs: enabled ? nowMs : null,
+      whatsappNotificationsConsentVersion: enabled ? '2026-10' : null,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    const auditRef = db.collection('auditEvents').doc(stableEventId(`whatsapp-notification-preference:${uid}:${identityId}:${nowMs}`));
+    transaction.create(auditRef, { eventType: 'whatsapp_notification_preference_changed', actorUid: uid, identityId, enabled, createdAt: admin.firestore.FieldValue.serverTimestamp() });
+    return { code: 'updated' };
+  });
+  if (result.code !== 'updated') throw new HttpsError('permission-denied', 'The WhatsApp identity is not linked to this account.');
+  return { enabled };
+});
+
+const WHATSAPP_STATUS_NOTIFICATION_CONFIG = {
+  matching: { key: 'BOOKING_CONFIRMED', description: 'Your booking is confirmed and Uncedo is looking for a helper.' },
+  accepted: { key: 'HELPER_ASSIGNED', description: 'A helper accepted your service request.' },
+  driving: { key: 'HELPER_ON_THE_WAY', description: 'Your helper is travelling to your service location.' },
+  en_route: { key: 'HELPER_ON_THE_WAY', description: 'Your helper is on the way.' },
+  work_started: { key: 'SERVICE_STARTED', description: 'Your service has started.' },
+  completed: { key: 'SERVICE_COMPLETED', description: 'Your service is complete. Payment may be required.' },
+  canceled: { key: 'BOOKING_CANCELED', description: 'Your service request was canceled.' },
+};
+
+async function syncWhatsAppRelayModeForRequestTransition({ after, status, beforeStatus, requestId }) {
+  if (!['accepted', 'completed', 'canceled', 'expired', 'no_helper_available'].includes(status) || status === beforeStatus) return;
+  const identities = [];
+  const customerId = String(after.customerId || '').trim();
+  const originIdentityId = String(after.originIdentityId || '').trim();
+  if (originIdentityId) identities.push(originIdentityId);
+  else if (customerId && !customerId.startsWith('guest_')) {
+    const link = await db.collection('whatsappUserLinks').doc(customerId).get();
+    if (link.exists) identities.push(String(link.data()?.identityId || '').trim());
+  }
+  const helperId = String(after.helperAssignment?.helperId || '').trim();
+  if (helperId) {
+    const link = await db.collection('whatsappUserLinks').doc(helperId).get();
+    if (link.exists) identities.push(String(link.data()?.identityId || '').trim());
+  }
+  const activeIdentities = [...new Set(identities.filter(Boolean))];
+  for (const identityId of activeIdentities) {
+    const conversationRef = db.collection('whatsappConversations').doc(identityId);
+    await db.runTransaction(async (transaction) => {
+      const conversationSnap = await transaction.get(conversationRef);
+      if (status === 'accepted') {
+        transaction.set(conversationRef, {
+          currentMode: 'provider_relay', currentIntent: 'provider_relay',
+          activeServiceRequestId: requestId, updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        return;
+      }
+      if (String(conversationSnap.data()?.activeServiceRequestId || '') === requestId) {
+        transaction.set(conversationRef, {
+          currentMode: 'assistant', currentIntent: null, activeServiceRequestId: null,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+      }
+    });
+  }
+}
+
+exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
+  document: 'serviceRequests/{requestId}', maxInstances: 2, ...HALF_CPU_OPTIONS,
+}, async (event) => {
+  const before = event.data.before.exists ? event.data.before.data() || {} : null;
+  const after = event.data.after.exists ? event.data.after.data() || {} : null;
+  if (!after) return;
+  const beforeStatus = String(before?.status || '').toLowerCase();
+  const status = String(after.status || '').toLowerCase();
+  const requestId = String(event.params.requestId || '').trim();
+  await syncWhatsAppRelayModeForRequestTransition({ after, status, beforeStatus, requestId }).catch((error) => {
+    logger.warn('whatsapp_relay_mode_sync_failed', { requestId, status, errorCode: String(error?.code || 'conversation_sync_failed').slice(0, 80) });
+  });
+  if (!whatsappNotificationsEnabled() || !whatsappMessagingEnabled()) return;
+  const statusEvent = beforeStatus !== status ? WHATSAPP_STATUS_NOTIFICATION_CONFIG[status] : null;
+  const paymentChanged = before && String(before.paymentStatus || '') !== String(after.paymentStatus || '')
+    && ['paid', 'unpaid', 'payment_reconciliation_required'].includes(String(after.paymentStatus || '').toLowerCase());
+  const eventConfig = statusEvent || (paymentChanged ? {
+    key: String(after.paymentStatus || '').toLowerCase() === 'paid' ? 'PAYMENT_CONFIRMED' : 'PAYMENT_REQUIRED',
+    description: String(after.paymentStatus || '').toLowerCase() === 'paid' ? 'Payment for your service was confirmed.' : 'Payment is required for your service request.',
+  } : null);
+  if (!eventConfig || status === 'helper_found') return;
+
+  const identities = [];
+  const customerIdentityId = String(after.originIdentityId || '').trim();
+  if (customerIdentityId) identities.push({ identityId: customerIdentityId, eventRole: 'customer' });
+  else if (String(after.customerId || '').trim() && !String(after.customerId).startsWith('guest_')) {
+    const link = await db.collection('whatsappUserLinks').doc(String(after.customerId)).get();
+    if (link.exists) identities.push({ identityId: String(link.data()?.identityId || ''), eventRole: 'customer' });
+  }
+  if (status === 'accepted' || ['driving', 'en_route', 'work_started', 'completed'].includes(status)) {
+    const helperId = String(after.helperAssignment?.helperId || '').trim();
+    if (helperId) {
+      const link = await db.collection('whatsappUserLinks').doc(helperId).get();
+      if (link.exists) identities.push({ identityId: String(link.data()?.identityId || ''), eventRole: 'helper' });
+    }
+  }
+
+  const secrets = getWhatsAppSecrets();
+  const templateName = String(process.env[`WHATSAPP_TEMPLATE_${eventConfig.key}_NAME`] || '').trim();
+  const languageCode = String(process.env[`WHATSAPP_TEMPLATE_${eventConfig.key}_LANGUAGE`] || '').trim();
+  if (!templateName || !languageCode || !secrets.approvedTemplateNames.includes(templateName)
+    || !secrets.accessToken || !secrets.phoneNumberId || !secrets.graphApiVersion) return;
+  const client = createMetaWhatsAppClient({ accessToken: secrets.accessToken, phoneNumberId: secrets.phoneNumberId, graphApiVersion: secrets.graphApiVersion, approvedTemplateNames: secrets.approvedTemplateNames });
+
+  for (const recipient of identities) {
+    if (!recipient.identityId) continue;
+    const identityRef = db.collection('whatsappIdentities').doc(recipient.identityId);
+    const identitySnap = await identityRef.get();
+    if (!identitySnap.exists) continue;
+    const identity = identitySnap.data() || {};
+    if (identity.phoneNumberId !== secrets.phoneNumberId
+      || !(Number(identity.whatsappNotificationsConsentAtMs || 0) > 0 || identity.whatsappNotificationsEnabled === true)) continue;
+    const notificationId = stableEventId(`lifecycle:${requestId}:${status}:${String(after.paymentStatus || '')}:${recipient.identityId}`);
+    const outboundRef = db.collection('whatsappMessages').doc(notificationId);
+    const claimed = await db.runTransaction(async (transaction) => {
+      const [outboundSnap, currentRequestSnap] = await Promise.all([transaction.get(outboundRef), transaction.get(db.collection('serviceRequests').doc(requestId))]);
+      if (outboundSnap.exists || !currentRequestSnap.exists) return false;
+      const current = currentRequestSnap.data() || {};
+      if (String(current.status || '').toLowerCase() !== status || String(current.paymentStatus || '') !== String(after.paymentStatus || '')) return false;
+      transaction.create(outboundRef, {
+        eventId: notificationId, identityId: recipient.identityId, requestId, phoneNumberId: secrets.phoneNumberId,
+        to: identity.waId, direction: 'outbound', type: 'template', status: 'sending',
+        templateName, createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      return true;
+    });
+    if (!claimed) continue;
+    try {
+      const delivery = await client.sendTemplate({
+        to: identity.waId, name: templateName, languageCode,
+        components: [{ type: 'body', parameters: [
+          { type: 'text', text: String(after.serviceSummary || after.subject || 'Uncedo service').slice(0, 180) },
+          { type: 'text', text: String(eventConfig.description).slice(0, 240) },
+        ] }],
+      });
+      await outboundRef.set({ status: 'sent', metaMessageId: delivery.messageId || null, sentAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      await reconcileWhatsAppDeliveryStatuses({ metaMessageId: delivery.messageId, recipientId: identity.waId, messageRef: outboundRef });
+    } catch (error) {
+      const deliveryStatus = classifyMetaDeliveryError(error);
+      await outboundRef.set({ status: deliveryStatus, deliveryStatus, errorCode: String(error?.code || 'meta_delivery_unknown').slice(0, 100), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      logger.warn('whatsapp_lifecycle_notification_delivery_failed', { requestId, status, deliveryStatus, errorCode: String(error?.code || 'unknown').slice(0, 80) });
+    }
+  }
+});
 
 function isValidEmailAddress(value = '') {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
@@ -2628,7 +6175,7 @@ async function sendTutorAgreementEmailWithAttachment({
   };
 }
 
-exports.verifyPaystack = onRequest({ cors: true, invoker: 'public', secrets: [UNCEDO_PAYMENTS_SECRETS] }, async (req, res) => {
+exports.verifyPaystack = onRequest({ cors: true, invoker: 'public' }, async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, message: 'Method not allowed' });
     return;
@@ -2765,35 +6312,28 @@ exports.verifyPaystack = onRequest({ cors: true, invoker: 'public', secrets: [UN
     const usersRef = db.collection('users').doc(uid);
     const userSnap = await usersRef.get();
     const studentData = userSnap.data() || {};
-    const existingMethods = Array.isArray(userSnap.data()?.paymentMethods)
-      ? userSnap.data().paymentMethods
-      : [];
-
-    const duplicateMethod = existingMethods.find(
-      (method) => method.paystackAuthorizationCode === authorization.authorization_code,
-    );
-
-    const safeCardRecord = duplicateMethod || {
-      id: randomUUID(),
-      nickname: nickname || `${(authorization.brand || 'Card').charAt(0).toUpperCase() + (authorization.brand || 'Card').slice(1)} •••• ${authorization.last4 || '----'}`,
-      brand: authorization.brand || 'Card',
-      last4: authorization.last4 || '----',
-      paystackAuthorizationCode: authorization.authorization_code,
-      signature: authorization.signature || null,
-      reusable: true,
-      isDefault: existingMethods.length === 0,
-      createdAt: new Date().toISOString(),
-    };
-
-    if (!duplicateMethod) {
-      await usersRef.set(
-        {
-          paymentMethods: [...existingMethods, safeCardRecord],
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-        { merge: true },
-      );
+    const verifiedAccountEmail = String(decodedToken.email || studentData.email || '').trim().toLowerCase();
+    const transactionEmail = String(transactionData.customer?.email || '').trim().toLowerCase();
+    if (!verifiedAccountEmail || !transactionEmail || verifiedAccountEmail !== transactionEmail) {
+      res.status(403).json({ success: false, message: 'This payment reference does not belong to the signed-in account.' });
+      return;
     }
+    await migrateLegacyPaymentMethods({ db, admin, uid });
+    const savedCard = await storeReusablePaymentMethod({
+      db,
+      admin,
+      uid,
+      authorization,
+      nickname,
+      consentAtMs: Date.now(),
+      consentPurpose: 'customer_added_payment_method',
+    });
+    if (!savedCard.saved) {
+      res.status(409).json({ success: false, message: 'This card could not be securely saved to the account.' });
+      return;
+    }
+    const safeCardRecord = savedCard.card;
+    const duplicateMethod = savedCard.duplicate === true;
 
     logger.info('Card saved to Firestore.', {
       uid,
@@ -2831,44 +6371,73 @@ exports.verifyPaystack = onRequest({ cors: true, invoker: 'public', secrets: [UN
 
     let refundSucceeded = false;
     let refundMessage = null;
-
+    let refundOperation = null;
     try {
-      const refundResponse = await fetch('https://api.paystack.co/refund', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${paystackSecretKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ transaction: reference }),
-      });
-
-      const refundPayload = await refundResponse.json().catch(() => null);
-
-      logger.info('Paystack refund response status.', {
-        status: refundResponse.status,
-        ok: refundResponse.ok,
+      const refundClaim = await claimPaystackRefund({
+        db,
         reference,
-        responseStatus: refundPayload?.status,
-        message: refundPayload?.message,
-        errorCode: refundPayload?.code || null,
-        errorType: refundPayload?.type || null,
+        userId: uid,
+        amountMinor: Number(transactionData.amount || 0),
+        currency: transactionData.currency || 'ZAR',
       });
-
-      if (!refundResponse.ok) {
-        const refundError = new Error(`Paystack refund failed (${refundResponse.status})`);
-        refundError.response = {
-          data: refundPayload || `HTTP ${refundResponse.status}`,
-        };
-        throw refundError;
+      if (refundClaim.action === 'conflict') {
+        throw new Error('The refund operation is bound to a different account.');
       }
-
-      refundSucceeded = true;
-    } catch (refundError) {
-      refundMessage = 'Card saved, but refund is still processing. Please contact support if not reversed shortly.';
-      logger.error('Paystack refund failed after successful authorization.', {
+      if (refundClaim.action === 'submit') {
+        let refundPayload = null;
+        let refundOutcome = 'unknown';
+        let refundReason = null;
+        try {
+          const refundResponse = await fetch('https://api.paystack.co/refund', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${paystackSecretKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ transaction: reference }),
+            signal: AbortSignal.timeout(20_000),
+          });
+          refundPayload = await refundResponse.json().catch(() => null);
+          const refundStatus = String(refundPayload?.data?.status || '').toLowerCase();
+          if (refundResponse.ok && refundPayload?.status === true && ['processed', 'success'].includes(refundStatus)) {
+            refundOutcome = 'success';
+          } else if (refundResponse.ok && refundPayload?.status === true && ['failed', 'rejected'].includes(refundStatus)) {
+            refundOutcome = 'failed_confirmed';
+          } else {
+            refundOutcome = 'unknown';
+            refundReason = refundPayload?.message || `Refund response status ${refundResponse.status} requires reconciliation.`;
+          }
+        } catch (refundError) {
+          refundReason = String(refundError?.code || 'refund_request_outcome_unknown').slice(0, 120);
+        }
+        await recordPaystackRefundObservation({
+          db,
+          operationRef: refundClaim.operationRef,
+          outcome: refundOutcome,
+          refund: refundPayload?.data || null,
+          reason: refundReason,
+        });
+      }
+      const refundSnap = await refundClaim.operationRef.get();
+      refundOperation = refundSnap.data() || null;
+      refundSucceeded = refundOperation?.status === 'refunded';
+      if (!refundSucceeded) {
+        refundMessage = refundOperation?.status === 'failed_confirmed'
+          ? 'Card saved, but the refund was not confirmed. Please contact support before retrying.'
+          : 'Card saved, but the refund outcome is still being reconciled. Please contact support if it does not appear shortly.';
+      }
+      logger.info('Paystack card authorization refund state recorded.', {
         reference,
         uid,
-        error: refundError.response?.data || refundError.message,
+        refundStatus: refundOperation?.status || 'unknown',
+        duplicateRequest: refundClaim.action === 'existing',
+      });
+    } catch (refundError) {
+      refundMessage = 'Card saved, but the refund outcome could not be recorded. Please contact support before retrying.';
+      logger.error('Paystack refund operation could not be recorded.', {
+        reference,
+        uid,
+        error: refundError.message,
       });
     }
 
@@ -2922,7 +6491,6 @@ exports.verifyPaystack = onRequest({ cors: true, invoker: 'public', secrets: [UN
         last4: safeCardRecord.last4,
         reusable: safeCardRecord.reusable,
         isDefault: safeCardRecord.isDefault,
-        signature: safeCardRecord.signature,
         createdAt: safeCardRecord.createdAt,
       },
       refunded: refundSucceeded,
@@ -2969,7 +6537,7 @@ exports.captureReferral = onRequest({ cors: true }, async (req, res) => {
   } catch (error) { logger.warn('referral_rejected', { uid: decoded.uid, reason: error.message }); res.status(400).json({ success: false, message: error.message }); }
 });
 
-exports.ensureReferralCode = onRequest({ cors: true }, async (req, res) => {
+exports.ensureReferralCode = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
   const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
   if (!decoded?.uid) { res.status(401).json({ success: false, message: 'Unauthorized request.' }); return; }
@@ -3050,7 +6618,7 @@ exports.getMyReferralSummary = onRequest({ cors: true }, async (req, res) => {
   }
 });
 
-exports.evaluateCustomerReferralStageOne = onRequest({ cors: true }, async (req, res) => {
+exports.evaluateCustomerReferralStageOne = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
   const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
   if (!decoded?.uid) { res.status(401).json({ success: false, message: 'Unauthorized request.' }); return; }
@@ -3091,14 +6659,14 @@ async function getVerifiedRequestUser(req) {
   return { uid: decoded.uid, email: decoded.email || '', ...profile };
 }
 
-exports.reserveServiceCredit = onRequest({ cors: true }, async (req, res) => {
+exports.reserveServiceCredit = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
   const user = await getVerifiedRequestUser(req); if (!user) return res.status(401).json({ success: false, message: 'Unauthorized request.' });
   try { const redemption = await reserveServiceCredit({ db, admin, userId: user.uid, requestId: String(req.body?.requestId || ''), requestedPoints: req.body?.points }); res.status(200).json({ success: true, redemption }); }
   catch (error) { logger.warn('service_credit_reservation_failed', { uid: user.uid, error: error.message }); res.status(400).json({ success: false, message: error.message }); }
 });
 
-exports.releaseServiceCredit = onRequest({ cors: true }, async (req, res) => {
+exports.releaseServiceCredit = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
   const user = await getVerifiedRequestUser(req); if (!user) return res.status(401).json({ success: false, message: 'Unauthorized request.' });
   const requestId = String(req.body?.requestId || ''); const request = (await db.collection('serviceRequests').doc(requestId).get()).data() || {};
@@ -3107,7 +6675,7 @@ exports.releaseServiceCredit = onRequest({ cors: true }, async (req, res) => {
   catch (error) { res.status(400).json({ success: false, message: error.message }); }
 });
 
-exports.adminAdjustReward = onRequest({ cors: true }, async (req, res) => {
+exports.adminAdjustReward = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
   const user = await getVerifiedRequestUser(req); if (!user?.isAdmin && user?.role !== 'admin' && user?.email !== 'jabuobed1@gmail.com') return res.status(403).json({ success: false, message: 'Admin only.' });
   try { const result = await adminRewardAdjustment({ db, admin, adminUser: user, userId: String(req.body?.userId || ''), accountType: req.body?.accountType, direction: req.body?.direction, points: req.body?.points, reason: req.body?.reason, supportReference: req.body?.supportReference }); res.status(200).json({ success: true, result }); }
@@ -3128,7 +6696,7 @@ function validateRewardConfigPatch(configId, patch) {
   if (patch.pointsPerRand !== undefined && Number(patch.pointsPerRand) < 1) throw new Error('Points-per-Rand must be at least one.');
 }
 
-exports.adminUpdateRewardConfig = onRequest({ cors: true }, async (req, res) => {
+exports.adminUpdateRewardConfig = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
   const user = await getVerifiedRequestUser(req); if (!isRewardAdmin(user)) return res.status(403).json({ success: false, message: 'Admin only.' });
   try {
@@ -3146,7 +6714,7 @@ exports.adminUpdateRewardConfig = onRequest({ cors: true }, async (req, res) => 
   } catch (error) { res.status(400).json({ success: false, message: error.message }); }
 });
 
-exports.adminRewardOperations = onRequest({ cors: true }, async (req, res) => {
+exports.adminRewardOperations = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'GET') return res.status(405).json({ success: false, message: 'Method not allowed' });
   const user = await getVerifiedRequestUser(req); if (!isRewardAdmin(user)) return res.status(403).json({ success: false, message: 'Admin only.' });
   try {
@@ -3180,7 +6748,7 @@ exports.requestHelperRewardBenefit = onRequest({ cors: true }, async (req, res) 
   catch (error) { res.status(400).json({ success: false, message: error.message }); }
 });
 
-exports.updatePaymentMethod = onRequest({ cors: true }, async (req, res) => {
+exports.updatePaymentMethod = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
   const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
   if (!decoded?.uid) { res.status(401).json({ success: false, message: 'Unauthorized request.' }); return; }
@@ -3191,53 +6759,550 @@ exports.updatePaymentMethod = onRequest({ cors: true }, async (req, res) => {
     res.status(400).json({ success: false, message: 'Invalid payment-method request.' }); return;
   }
 
-  const userRef = db.collection('users').doc(decoded.uid);
-  const userSnap = await userRef.get();
-  if (!userSnap.exists) {
-    res.status(404).json({ success: false, message: 'User profile not found.' }); return;
-  }
-
-  const user = userSnap.data() || {};
-  const paymentMethods = Array.isArray(user.paymentMethods) ? [...user.paymentMethods] : [];
-  const methodIndex = paymentMethods.findIndex((method) => String(method?.id || '').trim() === methodId);
-  if (methodIndex < 0) {
-    res.status(404).json({ success: false, message: 'Payment method not found.' }); return;
-  }
-
-  let nextMethods = paymentMethods;
-  if (action === 'set_default') {
-    nextMethods = paymentMethods.map((method) => ({
-      ...method,
-      isDefault: String(method?.id || '').trim() === methodId,
-    }));
-  } else {
-    nextMethods = paymentMethods.filter((method) => String(method?.id || '').trim() !== methodId);
-    if (nextMethods.length && !nextMethods.some((method) => method.isDefault)) {
-      nextMethods[0] = { ...nextMethods[0], isDefault: true };
-    }
-  }
-
-  await userRef.set({
-    paymentMethods: nextMethods,
-    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-  }, { merge: true });
-
-  res.status(200).json({
-    success: true,
-    paymentMethods: nextMethods.map((method) => ({
-      id: method.id,
-      nickname: method.nickname,
-      brand: method.brand,
-      last4: method.last4,
-      isDefault: Boolean(method.isDefault),
-      reusable: method.reusable === true,
-      signature: method.signature || null,
-      createdAt: method.createdAt || null,
-    })),
-  });
+  const result = await updateSavedPaymentMethod({ db, admin, uid: decoded.uid, methodId, action });
+  if (result.action === 'profile-not-found') return res.status(404).json({ success: false, message: 'User profile not found.' });
+  if (result.action === 'method-not-found') return res.status(404).json({ success: false, message: 'Payment method not found.' });
+  if (result.action !== 'updated') return res.status(400).json({ success: false, message: 'Invalid payment-method request.' });
+  return res.status(200).json({ success: true, paymentMethods: result.paymentMethods });
 });
 
-exports.submitServiceRequestRating = onRequest({ cors: true }, async (req, res) => {
+function paymentFeatureUnavailable(res) {
+  return res.status(503).json({ success: false, code: 'payments-disabled', message: 'The updated payment options are not enabled yet.' });
+}
+
+function getRequestPaymentReference(requestId, attemptId) {
+  const digest = createHash('sha256').update(`${String(requestId || '')}:${String(attemptId || '')}`).digest('hex').slice(0, 32);
+  return `uncedo-pay-${digest}`;
+}
+
+function isValidCustomerEmail(value) {
+  const email = String(value || '').trim().toLowerCase();
+  return email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : '';
+}
+
+async function getOptionalPaymentCaller(req) {
+  const token = getBearerToken(req);
+  if (!token) return null;
+  return admin.auth().verifyIdToken(token).catch(() => null);
+}
+
+function paymentSessionPublicPayload(resolved) {
+  const request = resolved.request || {};
+  const operation = resolved.paymentOperation || {};
+  const methods = ['cash', 'paystack_checkout'];
+  return {
+    success: true,
+    requestReference: String(request.publicRequestReference || request.requestReference || request.id || ''),
+    service: String(request.subject || request.serviceName || 'Uncedo service'),
+    amount: Number(resolved.amount || 0),
+    currency: 'ZAR',
+    paymentStatus: resolved.paymentStatus,
+    availableMethods: resolved.paymentStatus === 'paid' ? [] : methods,
+    paymentAttemptStatus: String(operation.status || ''),
+    activeAttemptId: String(operation.activeAttemptId || ''),
+    paymentMethod: String(operation.method || ''),
+    receiptId: String(operation.receiptId || request.paymentReceiptId || ''),
+  };
+}
+
+async function saveReusablePaystackAuthorization({ uid, transaction, consentAtMs }) {
+  const authorization = transaction?.authorization || {};
+  return storeReusablePaymentMethod({
+    db,
+    admin,
+    uid,
+    authorization,
+    consentAtMs,
+    consentPurpose: 'explicit_future_card_consent',
+  });
+}
+
+async function issuePaidRequestPostEffects({ requestId, paymentResult }) {
+  if (paymentResult?.action !== 'settled') return;
+  const requestSnap = await db.collection('serviceRequests').doc(requestId).get();
+  if (!requestSnap.exists) return;
+  const request = { id: requestSnap.id, ...(requestSnap.data() || {}) };
+  const customerId = String(request.customerId || '');
+  const helperId = String(request.helperAssignment?.helperId || '');
+  const customerConfig = await getRewardConfig(db, 'customer').catch(() => ({}));
+  const helperConfig = await getRewardConfig(db, 'helper').catch(() => ({}));
+  const expandedServiceIds = serviceIdsFor(request);
+  if (customerId) {
+    await applyRewardTransaction({ db, admin, userId: customerId, accountType: ACCOUNT_TYPES.CUSTOMER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(customerConfig.rewards?.completedPaidBooking || 50), reasonCode: REWARD_REASON_CODES.CUSTOMER_COMPLETED_PAID_BOOKING, reasonLabel: 'Completed paid booking', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `customer:${customerId}:request:${requestId}:completed-paid`, requestId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch(() => null);
+    const firstReward = await applyRewardTransaction({ db, admin, userId: customerId, accountType: ACCOUNT_TYPES.CUSTOMER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(customerConfig.rewards?.firstCompletedPaidBooking || 100), reasonCode: REWARD_REASON_CODES.CUSTOMER_FIRST_COMPLETED_PAID_BOOKING, reasonLabel: 'First completed paid booking', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `customer:${customerId}:request:first-booking-bonus`, requestId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch(() => null);
+    await incrementCompletedPaid({ db, admin, userId: customerId, accountType: ACCOUNT_TYPES.CUSTOMER, requestId }).catch(() => null);
+    if (firstReward) await awardReferralStage({ db, admin, referredUserId: customerId, stage: 2, requestId }).catch(() => null);
+  }
+  if (helperId) {
+    await applyRewardTransaction({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(helperConfig.rewards?.completedPaidJob || 50), reasonCode: REWARD_REASON_CODES.HELPER_COMPLETED_PAID_JOB, reasonLabel: 'Completed paid job', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `helper:${helperId}:request:${requestId}:completed-paid`, requestId, relatedUserId: customerId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch(() => null);
+    await incrementCompletedPaid({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, requestId, serviceIds: expandedServiceIds, categoryId: request.categoryId || '' }).catch(() => null);
+  }
+  await db.collection('customerServiceEvents').doc(`request_completed_${requestId}`).set({
+    requestId,
+    eventType: 'request_completed',
+    metadata: { paymentStatus: 'paid', paymentMethod: paymentResult.method, totalAmount: Number(paymentResult.amount || 0), requestStatus: 'completed' },
+    paymentUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true }).catch(() => null);
+  await createUserNotificationOnce({ notificationId: `request_payment_${requestId}_${paymentResult.receiptId}_customer`, userId: customerId, title: 'Payment confirmed', message: `Payment received for request ${request.publicRequestReference || requestId}.`, type: 'payment_confirmed', requestId, targetPath: `/customer/requests/${requestId}`, metadata: { paymentStatus: 'paid', receiptId: paymentResult.receiptId } }).catch(() => null);
+}
+
+async function verifyAndSettleRequestPayment({ requestId, attemptId, reference, paystackSecretKey, helperId = '' }) {
+  const paymentRef = db.collection(PAYMENT_OPERATIONS).doc(requestId);
+  const attemptRef = paymentRef.collection('attempts').doc(attemptId);
+  const [paymentSnap, attemptSnap] = await Promise.all([paymentRef.get(), attemptRef.get()]);
+  if (!paymentSnap.exists || !attemptSnap.exists) return { action: 'not-found' };
+  const payment = paymentSnap.data() || {};
+  const attempt = attemptSnap.data() || {};
+  if (payment.activeAttemptId !== attemptId || String(attempt.gatewayReference || '') !== String(reference || '')) return { action: 'reference-mismatch' };
+  const verification = await verifyPaystackTransaction({ paystackSecretKey, reference, amountMinor: Number(attempt.amountMinor || 0), currency: 'ZAR' });
+  if (verification.outcome === 'success' && attempt.saveCardConsent === true && attempt.saveCardOwnerUid
+    && await isCustomerRequestPrincipalOwnedByUid(attempt.saveCardOwnerUid, attempt.customerId)) {
+    const ownerUid = String(attempt.saveCardOwnerUid);
+    const user = (await db.collection('users').doc(ownerUid).get()).data() || {};
+    const userEmail = String(user.email || '').trim().toLowerCase();
+    const transactionEmail = String(verification.transaction?.customer?.email || '').trim().toLowerCase();
+    if (userEmail && transactionEmail && userEmail === transactionEmail) {
+      await saveReusablePaystackAuthorization({ uid: ownerUid, transaction: verification.transaction, consentAtMs: Number(attempt.saveCardConsentAtMs || Date.now()) }).catch(() => null);
+    }
+  }
+  const result = await settleRequestPayment({ db, admin, requestId, attemptId, outcome: verification.outcome, gatewayTransactionId: verification.transaction?.id ? String(verification.transaction.id) : '', gatewayReference: reference, providerStatus: verification.transaction?.status || verification.outcome, helperId });
+  if (['settled', 'already-paid'].includes(result.action)) await issuePaidRequestPostEffects({ requestId, paymentResult: result });
+  return { ...result, verification };
+}
+
+exports.createServicePaymentSession = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
+  const user = await getOptionalPaymentCaller(req);
+  if (!user?.uid) return res.status(401).json({ success: false, message: 'Sign in to request a payment link.' });
+  const requestId = String(req.body?.requestId || '').trim();
+  if (!/^[A-Za-z0-9_-]{6,128}$/.test(requestId)) return res.status(400).json({ success: false, message: 'A valid request reference is required.' });
+  const requestSnap = await db.collection('serviceRequests').doc(requestId).get();
+  if (!requestSnap.exists) return res.status(404).json({ success: false, message: 'Request not found.' });
+  const request = requestSnap.data() || {};
+  if (!(await isCustomerRequestPrincipalOwnedByUid(user.uid, request.customerId))) return res.status(403).json({ success: false, message: 'This request is not linked to your customer account.' });
+  const session = await createServicePaymentSession({ db, requestId, customerId: request.customerId, principalId: user.uid, principalType: 'firebase_uid' });
+  if (session.code !== 'created') {
+    const status = session.code === 'already-paid' ? 409 : session.code === 'not-found' ? 404 : 409;
+    return res.status(status).json({ success: false, code: session.code, message: session.code === 'already-paid' ? 'This request has already been paid.' : 'This request cannot accept payment right now.' });
+  }
+  const baseUrl = String(process.env.CUSTOMER_PAYMENT_URL || 'https://uncedo.bakayise.com/payment').trim().replace(/\/$/, '');
+  res.set('Cache-Control', 'no-store, private');
+  res.set('Referrer-Policy', 'no-referrer');
+  return res.status(200).json({ success: true, url: `${baseUrl}?token=${encodeURIComponent(session.token)}`, expiresAtMs: session.expiresAtMs });
+});
+
+exports.getServicePaymentSession = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  const token = String(req.body?.token || '').trim();
+  const result = await resolveServicePaymentSession({ db, token });
+  if (result.code !== 'available') return res.status(result.code === 'expired' ? 410 : 404).json({ success: false, code: result.code, message: result.code === 'expired' ? 'This payment link has expired.' : 'This payment link is unavailable.' });
+  const payload = paymentSessionPublicPayload(result);
+  const caller = await getOptionalPaymentCaller(req);
+  const verifiedOwner = Boolean(caller?.uid && await isCustomerRequestPrincipalOwnedByUid(caller.uid, result.session.customerId));
+  payload.canSaveCard = verifiedOwner;
+  payload.savedCards = [];
+  if (verifiedOwner) {
+    const paymentMethods = await getServerPaymentMethods({ db, admin, uid: caller.uid });
+    payload.savedCards = paymentMethods
+      .filter((card) => card?.reusable === true && String(card.paystackAuthorizationCode || '').trim())
+      .map((card) => ({ id: String(card.id || ''), brand: String(card.brand || 'Card'), last4: String(card.last4 || '').slice(-4), isDefault: card.isDefault === true }))
+      .filter((card) => card.id);
+    if (result.paymentOperation?.status === 'awaiting_customer_confirmation'
+      && result.paymentOperation?.method === 'saved_card'
+      && result.paymentOperation?.activeAttemptId) {
+      const attemptSnap = await result.paymentOperationRef.collection('attempts').doc(String(result.paymentOperation.activeAttemptId)).get();
+      const attempt = attemptSnap.data() || {};
+      const selectedCard = paymentMethods.find((card) => String(card.id || '') === String(attempt.selectedCardId || '') && card?.reusable === true);
+      if (selectedCard) payload.pendingSavedCardPayment = {
+        requestId: result.request.id,
+        attemptId: String(result.paymentOperation.activeAttemptId),
+        amount: Number(attempt.amount || result.amount),
+        card: { id: String(selectedCard.id), brand: String(selectedCard.brand || 'Card'), last4: String(selectedCard.last4 || '').slice(-4) },
+      };
+    }
+  }
+  if (payload.paymentStatus === 'paid') {
+    payload.receipt = safePaymentReceipt({ requestId: result.request.id, operation: result.paymentOperation, request: result.request });
+    if (!payload.receipt && result.legacyOperation?.status === 'settled_success') {
+      payload.receipt = {
+        receiptId: String(result.legacyOperation.gatewayTransactionId || result.legacyOperation.operationId || ''),
+        requestReference: String(result.request.publicRequestReference || result.request.requestReference || result.request.id || ''),
+        service: String(result.request.subject || result.request.serviceName || 'Uncedo service'),
+        amount: Number(result.legacyOperation.amount || result.request.totalAmount || 0), currency: 'ZAR', method: 'paystack',
+        paidAtMs: Number(result.legacyOperation.settledAtMs || 0), status: 'paid',
+      };
+    }
+  }
+  else if (!['unpaid', 'payment_failed', 'wallet_debt_recorded', 'payment_cancelled', 'payment_expired', 'cash_selected', 'awaiting_cash_confirmation'].includes(payload.paymentStatus)) {
+    payload.availableMethods = [];
+    payload.message = 'A payment attempt is already in progress. Check its status again shortly.';
+  }
+  if (payload.paymentStatus === 'awaiting_cash_confirmation') payload.message = 'Waiting for the assigned helper to confirm cash payment.';
+  res.set('Cache-Control', 'no-store, private');
+  res.set('Referrer-Policy', 'no-referrer');
+  return res.status(200).json(payload);
+});
+
+exports.revokeServicePaymentSession = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  const user = await getOptionalPaymentCaller(req);
+  if (!user?.uid) return res.status(401).json({ success: false, message: 'Unauthorized.' });
+  const token = String(req.body?.token || '').trim();
+  const resolved = await resolveServicePaymentSession({ db, token });
+  if (resolved.code !== 'available') return res.status(404).json({ success: false, code: resolved.code });
+  if (!(await isCustomerRequestPrincipalOwnedByUid(user.uid, resolved.session.customerId))) return res.status(403).json({ success: false, message: 'Not allowed.' });
+  const result = await revokeServicePaymentSession({ db, requestId: resolved.session.requestId, customerId: resolved.session.customerId, tokenHash: resolved.session.sessionId });
+  return res.status(result.action === 'revoked' ? 200 : 409).json({ success: result.action === 'revoked' });
+});
+
+exports.startServicePaystackCheckout = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
+  let paystackSecretKey = '';
+  try { paystackSecretKey = getPaymentsSecrets().PAYSTACK_SECRET_KEY; } catch { return res.status(503).json({ success: false, code: 'payments-unavailable', message: 'Card checkout is not configured yet.' }); }
+  const token = String(req.body?.token || '').trim();
+  const resolved = await resolveServicePaymentSession({ db, token });
+  if (resolved.code !== 'available') return res.status(resolved.code === 'expired' ? 410 : 404).json({ success: false, code: resolved.code, message: 'This payment link is unavailable or expired.' });
+  const caller = await getOptionalPaymentCaller(req);
+  const isOwnerAuthenticated = Boolean(caller?.uid && await isCustomerRequestPrincipalOwnedByUid(caller.uid, resolved.session.customerId));
+  const saveCardConsent = req.body?.saveCardConsent === true && isOwnerAuthenticated;
+  const email = isOwnerAuthenticated
+    ? isValidCustomerEmail(caller.email || (await db.collection('users').doc(caller.uid).get()).data()?.email) || isValidCustomerEmail(req.body?.email)
+    : isValidCustomerEmail(req.body?.email || resolved.request.customerEmail);
+  if (!email) return res.status(422).json({ success: false, code: 'email-required', message: 'Enter a valid email address to continue to Paystack.' });
+  const idempotencyKey = String(req.body?.idempotencyKey || randomUUID());
+  const begun = await beginServicePaymentAttempt({ db, admin, sessionRef: resolved.sessionRef, session: resolved.session, method: 'paystack_checkout', idempotencyKey, saveCardConsent, now: Date.now() });
+  if (!['created', 'existing'].includes(begun.action)) return res.status(begun.action === 'already-paid' ? 409 : 409).json({ success: false, code: begun.action, message: begun.action === 'already-paid' ? 'This request has already been paid.' : 'Another payment attempt is active or this request is no longer payable.' });
+  const attempt = begun.attempt || {};
+  const attemptRef = begun.attemptRef;
+  if (attempt.authorizationUrl) return res.status(200).json({ success: true, authorizationUrl: attempt.authorizationUrl, status: attempt.status });
+  if (begun.action === 'existing' && attempt.gatewayReference) {
+    const verified = await verifyAndSettleRequestPayment({ requestId: resolved.session.requestId, attemptId: attempt.attemptId, reference: attempt.gatewayReference, paystackSecretKey });
+    return res.status(200).json({ success: true, status: verified.action === 'settled' ? 'paid' : verified.action === 'failed' ? 'payment_failed' : 'payment_reconciliation_required' });
+  }
+  const reference = getRequestPaymentReference(resolved.session.requestId, attempt.attemptId);
+  const now = Date.now();
+  await attemptRef.set({ gatewayReference: reference, email, saveCardConsent, saveCardConsentAtMs: saveCardConsent ? now : null, saveCardOwnerUid: saveCardConsent ? caller.uid : null, updatedAtMs: now }, { merge: true });
+  await recordCheckoutInitialization({ db, admin, requestId: resolved.session.requestId, attemptId: attempt.attemptId, gatewayReference: reference, authorizationUrl: '' });
+  try {
+    const baseUrl = String(process.env.CUSTOMER_PAYMENT_URL || 'https://uncedo.bakayise.com/payment').trim().replace(/\/$/, '');
+    // Keep the bearer payment token in same-origin sessionStorage; only the
+    // non-authorizing Paystack reference is sent back in the browser URL.
+    const callbackUrl = `${baseUrl}?reference=${encodeURIComponent(reference)}`;
+    const payload = await callPaystackApi({
+      paystackSecretKey,
+      path: '/transaction/initialize',
+      method: 'POST',
+      body: {
+        email,
+        amount: Number(attempt.amountMinor),
+        currency: 'ZAR',
+        reference,
+        callback_url: callbackUrl,
+        channels: ['card'],
+        metadata: { uncedo_request_id: resolved.session.requestId, uncedo_payment_attempt_id: attempt.attemptId, save_card_consent: saveCardConsent },
+      },
+    });
+    const authorizationUrl = String(payload.data?.authorization_url || '');
+    const checkoutHost = (() => { try { return new URL(authorizationUrl).hostname; } catch { return ''; } })();
+    if (!authorizationUrl.startsWith('https://') || !['checkout.paystack.com', 'checkout.paystack.co'].includes(checkoutHost) || String(payload.data?.reference || '') !== reference) {
+      return res.status(502).json({ success: false, code: 'checkout-response-invalid', message: 'Paystack did not return a valid secure checkout link.' });
+    }
+    const saved = await recordCheckoutInitialization({ db, admin, requestId: resolved.session.requestId, attemptId: attempt.attemptId, gatewayReference: reference, authorizationUrl });
+    if (saved.action !== 'updated') return res.status(409).json({ success: false, code: saved.action });
+    return res.status(200).json({ success: true, authorizationUrl, status: 'payment_processing' });
+  } catch (error) {
+    logger.warn('request_paystack_checkout_initialization_uncertain', { requestId: resolved.session.requestId, attemptId: attempt.attemptId, errorCode: String(error?.code || 'paystack_init_failed').slice(0, 80) });
+    const result = await verifyAndSettleRequestPayment({ requestId: resolved.session.requestId, attemptId: attempt.attemptId, reference, paystackSecretKey });
+    return res.status(200).json({ success: true, status: result.action === 'settled' ? 'paid' : result.action === 'failed' ? 'payment_failed' : 'payment_reconciliation_required' });
+  }
+});
+
+exports.verifyServicePaystackCheckout = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  const token = String(req.body?.token || '').trim();
+  const reference = String(req.body?.reference || '').trim();
+  const resolved = await resolveServicePaymentSession({ db, token });
+  if (resolved.code !== 'available') return res.status(resolved.code === 'expired' ? 410 : 404).json({ success: false, code: resolved.code, message: 'This payment link is unavailable or expired.' });
+  const payment = resolved.paymentOperation || {};
+  const attemptId = String(payment.activeAttemptId || '');
+  if (!attemptId || String(payment.gatewayReference || '') !== reference) return res.status(409).json({ success: false, code: 'payment-reference-mismatch' });
+  let secret;
+  try { secret = getPaymentsSecrets().PAYSTACK_SECRET_KEY; } catch { return res.status(503).json({ success: false, code: 'payments-unavailable' }); }
+  const result = await verifyAndSettleRequestPayment({ requestId: resolved.session.requestId, attemptId, reference, paystackSecretKey: secret });
+  const status = result.action === 'settled' || result.action === 'already-paid' ? 'paid'
+    : result.action === 'failed' ? 'payment_failed'
+      : result.action === 'pending' ? 'payment_processing'
+        : 'payment_reconciliation_required';
+  const updated = await resolveServicePaymentSession({ db, token });
+  return res.status(200).json({ success: true, status, receipt: status === 'paid' ? safePaymentReceipt({ requestId: updated.request.id, operation: updated.paymentOperation, request: updated.request }) : null });
+});
+
+exports.requestCashServicePayment = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
+  const caller = await getOptionalPaymentCaller(req);
+  if (!caller?.uid) return res.status(401).json({ success: false, message: 'Sign in to choose cash payment.' });
+  const requestId = String(req.body?.requestId || '').trim();
+  const requestSnap = await db.collection('serviceRequests').doc(requestId).get();
+  if (!requestSnap.exists) return res.status(404).json({ success: false, message: 'Request not found.' });
+  const request = requestSnap.data() || {};
+  if (!(await isCustomerRequestPrincipalOwnedByUid(caller.uid, request.customerId))) return res.status(403).json({ success: false, message: 'Not allowed.' });
+  const session = await createServicePaymentSession({ db, requestId, customerId: request.customerId, principalId: caller.uid, principalType: 'firebase_uid' });
+  if (session.code !== 'created') return res.status(409).json({ success: false, code: session.code });
+  const resolved = await resolveServicePaymentSession({ db, token: session.token });
+  const begun = await beginServicePaymentAttempt({ db, admin, sessionRef: resolved.sessionRef, session: resolved.session, method: 'cash', idempotencyKey: String(req.body?.idempotencyKey || randomUUID()) });
+  if (!['created', 'existing'].includes(begun.action)) return res.status(409).json({ success: false, code: begun.action });
+  return res.status(200).json({ success: true, requestId, amount: Number(begun.attempt.amount), status: begun.attempt.status, attemptId: begun.attempt.attemptId });
+});
+
+exports.selectCashPaymentFromSession = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 20 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
+  const token = String(req.body?.token || '').trim();
+  const resolved = await resolveServicePaymentSession({ db, token });
+  if (resolved.code !== 'available') return res.status(resolved.code === 'expired' ? 410 : 404).json({ success: false, code: resolved.code });
+  const begun = await beginServicePaymentAttempt({ db, admin, sessionRef: resolved.sessionRef, session: resolved.session, method: 'cash', idempotencyKey: String(req.body?.idempotencyKey || randomUUID()) });
+  if (!['created', 'existing'].includes(begun.action)) return res.status(409).json({ success: false, code: begun.action, message: 'Another payment is active or this request cannot be paid.' });
+  return res.status(200).json({ success: true, requestId: resolved.session.requestId, amount: Number(begun.attempt.amount), status: begun.attempt.status, attemptId: begun.attempt.attemptId });
+});
+
+exports.cancelCashPaymentSelection = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 20 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
+  const caller = await getOptionalPaymentCaller(req);
+  const token = String(req.body?.token || '').trim();
+  const resolved = token ? await resolveServicePaymentSession({ db, token }) : null;
+  let customerId = String(caller?.uid || '');
+  let requestId = String(req.body?.requestId || '');
+  if (resolved?.code === 'available') {
+    requestId = resolved.session.requestId;
+    customerId = resolved.session.customerId;
+    if (caller?.uid && !(await isCustomerRequestPrincipalOwnedByUid(caller.uid, customerId))) return res.status(403).json({ success: false, message: 'Not allowed.' });
+  } else if (token) return res.status(resolved?.code === 'expired' ? 410 : 404).json({ success: false, code: resolved?.code });
+  else if (!caller?.uid) return res.status(401).json({ success: false, message: 'Unauthorized.' });
+  const result = await cancelCashPaymentSelection({ db, admin, requestId, customerId, attemptId: String(req.body?.attemptId || '') });
+  return res.status(result.action === 'cancelled' ? 200 : 409).json({ success: result.action === 'cancelled', code: result.action });
+});
+
+exports.reportCashServicePayment = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
+  const caller = await getOptionalPaymentCaller(req);
+  let requestId = String(req.body?.requestId || '');
+  let customerId = String(caller?.uid || '');
+  if (req.body?.token) {
+    const resolved = await resolveServicePaymentSession({ db, token: String(req.body.token) });
+    if (resolved.code !== 'available') return res.status(410).json({ success: false, code: resolved.code });
+    requestId = resolved.session.requestId;
+    customerId = resolved.session.customerId;
+    if (caller?.uid && !(await isCustomerRequestPrincipalOwnedByUid(caller.uid, customerId))) return res.status(403).json({ success: false, message: 'Not allowed.' });
+  } else if (!caller?.uid) return res.status(401).json({ success: false, message: 'Unauthorized.' });
+  const result = await reportCashPayment({ db, admin, requestId, customerId, attemptId: String(req.body?.attemptId || '') });
+  if (result.action === 'reported') {
+    const helperId = String(result.request?.helperAssignment?.helperId || '');
+    await notifyCashPaymentToHelper({ requestId, attemptId: String(req.body?.attemptId || ''), helperId, amount: result.attempt?.amount }).catch(() => null);
+  }
+  return res.status(['reported', 'already-reported'].includes(result.action) ? 200 : 409).json({ success: ['reported', 'already-reported'].includes(result.action), code: result.action });
+});
+
+exports.respondToCashServicePayment = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
+  const caller = await getOptionalPaymentCaller(req);
+  if (!caller?.uid) return res.status(401).json({ success: false, message: 'Unauthorized.' });
+  const requestId = String(req.body?.requestId || '');
+  const attemptId = String(req.body?.attemptId || '');
+  const action = String(req.body?.action || '').toLowerCase();
+  if (!['confirm', 'reject'].includes(action)) return res.status(400).json({ success: false, message: 'Choose confirm or reject.' });
+  const result = action === 'reject'
+    ? await rejectCashPayment({ db, admin, requestId, helperId: caller.uid, attemptId })
+    : await settleRequestPayment({ db, admin, requestId, attemptId, outcome: 'success', helperId: caller.uid, providerStatus: 'helper_confirmed' });
+  if (result.action === 'settled') await issuePaidRequestPostEffects({ requestId, paymentResult: result });
+  return res.status(result.action === 'settled' || result.action === 'rejected' ? 200 : 409).json({ success: result.action === 'settled' || result.action === 'rejected', code: result.action, receiptId: result.receiptId || null });
+});
+
+exports.getHelperCashPaymentConfirmations = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 20 }, async (req, res) => {
+  if (req.method !== 'GET') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
+  const caller = await getOptionalPaymentCaller(req);
+  if (!caller?.uid) return res.status(401).json({ success: false, message: 'Unauthorized.' });
+  const helper = (await db.collection('users').doc(caller.uid).get()).data() || {};
+  const roles = [helper.role, helper.activeRole, ...(Array.isArray(helper.roles) ? helper.roles : [])].map((value) => String(value || '').toLowerCase());
+  if (!roles.some((role) => ['helper', 'provider'].includes(role))) return res.status(403).json({ success: false, message: 'Helper role required.' });
+  const requestSnapshots = await db.collection('serviceRequests').where('helperAssignment.helperId', '==', caller.uid).orderBy('createdAt', 'desc').limit(50).get();
+  const pending = [];
+  for (const requestDoc of requestSnapshots.docs) {
+    if (String(requestDoc.data()?.status || '').toLowerCase() !== 'completed') continue;
+    const paymentRef = db.collection(PAYMENT_OPERATIONS).doc(requestDoc.id);
+    const paymentSnap = await paymentRef.get();
+    if (!paymentSnap.exists) continue;
+    const payment = paymentSnap.data() || {};
+    if (payment.status !== 'awaiting_cash_confirmation' || !payment.activeAttemptId) continue;
+    const attemptSnap = await paymentRef.collection('attempts').doc(String(payment.activeAttemptId)).get();
+    const attempt = attemptSnap.data() || {};
+    if (attempt.method !== 'cash' || attempt.status !== 'awaiting_cash_confirmation') continue;
+    const request = requestDoc.data() || {};
+    pending.push({
+      requestId: requestDoc.id,
+      requestReference: String(request.publicRequestReference || request.requestReference || requestDoc.id),
+      service: String(request.subject || request.serviceName || 'Uncedo service'),
+      amount: Number(attempt.amount || 0),
+      currency: 'ZAR',
+      attemptId: attempt.attemptId,
+      customerReportedAtMs: Number(attempt.customerReportedAtMs || 0),
+    });
+    if (pending.length >= 20) break;
+  }
+  return res.status(200).json({ success: true, confirmations: pending });
+});
+
+exports.prepareSavedCardServicePayment = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
+  const caller = await getOptionalPaymentCaller(req);
+  if (!caller?.uid) return res.status(401).json({ success: false, message: 'Sign in before using a saved card.' });
+  let requestId = String(req.body?.requestId || '');
+  let requestSnap = requestId ? await db.collection('serviceRequests').doc(requestId).get() : null;
+  let paymentSession = null;
+  if (req.body?.token) {
+    paymentSession = await resolveServicePaymentSession({ db, token: String(req.body.token) });
+    if (paymentSession.code !== 'available') return res.status(404).json({ success: false, code: paymentSession.code });
+    requestId = paymentSession.session.requestId;
+    requestSnap = await db.collection('serviceRequests').doc(requestId).get();
+  }
+  if (!requestSnap?.exists) return res.status(404).json({ success: false, message: 'Request not found.' });
+  const request = requestSnap.data() || {};
+  if (!(await isCustomerRequestPrincipalOwnedByUid(caller.uid, request.customerId))) return res.status(403).json({ success: false, message: 'Saved cards require the verified request owner account.' });
+  const card = await getServerPaymentMethod({ db, admin, uid: caller.uid, methodId: String(req.body?.paymentMethodId || '') });
+  if (card?.reusable !== true || !String(card.paystackAuthorizationCode || '').trim()) return res.status(404).json({ success: false, code: 'saved-card-unavailable', message: 'That saved card is unavailable.' });
+  if (!paymentSession) {
+    const created = await createServicePaymentSession({ db, requestId, customerId: request.customerId, principalId: caller.uid, principalType: 'firebase_uid' });
+    if (created.code !== 'created') return res.status(409).json({ success: false, code: created.code });
+    paymentSession = await resolveServicePaymentSession({ db, token: created.token });
+  }
+  const resolved = paymentSession;
+  const begun = await beginServicePaymentAttempt({ db, admin, sessionRef: resolved.sessionRef, session: resolved.session, method: 'saved_card', selectedCardId: card.id, idempotencyKey: String(req.body?.idempotencyKey || randomUUID()) });
+  if (!['created', 'existing'].includes(begun.action)) return res.status(409).json({ success: false, code: begun.action });
+  return res.status(200).json({ success: true, requestId, amount: Number(begun.attempt.amount), attemptId: begun.attempt.attemptId, status: begun.attempt.status, card: { id: card.id, brand: String(card.brand || 'Card'), last4: String(card.last4 || '').slice(-4) } });
+});
+
+exports.confirmSavedCardServicePayment = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
+  if (req.body?.confirmed !== true) return res.status(400).json({ success: false, code: 'explicit-confirmation-required', message: 'Confirm this saved-card payment before it can be charged.' });
+  const caller = await getOptionalPaymentCaller(req);
+  if (!caller?.uid) return res.status(401).json({ success: false, message: 'Sign in before authorising a saved-card charge.' });
+  const requestId = String(req.body?.requestId || '');
+  const attemptId = String(req.body?.attemptId || '');
+  const paymentSnap = await db.collection(PAYMENT_OPERATIONS).doc(requestId).get();
+  const attemptSnap = await db.collection(PAYMENT_OPERATIONS).doc(requestId).collection('attempts').doc(attemptId).get();
+  if (!paymentSnap.exists || !attemptSnap.exists) return res.status(404).json({ success: false, message: 'Payment confirmation not found.' });
+  const attempt = attemptSnap.data() || {};
+  if (!(await isCustomerRequestPrincipalOwnedByUid(caller.uid, attempt.customerId))) return res.status(403).json({ success: false, message: 'Not allowed.' });
+  const userSnap = await db.collection('users').doc(caller.uid).get();
+  const card = await getServerPaymentMethod({ db, admin, uid: caller.uid, methodId: String(attempt.selectedCardId || '') });
+  if (!card) return res.status(404).json({ success: false, code: 'saved-card-unavailable' });
+  const paymentEmail = isValidCustomerEmail(userSnap.data()?.email || caller.email);
+  if (!paymentEmail) return res.status(422).json({ success: false, code: 'email-required', message: 'Add a valid email address to your Uncedo account before using a saved card.' });
+  let paystackSecretKey = '';
+  try { paystackSecretKey = getPaymentsSecrets().PAYSTACK_SECRET_KEY; } catch { return res.status(503).json({ success: false, code: 'payments-unavailable' }); }
+  const reference = String(attempt.gatewayReference || getRequestPaymentReference(requestId, attemptId));
+  const claim = await claimSavedCardPayment({ db, admin, requestId, attemptId, gatewayReference: reference });
+  if (!['charge', 'reconcile'].includes(claim.action)) return res.status(claim.action === 'already-paid' ? 200 : 409).json({ success: claim.action === 'already-paid', status: claim.action });
+  const outcome = await executeServiceChargeAttempt({
+    operation: { ...claim.attempt, requestId, operationId: `payment_${requestId}`, gatewayReference: reference },
+    action: claim.action,
+    email: paymentEmail,
+    authorizationCode: card.paystackAuthorizationCode,
+    paystack: {
+      chargeAuthorization: (input) => chargeAuthorizationWithPaystack({ paystackSecretKey, ...input }),
+      verifyTransaction: (input) => verifyPaystackTransaction({ paystackSecretKey, ...input }),
+    },
+  });
+  const settled = await settleRequestPayment({ db, admin, requestId, attemptId, outcome: outcome.outcome, gatewayTransactionId: outcome.transaction?.id ? String(outcome.transaction.id) : '', gatewayReference: reference, providerStatus: outcome.transaction?.status || outcome.outcome });
+  if (['settled', 'already-paid'].includes(settled.action)) await issuePaidRequestPostEffects({ requestId, paymentResult: settled });
+  return res.status(200).json({ success: ['settled', 'already-paid'].includes(settled.action), status: settled.action === 'settled' || settled.action === 'already-paid' ? 'paid' : settled.action === 'failed' ? 'payment_failed' : 'payment_reconciliation_required', receiptId: settled.receiptId || null });
+});
+
+exports.cancelSavedCardPaymentConfirmation = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 20 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
+  const caller = await getOptionalPaymentCaller(req);
+  if (!caller?.uid) return res.status(401).json({ success: false, message: 'Sign in before changing a saved-card payment selection.' });
+  const requestId = String(req.body?.requestId || '');
+  const requestSnap = requestId ? await db.collection('serviceRequests').doc(requestId).get() : null;
+  if (!requestSnap?.exists || !(await isCustomerRequestPrincipalOwnedByUid(caller.uid, requestSnap.data()?.customerId))) return res.status(403).json({ success: false, message: 'Not allowed.' });
+  const result = await cancelSavedCardPaymentConfirmation({ db, admin, requestId, customerId: requestSnap.data()?.customerId, attemptId: String(req.body?.attemptId || '') });
+  return res.status(result.action === 'cancelled' ? 200 : 409).json({ success: result.action === 'cancelled', code: result.action });
+});
+
+exports.getServicePaymentReceipt = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  const token = String(req.body?.token || '').trim();
+  const requestId = String(req.body?.requestId || '').trim();
+  const caller = await getOptionalPaymentCaller(req);
+  let resolved = null;
+  if (token) resolved = await resolveServicePaymentSession({ db, token });
+  else if (caller?.uid && requestId) {
+    const requestRef = db.collection('serviceRequests').doc(requestId);
+    const requestSnap = await requestRef.get();
+    if (!requestSnap.exists || !(await isCustomerRequestPrincipalOwnedByUid(caller.uid, requestSnap.data()?.customerId))) return res.status(403).json({ success: false, message: 'Not allowed.' });
+    const [paymentSnap, legacySnap] = await Promise.all([db.collection(PAYMENT_OPERATIONS).doc(requestId).get(), db.collection(FINANCIAL_OPERATIONS).doc(serviceFinancialOperationId(requestId)).get()]);
+    resolved = { code: 'available', request: { id: requestId, ...requestSnap.data() }, paymentOperation: paymentSnap.exists ? paymentSnap.data() : null, legacyOperation: legacySnap.exists ? legacySnap.data() : null };
+  }
+  if (!resolved || resolved.code !== 'available') return res.status(404).json({ success: false, message: 'Payment receipt not found.' });
+  const requestIdResolved = String(resolved.request.id || resolved.session?.requestId || requestId);
+  const receipt = safePaymentReceipt({ requestId: requestIdResolved, operation: resolved.paymentOperation, request: resolved.request });
+  if (!receipt && resolved.legacyOperation?.paymentStatus === 'paid') {
+    const legacy = resolved.legacyOperation;
+    return res.status(200).json({ success: true, receipt: { receiptId: String(legacy.gatewayTransactionId || legacy.operationId || ''), requestReference: String(resolved.request.publicRequestReference || requestIdResolved), requestId: requestIdResolved, service: String(resolved.request.subject || 'Uncedo service'), amount: Number(legacy.amount || 0), currency: 'ZAR', method: 'paystack', paidAtMs: Number(legacy.settledAtMs || 0), gatewayReference: String(legacy.gatewayReference || ''), status: 'paid' } });
+  }
+  if (!receipt) return res.status(409).json({ success: false, message: 'A verified payment receipt is not available.' });
+  res.set('Cache-Control', 'no-store, private');
+  return res.status(200).json({ success: true, receipt });
+});
+
+exports.paystackServicePaymentWebhook = onRequest({ cors: false, maxInstances: 3, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).send('Method not allowed');
+  let secret;
+  try { secret = getPaymentsSecrets().PAYSTACK_SECRET_KEY; } catch { return res.status(503).send('Payment provider unavailable'); }
+  const supplied = String(req.get('x-paystack-signature') || '').trim();
+  const rawBody = req.rawBody;
+  if (!Buffer.isBuffer(rawBody) || !/^[a-f0-9]{128}$/i.test(supplied)) return res.status(401).send('Invalid signature');
+  const expected = createHmac('sha512', secret).update(rawBody).digest();
+  const actual = Buffer.from(supplied, 'hex');
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return res.status(401).send('Invalid signature');
+  const event = req.body && typeof req.body === 'object' ? req.body : {};
+  if (String(event.event || '') !== 'charge.success') return res.status(200).send('Ignored');
+  const reference = String(event.data?.reference || '').trim();
+  if (!reference) return res.status(200).send('Ignored');
+  const refSnap = await db.collection('paystackRequestPaymentReferences').doc(reference).get();
+  if (!refSnap.exists) return res.status(200).send('Unlinked');
+  const mapped = refSnap.data() || {};
+  const eventId = createHash('sha256').update(`${String(event.event)}:${reference}:${String(event.data?.id || '')}`).digest('hex');
+  const webhookRef = db.collection('paystackWebhookEvents').doc(eventId);
+  const lease = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(webhookRef);
+    const current = snap.data() || {};
+    if (snap.exists && current.status === 'processed') return false;
+    if (snap.exists && Number(current.leaseExpiresAtMs || 0) > Date.now()) return false;
+    tx.set(webhookRef, { eventId, eventName: String(event.event), reference, status: 'processing', leaseExpiresAtMs: Date.now() + 60_000, updatedAtMs: Date.now() }, { merge: true });
+    return true;
+  });
+  if (!lease) return res.status(200).send('Already processing');
+  try {
+    await verifyAndSettleRequestPayment({ requestId: String(mapped.requestId || ''), attemptId: String(mapped.attemptId || ''), reference, paystackSecretKey: secret });
+    await webhookRef.set({ status: 'processed', processedAtMs: Date.now(), leaseExpiresAtMs: null }, { merge: true });
+    return res.status(200).send('Accepted');
+  } catch (error) {
+    await webhookRef.set({ status: 'retryable', lastErrorCode: String(error?.code || 'verification_failed').slice(0, 80), leaseExpiresAtMs: 0 }, { merge: true });
+    return res.status(500).send('Retry');
+  }
+});
+
+exports.submitServiceRequestRating = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
   const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
   if (!decoded?.uid) { res.status(401).json({ success: false, message: 'Unauthorized request.' }); return; }
@@ -3255,9 +7320,9 @@ exports.submitServiceRequestRating = onRequest({ cors: true }, async (req, res) 
 
 exports.expireRewardPoints = onSchedule('every 24 hours', async () => processExpiredCustomerPoints({ db, admin, limit: 200 }));
 
-async function chargeAuthorizationWithPaystack({ paystackSecretKey, email, amount, authorizationCode }) {
+async function chargeAuthorizationWithPaystack({ paystackSecretKey, email, amount, authorizationCode, reference, requestId, operationId }) {
   if (!authorizationCode) {
-    return { ok: false, reason: 'missing_authorization' };
+    return { attempted: false, ok: false, reason: 'missing_authorization' };
   }
 
   const chargeResponse = await fetch('https://api.paystack.co/transaction/charge_authorization', {
@@ -3271,7 +7336,13 @@ async function chargeAuthorizationWithPaystack({ paystackSecretKey, email, amoun
       amount: Math.round(Number(amount || 0) * 100),
       authorization_code: authorizationCode,
       currency: 'ZAR',
+      reference,
+      metadata: {
+        uncedo_request_id: String(requestId || ''),
+        uncedo_financial_operation_id: String(operationId || ''),
+      },
     }),
+    signal: AbortSignal.timeout(20_000),
   });
 
   const chargePayload = await chargeResponse.json().catch(() => ({}));
@@ -3279,10 +7350,70 @@ async function chargeAuthorizationWithPaystack({ paystackSecretKey, email, amoun
   const succeeded = chargeResponse.ok && chargePayload?.status === true && chargeData?.status === 'success';
 
   return {
+    attempted: true,
     ok: succeeded,
     reason: succeeded ? null : (chargePayload?.message || 'gateway_declined'),
     transactionId: chargeData?.id ? String(chargeData.id) : null,
+    reference: chargeData?.reference || reference,
+    gatewayStatus: String(chargeData?.status || '').toLowerCase(),
   };
+}
+
+async function verifyPaystackTransaction({ paystackSecretKey, reference, amountMinor, currency = 'ZAR' }) {
+  try {
+    const response = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${paystackSecretKey}`, 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(15_000),
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) return { outcome: 'unknown', reason: `verify_http_${response.status}` };
+    return classifyPaystackTransaction(payload, { reference, amountMinor, currency });
+  } catch (error) {
+    return { outcome: 'unknown', reason: String(error?.code || 'verify_request_failed').slice(0, 120) };
+  }
+}
+
+async function verifyPaystackTransfer({ paystackSecretKey, reference, amountMinor, currency = 'ZAR' }) {
+  try {
+    const response = await fetch(`https://api.paystack.co/transfer/verify/${encodeURIComponent(reference)}`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${paystackSecretKey}`, 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(15_000),
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) return { outcome: 'unknown', reason: `verify_http_${response.status}` };
+    return classifyPaystackTransfer(payload, { reference, amountMinor, currency });
+  } catch (error) {
+    return { outcome: 'unknown', reason: String(error?.code || 'verify_request_failed').slice(0, 120) };
+  }
+}
+
+async function enqueueFinancialReconciliation({ operationId, operationType, attemptNo = 1, delaySeconds = 30, payoutId = null }) {
+  const checkNo = Math.max(1, Number(attemptNo) || 1);
+  const taskId = `financial-reconcile_${createHash('sha256').update(`${operationId}:${checkNo}`).digest('hex').slice(0, 32)}`;
+  try {
+    await getFunctions().taskQueue('reconcileFinancialOperation').enqueue({
+      operationId,
+      operationType,
+      checkNo,
+      ...(payoutId ? { payoutId } : {}),
+    }, {
+      id: taskId,
+      scheduleDelaySeconds: Math.max(1, Math.min(Number(delaySeconds) || 30, 3600)),
+      dispatchDeadlineSeconds: 60,
+    });
+    return true;
+  } catch (error) {
+    if (String(error?.code || '').includes('task-already-exists')) return true;
+    logger.error('financial_operation_reconciliation_task_enqueue_failed', {
+      operationId,
+      operationType,
+      checkNo,
+      errorCode: String(error?.code || 'task_enqueue_failed').slice(0, 120),
+    });
+    return false;
+  }
 }
 
 async function callPaystackApi({ paystackSecretKey, path, method = 'GET', body = null }) {
@@ -3293,6 +7424,7 @@ async function callPaystackApi({ paystackSecretKey, path, method = 'GET', body =
       'Content-Type': 'application/json',
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(20_000),
   });
   const payload = await response.json().catch(() => ({}));
 
@@ -3429,7 +7561,7 @@ async function initiatePaystackTransfer({ paystackSecretKey, amount, recipientCo
   return payload?.data || {};
 }
 
-exports.getHelperPayoutBanks = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRETS] }, async (req, res) => {
+exports.getHelperPayoutBanks = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
   if (!['GET', 'POST'].includes(req.method)) {
     res.status(405).json({ success: false, message: 'Method not allowed' });
     return;
@@ -3470,7 +7602,7 @@ exports.getHelperPayoutBanks = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS
   }
 });
 
-exports.verifyHelperPayout = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRETS] }, async (req, res) => {
+exports.verifyHelperPayout = onRequest({ cors: true }, async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, message: 'Method not allowed' });
     return;
@@ -3532,287 +7664,447 @@ exports.verifyHelperPayout = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_S
   }
 });
 
-exports.finalizeServiceRequestBilling = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRETS] }, async (req, res) => {
-  if (req.method !== 'POST') {
-    res.status(405).json({ success: false, message: 'Method not allowed' });
-    return;
+async function runServiceFinancialOperation({
+  operationRef,
+  requestRef,
+  helperId,
+  action,
+  operation,
+  paystackSecretKey,
+  email,
+  authorizationCode,
+}) {
+  let providerRecord = null;
+  let outcome;
+  if (action === 'charge' && Number(operation.amountMinor || 0) > 0) {
+    await enqueueFinancialReconciliation({
+      operationId: operation.operationId,
+      operationType: operation.operationType,
+      attemptNo: 1,
+      delaySeconds: 30,
+    });
+  }
+  outcome = await executeServiceChargeAttempt({
+    operation,
+    action,
+    email,
+    authorizationCode,
+    paystack: {
+      chargeAuthorization: (input) => chargeAuthorizationWithPaystack({ paystackSecretKey, ...input }),
+      verifyTransaction: (input) => verifyPaystackTransaction({ paystackSecretKey, ...input }),
+    },
+  });
+  if (outcome.requestErrorCode) {
+    logger.warn('paystack_service_charge_response_uncertain', {
+      operationId: operation.operationId,
+      reference: operation.gatewayReference,
+      errorCode: outcome.requestErrorCode,
+    });
+  }
+  providerRecord = outcome.transaction || null;
+
+  if (outcome.outcome !== 'no_charge') {
+    await recordServiceGatewayObservation({ db, operationRef, outcome });
+  }
+  const settlement = await settleServiceFinancialOperation({
+    db,
+    admin,
+    operationRef,
+    requestRef,
+    helperRef: helperId ? db.collection('users').doc(helperId) : null,
+    helperDispatchRef: helperId ? db.collection('helperDispatchIndex').doc(helperId) : null,
+    outcome: outcome.outcome,
+    transactionId: providerRecord?.id ? String(providerRecord.id) : null,
+  });
+  await runServiceFinancialPostEffects(operationRef).catch((error) => logger.error('service_financial_post_effects_failed', {
+    operationId: operation.operationId,
+    error: error.message,
+  }));
+  if (settlement.applied && ['pending', 'unknown'].includes(outcome.outcome)) {
+    await enqueueFinancialReconciliation({
+      operationId: operation.operationId,
+      operationType: operation.operationType,
+      attemptNo: 1,
+      delaySeconds: 30,
+    });
+  }
+  return { outcome, settlement };
+}
+
+async function runServiceFinancialPostEffects(operationRef) {
+  const operationSnap = await operationRef.get();
+  if (!operationSnap.exists) return;
+  const operation = operationSnap.data() || {};
+  if (!operation.settlementApplied) return;
+  const settlementData = operation.settlementData || {};
+  const requestRef = db.collection('serviceRequests').doc(operation.requestId);
+  const requestSnap = await requestRef.get();
+  const request = requestSnap.exists ? requestSnap.data() || {} : {};
+  const operationId = operation.operationId;
+  const requestId = operation.requestId;
+  const customerId = String(settlementData.customerId || request.customerId || '');
+  const helperId = String(settlementData.helperId || request.helperAssignment?.helperId || '');
+  const outcome = String(operation.finalOutcome || 'unknown');
+  const paymentStatus = String(operation.paymentStatus || request.paymentStatus || 'payment_reconciliation_required');
+  const endedAt = Number(settlementData.endedAt || operation.updatedAtMs || Date.now());
+  const success = outcome === 'success' || (outcome === 'no_charge' && paymentStatus === 'paid');
+
+  if (operation.operationType === 'completion') {
+    const payoutBreakdown = settlementData.helperPayoutBreakdown || {};
+    await admin.database().ref(`liveTracking/serviceRequests/${requestId}`).update({
+      status: 'completed', closedReason: 'completed', closedAtMs: endedAt, updatedAtMs: endedAt,
+    }).catch((error) => logger.warn('service_completion_tracking_close_failed', { requestId, error: error.message }));
+    await db.collection('customerServiceEvents').doc(`request_completed_${requestId}`).set({
+      customerId,
+      eventType: 'request_completed',
+      serviceId: request.serviceIds?.[0] || request.selectedPackageId || request.categoryId || '',
+      categoryId: request.categoryId || '',
+      serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
+      requestId,
+      source: 'finalizeServiceRequestBilling',
+      metadata: {
+        helperId,
+        paymentStatus,
+        totalAmount: Number(settlementData.totalAmount || 0),
+        waitingCost: Number(settlementData.waitingCost || 0),
+        helperPayoutAmount: Number(payoutBreakdown.helperAmount || 0),
+        platformAmount: Number(payoutBreakdown.platformAmount || 0),
+        requestStatus: 'completed',
+      },
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdAtMs: endedAt,
+      dayBucket: new Date(endedAt).toISOString().slice(0, 10),
+    }, { merge: true }).catch((error) => logger.warn('service_completion_event_write_failed', { requestId, error: error.message }));
+
+    if (settlementData.redemptionId && ['success', 'failed_confirmed', 'reversed', 'no_charge'].includes(outcome)) {
+      await finalizeServiceCredit({
+        db,
+        admin,
+        requestId,
+        paymentSucceeded: success,
+        appliedPoints: Number(settlementData.serviceCreditPoints || 0),
+        reason: success ? 'final_cap' : 'payment_failed',
+      }).catch((error) => logger.error('service_credit_finalization_failed', {
+        requestId,
+        redemptionId: settlementData.redemptionId,
+        error: error.message,
+      }));
+    }
+
+    if (success && customerId) {
+      const customerConfig = await getRewardConfig(db, 'customer');
+      const helperConfig = await getRewardConfig(db, 'helper');
+      const updatedRequest = { id: requestId, ...request };
+      const expandedServiceIds = serviceIdsFor(updatedRequest);
+      await applyRewardTransaction({ db, admin, userId: customerId, accountType: ACCOUNT_TYPES.CUSTOMER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(customerConfig.rewards?.completedPaidBooking || 50), reasonCode: REWARD_REASON_CODES.CUSTOMER_COMPLETED_PAID_BOOKING, reasonLabel: 'Completed paid booking', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `customer:${customerId}:request:${requestId}:completed-paid`, requestId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch((error) => logger.warn('customer_booking_reward_failed', { requestId, error: error.message }));
+      const firstBookingRewardResult = await applyRewardTransaction({ db, admin, userId: customerId, accountType: ACCOUNT_TYPES.CUSTOMER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(customerConfig.rewards?.firstCompletedPaidBooking || 100), reasonCode: REWARD_REASON_CODES.CUSTOMER_FIRST_COMPLETED_PAID_BOOKING, reasonLabel: 'First completed paid booking', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `customer:${customerId}:request:first-booking-bonus`, requestId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch((error) => { logger.info('first_booking_bonus_skipped_or_failed', { requestId, error: error.message }); return null; });
+      await incrementCompletedPaid({ db, admin, userId: customerId, accountType: ACCOUNT_TYPES.CUSTOMER, requestId }).catch((error) => logger.warn('customer_membership_recalc_failed', { requestId, error: error.message }));
+      if (helperId) {
+        await applyRewardTransaction({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(helperConfig.rewards?.completedPaidJob || 50), reasonCode: REWARD_REASON_CODES.HELPER_COMPLETED_PAID_JOB, reasonLabel: 'Completed paid job', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `helper:${helperId}:request:${requestId}:completed-paid`, requestId, relatedUserId: customerId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch((error) => logger.warn('helper_booking_reward_failed', { requestId, helperId, error: error.message }));
+        await incrementCompletedPaid({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, requestId, serviceIds: expandedServiceIds, categoryId: request.categoryId || '' }).catch((error) => logger.warn('helper_mastery_recalc_failed', { requestId, helperId, error: error.message }));
+      }
+      if (firstBookingRewardResult) {
+        await awardReferralStage({ db, admin, referredUserId: customerId, stage: 2, requestId }).catch((error) => logger.warn('referral_stage_two_failed', { requestId, error: error.message }));
+      }
+    }
+
+    await createUserNotificationOnce({
+      notificationId: `financial_${operationId}_completion_${customerId}`,
+      userId: customerId,
+      title: 'Service completed',
+      message: `Your service request for ${request.subject || 'help'} was marked as completed. Total: ${formatMoney(settlementData.totalAmount || 0)}.${paymentStatus === 'payment_reconciliation_required' ? ' The payment result is still being verified.' : ''}`,
+      type: 'service_completed',
+      requestId,
+      targetPath: `/customer/requests/${requestId}`,
+      metadata: { paymentStatus, totalAmount: Number(settlementData.totalAmount || 0) },
+    }).catch((error) => logger.warn('service_completion_customer_notification_failed', { requestId, error: error.message }));
+    if (helperId) {
+      await createUserNotificationOnce({
+        notificationId: `financial_${operationId}_completion_${helperId}`,
+        userId: helperId,
+        title: 'Job completed',
+        message: `Your job for ${request.customerName || 'Customer'} was marked as completed. Helper earnings recorded: ${formatMoney(payoutBreakdown.helperAmount || 0)}.`,
+        type: 'job_completed',
+        requestId,
+        targetPath: `/provider/jobs/${requestId}`,
+      }).catch((error) => logger.warn('service_completion_helper_notification_failed', { requestId, error: error.message }));
+    }
+  } else if (operation.operationType === 'customer_cancellation') {
+    const cancellation = settlementData.cancellation || {};
+    await admin.database().ref(`liveTracking/serviceRequests/${requestId}`).update({
+      status: 'canceled',
+      closedReason: cancellation.liveTrackingClosedReason || 'customer_canceled',
+      closedAtMs: endedAt,
+      updatedAtMs: endedAt,
+    }).catch(() => null);
+    await db.collection('customerServiceEvents').doc(`request_canceled_${requestId}`).set({
+      customerId,
+      eventType: 'request_canceled',
+      serviceId: request.serviceIds?.[0] || request.selectedPackageId || request.categoryId || '',
+      categoryId: request.categoryId || '',
+      serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
+      requestId,
+      source: 'billCustomerServiceCancellation',
+      metadata: {
+        helperId,
+        paymentStatus,
+        cancellationAmount: Number(cancellation.cancellationAmount || 0),
+        cancellationBillingRule: cancellation.cancellationBillingRule || 'pre_assignment',
+        cancellationDistanceKm: Number(cancellation.cancellationDistanceKm || 0),
+        helperPayoutAmount: Number(cancellation.helperPayoutBreakdown?.helperAmount || 0),
+        platformAmount: Number(cancellation.helperPayoutBreakdown?.platformAmount || 0),
+        requestStatus: 'canceled',
+      },
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdAtMs: endedAt,
+      dayBucket: new Date(endedAt).toISOString().slice(0, 10),
+    }, { merge: true }).catch((error) => logger.warn('service_cancellation_event_write_failed', { requestId, error: error.message }));
+    await createUserNotificationOnce({
+      notificationId: `financial_${operationId}_cancellation_${customerId}`,
+      userId: customerId,
+      title: 'Service canceled',
+      message: Number(cancellation.cancellationAmount || 0) > 0
+        ? `Your service request was canceled. Cancellation fee: ${formatMoney(cancellation.cancellationAmount)}.${paymentStatus === 'payment_reconciliation_required' ? ' The payment result is still being verified.' : ''}`
+        : `Your service request was canceled.${paymentStatus === 'payment_reconciliation_required' ? ' The payment result is still being verified.' : ''}`,
+      type: 'service_canceled',
+      requestId,
+      targetPath: `/customer/requests/${requestId}`,
+      metadata: { paymentStatus, cancellationAmount: Number(cancellation.cancellationAmount || 0) },
+    }).catch((error) => logger.warn('service_cancellation_customer_notification_failed', { requestId, error: error.message }));
+    if (helperId) {
+      await createUserNotificationOnce({
+        notificationId: `financial_${operationId}_cancellation_${helperId}`,
+        userId: helperId,
+        title: 'Job canceled',
+        message: `${request.customerName || 'The customer'} canceled this job. Helper earnings recorded: ${formatMoney(cancellation.helperPayoutBreakdown?.helperAmount || 0)}.`,
+        type: 'job_canceled',
+        requestId,
+        targetPath: `/provider/jobs/${requestId}`,
+      }).catch((error) => logger.warn('service_cancellation_helper_notification_failed', { requestId, error: error.message }));
+    }
   }
 
+  if (operation.finalOutcome === 'success' && operation.previousFinalOutcome && operation.previousFinalOutcome !== 'success') {
+    await createUserNotificationOnce({
+      notificationId: `financial_${operationId}_reconciled_success_${customerId}`,
+      userId: customerId,
+      title: 'Payment confirmed',
+      message: 'The payment for your service request has now been confirmed.',
+      type: 'payment_confirmed',
+      requestId,
+      targetPath: `/customer/requests/${requestId}`,
+      metadata: { paymentStatus: 'paid' },
+    }).catch(() => null);
+  }
+}
+
+async function isCustomerRequestPrincipalOwnedByUid(uid, customerId) {
+  const normalizedUid = String(uid || '').trim();
+  const normalizedCustomerId = String(customerId || '').trim();
+  if (!normalizedUid || !normalizedCustomerId) return false;
+  if (normalizedUid === normalizedCustomerId) return true;
+  const ownerSnap = await db.collection('whatsappGuestOwnership').doc(normalizedCustomerId).get().catch(() => null);
+  return Boolean(ownerSnap?.exists && String(ownerSnap.data()?.uid || '') === normalizedUid);
+}
+
+exports.finalizeServiceRequestBilling = onRequest({ cors: true }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
   const token = getBearerToken(req);
-  if (!token) {
-    res.status(401).json({ success: false, message: 'Unauthorized request.' });
-    return;
-  }
-
-  const decoded = await admin.auth().verifyIdToken(token).catch(() => null);
-  if (!decoded?.uid) {
-    res.status(401).json({ success: false, message: 'Unauthorized request.' });
-    return;
-  }
-
-  const requestId = req.body?.requestId?.toString().trim();
-  if (!requestId) {
-    res.status(400).json({ success: false, message: 'Missing requestId.' });
-    return;
-  }
+  const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) return res.status(401).json({ success: false, message: 'Unauthorized request.' });
+  const requestId = String(req.body?.requestId || '').trim();
+  if (!requestId) return res.status(400).json({ success: false, message: 'Missing requestId.' });
 
   const requestRef = db.collection('serviceRequests').doc(requestId);
   const requestSnap = await requestRef.get();
-  if (!requestSnap.exists) {
-    res.status(404).json({ success: false, message: 'Service request not found.' });
-    return;
-  }
-
+  if (!requestSnap.exists) return res.status(404).json({ success: false, message: 'Service request not found.' });
   const request = requestSnap.data() || {};
-  const isParticipant = [request.customerId, request.helperAssignment?.helperId].includes(decoded.uid);
-  if (!isParticipant) {
-    res.status(403).json({ success: false, message: 'Not allowed to finalize billing for this request.' });
-    return;
+  const helperId = String(request.helperAssignment?.helperId || '').trim();
+  if (decoded.uid !== helperId && !(await isCustomerRequestPrincipalOwnedByUid(decoded.uid, request.customerId))) {
+    return res.status(403).json({ success: false, message: 'Not allowed to finalize billing for this request.' });
+  }
+  const operationId = serviceFinancialOperationId(requestId);
+  const operationRef = db.collection(FINANCIAL_OPERATIONS_COLLECTION).doc(operationId);
+  const existingOperation = await operationRef.get();
+  if (['completed', 'canceled', 'cancelled'].includes(String(request.status || '').toLowerCase())
+    && existingOperation.exists
+    && existingOperation.data()?.operationType !== 'completion') {
+    return res.status(200).json({ success: true, request: { id: requestId, ...request }, charge: { ok: request.paymentStatus === 'paid', reason: null } });
+  }
+  if (['completed', 'canceled', 'cancelled'].includes(String(request.status || '').toLowerCase()) && !existingOperation.exists) {
+    return res.status(200).json({ success: true, request: { id: requestId, ...request }, charge: { ok: true, reason: null } });
   }
 
-  if (['completed', 'canceled'].includes(request.status)) {
-    res.status(200).json({ success: true, request: { id: requestId, ...request } });
-    return;
-  }
-
-  const endedAt = Date.now();
-  const arrivedAtMs = timestampToMillis(request.arrivedAt || request.helperAssignment?.arrivedAt);
-  const workStartedAtMs = timestampToMillis(request.workStartedAt || request.helperAssignment?.workStartedAt);
-
-  let waitingMinutes = 0;
-  let waitingCost = 0;
-  if (arrivedAtMs && workStartedAtMs && workStartedAtMs > arrivedAtMs) {
-    waitingMinutes = Number(((workStartedAtMs - arrivedAtMs) / 60000).toFixed(2));
-    if (waitingMinutes > 2) {
-      waitingCost = Math.round(waitingMinutes - 2) * 1.00;
+  let settlementData = null;
+  let cashChargeAmount = 0;
+  let selectedCard = null;
+  let customerData = {};
+  if (!existingOperation.exists) {
+    const endedAt = Date.now();
+    const arrivedAtMs = timestampToMillis(request.arrivedAt || request.helperAssignment?.arrivedAt);
+    const workStartedAtMs = timestampToMillis(request.workStartedAt || request.helperAssignment?.workStartedAt);
+    let waitingMinutes = 0;
+    let waitingCost = 0;
+    if (arrivedAtMs && workStartedAtMs && workStartedAtMs > arrivedAtMs) {
+      waitingMinutes = Number(((workStartedAtMs - arrivedAtMs) / 60000).toFixed(2));
+      if (waitingMinutes > 2) waitingCost = Math.round(waitingMinutes - 2) * 1.00;
     }
-  }
-
-  const quoteTotal = toRand(
-    request.pricingSnapshot?.total
-    ?? request.pricingSnapshot?.totalAmount
-    ?? request.pricingSnapshot?.finalAmount
-    ?? request.pricingSnapshot?.finalPrice
-    ?? 0,
-  );
-  const subtotal = getServiceQuoteSubtotal(request);
-  const travelFee = getServiceTravelFee(request);
-  const bookingFee = getServiceBookingFee(request);
-  const helperPayoutBreakdown = getServiceHelperPayoutBreakdown(request, {
-    closureType: 'completed',
-    waitingCost,
-    travelFeeAmount: travelFee,
-    bookingFeeAmount: bookingFee,
-  });
-  const totalAmount = helperPayoutBreakdown.customerChargeAmount || toRand(quoteTotal + waitingCost + bookingFee);
-  const redemptionId = String(request.serviceCreditRedemptionId || '').trim();
-  let serviceCreditAmount = 0;
-  let serviceCreditPoints = 0;
-  if (redemptionId) {
-    const redemptionSnap = await db.collection('serviceCreditRedemptions').doc(redemptionId).get();
-    const redemption = redemptionSnap.data() || {};
-    if (!redemptionSnap.exists || redemption.userId !== request.customerId || redemption.requestId !== requestId || redemption.status !== 'reserved') {
-      res.status(409).json({ success: false, message: 'The service-credit reservation is no longer valid.' });
-      return;
+    const quoteTotal = toRand(request.pricingSnapshot?.total ?? request.pricingSnapshot?.totalAmount ?? request.pricingSnapshot?.finalAmount ?? request.pricingSnapshot?.finalPrice ?? 0);
+    const subtotal = getServiceQuoteSubtotal(request);
+    const travelFee = getServiceTravelFee(request);
+    const bookingFee = getServiceBookingFee(request);
+    const helperPayoutBreakdown = getServiceHelperPayoutBreakdown(request, { closureType: 'completed', waitingCost, travelFeeAmount: travelFee, bookingFeeAmount: bookingFee });
+    const totalAmount = helperPayoutBreakdown.customerChargeAmount || toRand(quoteTotal + waitingCost + bookingFee);
+    const redemptionId = String(request.serviceCreditRedemptionId || '').trim();
+    let serviceCreditAmount = 0;
+    let serviceCreditPoints = 0;
+    if (redemptionId) {
+      const redemptionSnap = await db.collection('serviceCreditRedemptions').doc(redemptionId).get();
+      const redemption = redemptionSnap.data() || {};
+      if (!redemptionSnap.exists || redemption.userId !== request.customerId || redemption.requestId !== requestId || redemption.status !== 'reserved') {
+        return res.status(409).json({ success: false, message: 'The service-credit reservation is no longer valid.' });
+      }
+      const globalRewardConfig = await getRewardConfig(db, 'global');
+      const pointsPerRand = Math.max(1, Number(globalRewardConfig.pointsPerRand || 10));
+      const redemptionIncrement = Math.max(1, Number(globalRewardConfig.redemptionIncrementPoints || 10));
+      const eligibleSubtotal = Math.max(0, Number(quoteTotal || 0));
+      const percentageCap = eligibleSubtotal * (Number(globalRewardConfig.maximumServiceCreditPercentagePerBooking || 20) / 100);
+      const randCap = Number(globalRewardConfig.maximumServiceCreditRandPerBooking || 0);
+      const maxCreditRand = randCap > 0 ? Math.min(percentageCap, randCap) : percentageCap;
+      const maximumPoints = Math.floor((maxCreditRand * pointsPerRand) / redemptionIncrement) * redemptionIncrement;
+      serviceCreditPoints = Math.max(0, Math.min(Number(redemption.points || 0), maximumPoints));
+      serviceCreditAmount = toRand(serviceCreditPoints / pointsPerRand);
     }
-    const globalRewardConfig = await getRewardConfig(db, 'global');
-    const pointsPerRand = Math.max(1, Number(globalRewardConfig.pointsPerRand || 10));
-    const redemptionIncrement = Math.max(1, Number(globalRewardConfig.redemptionIncrementPoints || 10));
-    const eligibleSubtotal = Math.max(0, Number(quoteTotal || 0));
-    const percentageCap = eligibleSubtotal * (Number(globalRewardConfig.maximumServiceCreditPercentagePerBooking || 20) / 100);
-    const randCap = Number(globalRewardConfig.maximumServiceCreditRandPerBooking || 0);
-    const maxCreditRand = randCap > 0 ? Math.min(percentageCap, randCap) : percentageCap;
-    const maximumPoints = Math.floor((maxCreditRand * pointsPerRand) / redemptionIncrement) * redemptionIncrement;
-    serviceCreditPoints = Math.max(0, Math.min(Number(redemption.points || 0), maximumPoints));
-    serviceCreditAmount = toRand(serviceCreditPoints / pointsPerRand);
-  }
-  const cashChargeAmount = toRand(Math.max(0, totalAmount - serviceCreditAmount));
-
-  const customerRef = db.collection('users').doc(request.customerId);
-  const customerSnap = await customerRef.get();
-  const customerData = customerSnap.data() || {};
-
-  const paymentMethods = customerData.paymentMethods || [];
-  const selectedCardId = request.selectedCardId || request.requestPayload?.selectedCardId || null;
-  const selectedCard = paymentMethods.find((card) => card.id === selectedCardId)
-    || paymentMethods.find((card) => card.isDefault)
-    || paymentMethods[0]
-    || null;
-
-  let charge = { ok: true, reason: null, transactionId: 'free-request-covered' };
-  if (cashChargeAmount > 0) {
-    let paymentsSecrets;
-    try {
-      paymentsSecrets = getPaymentsSecrets();
-    } catch (error) {
-      logger.error('Payment configuration is unavailable during service request billing.', {
-        requestId,
-        error: error.message,
-      });
-      res.status(500).json({ success: false, message: 'Payment configuration is unavailable.' });
-      return;
-    }
-
-    charge = await chargeAuthorizationWithPaystack({
-      paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY,
-      email: customerData.email || request.customerEmail || '',
-      amount: cashChargeAmount,
-      authorizationCode: selectedCard?.paystackAuthorizationCode || '',
-    });
-  }
-
-  const paymentStatus = charge.ok ? 'paid' : 'wallet_debt_recorded';
-  const wallet = customerData.wallet || { balance: 0, currency: 'ZAR' };
-  const nextWalletBalance = charge.ok
-    ? Number(wallet.balance || 0)
-    : Number((Number(wallet.balance || 0) - cashChargeAmount).toFixed(2));
-
-  const batch = db.batch();
-  batch.set(requestRef, {
-    status: 'completed',
-    statusDetail: 'Service completed and billing finalized.',
-    endedAt,
-    waitingMinutes,
-    waitingCost,
-    totalAmount,
-    pricingSnapshot: {
-      ...(request.pricingSnapshot || {}),
-      subtotal,
-      travelFee,
-      bookingFee,
-      bookingFeeRate: SERVICE_BOOKING_FEE_RATE,
-      bookingFeeCap: SERVICE_BOOKING_FEE_CAP,
+    cashChargeAmount = toRand(Math.max(0, totalAmount - serviceCreditAmount));
+    const customerSnap = await db.collection('users').doc(request.customerId).get();
+    customerData = customerSnap.data() || {};
+    const paymentMethods = (await getServerPaymentMethods({ db, admin, uid: request.customerId }))
+      .filter((method) => String(method.paystackAuthorizationCode || '').trim());
+    const selectedCardId = request.selectedCardId || request.requestPayload?.selectedCardId || null;
+    selectedCard = paymentMethods.find((card) => card.id === selectedCardId)
+      || paymentMethods.find((card) => card.isDefault)
+      || paymentMethods[0]
+      || null;
+    settlementData = {
+      customerId: String(request.customerId || ''),
+      helperId,
+      endedAt,
+      noChargePaymentStatus: 'paid',
+      totalAmount,
       waitingMinutes,
       waitingCost,
       serviceCreditAmount,
       serviceCreditPoints,
-      cashChargeAmount,
-      finalAmount: totalAmount,
-      finalizedAt: new Date(endedAt).toISOString(),
-    },
-    helperPayoutBreakdown: {
-      ...helperPayoutBreakdown,
-      finalizedAt: new Date(endedAt).toISOString(),
-    },
-    paymentStatus,
-    paymentTransactionId: charge.transactionId || null,
-    chargedCardLast4: selectedCard?.last4 || null,
-    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-  }, { merge: true });
-
-  const helperId = request.helperAssignment?.helperId;
-  if (helperId) {
-    const helperRef = db.collection('users').doc(helperId);
-    batch.set(helperRef, {
-      activeServiceRequestId: admin.firestore.FieldValue.delete(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
-    batch.set(db.collection('helperDispatchIndex').doc(helperId), {
-      activeServiceRequestId: null,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
-  }
-
-  if (!charge.ok) {
-    batch.set(customerRef, {
-      wallet: {
-        ...wallet,
-        balance: nextWalletBalance,
-        currency: wallet.currency || 'ZAR',
-        updatedAt: new Date().toISOString(),
-      },
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
-  }
-
-  await batch.commit();
-  if (redemptionId) {
-    await finalizeServiceCredit({ db, admin, requestId, paymentSucceeded: charge.ok, appliedPoints: serviceCreditPoints, reason: charge.ok ? 'final_cap' : 'payment_failed' })
-      .catch((error) => logger.error('service_credit_finalization_failed', { requestId, redemptionId, error: error.message }));
-  }
-
-  await admin.database().ref(`liveTracking/serviceRequests/${requestId}`).update({
-    status: 'completed',
-    closedReason: 'completed',
-    closedAtMs: endedAt,
-    updatedAtMs: endedAt,
-  }).catch((error) => logger.warn('Unable to close live tracking after service completion.', {
-    requestId,
-    error: error.message,
-  }));
-
-  const updatedSnap = await requestRef.get();
-  const updatedRequest = { id: updatedSnap.id, ...updatedSnap.data() };
-  const completionEventId = `request_completed_${requestId}`;
-  await db.collection('customerServiceEvents').doc(completionEventId).set({
-    customerId: request.customerId,
-    eventType: 'request_completed',
-    serviceId: request.serviceIds?.[0] || request.selectedPackageId || request.categoryId || '',
-    categoryId: request.categoryId || '',
-    serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
-    requestId,
-    source: 'finalizeServiceRequestBilling',
-    metadata: {
-      helperId: helperId || '',
-      paymentStatus,
-      totalAmount,
-      waitingCost,
-      helperPayoutAmount: helperPayoutBreakdown.helperAmount,
-      platformAmount: helperPayoutBreakdown.platformAmount,
-      requestStatus: 'completed',
-    },
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    createdAtMs: endedAt,
-    dayBucket: new Date(endedAt).toISOString().slice(0, 10),
-  }, { merge: true });
-
-
-  if (paymentStatus === 'paid') {
-    const customerConfig = await getRewardConfig(db, 'customer');
-    const helperConfig = await getRewardConfig(db, 'helper');
-    const expandedServiceIds = serviceIdsFor(updatedRequest);
-    await applyRewardTransaction({ db, admin, userId: request.customerId, accountType: ACCOUNT_TYPES.CUSTOMER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(customerConfig.rewards?.completedPaidBooking || 50), reasonCode: REWARD_REASON_CODES.CUSTOMER_COMPLETED_PAID_BOOKING, reasonLabel: 'Completed paid booking', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `customer:${request.customerId}:request:${requestId}:completed-paid`, requestId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch((error) => logger.warn('customer_booking_reward_failed', { requestId, error: error.message }));
-    const firstBookingRewardResult = await applyRewardTransaction({ db, admin, userId: request.customerId, accountType: ACCOUNT_TYPES.CUSTOMER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(customerConfig.rewards?.firstCompletedPaidBooking || 100), reasonCode: REWARD_REASON_CODES.CUSTOMER_FIRST_COMPLETED_PAID_BOOKING, reasonLabel: 'First completed paid booking', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `customer:${request.customerId}:request:first-booking-bonus`, requestId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch((error) => { logger.info('first_booking_bonus_skipped_or_failed', { requestId, error: error.message }); return null; });
-    await incrementCompletedPaid({ db, admin, userId: request.customerId, accountType: ACCOUNT_TYPES.CUSTOMER, requestId }).catch((error) => logger.warn('customer_membership_recalc_failed', { requestId, error: error.message }));
-    if (helperId) {
-      await applyRewardTransaction({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(helperConfig.rewards?.completedPaidJob || 50), reasonCode: REWARD_REASON_CODES.HELPER_COMPLETED_PAID_JOB, reasonLabel: 'Completed paid job', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `helper:${helperId}:request:${requestId}:completed-paid`, requestId, relatedUserId: request.customerId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch((error) => logger.warn('helper_booking_reward_failed', { requestId, helperId, error: error.message }));
-      await incrementCompletedPaid({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, requestId, serviceIds: expandedServiceIds, categoryId: request.categoryId || '' }).catch((error) => logger.warn('helper_mastery_recalc_failed', { requestId, helperId, error: error.message }));
-    }
-    if (firstBookingRewardResult) {
-      await awardReferralStage({ db, admin, referredUserId: request.customerId, stage: 2, requestId }).catch((error) => logger.warn('referral_stage_two_failed', { requestId, error: error.message }));
-    }
-  }
-
-  await Promise.all([
-    createUserNotification({
-      userId: request.customerId,
-      title: 'Service completed',
-      message: `Your service request for ${request.subject || 'help'} was marked as completed. Total: ${formatMoney(totalAmount)}.`,
-      type: 'service_completed',
-      requestId,
-      targetPath: `/customer/requests/${requestId}`,
-      metadata: {
-        paymentStatus,
+      redemptionId: redemptionId || null,
+      selectedCardId: selectedCard?.id || null,
+      chargedCardLast4: selectedCard?.last4 || null,
+      helperPayoutBreakdown: { ...helperPayoutBreakdown, finalizedAt: new Date(endedAt).toISOString() },
+      requestPatch: {
+        status: 'completed',
+        statusDetail: 'Service completed and billing finalized.',
+        endedAt,
+        waitingMinutes,
+        waitingCost,
         totalAmount,
+        pricingSnapshot: {
+          ...(request.pricingSnapshot || {}),
+          subtotal, travelFee, bookingFee,
+          bookingFeeRate: SERVICE_BOOKING_FEE_RATE,
+          bookingFeeCap: SERVICE_BOOKING_FEE_CAP,
+          waitingMinutes, waitingCost, serviceCreditAmount, serviceCreditPoints,
+          cashChargeAmount,
+          finalAmount: totalAmount,
+          finalizedAt: new Date(endedAt).toISOString(),
+        },
+        helperPayoutBreakdown: { ...helperPayoutBreakdown, finalizedAt: new Date(endedAt).toISOString() },
+        chargedCardLast4: selectedCard?.last4 || null,
       },
-    }),
-    ...(helperId ? [
-      createUserNotification({
-        userId: helperId,
-        title: 'Job completed',
-        message: `Your job for ${request.customerName || 'Customer'} was marked as completed. Helper earnings recorded: ${formatMoney(helperPayoutBreakdown.helperAmount)}.`,
-        type: 'job_completed',
-        requestId,
-        targetPath: `/provider/jobs/${requestId}`,
-      })
-    ] : [])
-  ]);
+    };
+  }
 
-  res.status(200).json({
-    success: true,
-    request: updatedRequest,
-    charge: { ok: charge.ok, reason: charge.reason || null },
-  });
+  if (existingOperation.exists && existingOperation.data()?.status === 'settled_failed' && req.body?.retryConfirmedFailure === true) {
+    const customerSnap = await db.collection('users').doc(request.customerId).get();
+    customerData = customerSnap.data() || {};
+    const paymentMethods = (await getServerPaymentMethods({ db, admin, uid: request.customerId }))
+      .filter((method) => String(method.paystackAuthorizationCode || '').trim());
+    const selectedCardId = existingOperation.data()?.settlementData?.selectedCardId || null;
+    selectedCard = paymentMethods.find((card) => card.id === selectedCardId) || null;
+  }
+
+  let paymentsSecrets = { PAYSTACK_SECRET_KEY: '' };
+  const existingOperationData = existingOperation.exists ? existingOperation.data() || {} : null;
+  const existingOperationStatus = String(existingOperationData?.status || '').toLowerCase();
+  const needsPaystack = existingOperation.exists
+    ? (['processing', 'gateway_succeeded', 'gateway_failed_confirmed', 'gateway_reversed', 'reconciliation_required'].includes(existingOperationStatus)
+      || (existingOperationStatus === 'settled_failed' && req.body?.retryConfirmedFailure === true))
+    : cashChargeAmount > 0;
+  if (needsPaystack && Number(existingOperationData?.amountMinor || Math.round(cashChargeAmount * 100)) > 0) {
+    try {
+      paymentsSecrets = getPaymentsSecrets();
+    } catch (error) {
+      logger.error('Payment configuration is unavailable during service request billing.', { requestId, error: error.message });
+      return res.status(500).json({ success: false, message: 'Payment configuration is unavailable.' });
+    }
+  }
+
+  try {
+    const claim = await claimServiceFinancialOperation({
+      db,
+      requestRef,
+      requestId,
+      operationType: 'completion',
+      amount: existingOperation.exists ? Number(existingOperation.data()?.amount || 0) : cashChargeAmount,
+      currency: 'ZAR',
+      settlementData,
+      allowRetry: req.body?.retryConfirmedFailure === true,
+    });
+    if (claim.action === 'conflict') return res.status(409).json({ success: false, message: 'A conflicting request financial operation already exists.' });
+    if (claim.action === 'legacy_terminal') return res.status(200).json({ success: true, request: { id: requestId, ...claim.request }, charge: { ok: true, reason: null } });
+    if (claim.action === 'missing_request') return res.status(404).json({ success: false, message: 'Service request not found.' });
+    if (claim.action === 'confirmed_failure' || claim.action === 'settled') {
+      await runServiceFinancialPostEffects(claim.operationRef);
+      const current = await requestRef.get();
+      const op = claim.operation || {};
+      return res.status(200).json({ success: true, request: { id: requestId, ...current.data() }, charge: { ok: op.finalOutcome === 'success' || op.finalOutcome === 'no_charge', reason: op.reconciliationReason || null, pendingReconciliation: false } });
+    }
+    if (!['charge', 'reconcile'].includes(claim.action)) return res.status(409).json({ success: false, message: 'The request financial operation could not be claimed.' });
+
+    const operation = claim.operation || {};
+    const existingStatus = String(operation.status || '');
+    if (claim.action === 'reconcile' && ['settled_failed', 'settled_success', 'settled_no_charge'].includes(existingStatus)) {
+      await runServiceFinancialPostEffects(claim.operationRef);
+      const current = await requestRef.get();
+      return res.status(200).json({ success: true, request: { id: requestId, ...current.data() }, charge: { ok: operation.finalOutcome === 'success' || operation.finalOutcome === 'no_charge', reason: operation.reconciliationReason || null } });
+    }
+    const activeCustomer = customerData && Object.keys(customerData).length
+      ? customerData
+      : (await db.collection('users').doc(request.customerId).get()).data() || {};
+    const { outcome, settlement } = await runServiceFinancialOperation({
+      operationRef: claim.operationRef,
+      requestRef,
+      helperId: operation.operationType === 'completion' ? String(operation.settlementData?.helperId || helperId) : '',
+      action: claim.action,
+      operation,
+      paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY,
+      email: activeCustomer.email || request.customerEmail || '',
+      authorizationCode: selectedCard?.paystackAuthorizationCode || '',
+    });
+    const current = await requestRef.get();
+    const updatedRequest = current.exists ? { id: current.id, ...current.data() } : null;
+    return res.status(200).json({
+      success: true,
+      request: updatedRequest,
+      charge: {
+        ok: outcome.outcome === 'success' || outcome.outcome === 'no_charge',
+        reason: outcome.reason || null,
+        pendingReconciliation: ['pending', 'unknown'].includes(outcome.outcome),
+      },
+      settlement: settlement || null,
+    });
+  } catch (error) {
+    logger.error('service_request_billing_operation_failed', { requestId, error: error.message });
+    return res.status(500).json({ success: false, message: 'Unable to finalize billing right now. The payment operation is protected from duplicate charging and may require reconciliation.' });
+  }
 });
 
 function buildServiceRequestIdCandidates(rawRequestId = '') {
@@ -3887,352 +8179,454 @@ async function resolveServiceRequestSnapshot(rawRequestId = '') {
   };
 }
 
-exports.billCustomerServiceCancellation = onRequest({ cors: true, secrets: [UNCEDO_PAYMENTS_SECRETS] }, async (req, res) => {
-  if (req.method !== 'POST') {
-    res.status(405).json({ success: false, message: 'Method not allowed' });
-    return;
-  }
-
-  const token = getBearerToken(req);
-  if (!token) {
-    res.status(401).json({ success: false, message: 'Unauthorized request.' });
-    return;
-  }
-
-  const decoded = await admin.auth().verifyIdToken(token).catch(() => null);
-  if (!decoded?.uid) {
-    res.status(401).json({ success: false, message: 'Unauthorized request.' });
-    return;
-  }
-
-  const rawRequestId = String(req.body?.requestId || '').trim();
-  const canceledReason = String(req.body?.reason || '').trim();
-  if (!rawRequestId) {
-    res.status(400).json({ success: false, message: 'Missing requestId.' });
-    return;
-  }
-
-  const resolvedRequest = await resolveServiceRequestSnapshot(rawRequestId);
-  const { requestId, requestRef, requestSnap } = resolvedRequest;
-  if (!requestRef || !requestSnap?.exists) {
-    res.status(404).json({ success: false, message: 'Service request not found.' });
-    return;
-  }
-
-  const request = requestSnap.data() || {};
-  if (decoded.uid !== request.customerId) {
-    res.status(403).json({ success: false, message: 'Only the customer can cancel this request.' });
-    return;
-  }
-
-  if (['completed', 'canceled'].includes(String(request.status || '').toLowerCase())) {
-    res.status(200).json({ success: true, request: { id: requestId, ...request } });
-    return;
-  }
-
-  const helperId = String(request.helperAssignment?.helperId || '').trim();
-  const status = String(request.status || '').toLowerCase();
-  const endedAt = Date.now();
-
+async function getCustomerCancellationTerms(requestRef, request) {
+  const status = String(request?.status || '').trim().toLowerCase();
   if (isPreAssignmentServiceRequestStatus(status)) {
-    await requestRef.set({
-      status: 'canceled',
-      statusDetail: 'Customer canceled the service request before helper assignment.',
-      canceledAt: endedAt,
-      canceledBy: 'customer',
-      canceledReason,
-      helperAssignment: null,
-      helperQueue: [],
-      currentOfferHelperId: null,
-      offerExpiresAt: null,
-      offerToken: null,
-      offerCycleExcludedHelperIds: [],
-      declinedHelperIds: [],
-      matchingStartedAtMs: null,
-      paymentStatus: null,
-      paymentTransactionId: null,
-      cancellationFeeAmount: 0,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
-
-    await admin.database().ref(`liveTracking/serviceRequests/${requestId}`).update({
-      status: 'canceled',
-      closedReason: 'customer_canceled_pre_assignment',
-      closedAtMs: endedAt,
-      updatedAtMs: endedAt,
-    }).catch(() => null);
-
-    await Promise.all([
-      db.collection('customerServiceEvents').doc(`request_canceled_${requestId}`).set({
-        customerId: request.customerId,
-        eventType: 'request_canceled',
-        serviceId: request.serviceIds?.[0] || request.selectedPackageId || request.categoryId || '',
-        categoryId: request.categoryId || '',
-        serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
-        requestId,
-        source: 'billCustomerServiceCancellation',
-        metadata: {
-          helperId: '',
-          paymentStatus: 'not_applicable',
-          cancellationAmount: 0,
-          cancellationBillingRule: 'pre_assignment',
-          cancellationDistanceKm: 0,
-          helperPayoutAmount: 0,
-          platformAmount: 0,
-          requestStatus: 'canceled',
-        },
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        createdAtMs: endedAt,
-        dayBucket: new Date(endedAt).toISOString().slice(0, 10),
-      }, { merge: true }),
-      createUserNotification({
-        userId: request.customerId,
-        title: 'Service canceled',
-        message: 'Your service request was canceled.',
-        type: 'service_canceled',
-        requestId,
-        targetPath: `/customer/requests/${requestId}`,
-        metadata: {
-          paymentStatus: 'not_applicable',
-          cancellationAmount: 0,
-        },
-      }),
-    ]).catch(() => null);
-
-    const updatedSnap = await requestRef.get();
-    res.status(200).json({
-      success: true,
-      request: { id: updatedSnap.id, ...updatedSnap.data() },
-      charge: { ok: true, reason: null },
-      cancellation: {
-        requestId,
-        helperId: '',
-        endedAt,
-        paymentStatus: 'not_applicable',
-        cancellationAmount: 0,
-        cancellationBillingRule: 'pre_assignment',
-        cancellationDistanceKm: 0,
-        helperPayoutBreakdown: {
-          helperAmount: 0,
-          platformAmount: 0,
-          customerChargeAmount: 0,
-        },
-        chargedCardLast4: null,
-        paymentTransactionId: null,
-        walletBalance: null,
-        walletCurrency: null,
-        liveTrackingClosedReason: 'customer_canceled_pre_assignment',
-      },
-    });
-    return;
+    return calculateCustomerCancellationTerms({ request });
   }
-
   if (!isPostAssignmentServiceRequestStatus(status)) {
-    res.status(409).json({ success: false, message: 'This request cannot be canceled from its current state.' });
-    return;
+    return calculateCustomerCancellationTerms({ request });
   }
-
-  const bookingFee = getServiceBookingFee(request);
-  const travelFee = getServiceTravelFee(request);
-  const trackingSnap = await requestRef.collection('tracking').doc('live').get().catch(() => null);
-  const trackingData = trackingSnap?.exists ? (trackingSnap.data() || {}) : {};
-  const liveTrackingSnap = await admin.database().ref(`liveTracking/serviceRequests/${requestId}`).get().catch(() => null);
-  const liveTrackingData = liveTrackingSnap?.exists() ? (liveTrackingSnap.val() || {}) : {};
+  const [trackingSnap, liveTrackingSnap] = await Promise.all([
+    requestRef.collection('tracking').doc('live').get().catch(() => null),
+    admin.database().ref(`liveTracking/serviceRequests/${requestRef.id}`).get().catch(() => null),
+  ]);
+  const trackingData = trackingSnap?.exists ? trackingSnap.data() || {} : {};
+  const liveTrackingData = liveTrackingSnap?.exists() ? liveTrackingSnap.val() || {} : {};
   const distanceTravelledMeters = Number(
     request?.travelTracking?.distanceTravelledMeters
     || trackingData?.distanceTravelledMeters
     || liveTrackingData?.distanceTravelledMeters
     || 0,
   );
-  const travelledKm = Math.max(0, distanceTravelledMeters / 1000);
+  return calculateCustomerCancellationTerms({
+    request,
+    distanceTravelledMeters,
+    bookingFee: getServiceBookingFee(request),
+    travelFee: getServiceTravelFee(request),
+    travelRatePerKm: SERVICE_TRAVEL_RATE_PER_KM,
+    toMoney: toRand,
+    payoutBreakdown: (options) => getServiceHelperPayoutBreakdown(request, { closureType: 'canceled', ...options }),
+  });
+}
 
-  let billingRule = 'booking_fee_only';
-  let bookingCharge = bookingFee;
-  let travelCharge = 0;
-  if (['driving', 'en_route', 'buying_resources'].includes(status)) {
-    billingRule = 'travelled_distance_plus_booking_fee';
-    travelCharge = toRand(travelledKm * SERVICE_TRAVEL_RATE_PER_KM);
-  } else if (['arrived', 'work_started'].includes(status)) {
-    billingRule = 'travel_fee_plus_booking_fee';
-    travelCharge = toRand(travelFee);
+async function getWhatsAppIdentityForCurrentSender(identityId, eventIdentity) {
+  const safeIdentityId = String(identityId || '').trim();
+  if (!safeIdentityId || !eventIdentity?.waId || !eventIdentity?.phoneNumberId) return null;
+  const snapshot = await db.collection('whatsappIdentities').doc(safeIdentityId).get();
+  if (!snapshot.exists) return null;
+  const currentIdentity = snapshot.data() || {};
+  if (String(currentIdentity.waId || '') !== String(eventIdentity.waId || '')
+    || String(currentIdentity.phoneNumberId || '') !== String(eventIdentity.phoneNumberId || '')) return null;
+  return currentIdentity;
+}
+
+async function getWhatsAppCustomerCancellationPreview({ identityId, identity, requestId }) {
+  const currentIdentity = await getWhatsAppIdentityForCurrentSender(identityId, identity);
+  if (!currentIdentity) return { code: 'identity-not-found' };
+  const access = await getWhatsAppRequestForIdentity({ db, identity: currentIdentity, requestId });
+  if (access.code !== 'found') return { code: access.code };
+  const requestRef = db.collection('serviceRequests').doc(access.request.id);
+  const terms = await getCustomerCancellationTerms(requestRef, access.request);
+  return { ...terms, requestId: access.request.id };
+}
+
+async function handleCustomerServiceCancellation(req, res, internalPrincipal = null) {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
+  const token = internalPrincipal ? '' : getBearerToken(req);
+  const decoded = internalPrincipal?.uid
+    ? internalPrincipal
+    : token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) return res.status(401).json({ success: false, message: 'Unauthorized request.' });
+  const rawRequestId = String(req.body?.requestId || '').trim();
+  const canceledReason = String(req.body?.reason || '').trim();
+  if (!rawRequestId) return res.status(400).json({ success: false, message: 'Missing requestId.' });
+
+  const resolvedRequest = await resolveServiceRequestSnapshot(rawRequestId);
+  const { requestId, requestRef, requestSnap } = resolvedRequest;
+  if (!requestRef || !requestSnap?.exists) return res.status(404).json({ success: false, message: 'Service request not found.' });
+  const request = requestSnap.data() || {};
+  if (!(await isCustomerRequestPrincipalOwnedByUid(decoded.uid, request.customerId))) return res.status(403).json({ success: false, message: 'Only the customer can cancel this request.' });
+
+  const operationId = serviceFinancialOperationId(requestId);
+  const operationRef = db.collection(FINANCIAL_OPERATIONS_COLLECTION).doc(operationId);
+  const existingOperation = await operationRef.get();
+  if (['completed', 'canceled', 'cancelled'].includes(String(request.status || '').toLowerCase())
+    && existingOperation.exists
+    && existingOperation.data()?.operationType !== 'customer_cancellation') {
+    return res.status(200).json({ success: true, request: { id: requestId, ...request } });
+  }
+  if (['completed', 'canceled', 'cancelled'].includes(String(request.status || '').toLowerCase()) && !existingOperation.exists) {
+    return res.status(200).json({ success: true, request: { id: requestId, ...request } });
   }
 
-  const helperPayoutBreakdown = getServiceHelperPayoutBreakdown(request, {
-    closureType: 'canceled',
-    billingRule,
-    travelledKm,
-    travelFeeAmount: billingRule === 'travelled_distance_plus_booking_fee' ? travelCharge : travelFee,
-    bookingFeeAmount: bookingCharge,
-  });
-  const cancellationAmount = helperPayoutBreakdown.customerChargeAmount;
-  const customerRef = db.collection('users').doc(request.customerId);
-  const customerSnap = await customerRef.get();
-  const customerData = customerSnap.data() || {};
-  const paymentMethods = customerData.paymentMethods || [];
-  const selectedCardId = request.selectedCardId || request.requestPayload?.selectedCardId || null;
-  const selectedCard = paymentMethods.find((card) => card.id === selectedCardId)
-    || paymentMethods.find((card) => card.isDefault)
-    || paymentMethods[0]
-    || null;
+  let settlementData = null;
+  let cancellationAmount = 0;
+  let selectedCard = null;
+  let customerData = {};
+  if (!existingOperation.exists) {
+    const helperId = String(request.helperAssignment?.helperId || '').trim();
+    const status = String(request.status || '').toLowerCase();
+    const endedAt = Date.now();
+    const cancellationTerms = await getCustomerCancellationTerms(requestRef, request);
+    if (cancellationTerms.code !== 'eligible') {
+      return res.status(409).json({ success: false, code: cancellationTerms.code, message: 'This request cannot be canceled from its current state.' });
+    }
+    if (req.body?.expectedCancellation
+      && !cancellationQuoteMatches(req.body.expectedCancellation, cancellationTerms)) {
+      return res.status(409).json({
+        success: false,
+        code: 'cancellation-terms-changed',
+        message: 'The request state or cancellation fee changed. Review the updated fee and confirm again.',
+        cancellationPreview: {
+          status: cancellationTerms.status,
+          cancellationAmount: cancellationTerms.cancellationAmount,
+          currency: 'ZAR',
+          billingRule: cancellationTerms.billingRule,
+        },
+      });
+    }
+    if (isPreAssignmentServiceRequestStatus(status)) {
+      const cancellation = {
+        requestId,
+        helperId: '',
+        endedAt,
+        cancellationAmount: 0,
+        cancellationBillingRule: 'pre_assignment',
+        cancellationDistanceKm: 0,
+        helperPayoutBreakdown: { helperAmount: 0, platformAmount: 0, customerChargeAmount: 0 },
+        chargedCardLast4: null,
+        paymentTransactionId: null,
+        walletBalance: null,
+        walletCurrency: null,
+        liveTrackingClosedReason: 'customer_canceled_pre_assignment',
+      };
+      settlementData = {
+        customerId: String(request.customerId || ''),
+        helperId: '',
+        endedAt,
+        noChargePaymentStatus: null,
+        cancellation,
+        requestPatch: {
+          status: 'canceled',
+          statusDetail: 'Customer canceled the service request before helper assignment.',
+          canceledAt: endedAt,
+          canceledBy: 'customer',
+          canceledReason,
+          helperAssignment: null,
+          helperQueue: [],
+          currentOfferHelperId: null,
+          offerExpiresAt: null,
+          offerToken: null,
+          offerCycleExcludedHelperIds: [],
+          declinedHelperIds: [],
+          matchingStartedAtMs: null,
+          paymentStatus: null,
+          paymentTransactionId: null,
+          cancellationFeeAmount: 0,
+        },
+      };
+    } else {
+      if (!isPostAssignmentServiceRequestStatus(status)) {
+        return res.status(409).json({ success: false, message: 'This request cannot be canceled from its current state.' });
+      }
+      const bookingFee = getServiceBookingFee(request);
+      const travelFee = getServiceTravelFee(request);
+      cancellationAmount = Number(cancellationTerms.cancellationAmount || 0);
+      const helperPayoutBreakdown = cancellationTerms.helperPayoutBreakdown;
+      const bookingCharge = bookingFee;
+      const customerSnap = await db.collection('users').doc(request.customerId).get();
+      customerData = customerSnap.data() || {};
+      const paymentMethods = (await getServerPaymentMethods({ db, admin, uid: request.customerId }))
+        .filter((method) => String(method.paystackAuthorizationCode || '').trim());
+      const selectedCardId = request.selectedCardId || request.requestPayload?.selectedCardId || null;
+      selectedCard = paymentMethods.find((card) => card.id === selectedCardId)
+        || paymentMethods.find((card) => card.isDefault)
+        || paymentMethods[0]
+        || null;
+      const pricingSnapshot = {
+        ...(request.pricingSnapshot || {}),
+        subtotal: getServiceQuoteSubtotal(request),
+        travelFee,
+        bookingFee: bookingCharge,
+        bookingFeeRate: SERVICE_BOOKING_FEE_RATE,
+        bookingFeeCap: SERVICE_BOOKING_FEE_CAP,
+        cancellationAmount,
+        cancellationTravelCharge: Number(cancellationTerms.travelCharge || 0),
+        cancellationDistanceKm: Number(cancellationTerms.cancellationDistanceKm || 0),
+        cancellationBillingRule: cancellationTerms.billingRule,
+        finalizedAt: new Date(endedAt).toISOString(),
+      };
+      const cancellation = {
+        requestId,
+        helperId,
+        endedAt,
+        cancellationAmount,
+        cancellationBillingRule: cancellationTerms.billingRule,
+        cancellationDistanceKm: Number(cancellationTerms.cancellationDistanceKm || 0),
+        helperPayoutBreakdown,
+        selectedCardId: selectedCard?.id || null,
+        chargedCardLast4: selectedCard?.last4 || null,
+        paymentTransactionId: null,
+        walletBalance: null,
+        walletCurrency: String(customerData.wallet?.currency || 'ZAR'),
+        pricingSnapshot,
+        liveTrackingClosedReason: 'customer_canceled',
+      };
+      settlementData = {
+        customerId: String(request.customerId || ''),
+        helperId,
+        endedAt,
+        noChargePaymentStatus: 'paid',
+        cancellation,
+        requestPatch: {
+          status: 'canceled',
+          statusDetail: cancellationAmount > 0
+            ? `Customer canceled the service. Cancellation fee charged: R${cancellationAmount.toFixed(2)}.`
+            : 'Customer canceled the service.',
+          canceledAt: endedAt,
+          canceledBy: 'customer',
+          canceledReason,
+          cancellationFeeAmount: cancellationAmount,
+          chargedCardLast4: selectedCard?.last4 || null,
+          pricingSnapshot,
+          helperPayoutBreakdown: { ...helperPayoutBreakdown, finalizedAt: pricingSnapshot.finalizedAt },
+        },
+      };
+    }
+  }
 
-  let charge = { ok: true, reason: null, transactionId: 'service-cancel-zero-charge' };
-  if (cancellationAmount > 0) {
-    let paymentsSecrets;
+  if (existingOperation.exists && existingOperation.data()?.status === 'settled_failed' && req.body?.retryConfirmedFailure === true) {
+    const customerSnap = await db.collection('users').doc(request.customerId).get();
+    customerData = customerSnap.data() || {};
+    const paymentMethods = (await getServerPaymentMethods({ db, admin, uid: request.customerId }))
+      .filter((method) => String(method.paystackAuthorizationCode || '').trim());
+    const selectedCardId = existingOperation.data()?.settlementData?.cancellation?.selectedCardId || null;
+    selectedCard = paymentMethods.find((card) => card.id === selectedCardId) || null;
+  }
+
+  let paymentsSecrets = { PAYSTACK_SECRET_KEY: '' };
+  const existingOperationData = existingOperation.exists ? existingOperation.data() || {} : null;
+  const existingOperationStatus = String(existingOperationData?.status || '').toLowerCase();
+  const needsPaystack = existingOperation.exists
+    ? (['processing', 'gateway_succeeded', 'gateway_failed_confirmed', 'gateway_reversed', 'reconciliation_required'].includes(existingOperationStatus)
+      || (existingOperationStatus === 'settled_failed' && req.body?.retryConfirmedFailure === true))
+    : cancellationAmount > 0;
+  if (needsPaystack && Number(existingOperationData?.amountMinor || Math.round(cancellationAmount * 100)) > 0) {
     try {
       paymentsSecrets = getPaymentsSecrets();
     } catch (error) {
-      logger.error('Payment configuration is unavailable during service request cancellation.', {
-        requestId,
-        error: error.message,
-      });
-      res.status(500).json({ success: false, message: 'Payment configuration is unavailable.' });
-      return;
+      logger.error('Payment configuration is unavailable during service request cancellation.', { requestId, error: error.message });
+      return res.status(500).json({ success: false, message: 'Payment configuration is unavailable.' });
     }
+  }
 
-    charge = await chargeAuthorizationWithPaystack({
+  try {
+    const claim = await claimServiceFinancialOperation({
+      db,
+      requestRef,
+      requestId,
+      operationType: 'customer_cancellation',
+      amount: existingOperation.exists ? Number(existingOperation.data()?.amount || 0) : cancellationAmount,
+      currency: 'ZAR',
+      settlementData,
+      allowRetry: req.body?.retryConfirmedFailure === true,
+      expectedRequestStatus: existingOperation.exists ? null : request.status,
+      expectedHelperId: existingOperation.exists ? null : String(request.helperAssignment?.helperId || ''),
+    });
+    if (claim.action === 'conflict') return res.status(409).json({ success: false, message: 'A conflicting request financial operation already exists.' });
+    if (claim.action === 'request_changed') return res.status(409).json({ success: false, code: 'request-state-changed', message: 'The request changed before cancellation could be committed. Please review its current state.' });
+    if (claim.action === 'legacy_terminal') return res.status(200).json({ success: true, request: { id: requestId, ...claim.request } });
+    if (claim.action === 'missing_request') return res.status(404).json({ success: false, message: 'Service request not found.' });
+    if (claim.action === 'confirmed_failure' || claim.action === 'settled') {
+      await runServiceFinancialPostEffects(claim.operationRef);
+      const current = await requestRef.get();
+      const op = claim.operation || {};
+      return res.status(200).json({ success: true, request: { id: requestId, ...current.data() }, charge: { ok: op.finalOutcome === 'success' || op.finalOutcome === 'no_charge', reason: op.reconciliationReason || null }, cancellation: op.settlementData?.cancellation || null });
+    }
+    if (!['charge', 'reconcile'].includes(claim.action)) return res.status(409).json({ success: false, message: 'The request financial operation could not be claimed.' });
+    const operation = claim.operation || {};
+    const activeCustomer = customerData && Object.keys(customerData).length
+      ? customerData
+      : (await db.collection('users').doc(request.customerId).get()).data() || {};
+    const { outcome, settlement } = await runServiceFinancialOperation({
+      operationRef: claim.operationRef,
+      requestRef,
+      helperId: '',
+      action: claim.action,
+      operation,
       paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY,
-      email: customerData.email || request.customerEmail || '',
-      amount: cancellationAmount,
+      email: activeCustomer.email || request.customerEmail || '',
       authorizationCode: selectedCard?.paystackAuthorizationCode || '',
     });
+    const current = await requestRef.get();
+    const updatedRequest = current.exists ? { id: current.id, ...current.data() } : null;
+    const savedOperation = (await claim.operationRef.get()).data() || {};
+    return res.status(200).json({
+      success: true,
+      request: updatedRequest,
+      charge: {
+        ok: outcome.outcome === 'success' || outcome.outcome === 'no_charge',
+        reason: outcome.reason || null,
+        pendingReconciliation: ['pending', 'unknown'].includes(outcome.outcome),
+      },
+      cancellation: savedOperation.settlementData?.cancellation || null,
+      settlement: settlement || null,
+    });
+  } catch (error) {
+    logger.error('service_request_cancellation_billing_failed', { requestId, error: error.message });
+    return res.status(500).json({ success: false, message: 'Unable to cancel this request right now. The payment operation is protected from duplicate charging and may require reconciliation.' });
   }
+}
 
-  const paymentStatus = charge.ok ? 'paid' : 'wallet_debt_recorded';
-  const wallet = customerData.wallet || { balance: 0, currency: 'ZAR' };
-  const nextWalletBalance = charge.ok
-    ? Number(wallet.balance || 0)
-    : Number((Number(wallet.balance || 0) - cancellationAmount).toFixed(2));
+exports.billCustomerServiceCancellation = onRequest({ cors: true }, async (req, res) => (
+  handleCustomerServiceCancellation(req, res)
+));
 
-  const pricingSnapshot = {
-    ...(request.pricingSnapshot || {}),
-    subtotal: getServiceQuoteSubtotal(request),
-    travelFee,
-    bookingFee: bookingCharge,
-    bookingFeeRate: SERVICE_BOOKING_FEE_RATE,
-    bookingFeeCap: SERVICE_BOOKING_FEE_CAP,
-    cancellationAmount,
-    cancellationTravelCharge: travelCharge,
-    cancellationDistanceKm: Number(travelledKm.toFixed(2)),
-    cancellationBillingRule: billingRule,
-    finalizedAt: new Date(endedAt).toISOString(),
+async function cancelCustomerServiceRequestFromWhatsApp({ identityId, identity, requestId, expectedCancellation, reason = 'Customer requested cancellation through WhatsApp.' } = {}) {
+  if (!whatsappCancellationEnabled()) return { statusCode: 503, body: { success: false, code: 'whatsapp-cancellation-disabled' } };
+  const currentIdentity = await getWhatsAppIdentityForCurrentSender(identityId, identity);
+  if (!currentIdentity) return { statusCode: 403, body: { success: false, code: 'identity-not-authorized' } };
+  const role = String(currentIdentity.role || (currentIdentity.guestPrincipalId ? 'customer' : '')).trim().toLowerCase();
+  if (role !== 'customer') return { statusCode: 403, body: { success: false, code: 'customer-role-required' } };
+  const principalUid = String(currentIdentity.linkedFirebaseUid || currentIdentity.guestPrincipalId || '').trim();
+  if (!principalUid) return { statusCode: 403, body: { success: false, code: 'customer-identity-required' } };
+  let statusCode = 200;
+  let body = null;
+  const response = {
+    status(code) { statusCode = Number(code) || 500; return this; },
+    json(payload) { body = payload; return this; },
   };
+  await handleCustomerServiceCancellation({
+    method: 'POST',
+    headers: {},
+    body: { requestId, reason, expectedCancellation },
+  }, response, { uid: principalUid });
+  return { statusCode, body: body || { success: false, code: 'empty-cancellation-response' } };
+}
 
-  const cancellationPayload = {
-    requestId,
-    helperId,
-    endedAt,
-    paymentStatus,
-    cancellationAmount,
-    cancellationBillingRule: billingRule,
-    cancellationDistanceKm: Number(travelledKm.toFixed(2)),
-    helperPayoutBreakdown,
-    chargedCardLast4: selectedCard?.last4 || null,
-    paymentTransactionId: charge.transactionId || null,
-    walletBalance: nextWalletBalance,
-    walletCurrency: wallet.currency || 'ZAR',
-    pricingSnapshot,
-    liveTrackingClosedReason: 'customer_canceled',
-  };
-
-  const writeBatch = db.batch();
-  writeBatch.set(requestRef, {
-    status: 'canceled',
-    statusDetail: cancellationAmount > 0
-      ? `Customer canceled the service. Cancellation fee charged: R${cancellationAmount.toFixed(2)}.`
-      : 'Customer canceled the service.',
-    canceledAt: endedAt,
-    canceledBy: 'customer',
-    canceledReason,
-    cancellationFeeAmount: cancellationAmount,
-    paymentStatus,
-    paymentTransactionId: charge.transactionId || null,
-    chargedCardLast4: selectedCard?.last4 || null,
-    pricingSnapshot,
-    helperPayoutBreakdown: {
-      ...helperPayoutBreakdown,
-      finalizedAt: pricingSnapshot.finalizedAt,
-    },
-    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-  }, { merge: true });
-
-  if (!charge.ok) {
-    writeBatch.set(customerRef, {
-      wallet: {
-        ...wallet,
-        balance: nextWalletBalance,
-        currency: wallet.currency || 'ZAR',
-        updatedAt: new Date().toISOString(),
-      },
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
+async function getWhatsAppPaymentContext({ identityId, identity, requestId } = {}) {
+  if (!whatsappPaymentsEnabled()) return { code: 'disabled' };
+  const currentIdentity = await getWhatsAppIdentityForCurrentSender(identityId, identity);
+  if (!currentIdentity) return { code: 'identity-not-authorized' };
+  const role = String(currentIdentity.role || (currentIdentity.guestPrincipalId ? 'customer' : '')).toLowerCase();
+  if (role !== 'customer') return { code: 'customer-role-required' };
+  const access = await getWhatsAppRequestForIdentity({ db, identity: currentIdentity, requestId });
+  if (access.code !== 'found') return { code: access.code };
+  const request = access.request;
+  const [paymentSnap, legacySnap] = await Promise.all([
+    db.collection(PAYMENT_OPERATIONS).doc(request.id).get(),
+    db.collection(FINANCIAL_OPERATIONS_COLLECTION).doc(serviceFinancialOperationId(request.id)).get(),
+  ]);
+  const paymentOperation = paymentSnap.exists ? paymentSnap.data() || {} : null;
+  const legacyOperation = legacySnap.exists ? legacySnap.data() || {} : null;
+  const state = paymentStateForRequest(request, paymentOperation, legacyOperation);
+  const amount = getFinalPayableAmount(request, legacyOperation);
+  if (state === 'paid') return { code: 'already-paid', identity: currentIdentity, request, paymentOperation, legacyOperation };
+  if (request.status !== 'completed' || amount === null) return { code: 'not-payable', identity: currentIdentity, request };
+  if (['payment_processing', 'awaiting_cash_confirmation', 'awaiting_customer_confirmation', 'payment_reconciliation_required'].includes(state)) return { code: state, identity: currentIdentity, request, paymentOperation };
+  let ownerUid = String(currentIdentity.linkedFirebaseUid || '');
+  if (String(request.customerId || '').startsWith('guest_')) {
+    const owner = await db.collection('whatsappGuestOwnership').doc(request.customerId).get().catch(() => null);
+    if (owner?.exists) ownerUid = String(owner.data()?.uid || ownerUid);
   }
+  const profileSnap = ownerUid ? await db.collection('users').doc(ownerUid).get().catch(() => null) : null;
+  const linkedCards = currentIdentity.linkedFirebaseUid
+    ? await getServerPaymentMethods({ db, admin, uid: currentIdentity.linkedFirebaseUid }).catch(() => [])
+    : [];
+  const cards = profileSnap?.exists
+    ? linkedCards
+      .filter((card) => card?.reusable === true && String(card.paystackAuthorizationCode || '').trim())
+      .map((card) => ({ id: String(card.id || ''), brand: String(card.brand || 'Card').slice(0, 40), last4: String(card.last4 || '').slice(-4), isDefault: card.isDefault === true }))
+      .filter((card) => card.id)
+    : [];
+  return { code: 'available', identity: currentIdentity, request, amount, ownerUid, cards, paymentOperation, legacyOperation };
+}
 
-  await writeBatch.commit();
-
-  await admin.database().ref(`liveTracking/serviceRequests/${requestId}`).update({
-    status: 'canceled',
-    closedReason: cancellationPayload.liveTrackingClosedReason,
-    closedAtMs: endedAt,
-    updatedAtMs: endedAt,
-  }).catch(() => null);
-
-  await Promise.all([
-    db.collection('customerServiceEvents').doc(`request_canceled_${requestId}`).set({
-      customerId: request.customerId,
-      eventType: 'request_canceled',
-      serviceId: request.serviceIds?.[0] || request.selectedPackageId || request.categoryId || '',
-      categoryId: request.categoryId || '',
-      serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
-      requestId,
-      source: 'billCustomerServiceCancellation',
-      metadata: {
-        helperId,
-        paymentStatus,
-        cancellationAmount,
-        cancellationBillingRule: billingRule,
-        cancellationDistanceKm: Number(travelledKm.toFixed(2)),
-        helperPayoutAmount: Number(helperPayoutBreakdown.helperAmount || 0),
-        platformAmount: Number(helperPayoutBreakdown.platformAmount || 0),
-        requestStatus: 'canceled',
-      },
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      createdAtMs: endedAt,
-      dayBucket: new Date(endedAt).toISOString().slice(0, 10),
-    }, { merge: true }),
-    createUserNotification({
-      userId: request.customerId,
-      title: 'Service canceled',
-      message: cancellationAmount > 0
-        ? `Your service request was canceled. Cancellation fee: R${cancellationAmount.toFixed(2)}.`
-        : 'Your service request was canceled.',
-      type: 'service_canceled',
-      requestId,
-      targetPath: `/customer/requests/${requestId}`,
-      metadata: {
-        paymentStatus,
-        cancellationAmount,
-      },
-    }),
-    ...(helperId ? [
-      createUserNotification({
-        userId: helperId,
-        title: 'Job canceled',
-        message: `${request.customerName || 'The customer'} canceled this job. Helper earnings recorded: R${Number(helperPayoutBreakdown.helperAmount || 0).toFixed(2)}.`,
-        type: 'job_canceled',
-        requestId,
-        targetPath: `/provider/jobs/${requestId}`,
-      }),
-    ] : []),
-  ]).catch(() => null);
-
-  const updatedSnap = await requestRef.get();
-  res.status(200).json({
-    success: true,
-    request: { id: updatedSnap.id, ...updatedSnap.data() },
-    charge: { ok: charge.ok, reason: charge.reason || null },
-    cancellation: cancellationPayload,
+async function createWhatsAppPaymentSession(context) {
+  const identity = context.identity || {};
+  const principalId = String(identity.linkedFirebaseUid || identity.guestPrincipalId || '').trim();
+  return createServicePaymentSession({
+    db,
+    requestId: String(context.request.id),
+    customerId: String(context.request.customerId),
+    principalId,
+    principalType: identity.linkedFirebaseUid ? 'firebase_uid' : 'whatsapp_guest',
   });
-});
+}
+
+async function handleCashPaymentConfirmation({ requestId, attemptId, helperId, action }) {
+  const result = action === 'reject'
+    ? await rejectCashPayment({ db, admin, requestId, helperId, attemptId })
+    : await settleRequestPayment({ db, admin, requestId, attemptId, outcome: 'success', helperId, providerStatus: 'helper_confirmed' });
+  if (result.action === 'settled' || result.action === 'already-paid') {
+    await issuePaidRequestPostEffects({ requestId, paymentResult: result });
+    return { ...result, action: result.action === 'already-paid' ? 'settled' : result.action };
+  }
+  if (result.action === 'rejected') {
+    const requestSnap = await db.collection('serviceRequests').doc(requestId).get();
+    const customerId = String(requestSnap.data()?.customerId || '');
+    await createUserNotificationOnce({ notificationId: `cash_payment_${requestId}_${attemptId}_rejected`, userId: customerId, title: 'Payment not confirmed', message: 'Your helper could not confirm receiving this payment. The request remains unpaid.', type: 'payment_failed', requestId, targetPath: `/customer/requests/${requestId}`, metadata: { paymentStatus: requestSnap.data()?.paymentStatus || 'unpaid' } }).catch(() => null);
+  }
+  return result;
+}
+
+async function notifyCashPaymentToHelper({ requestId, attemptId, helperId, amount }) {
+  if (!helperId) return;
+  await createUserNotificationOnce({
+    notificationId: `cash_payment_${requestId}_${attemptId}_helper`,
+    userId: helperId,
+    title: 'Confirm customer payment',
+    message: `A customer reports paying R${Number(amount || 0).toFixed(2)} directly for request ${requestId}. Confirm only if you received it.`,
+    type: 'cash_payment_confirmation',
+    requestId,
+    targetPath: '/provider/cash-payments',
+    metadata: { requestId, attemptId, amount: Number(amount || 0), currency: 'ZAR' },
+  }).catch(() => null);
+  if (!whatsappPaymentsEnabled()) return;
+  const identities = await db.collection('whatsappIdentities').where('linkedFirebaseUid', '==', helperId).limit(5).get().catch(() => null);
+  for (const identityDoc of identities?.docs || []) {
+    const identity = identityDoc.data() || {};
+    if (String(identity.role || '').toLowerCase() !== 'helper'
+      || !(Number(identity.whatsappNotificationsConsentAtMs || 0) > 0 || identity.whatsappNotificationsEnabled === true)) continue;
+    const actionRecords = ['confirm', 'reject'].map((action) => ({
+      action,
+      actionId: stableEventId(`cash-payment-action:${requestId}:${attemptId}:${helperId}:${action}`),
+    }));
+    await Promise.all(actionRecords.map(({ action, actionId }) => db.collection('whatsappPaymentActions').doc(actionId).set({ actionId, action, requestId, attemptId, helperId, status: 'pending', expiresAtMs: Date.now() + 24 * 60 * 60 * 1000, createdAtMs: Date.now() }, { merge: true })));
+    const conversationRef = db.collection('whatsappConversations').doc(identityDoc.id);
+    const conversation = (await conversationRef.get().catch(() => null))?.data() || {};
+    const lastInboundAtMs = Number(conversation.lastInboundMessageAtMs || 0);
+    const body = `A customer reports paying R${Number(amount || 0).toFixed(2)} for request ${requestId}. Confirm receipt only if you received this payment.`;
+    try {
+      const configured = getWhatsAppSecrets();
+      if (String(identity.phoneNumberId || '') !== configured.phoneNumberId) continue;
+      const client = createMetaWhatsAppClient({ accessToken: configured.accessToken, phoneNumberId: configured.phoneNumberId, graphApiVersion: configured.graphApiVersion, approvedTemplateNames: configured.approvedTemplateNames });
+      if (isWithinCustomerServiceWindow(lastInboundAtMs)) {
+        await persistWhatsAppAssistantReply({
+          sourceEventId: stableEventId(`cash-payment-notification:${requestId}:${attemptId}:${identityDoc.id}`),
+          identityId: identityDoc.id,
+          identity,
+          conversationRef,
+          text: body,
+          interactive: {
+            type: 'button',
+            body: { text: body },
+            action: { buttons: actionRecords.map(({ action, actionId }) => ({ type: 'reply', reply: { id: `wa_cash_${action}_${actionId}`, title: action === 'confirm' ? 'Received' : 'Not received' } })) },
+          },
+        });
+      } else {
+        const templateName = String(process.env.WHATSAPP_CASH_CONFIRMATION_TEMPLATE_NAME || '').trim();
+        const languageCode = String(process.env.WHATSAPP_CASH_CONFIRMATION_TEMPLATE_LANGUAGE || '').trim();
+        if (templateName && languageCode && configured.approvedTemplateNames.includes(templateName)) {
+          await client.sendTemplate({ to: identity.waId, name: templateName, languageCode, components: [{ type: 'body', parameters: [{ type: 'text', text: requestId }, { type: 'text', text: `R${Number(amount || 0).toFixed(2)}` }] }] });
+        }
+      }
+    } catch (error) {
+      logger.warn('cash_payment_whatsapp_helper_notification_failed', { requestId, helperId, errorCode: String(error?.code || 'message_failed').slice(0, 80) });
+    }
+  }
+}
 
 async function syncBackendHelperWeeklyPayoutRecords() {
   const startWindow = Date.now() - (PAYOUT_LOOKBACK_WEEKS * 7 * 24 * 60 * 60 * 1000);
@@ -4247,6 +8641,9 @@ async function syncBackendHelperWeeklyPayoutRecords() {
     const request = { id: requestDoc.id, ...(requestDoc.data() || {}) };
     const helperId = String(request?.helperAssignment?.helperId || '').trim();
     if (!helperId) return;
+    // The helper has already received this amount directly from the customer;
+    // do not include it again in Uncedo's Paystack weekly payout batch.
+    if (String(request.cashPayment?.status || '').toLowerCase() === 'helper_confirmed') return;
 
     const settledAtMs = timestampToMillis(
       request.endedAt
@@ -4298,7 +8695,8 @@ async function syncBackendHelperWeeklyPayoutRecords() {
     const payoutRef = db.collection(HELPER_PAYOUT_COLLECTION).doc(docId);
     const existingSnap = await payoutRef.get();
     const existing = existingSnap.exists ? (existingSnap.data() || {}) : {};
-    if (existing.status === 'paid') {
+    if (existing.status === 'paid'
+      && (!existing.transferReference || ['success', 'completed'].includes(String(existing.transferStatus || '').toLowerCase()))) {
       upserted.push({ id: docId, ...existing });
       continue;
     }
@@ -4322,10 +8720,143 @@ async function syncBackendHelperWeeklyPayoutRecords() {
   return upserted;
 }
 
+function payoutNotificationId(payoutId, state) {
+  return `payout_${createHash('sha256').update(`${payoutId}:${state}`).digest('hex').slice(0, 40)}`;
+}
+
+async function notifyPayoutOutcome(payout, state, reference = '', details = '') {
+  const amount = Number(payout.helperAmount || 0);
+  const shared = {
+    userId: payout.helperId,
+    requestId: null,
+    targetPath: '/provider/earnings',
+    metadata: { payoutId: payout.id, payoutStatus: state, amount, transferReference: reference || null },
+  };
+  if (state === 'paid') {
+    return createUserNotificationOnce({
+      notificationId: payoutNotificationId(payout.id, 'paid'),
+      ...shared,
+      title: 'Helper payout paid',
+      message: `Your ${payout.weekKey || 'weekly'} payout was paid successfully. Amount: ${formatMoney(amount)}.`,
+      type: 'helper_payout_paid',
+    });
+  }
+  if (state === 'processing') {
+    return createUserNotificationOnce({
+      notificationId: payoutNotificationId(payout.id, `processing_${reference}`),
+      ...shared,
+      title: 'Helper payout processing',
+      message: `Your ${payout.weekKey || 'weekly'} payout is being processed. Amount: ${formatMoney(amount)}.`,
+      type: 'helper_payout_processing',
+    });
+  }
+  if (state === 'reversed') {
+    return createUserNotificationOnce({
+      notificationId: payoutNotificationId(payout.id, `reversed_${reference}`),
+      ...shared,
+      title: 'Helper payout reversed',
+      message: `Your ${payout.weekKey || 'weekly'} payout was reversed by the payment provider. ${details}`.trim(),
+      type: 'helper_payout_reversed',
+    });
+  }
+  return createUserNotificationOnce({
+    notificationId: payoutNotificationId(payout.id, `failed_${reference || 'no_reference'}`),
+    ...shared,
+    title: 'Helper payout unsuccessful',
+    message: details || `Your ${payout.weekKey || 'weekly'} payout could not be completed.`,
+    type: 'helper_payout_failed',
+  });
+}
+
+async function reconcilePayoutTransfer({ payout, payoutRef, attemptNo, reference, paystackSecretKey, checkNo = 1, fallbackTransfer = null, verification: preverified = null }) {
+  const transferAttemptRef = payoutRef.collection('transferAttempts').doc(String(attemptNo).padStart(4, '0'));
+  const referenceRef = db.collection(PAYSTACK_TRANSFER_REFERENCES_COLLECTION).doc(reference);
+  const attemptSnap = await transferAttemptRef.get().catch(() => null);
+  const attempt = attemptSnap?.exists ? attemptSnap.data() || {} : {};
+  const amountMinor = Number(attempt.amountMinor ?? payout.transferAmountMinor ?? Math.round(Number(payout.helperAmount || 0) * 100));
+  const currency = String(attempt.currency || payout.transferCurrency || 'ZAR');
+  const verification = preverified || await verifyPaystackTransfer({
+    paystackSecretKey,
+    reference,
+    amountMinor,
+    currency,
+  });
+  const gatewayTransfer = verification.transfer || fallbackTransfer || null;
+  const result = await recordPayoutObservation({
+    db,
+    admin,
+    payoutRef,
+    transferAttemptRef,
+    referenceRef,
+    reference,
+    outcome: verification.outcome,
+    transfer: gatewayTransfer,
+  });
+  if (result.updated && ['pending', 'unknown'].includes(verification.outcome)) {
+    await enqueueFinancialReconciliation({
+      operationId: String(payout.operationId || helperPayoutOperationId(payout.weekKey, payout.helperId)),
+      operationType: 'helper_payout',
+      attemptNo: checkNo,
+      delaySeconds: Math.min(30 * (2 ** Math.max(0, checkNo - 1)), 1800),
+      payoutId: payout.id,
+    });
+    await notifyPayoutOutcome(payout, 'processing', reference).catch(() => null);
+  } else if (verification.outcome === 'success') {
+    await notifyPayoutOutcome(payout, 'paid', reference).catch((error) => logger.warn('helper_payout_paid_notification_failed', { payoutId: payout.id, error: error.message }));
+  } else if (verification.outcome === 'reversed') {
+    await notifyPayoutOutcome(payout, 'reversed', reference, 'Please contact support if you need help.').catch(() => null);
+  } else if (verification.outcome === 'failed_confirmed') {
+    await notifyPayoutOutcome(payout, 'failed', reference, 'Paystack confirmed the transfer failed. It may be retried in a later payout run.').catch(() => null);
+  }
+  return { verification, result };
+}
+
+async function markZeroValuePayoutPaid(payout, payoutRef) {
+  const changed = await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(payoutRef);
+    if (!snapshot.exists) return false;
+    const current = snapshot.data() || {};
+    if (current.status === 'paid') return false;
+    if (current.transferReference && ['processing', 'pending_reconciliation', 'reconciliation_required'].includes(String(current.status || '').toLowerCase())) return false;
+    transaction.set(payoutRef, {
+      status: 'paid',
+      operationStatus: 'settled_success',
+      transferStatus: 'not_required',
+      paidAt: current.paidAt || admin.firestore.FieldValue.serverTimestamp(),
+      paidBy: { system: 'automatic', reason: 'zero_amount' },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    return true;
+  });
+  if (changed) await notifyPayoutOutcome(payout, 'paid').catch(() => null);
+  return changed;
+}
+
+async function recordPayoutConfigurationFailure(payout, payoutRef, runKey) {
+  const changed = await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(payoutRef);
+    if (!snapshot.exists) return false;
+    const current = snapshot.data() || {};
+    if (current.lastProcessRunKey === runKey) return false;
+    if (current.transferReference && ['processing', 'pending_reconciliation', 'reconciliation_required'].includes(String(current.status || '').toLowerCase())) return false;
+    transaction.set(payoutRef, {
+      status: 'unsuccessful',
+      operationStatus: 'failed_confirmed',
+      failureReason: 'Helper payout account is not verified.',
+      transferAttempts: Number(current.transferAttempts || 0) + 1,
+      lastProcessRunKey: runKey,
+      lastTransferAttemptAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    return true;
+  });
+  if (changed) await notifyPayoutOutcome(payout, 'failed', '', 'Your helper payout could not be processed because your payout account is not verified.').catch(() => null);
+  return changed;
+}
+
 exports.processWeeklyHelperPayouts = onSchedule({
   schedule: '0 0 * * 1',
   timeZone: 'Africa/Johannesburg',
-  secrets: [UNCEDO_PAYMENTS_SECRETS],
 }, async () => {
   let paymentsSecrets;
   try {
@@ -4336,154 +8867,107 @@ exports.processWeeklyHelperPayouts = onSchedule({
   }
 
   const syncedRecords = await syncBackendHelperWeeklyPayoutRecords();
+  const runKey = `weekly-${getWeekKey(new Date())}`;
   let paidCount = 0;
   let failedCount = 0;
   let skippedCount = 0;
+  let reconciliationCount = 0;
 
   for (const payout of syncedRecords) {
-    const status = String(payout.status || 'unpaid').toLowerCase();
-    if (!['unpaid', 'unsuccessful', 'failed'].includes(status)) {
-      skippedCount += 1;
-      continue;
-    }
-
     const amount = Number(payout.helperAmount || 0);
     const payoutRef = db.collection(HELPER_PAYOUT_COLLECTION).doc(payout.id);
-    if (!amount || amount <= 0) {
-      await payoutRef.set({
-        status: 'paid',
-        paidAt: admin.firestore.FieldValue.serverTimestamp(),
-        paidBy: { system: 'automatic', reason: 'zero_amount' },
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      }, { merge: true });
-      await createUserNotification({
-        userId: payout.helperId,
-        title: 'Helper payout completed',
-        message: `Your ${payout.weekKey || 'weekly'} payout was marked paid. Amount: R0.00.`,
-        type: 'helper_payout_paid',
-        targetPath: '/provider/earnings',
-        metadata: {
-          payoutId: payout.id,
-          payoutStatus: 'paid',
-          amount: 0,
-        },
-      });
-      paidCount += 1;
+    if (amount <= 0) {
+      if (await markZeroValuePayoutPaid(payout, payoutRef)) paidCount += 1;
+      else skippedCount += 1;
       continue;
     }
 
     const helperSnap = await db.collection('users').doc(payout.helperId).get();
-    const helperData = helperSnap.exists ? (helperSnap.data() || {}) : {};
-    const payoutDetails = helperData?.payout || {};
+    const helperData = helperSnap.exists ? helperSnap.data() || {} : {};
+    const payoutDetails = helperData.payout || {};
     const recipientCode = String(payoutDetails.recipientCode || '').trim();
-    const payoutVerificationStatus = String(payoutDetails.verificationStatus || '').toLowerCase();
-    const isPayoutVerified = payoutVerificationStatus === 'verified';
-    const nextTransferAttempt = Number(payout.transferAttempts || 0) + 1;
-    if (!recipientCode || !isPayoutVerified) {
-      await payoutRef.set({
-        status: 'unsuccessful',
-        failureReason: 'Helper payout account is not verified.',
-        transferAttempts: nextTransferAttempt,
-        lastTransferAttemptAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      }, { merge: true });
-      await createUserNotification({
-        userId: payout.helperId,
-        title: 'Helper payout unsuccessful',
-        message: 'Your helper payout could not be processed because your payout account is not verified.',
-        type: 'helper_payout_failed',
-        targetPath: '/provider/earnings',
-        metadata: {
-          payoutId: payout.id,
-          payoutStatus: 'unsuccessful',
-          amount,
-          failureReason: 'Helper payout account is not verified.',
-        },
+    const verified = String(payoutDetails.verificationStatus || '').toLowerCase() === 'verified';
+    const claim = await claimPayoutTransfer({
+      db,
+      admin,
+      payoutRef,
+      payoutId: payout.id,
+      helperId: payout.helperId,
+      weekKey: payout.weekKey,
+      runKey,
+      amount,
+      currency: 'ZAR',
+      recipientCode: verified ? recipientCode : '',
+    });
+    if (claim.action === 'paid' || claim.action === 'already_attempted_this_run') {
+      skippedCount += 1;
+      continue;
+    }
+    if (claim.action === 'missing_payout') {
+      skippedCount += 1;
+      continue;
+    }
+    if (claim.action === 'missing_recipient') {
+      if (await recordPayoutConfigurationFailure(payout, payoutRef, runKey)) failedCount += 1;
+      else skippedCount += 1;
+      continue;
+    }
+    if (claim.action === 'reconcile') {
+      reconciliationCount += 1;
+      const attemptNo = Number(claim.payout.transferAttempts || 1);
+      await reconcilePayoutTransfer({
+        payout: { ...payout, ...claim.payout },
+        payoutRef,
+        attemptNo,
+        reference: claim.reference,
+        paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY,
+        checkNo: 1,
       });
-      failedCount += 1;
+      continue;
+    }
+    if (claim.action !== 'transfer') {
+      skippedCount += 1;
       continue;
     }
 
-    const reference = `uncedo-helper-${payout.weekKey}-${payout.helperId}-${Date.now()}`.replace(/[^a-zA-Z0-9-_]/g, '-').slice(0, 100);
-    await payoutRef.set({
-      status: 'processing',
-      transferReference: reference,
-      transferAttempts: nextTransferAttempt,
-      lastTransferAttemptAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
-    await createUserNotification({
-      userId: payout.helperId,
-      title: 'Helper payout processing',
-      message: `Your ${payout.weekKey || 'weekly'} payout is being processed. Amount: ${formatMoney(amount)}.`,
-      type: 'helper_payout_processing',
-      targetPath: '/provider/earnings',
-      metadata: {
-        payoutId: payout.id,
-        payoutStatus: 'processing',
-        amount,
-        transferReference: reference,
+    await notifyPayoutOutcome({ ...payout, ...claim.attempt }, 'processing', claim.attempt.reference).catch(() => null);
+    await enqueueFinancialReconciliation({
+      operationId: claim.operationId,
+      operationType: 'helper_payout',
+      attemptNo: 1,
+      delaySeconds: 30,
+      payoutId: payout.id,
+    });
+    const paystackResult = await executePayoutTransferAttempt({
+      claim,
+      amount,
+      recipientCode,
+      reason: `Uncedo helper payout ${payout.weekKey}`,
+      paystack: {
+        initiateTransfer: (input) => initiatePaystackTransfer({ paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY, ...input }),
+        verifyTransfer: (input) => verifyPaystackTransfer({ paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY, ...input }),
       },
     });
-
-    try {
-      const transfer = await initiatePaystackTransfer({
-        paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY,
-        amount,
-        recipientCode,
-        reason: `Uncedo helper payout ${payout.weekKey}`,
-        reference,
+    if (paystackResult.transferRequestErrorCode) {
+      logger.warn('paystack_payout_transfer_response_uncertain', {
+        payoutId: payout.id,
+        reference: claim.attempt.reference,
+        errorCode: paystackResult.transferRequestErrorCode,
       });
-
-      await payoutRef.set({
-        status: 'paid',
-        paidAt: admin.firestore.FieldValue.serverTimestamp(),
-        paidBy: { system: 'automatic', provider: 'paystack' },
-        transferReference: reference,
-        transferCode: transfer.transfer_code || null,
-        transferId: transfer.id ? String(transfer.id) : null,
-        transferStatus: transfer.status || null,
-        failureReason: null,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      }, { merge: true });
-      await createUserNotification({
-        userId: payout.helperId,
-        title: 'Helper payout paid',
-        message: `Your ${payout.weekKey || 'weekly'} payout was paid successfully. Amount: ${formatMoney(amount)}.`,
-        type: 'helper_payout_paid',
-        targetPath: '/provider/earnings',
-        metadata: {
-          payoutId: payout.id,
-          payoutStatus: 'paid',
-          amount,
-          transferReference: reference,
-          transferStatus: transfer.status || null,
-        },
-      });
-      paidCount += 1;
-    } catch (error) {
-      await payoutRef.set({
-        status: 'unsuccessful',
-        failureReason: error.message || 'Paystack transfer failed.',
-        transferReference: reference,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      }, { merge: true });
-      await createUserNotification({
-        userId: payout.helperId,
-        title: 'Helper payout unsuccessful',
-        message: `Your ${payout.weekKey || 'weekly'} payout could not be completed. ${error.message || 'Paystack transfer failed.'}`,
-        type: 'helper_payout_failed',
-        targetPath: '/provider/earnings',
-        metadata: {
-          payoutId: payout.id,
-          payoutStatus: 'unsuccessful',
-          amount,
-          transferReference: reference,
-          failureReason: error.message || 'Paystack transfer failed.',
-        },
-      });
-      failedCount += 1;
     }
+    const result = await reconcilePayoutTransfer({
+      payout: { ...payout, ...claim.attempt, operationId: claim.operationId },
+      payoutRef,
+      attemptNo: claim.attempt.attemptNo,
+      reference: claim.attempt.reference,
+      paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY,
+      checkNo: 1,
+      fallbackTransfer: paystackResult.transfer,
+      verification: paystackResult.verification,
+    });
+    if (result.verification.outcome === 'success') paidCount += 1;
+    else if (result.verification.outcome === 'failed_confirmed' || result.verification.outcome === 'reversed') failedCount += 1;
+    else reconciliationCount += 1;
   }
 
   logger.info('weekly_helper_payouts_processed', {
@@ -4491,13 +8975,145 @@ exports.processWeeklyHelperPayouts = onSchedule({
     paidCount,
     failedCount,
     skippedCount,
+    reconciliationCount,
   });
+});
+
+exports.reconcileFinancialOperation = onTaskDispatched({
+  retryConfig: { maxAttempts: 3, minBackoffSeconds: 30, maxBackoffSeconds: 300, maxDoublings: 3 },
+  rateLimits: { maxConcurrentDispatches: 20, maxDispatchesPerSecond: 5 },
+  ...HALF_CPU_OPTIONS,
+}, async (request) => {
+  const data = request.data || {};
+  const operationId = String(data.operationId || '').trim();
+  const operationType = String(data.operationType || '').trim();
+  const checkNo = Math.max(1, Number(data.checkNo || 1));
+  if (!operationId || !['completion', 'customer_cancellation', 'helper_payout'].includes(operationType)) {
+    logger.warn('financial_reconciliation_task_invalid_payload', { hasOperationId: Boolean(operationId), operationType });
+    return;
+  }
+  let paymentsSecrets;
+  try {
+    paymentsSecrets = getPaymentsSecrets();
+  } catch (error) {
+    logger.error('financial_reconciliation_missing_payment_config', { operationId, operationType, error: error.message });
+    throw error;
+  }
+
+  if (operationType === 'helper_payout') {
+    let payoutSnap = data.payoutId
+      ? await db.collection(HELPER_PAYOUT_COLLECTION).doc(String(data.payoutId)).get()
+      : null;
+    if (!payoutSnap?.exists) {
+      const query = await db.collection(HELPER_PAYOUT_COLLECTION).where('operationId', '==', operationId).limit(1).get();
+      payoutSnap = query.docs[0] || null;
+    }
+    if (!payoutSnap?.exists) return;
+    const payout = { id: payoutSnap.id, ...payoutSnap.data() };
+    const reference = String(payout.transferReference || '').trim();
+    const attemptNo = Number(payout.transferAttempts || 0);
+    if (!reference || attemptNo < 1) return;
+    const payoutRef = payoutSnap.ref;
+    const result = await reconcilePayoutTransfer({
+      payout,
+      payoutRef,
+      attemptNo,
+      reference,
+      paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY,
+      checkNo,
+    });
+    if (result.result.updated && ['pending', 'unknown'].includes(result.verification.outcome) && checkNo >= 6) {
+      await payoutRef.set({
+        reconciliationExhaustedAtMs: Date.now(),
+        reconciliationReason: result.verification.reason || 'Paystack transfer outcome remains uncertain.',
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      await createUserNotificationOnce({
+        notificationId: payoutNotificationId(payout.id, `reconciliation_required_${reference}`),
+        userId: payout.helperId,
+        title: 'Helper payout needs review',
+        message: 'The payment provider has not confirmed your payout yet. Uncedo will not submit a duplicate transfer while the original is unresolved.',
+        type: 'helper_payout_reconciliation',
+        targetPath: '/provider/earnings',
+        metadata: { payoutId: payout.id, transferReference: reference, amount: Number(payout.helperAmount || 0) },
+      }).catch(() => null);
+    }
+    return;
+  }
+
+  const operationRef = db.collection(FINANCIAL_OPERATIONS_COLLECTION).doc(operationId);
+  const operationSnap = await operationRef.get();
+  if (!operationSnap.exists) return;
+  const operation = operationSnap.data() || {};
+  if (operation.operationType !== operationType || !operation.requestId) return;
+  const requestRef = db.collection('serviceRequests').doc(operation.requestId);
+  if (['settled_success', 'settled_failed', 'settled_no_charge'].includes(String(operation.status || ''))) {
+    await runServiceFinancialPostEffects(operationRef);
+    return;
+  }
+  const amountMinor = Number(operation.amountMinor || 0);
+  let outcome;
+  let providerRecord = null;
+  if (amountMinor === 0) {
+    outcome = { outcome: 'no_charge' };
+  } else {
+    outcome = await verifyPaystackTransaction({
+      paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY,
+      reference: String(operation.gatewayReference || ''),
+      amountMinor,
+      currency: operation.currency || 'ZAR',
+    });
+    providerRecord = outcome.transaction || null;
+  }
+  if (outcome.outcome !== 'no_charge') await recordServiceGatewayObservation({ db, operationRef, outcome });
+  const settlement = await settleServiceFinancialOperation({
+    db,
+    admin,
+    operationRef,
+    requestRef,
+    helperRef: operation.operationType === 'completion' && operation.settlementData?.helperId
+      ? db.collection('users').doc(operation.settlementData.helperId)
+      : null,
+    helperDispatchRef: operation.operationType === 'completion' && operation.settlementData?.helperId
+      ? db.collection('helperDispatchIndex').doc(operation.settlementData.helperId)
+      : null,
+    outcome: outcome.outcome,
+    transactionId: providerRecord?.id ? String(providerRecord.id) : null,
+  });
+  await runServiceFinancialPostEffects(operationRef);
+  if (settlement.applied && ['pending', 'unknown'].includes(outcome.outcome)) {
+    if (checkNo < 6) {
+      await enqueueFinancialReconciliation({
+        operationId,
+        operationType,
+        attemptNo: checkNo + 1,
+        delaySeconds: Math.min(30 * (2 ** checkNo), 1800),
+      });
+    } else {
+      await operationRef.set({
+        reconciliationExhaustedAtMs: Date.now(),
+        reconciliationReason: outcome.reason || 'Paystack transaction outcome remains uncertain.',
+        updatedAtMs: Date.now(),
+      }, { merge: true });
+      const customerId = String(operation.settlementData?.customerId || '');
+      await createUserNotificationOnce({
+        notificationId: `financial_${operationId}_reconciliation_required_${customerId}`,
+        userId: customerId,
+        title: 'Payment needs review',
+        message: 'The payment provider has not confirmed the payment result. Uncedo will not submit another charge while the original is unresolved.',
+        type: 'payment_reconciliation_required',
+        requestId: operation.requestId,
+        targetPath: `/customer/requests/${operation.requestId}`,
+        metadata: { paymentStatus: 'payment_reconciliation_required', operationId },
+      }).catch(() => null);
+    }
+  }
 });
 
 exports.sendEmailFromQueue = onDocumentCreated(
   {
     document: 'emailEvents/{eventId}',
-    secrets: [UNCEDO_EMAIL_SECRETS],
+    ...HALF_CPU_OPTIONS,
   },
   async (event) => {
     const data = event.data?.data();

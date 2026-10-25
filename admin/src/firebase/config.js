@@ -18,6 +18,7 @@ import {
   getDoc,
   getDocs,
   getFirestore,
+  limit,
   onSnapshot,
   orderBy,
   query,
@@ -29,6 +30,7 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { connectStorageEmulator, getStorage } from 'firebase/storage';
+import { connectFunctionsEmulator, getFunctions, httpsCallable } from 'firebase/functions';
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -75,11 +77,13 @@ function initializeFirebase() {
   const auth = getAuth(app);
   const db = getFirestore(app);
   const storage = getStorage(app);
+  const functions = getFunctions(app, 'us-central1');
 
   if (useFirebaseEmulators && !emulatorsConnected) {
     connectAuthEmulator(auth, `http://${firebaseEmulatorHost}:9099`, { disableWarnings: true });
     connectFirestoreEmulator(db, firebaseEmulatorHost, 8080);
     connectStorageEmulator(storage, firebaseEmulatorHost, 9199);
+    connectFunctionsEmulator(functions, firebaseEmulatorHost, 5001);
     emulatorsConnected = true;
   }
 
@@ -87,6 +91,8 @@ function initializeFirebase() {
     auth,
     db,
     storage,
+    functions,
+    httpsCallable,
     authModule: {
       browserLocalPersistence,
       browserSessionPersistence,
@@ -103,6 +109,7 @@ function initializeFirebase() {
       getDoc,
       getDocs,
       getFirestore,
+      limit,
       onSnapshot,
       orderBy,
       query,

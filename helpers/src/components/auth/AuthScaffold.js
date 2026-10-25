@@ -7,6 +7,7 @@ function getSocialIconColor(iconName) {
   const name = String(iconName || '').toLowerCase();
   if (name.includes('google')) return '#ea4335';
   if (name.includes('facebook')) return '#1877f2';
+  if (name.includes('whatsapp')) return '#25d366';
   return '#000000'; // apple or default
 }
 
@@ -32,26 +33,31 @@ export function AuthScaffold({
   return (
     <KeyboardAvoidingView
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      style={styles.screen}
+      style={[styles.screen, Platform.OS === 'web' && webStyles.screen]}
     >
-      {/* Dark pink/burgundy background gradient effect with ambient glowing blurs */}
-      <View style={styles.background} />
-      <View style={styles.glow1} />
-      <View style={styles.glow2} />
+      <View style={[styles.background, Platform.OS === 'web' && webStyles.background]} />
+      <View style={[styles.glow1, Platform.OS === 'web' && webStyles.glow1]} />
+      <View style={[styles.glow2, Platform.OS === 'web' && webStyles.glow2]} />
 
       <ScrollView
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={[styles.scrollContent, Platform.OS === 'web' && webStyles.scrollContent]}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
-        <View style={styles.container}>
-          <View style={styles.header}>
-            {brandName ? <Text style={styles.brandName}>{brandName}</Text> : null}
-            <Text style={styles.title}>{resolvedTitle}</Text>
-            <Text style={styles.subtitle}>{resolvedSubtitle}</Text>
+        <View style={[styles.container, Platform.OS === 'web' && webStyles.container]}>
+          <View style={[styles.header, Platform.OS === 'web' && webStyles.header]}>
+            {onBack ? (
+              <Pressable accessibilityRole="button" onPress={onBack} style={[styles.backButton, Platform.OS === 'web' && webStyles.backButton]}>
+                <Ionicons color={Platform.OS === 'web' ? webPalette.lime : colors.brandDark} name="arrow-back-outline" size={17} />
+                <Text style={[styles.backButtonText, Platform.OS === 'web' && webStyles.backButtonText]}>{backLabel}</Text>
+              </Pressable>
+            ) : null}
+            {brandName ? <Text style={[styles.brandName, Platform.OS === 'web' && webStyles.brandName]}>{brandName}</Text> : null}
+            <Text style={[styles.title, Platform.OS === 'web' && webStyles.title]}>{resolvedTitle}</Text>
+            <Text style={[styles.subtitle, Platform.OS === 'web' && webStyles.subtitle]}>{resolvedSubtitle}</Text>
           </View>
 
-          <View style={styles.formContainer}>
+          <View style={[styles.formContainer, Platform.OS === 'web' && webStyles.formContainer]}>
             {children}
 
             {primaryLabel ? (
@@ -59,9 +65,9 @@ export function AuthScaffold({
                 accessibilityRole="button"
                 disabled={primaryDisabled}
                 onPress={onPrimaryPress}
-                style={[styles.primaryButton, primaryDisabled && styles.primaryButtonDisabled]}
+                style={[styles.primaryButton, Platform.OS === 'web' && webStyles.primaryButton, primaryDisabled && styles.primaryButtonDisabled]}
               >
-                <Text style={styles.primaryButtonText}>{primaryLabel}</Text>
+                <Text style={[styles.primaryButtonText, Platform.OS === 'web' && webStyles.primaryButtonText]}>{primaryLabel}</Text>
               </Pressable>
             ) : null}
 
@@ -76,12 +82,12 @@ export function AuthScaffold({
                       onPress={link.onPress}
                       style={styles.footerLinkButton}
                     >
-                      <Text style={styles.footerLinkText}>
+                      <Text style={[styles.footerLinkText, Platform.OS === 'web' && webStyles.footerLinkText]}>
                         {isModeToggle ? (
                           isSignup ? (
-                            <Text>Already have an account? <Text style={styles.footerLinkHighlight}>Log In</Text></Text>
+                            <Text>Already have an account? <Text style={[styles.footerLinkHighlight, Platform.OS === 'web' && webStyles.footerLinkHighlight]}>Log In</Text></Text>
                           ) : (
-                            <Text>Don't have any account? <Text style={styles.footerLinkHighlight}>Sign Up</Text></Text>
+                            <Text>Don't have any account? <Text style={[styles.footerLinkHighlight, Platform.OS === 'web' && webStyles.footerLinkHighlight]}>Sign Up</Text></Text>
                           )
                         ) : (
                           link.label
@@ -94,26 +100,29 @@ export function AuthScaffold({
             ) : null}
 
             {socialButtons.length ? (
-              <View style={styles.socialRow}>
+                <View style={[styles.socialRow, Platform.OS === 'web' && webStyles.socialRow]}>
                 {socialButtons.map((button) => (
-                  <Pressable
-                    accessibilityRole="button"
-                    disabled={button.disabled}
-                    key={button.label}
-                    onPress={button.onPress}
-                    style={[styles.socialButton, button.disabled && styles.socialButtonDisabled]}
-                  >
-                    <Ionicons
-                      color={getSocialIconColor(button.icon)}
-                      name={button.icon}
-                      size={26}
-                    />
-                  </Pressable>
+                  <View key={button.label} style={styles.socialChoice}>
+                    <Pressable
+                      accessibilityLabel={`${button.label} sign-in`}
+                      accessibilityRole="button"
+                      disabled={button.disabled}
+                      onPress={button.onPress}
+                      style={[styles.socialButton, Platform.OS === 'web' && webStyles.socialButton, button.disabled && styles.socialButtonDisabled]}
+                    >
+                      <Ionicons
+                        color={getSocialIconColor(button.icon)}
+                        name={button.icon}
+                        size={26}
+                      />
+                    </Pressable>
+                    <Text style={[styles.socialLabel, Platform.OS === 'web' && webStyles.socialLabel]}>{button.label}</Text>
+                  </View>
                 ))}
               </View>
             ) : null}
 
-            {legalContent ? <View style={styles.legalWrap}>{legalContent}</View> : null}
+            {legalContent ? <View style={[styles.legalWrap, Platform.OS === 'web' && webStyles.legalWrap]}>{legalContent}</View> : null}
           </View>
         </View>
       </ScrollView>
@@ -133,21 +142,21 @@ export function AuthField({
 
   return (
     <View style={styles.fieldWrap}>
-      {label ? <Text style={styles.fieldLabel}>{label}</Text> : null}
-      <View style={[styles.inputContainer, error ? styles.inputContainerError : null]}>
+      {label ? <Text style={[styles.fieldLabel, Platform.OS === 'web' && webStyles.fieldLabel]}>{label}</Text> : null}
+      <View style={[styles.inputContainer, Platform.OS === 'web' && webStyles.inputContainer, error ? styles.inputContainerError : null]}>
         <TextInput
-          placeholderTextColor="#9ca3af"
-          style={[styles.fieldInput, isPasswordField && { paddingRight: 40 }, style]}
+          placeholderTextColor={Platform.OS === 'web' ? webPalette.muted : '#9ca3af'}
+          style={[styles.fieldInput, Platform.OS === 'web' && webStyles.fieldInput, isPasswordField && { paddingRight: 40 }, style]}
           {...props}
           secureTextEntry={secureText}
         />
         {isPasswordField ? (
           <Pressable onPress={() => setSecureText(!secureText)} style={styles.eyeButton}>
-            <Ionicons name={secureText ? 'eye-off-outline' : 'eye-outline'} size={20} color="#6b7280" />
+            <Ionicons name={secureText ? 'eye-off-outline' : 'eye-outline'} size={20} color={Platform.OS === 'web' ? webPalette.muted : '#6b7280'} />
           </Pressable>
         ) : null}
       </View>
-      {error ? <Text style={styles.fieldError}>{error}</Text> : null}
+      {error ? <Text style={[styles.fieldError, Platform.OS === 'web' && webStyles.fieldError]}>{error}</Text> : null}
     </View>
   );
 }
@@ -157,8 +166,8 @@ export function AuthMessage({ text, tone = 'error', inverted = false }) {
 
   const isInfo = tone === 'info';
   return (
-    <View style={[styles.message, isInfo ? styles.messageInfo : styles.messageError]}>
-      <Text style={[styles.messageText, isInfo ? styles.messageTextInfo : styles.messageTextError]}>
+    <View style={[styles.message, Platform.OS === 'web' && webStyles.message, isInfo ? styles.messageInfo : styles.messageError, Platform.OS === 'web' && (isInfo ? webStyles.messageInfo : webStyles.messageError)]}>
+      <Text style={[styles.messageText, isInfo ? styles.messageTextInfo : styles.messageTextError, Platform.OS === 'web' && (isInfo ? webStyles.messageTextInfo : webStyles.messageTextError)]}>
         {text}
       </Text>
     </View>
@@ -217,6 +226,19 @@ const styles = StyleSheet.create({
   header: {
     alignItems: 'center',
     marginBottom: 36,
+  },
+  backButton: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 18,
+    paddingVertical: 6,
+  },
+  backButtonText: {
+    color: colors.brandDark,
+    fontSize: 12,
+    fontWeight: '800',
   },
   title: {
     color: colors.text,
@@ -280,6 +302,15 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 16,
     marginTop: 24,
+  },
+  socialChoice: {
+    alignItems: 'center',
+    gap: 5,
+  },
+  socialLabel: {
+    color: colors.muted,
+    fontSize: 11,
+    fontWeight: '700',
   },
   socialButton: {
     width: 54,
@@ -383,4 +414,72 @@ const styles = StyleSheet.create({
     color: colors.brandDark,
     fontWeight: '700',
   },
+});
+
+const webPalette = {
+  background: '#101713',
+  backgroundSoft: '#17211b',
+  surface: '#202d24',
+  line: '#34443a',
+  text: '#f4f7f1',
+  muted: '#b0bdb2',
+  lime: '#c8f169',
+  limeDark: '#18210f',
+  orange: '#ff9b62',
+};
+
+const webStyles = StyleSheet.create({
+  screen: { backgroundColor: webPalette.background },
+  background: { backgroundColor: webPalette.background },
+  glow1: { backgroundColor: webPalette.lime, opacity: 0.08 },
+  glow2: { backgroundColor: webPalette.orange, opacity: 0.045 },
+  scrollContent: { paddingHorizontal: 24, paddingVertical: 48 },
+  container: { maxWidth: 480 },
+  header: { marginBottom: 25 },
+  brandName: { color: webPalette.lime, letterSpacing: 2 },
+  title: { color: webPalette.text },
+  subtitle: { color: webPalette.muted, lineHeight: 22 },
+  backButton: {
+    backgroundColor: webPalette.backgroundSoft,
+    borderColor: webPalette.line,
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+  },
+  backButtonText: { color: webPalette.lime },
+  formContainer: {
+    backgroundColor: webPalette.surface,
+    borderColor: webPalette.line,
+    borderWidth: 1,
+    borderRadius: 24,
+    padding: 24,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 14 },
+    shadowOpacity: 0.25,
+    shadowRadius: 28,
+    elevation: 8,
+  },
+  primaryButton: { backgroundColor: webPalette.lime, borderRadius: 15 },
+  primaryButtonText: { color: webPalette.limeDark },
+  footerLinkText: { color: webPalette.muted },
+  footerLinkHighlight: { color: webPalette.lime },
+  socialRow: { marginTop: 10 },
+  socialButton: { backgroundColor: webPalette.backgroundSoft, borderColor: webPalette.line, borderRadius: 15 },
+  socialLabel: { color: webPalette.muted },
+  legalWrap: { marginTop: 6 },
+  fieldLabel: { color: webPalette.text },
+  inputContainer: {
+    backgroundColor: webPalette.backgroundSoft,
+    borderColor: webPalette.line,
+    borderRadius: 15,
+    shadowOpacity: 0,
+    elevation: 0,
+  },
+  fieldInput: { color: webPalette.text },
+  fieldError: { color: '#ff9b9b' },
+  message: { borderRadius: 13 },
+  messageError: { backgroundColor: 'rgba(248, 113, 113, 0.12)', borderColor: 'rgba(248, 113, 113, 0.28)' },
+  messageInfo: { backgroundColor: 'rgba(200, 241, 105, 0.10)', borderColor: 'rgba(200, 241, 105, 0.25)' },
+  messageTextError: { color: '#ffb4b4' },
+  messageTextInfo: { color: webPalette.lime },
 });

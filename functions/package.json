@@ -4,8 +4,8 @@
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "test": "node --test helperLegalAgreements.test.js legalAgreements.test.js pricingEngine.test.js subjectExtraction.test.js",
-    "test:emulator": "node --test test/firestore.rules.test.js test/rewards.integration.test.js test/rewards.test.js"
+    "test": "node --test helperLegalAgreements.test.js legalAgreements.test.js pricingEngine.test.js marketplaceRequestOperations.test.js serviceRequestCancellation.test.js serviceRequestOfferLogic.test.js serviceRequestOfferOperations.test.js serviceRequestPricing.test.js subjectExtraction.test.js financialOperationService.test.js requestPaymentService.test.js paymentMethodStore.test.js whatsapp/*.test.js",
+    "test:emulator": "node --test test/firestore.rules.test.js test/rewards.integration.test.js test/rewards.test.js test/financialOperations.emulator.test.js"
   },
   "engines": {
     "node": "20"
@@ -13,8 +13,10 @@
   "dependencies": {
     "firebase-admin": "^12.1.1",
     "firebase-functions": "^7.2.5",
+    "h3-js": "^4.2.1",
+    "mammoth": "^1.13.0",
+    "pdfjs-dist": "^4.10.38",
     "pdfkit": "^0.17.2",
-    "resend": "^4.1.2",
-    "h3-js": "^4.2.1"
+    "resend": "^4.1.2"
   }
 }

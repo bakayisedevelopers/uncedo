@@ -88,6 +88,12 @@ test('reward ledger applies credits, debits, duplicate idempotency, reversals, m
       sourceType: 'paystack',
       sourceId: 'ref-1',
       idempotencyKey: 'reward:credit:120',
+      metadata: {
+        safe: true,
+        secretToken: 'remove-me',
+        cardPayload: 'remove-me-too',
+      },
+      notifyUser: true,
     }),
   ]);
 
@@ -165,6 +171,35 @@ test('reward ledger applies credits, debits, duplicate idempotency, reversals, m
     }),
     /account type mismatch/,
   );
+});
+
+test('five concurrent reward requests with one idempotency key apply exactly once', async () => {
+  const userId = 'customer-concurrent-idempotency';
+  const attempts = await Promise.all(Array.from({ length: 5 }, () => applyRewardTransaction({
+    db,
+    admin,
+    userId,
+    accountType: ACCOUNT_TYPES.CUSTOMER,
+    direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT,
+    points: 75,
+    reasonCode: REWARD_REASON_CODES.CUSTOMER_COMPLETED_PAID_BOOKING,
+    reasonLabel: 'Completed paid booking',
+    sourceType: 'service_request',
+    sourceId: 'concurrent-request',
+    requestId: 'concurrent-request',
+    idempotencyKey: 'customer:concurrent-idempotency:request:concurrent-request:completed-paid',
+    notifyUser: true,
+  })));
+
+  const account = await getRewardAccount(userId);
+  const transactions = await getTransactions(userId);
+  const notifications = await db.collection('notifications').where('userId', '==', userId).get();
+  assert.equal(attempts.filter((result) => result.applied).length, 1);
+  assert.equal(attempts.filter((result) => result.duplicate).length, 4);
+  assert.equal(account.availablePoints, 75);
+  assert.equal(account.lifetimeEarnedPoints, 75);
+  assert.equal(transactions.length, 1);
+  assert.equal(notifications.size, 1);
 });
 
 test('customer expiry only expires remaining eligible customer credit points and stays idempotent', async () => {

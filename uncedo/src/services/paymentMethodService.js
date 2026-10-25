@@ -1,23 +1,4 @@
 import { getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
-import { updateUserProfile } from './userService';
-
-function makeId() {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-    return crypto.randomUUID();
-  }
-  return `card_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function sanitizeMethods(methods = []) {
-  return methods.map((method, index) => ({
-    ...method,
-    id: method.id || makeId(),
-    nickname: method.nickname || `${method.brand || 'Card'} ending ${method.last4 || '----'}`,
-    brand: method.brand || 'Card',
-    last4: method.last4 || '----',
-    isDefault: Boolean(method.isDefault || index === 0),
-  }));
-}
 
 export async function verifyPaystackReference(reference, options = {}) {
   const { auth } = getFirebaseClients();
@@ -52,21 +33,31 @@ export async function verifyPaystackReference(reference, options = {}) {
   return payload;
 }
 
-export async function setDefaultPaymentMethod(user, methodId) {
-  const paymentMethods = sanitizeMethods(user?.paymentMethods || []).map((method) => ({
-    ...method,
-    isDefault: method.id === methodId,
-  }));
+async function updateSavedPaymentMethod(user, methodId, action) {
+  const { auth } = getFirebaseClients();
+  if (!auth.currentUser?.uid || auth.currentUser.uid !== user?.uid) {
+    throw new Error('Sign in to manage your saved cards.');
+  }
+  const idToken = await auth.currentUser.getIdToken();
+  const response = await fetch(getFunctionEndpoint('updatePaymentMethod'), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ action, methodId }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.success !== true) {
+    throw new Error(payload?.message || 'Unable to update the saved card.');
+  }
+  return { paymentMethods: Array.isArray(payload.paymentMethods) ? payload.paymentMethods : [] };
+}
 
-  return updateUserProfile(user.uid, { paymentMethods });
+export async function setDefaultPaymentMethod(user, methodId) {
+  return updateSavedPaymentMethod(user, methodId, 'set_default');
 }
 
 export async function removePaymentMethod(user, methodId) {
-  const paymentMethods = sanitizeMethods(user?.paymentMethods || []).filter((method) => method.id !== methodId);
-
-  if (paymentMethods.length && !paymentMethods.some((method) => method.isDefault)) {
-    paymentMethods[0].isDefault = true;
-  }
-
-  return updateUserProfile(user.uid, { paymentMethods });
+  return updateSavedPaymentMethod(user, methodId, 'remove');
 }

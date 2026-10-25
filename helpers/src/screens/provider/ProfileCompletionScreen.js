@@ -2,14 +2,18 @@ import { useEffect, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { ActionButton, Card, SectionHeading, StatusBadge } from '../../components/app/HelperUi';
+import { useAuth } from '../../context/AuthContext';
 import { useHelpersApp } from '../../context/HelpersAppContext';
 import { colors } from '../../theme/colors';
 
 export function ProfileCompletionScreen({ navigate, goBack }) {
+  const { user } = useAuth();
   const { onboardingStatus, profile, saving, saveError, actions } = useHelpersApp();
+  const whatsappAuthenticated = user?.whatsappAuthenticated === true;
   const payout = profile?.payout && typeof profile.payout === 'object' ? profile.payout : {};
   const [firstName, setFirstName] = useState(profile.firstName || '');
   const [lastName, setLastName] = useState(profile.lastName || '');
+  const [phoneNumber, setPhoneNumber] = useState(profile.phoneNumber || '');
   const [providerType, setProviderType] = useState(profile.providerType || '');
   const [businessName, setBusinessName] = useState(profile.businessName || '');
   const [bankName, setBankName] = useState(payout.bankName || '');
@@ -21,18 +25,24 @@ export function ProfileCompletionScreen({ navigate, goBack }) {
   useEffect(() => {
     setFirstName(profile.firstName || '');
     setLastName(profile.lastName || '');
+    setPhoneNumber(profile.phoneNumber || '');
     setProviderType(profile.providerType || '');
     setBusinessName(profile.businessName || '');
     setBankName(payout.bankName || '');
     setAccountHolder(payout.accountHolder || '');
     setAccountNumber(payout.accountNumber || '');
     setRecipientCode(payout.recipientCode || '');
-  }, [payout.accountHolder, payout.accountNumber, payout.bankName, payout.recipientCode, profile.businessName, profile.firstName, profile.lastName, profile.providerType]);
+  }, [payout.accountHolder, payout.accountNumber, payout.bankName, payout.recipientCode, profile.businessName, profile.firstName, profile.lastName, profile.phoneNumber, profile.providerType]);
 
   const saveBasics = async () => {
+    if (String(phoneNumber || '').trim() === '' && !whatsappAuthenticated) {
+      setMessage('Add a WhatsApp number to complete your helper profile.');
+      return;
+    }
     const result = await actions.updateProfileBasics({
       firstName,
       lastName,
+      phoneNumber: whatsappAuthenticated ? (profile.whatsappPhoneNumber || profile.phoneNumber || '') : phoneNumber.trim(),
       providerType,
       businessName,
       fullName: [String(firstName || '').trim(), String(lastName || '').trim()].filter(Boolean).join(' '),
@@ -94,6 +104,19 @@ export function ProfileCompletionScreen({ navigate, goBack }) {
           onChangeText={setLastName}
           style={styles.input}
         />
+        {whatsappAuthenticated ? (
+          <Text style={styles.copy}>WhatsApp verified: {profile.whatsappPhoneNumber || profile.phoneNumber || 'number linked to your account'}</Text>
+        ) : (
+          <TextInput
+            autoCapitalize="none"
+            keyboardType="phone-pad"
+            placeholder="WhatsApp number (include country code)"
+            placeholderTextColor={colors.muted}
+            value={phoneNumber}
+            onChangeText={setPhoneNumber}
+            style={styles.input}
+          />
+        )}
         <View style={styles.typeRow}>
           {['individual', 'business'].map((option) => {
             const isActive = providerType === option;

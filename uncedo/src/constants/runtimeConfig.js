@@ -36,3 +36,5 @@ export const GOOGLE_ANDROID_CLIENT_ID = readPublicEnv(process.env.EXPO_PUBLIC_GO
 export const GOOGLE_IOS_CLIENT_ID = readPublicEnv(process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID);
 export const FIREBASE_EMULATOR_HOST = readPublicEnv(process.env.EXPO_PUBLIC_FIREBASE_EMULATOR_HOST, '10.0.2.2');
 export const USE_FIREBASE_EMULATORS = readPublicEnv(process.env.EXPO_PUBLIC_USE_FIREBASE_EMULATORS) === 'true';
+export const USE_SERVER_PRICING = readPublicEnv(process.env.EXPO_PUBLIC_USE_SERVER_PRICING) === 'true';
+export const USE_SERVER_REQUEST_LIFECYCLE = readPublicEnv(process.env.EXPO_PUBLIC_USE_SERVER_REQUEST_LIFECYCLE) === 'true';

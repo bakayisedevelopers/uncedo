@@ -6,15 +6,18 @@ import { useAuth } from '../../context/AuthContext';
 import { HELPER_LOGIN_BLOCKED_CODE } from '../../services/authService';
 
 const socialButtons = [
-  { label: 'Apple', icon: 'logo-apple' },
   { label: 'Google', icon: 'logo-google' },
-  { label: 'Facebook', icon: 'logo-facebook' },
+  { label: 'WhatsApp', icon: 'logo-whatsapp' },
 ];
 
 export function LoginScreen({ navigate }) {
-  const { login } = useAuth();
+  const { login, loginWithGoogle, startWhatsAppAuthChallenge, completeWhatsAppAuthChallenge } = useAuth();
+  const [method, setMethod] = useState('email');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [phoneNumber, setPhoneNumber] = useState('');
+  const [verificationCode, setVerificationCode] = useState('');
+  const [challengeId, setChallengeId] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -27,7 +30,15 @@ export function LoginScreen({ navigate }) {
     setNotice('');
     setHelperBlocked(false);
     try {
-      await login({ email, password });
+      if (method === 'whatsapp' && challengeId) {
+        await completeWhatsAppAuthChallenge({ challengeId, code: verificationCode });
+      } else if (method === 'whatsapp') {
+        const result = await startWhatsAppAuthChallenge({ phoneNumber, mode: 'login' });
+        setChallengeId(String(result?.challengeId || ''));
+        setNotice('If this number can sign in, a verification code has been sent on WhatsApp.');
+      } else {
+        await login({ email, password });
+      }
     } catch (nextError) {
       if (nextError?.code === HELPER_LOGIN_BLOCKED_CODE) {
         setHelperBlocked(true);
@@ -42,6 +53,17 @@ export function LoginScreen({ navigate }) {
     setError('');
     setHelperBlocked(false);
 
+    if (label === 'WhatsApp') {
+      setMethod('whatsapp');
+      setChallengeId('');
+      setVerificationCode('');
+      return;
+    }
+    if (label === 'Google') {
+      setBusy(true);
+      try { await loginWithGoogle(); } catch (nextError) { setError(nextError.message || 'Unable to sign in with Google.'); } finally { setBusy(false); }
+      return;
+    }
     setNotice(`${label} sign-in is coming soon.`);
   };
 
@@ -66,8 +88,8 @@ export function LoginScreen({ navigate }) {
       )}
       mode="login"
       onPrimaryPress={submit}
-      primaryDisabled={busy || !email.trim() || !password.trim()}
-      primaryLabel={busy ? 'Signing in...' : 'Sign in'}
+      primaryDisabled={busy || (method === 'email' ? (!email.trim() || !password.trim()) : (!phoneNumber.trim() || (Boolean(challengeId) && !verificationCode.trim())))}
+      primaryLabel={busy ? 'Please wait...' : method === 'whatsapp' ? challengeId ? 'Verify WhatsApp code' : 'Send WhatsApp code' : 'Sign in'}
       socialButtons={socialButtons.map((button) => ({
         ...button,
         onPress: () => {
@@ -80,22 +102,14 @@ export function LoginScreen({ navigate }) {
       <View style={styles.formBlock}>
         <AuthMessage text={activeMessage} />
         <AuthMessage text={notice} tone="info" />
-        <AuthField
-          autoCapitalize="none"
-          keyboardType="email-address"
-          label="Email"
-          onChangeText={setEmail}
-          placeholder="name@example.com"
-          value={email}
-        />
-        <AuthField
-          autoCapitalize="none"
-          label="Password"
-          onChangeText={setPassword}
-          placeholder="Enter your password"
-          secureTextEntry
-          value={password}
-        />
+        {method === 'email' ? <>
+          <AuthField autoCapitalize="none" keyboardType="email-address" label="Email" onChangeText={setEmail} placeholder="name@example.com" value={email} />
+          <AuthField autoCapitalize="none" label="Password" onChangeText={setPassword} placeholder="Enter your password" secureTextEntry value={password} />
+        </> : <>
+          <AuthField autoCapitalize="none" keyboardType="phone-pad" label="WhatsApp number" onChangeText={setPhoneNumber} placeholder="+27 71 234 5678" value={phoneNumber} editable={!challengeId} />
+          {challengeId ? <AuthField autoCapitalize="none" keyboardType="number-pad" label="WhatsApp verification code" onChangeText={setVerificationCode} placeholder="Enter code" value={verificationCode} /> : null}
+          {process.env.EXPO_PUBLIC_WHATSAPP_AUTH_ENABLED !== 'true' ? <Text style={styles.notice}>WhatsApp sign-in is awaiting Meta authentication configuration.</Text> : null}
+        </>}
       </View>
     </AuthScaffold>
   );
@@ -105,6 +119,7 @@ const styles = StyleSheet.create({
   formBlock: {
     gap: 16,
   },
+  notice: { color: authColors.muted, fontSize: 12, lineHeight: 18 },
   legalText: {
     color: authColors.muted,
     fontSize: 12,

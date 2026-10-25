@@ -27,8 +27,8 @@ assertIncludes('helpers/src/shared/rewards.js', "import sharedRewards from '../.
 assertIncludes('admin/src/shared/rewards.js', "import sharedRewards from '../../../shared/rewards/index.js';");
 assertIncludes('uncedo/src/services/rewards/rewardClientService.js', "import { REWARD_CONFIG_DOCS } from '../../shared/rewards';");
 assertIncludes('helpers/src/services/rewards/rewardClientService.js', "import { REWARD_CONFIG_DOCS } from '../../shared/rewards';");
-assertIncludes('uncedo/metro.config.js', 'config.watchFolders = [workspaceRoot];');
-assertIncludes('helpers/metro.config.js', 'config.watchFolders = [workspaceRoot];');
+assertIncludes('uncedo/metro.config.js', 'config.watchFolders = [sharedRoot, functionsRoot];');
+assertIncludes('helpers/metro.config.js', 'config.watchFolders = [sharedRoot];');
 assertIncludes('admin/vite.config.js', "'@shared-rewards'");
 
 console.log('Reward shared-source validation passed.');

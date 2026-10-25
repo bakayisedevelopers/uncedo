@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react';
-import { deleteAccount, loginWithEmail, logoutUser, signupWithEmail, subscribeToAuthChanges } from '../services/authService';
+import { completeWhatsAppAuthChallenge, deleteAccount, loginWithEmail, loginWithGoogle, logoutUser, signupWithEmail, startWhatsAppAuthChallenge, subscribeToAuthChanges } from '../services/authService';
 import { logError } from '../services/logger';
 import { subscribeToUserProfile } from '../services/userService';
 
@@ -53,6 +53,9 @@ export function AuthProvider({ children }) {
     initializing,
     user,
     login: loginWithEmail,
+    loginWithGoogle,
+    startWhatsAppAuthChallenge,
+    completeWhatsAppAuthChallenge,
     logout: logoutUser,
     signup: signupWithEmail,
     deleteAccount,

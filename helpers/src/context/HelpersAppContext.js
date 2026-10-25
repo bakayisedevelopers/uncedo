@@ -134,13 +134,14 @@ function withServiceMetadata(profile) {
 function normalizeProfile(user, existingProfile = null) {
   if (!user) return withServiceMetadata(FALLBACK_PROFILE, existingProfile);
 
+  const { whatsappAuthenticated: _whatsappAuthenticated, ...userProfile } = user;
   const fullName = String(user.fullName || user.displayName || '').trim();
   const firstName = String(user.firstName || '').trim();
   const lastName = String(user.lastName || '').trim();
 
   return withServiceMetadata({
     ...FALLBACK_PROFILE,
-    ...user,
+    ...userProfile,
     fullName,
     firstName,
     lastName,
@@ -160,7 +161,7 @@ function normalizeProfile(user, existingProfile = null) {
   }, existingProfile);
 }
 
-function getHelperOnboardingStatus(profile, { serviceCatalog = [], serviceCatalogResolved = false, helperServiceOfferings = [] } = {}) {
+function getHelperOnboardingStatus(profile, { serviceCatalog = [], serviceCatalogResolved = false, helperServiceOfferings = [], whatsappAuthenticated = false } = {}) {
   const firstName = String(profile?.firstName || '').trim();
   const lastName = String(profile?.lastName || '').trim();
   const fullName = String(profile?.fullName || '').trim();
@@ -202,6 +203,7 @@ function getHelperOnboardingStatus(profile, { serviceCatalog = [], serviceCatalo
   const hasName = Boolean(fullName || (firstName && lastName));
   const hasProviderType = providerType === 'individual' || providerType === 'business';
   const hasBusinessName = providerType !== 'business' || Boolean(businessName);
+  const hasWhatsAppNumber = Boolean(String(profile?.phoneNumber || '').trim() || whatsappAuthenticated);
 
   if (!hasName) {
     return { complete: false, step: 'profile', message: 'Add the helper name before going online.' };
@@ -213,6 +215,10 @@ function getHelperOnboardingStatus(profile, { serviceCatalog = [], serviceCatalo
 
   if (!hasBusinessName) {
     return { complete: false, step: 'profile', message: 'Add the business name before going online.' };
+  }
+
+  if (!hasWhatsAppNumber) {
+    return { complete: false, step: 'profile', message: 'Add a WhatsApp number to complete your helper profile.' };
   }
 
   if (!hasProfilePhoto) {
@@ -539,8 +545,8 @@ export function HelpersAppProvider({ children }) {
   };
 
   const onboardingStatus = useMemo(
-    () => getHelperOnboardingStatus(profile, { serviceCatalog, serviceCatalogResolved, helperServiceOfferings: helperServiceOfferingsState }),
-    [profile, serviceCatalog, serviceCatalogResolved, helperServiceOfferingsState],
+    () => getHelperOnboardingStatus(profile, { serviceCatalog, serviceCatalogResolved, helperServiceOfferings: helperServiceOfferingsState, whatsappAuthenticated: user?.whatsappAuthenticated === true }),
+    [profile, serviceCatalog, serviceCatalogResolved, helperServiceOfferingsState, user?.whatsappAuthenticated],
   );
   const helperServiceOfferings = helperServiceOfferingsState;
 
@@ -593,8 +599,8 @@ export function HelpersAppProvider({ children }) {
       await acceptServiceRequestOffer({
         requestId: offer.requestId || offer.id,
         helperId: user.uid,
-        helperName: user.fullName || user.displayName || user.email,
-        helperEmail: user.email || '',
+        offerToken: offer.offerToken,
+        offerRevision: offer.offerRevision,
       });
     } catch (error) {
       logError('HelpersAppContext.acceptOffer', error);
@@ -613,6 +619,8 @@ export function HelpersAppProvider({ children }) {
       await declineServiceRequestOffer({
         requestId: offer.requestId || offer.id,
         helperId: user.uid,
+        offerToken: offer.offerToken,
+        offerRevision: offer.offerRevision,
       });
     } catch (error) {
       logError('HelpersAppContext.declineOffer', error);

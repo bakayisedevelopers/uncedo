@@ -12,6 +12,7 @@ import {
   Users,
   FileImage,
   X,
+  Headphones,
 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
 import { logoutUser } from '../services/authService';
@@ -23,6 +24,7 @@ const NAV_ITEMS = [
   { to: '/customers', label: 'Customers', icon: FileImage },
   { to: '/helper-agreements', label: 'Helper agreements', icon: FileText },
   { to: '/rewards', label: 'Rewards', icon: Gift },
+  { to: '/support', label: 'Support inbox', icon: Headphones },
 ];
 
 function NavItem({ to, icon: Icon, label, onClick }) {
@@ -55,6 +57,7 @@ export default function AdminShell() {
     if (location.pathname.startsWith('/customers')) return 'Customer directory';
     if (location.pathname.startsWith('/helper-agreements')) return 'Helper agreements';
     if (location.pathname.startsWith('/rewards')) return 'Rewards operations';
+    if (location.pathname.startsWith('/support')) return 'Support inbox';
     return 'Operations overview';
   }, [location.pathname]);
 
