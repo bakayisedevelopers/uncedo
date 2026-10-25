@@ -13,6 +13,8 @@ const {
   recordPayoutObservation,
   settleServiceFinancialOperation,
 } = require('../financialOperationService');
+const { settleRequestPayment } = require('../requestPaymentService');
+const { emptyHelperWallet, helperWalletReference, walletObligationReference } = require('../helperWalletService');
 
 const emulatorAvailable = Boolean(process.env.FIRESTORE_EMULATOR_HOST);
 let db;
@@ -274,6 +276,51 @@ test('Paystack accepted then local work failed is recovered by verification with
   assert.equal(replay.outcome, 'success');
   assert.equal(chargeCalls, 1);
   assert.equal(verifyCalls, 2);
+});
+
+test('concurrent helper cash confirmations atomically settle payment and assess one wallet commission', { skip }, async () => {
+  const requestId = `wallet-cash-${randomUUID()}`;
+  const customerId = `customer-${requestId}`;
+  const helperId = `helper-${requestId}`;
+  const attemptId = 'cash-attempt-1';
+  const requestRef = db.collection('serviceRequests').doc(requestId);
+  const paymentRef = db.collection('servicePaymentOperations').doc(requestId);
+  const attemptRef = paymentRef.collection('attempts').doc(attemptId);
+  const walletRef = helperWalletReference(db, helperId);
+  await requestRef.set({
+    customerId,
+    status: 'completed',
+    paymentStatus: 'awaiting_cash_confirmation',
+    helperWalletAccountingVersion: 1,
+    totalAmount: 100,
+    helperAssignment: { helperId },
+    helperPayoutBreakdown: { platformAmount: 15, helperAmount: 85 },
+  });
+  await paymentRef.set({ status: 'awaiting_cash_confirmation', activeAttemptId: attemptId });
+  await attemptRef.set({ method: 'cash', status: 'awaiting_cash_confirmation', amount: 100, customerId });
+  await walletRef.set({ ...emptyHelperWallet(helperId), availableMinor: 1000 });
+
+  const confirm = () => settleRequestPayment({
+    db, admin, requestId, attemptId, outcome: 'success', helperId, providerStatus: 'helper_confirmed',
+  });
+  const results = await Promise.all(Array.from({ length: 5 }, confirm));
+  assert.equal(results.filter((result) => result.action === 'settled').length, 1);
+  assert.equal(results.filter((result) => result.action === 'already-paid').length, 4);
+  const [request, payment, wallet, obligation] = await Promise.all([
+    requestRef.get().then((snapshot) => snapshot.data()),
+    paymentRef.get().then((snapshot) => snapshot.data()),
+    walletRef.get().then((snapshot) => snapshot.data()),
+    walletObligationReference(walletRef, requestId).get().then((snapshot) => snapshot.data()),
+  ]);
+  assert.equal(request.paymentStatus, 'paid');
+  assert.equal(payment.status, 'paid');
+  assert.equal(wallet.availableMinor, 0);
+  assert.equal(wallet.outstandingCommissionMinor, 500);
+  assert.equal(obligation.originalMinor, 1500);
+  assert.equal(obligation.recoveredMinor, 1000);
+  assert.equal(obligation.outstandingMinor, 500);
+  const ledger = await walletRef.collection('transactions').get();
+  assert.equal(ledger.docs.filter((document) => document.data().entryType === 'cash_commission_assessed').length, 1);
 });
 
 test('unknown Paystack charge outcomes remain reconciling and are never treated as failed charges', { skip }, async () => {
