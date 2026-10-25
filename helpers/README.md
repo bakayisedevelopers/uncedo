@@ -14,8 +14,9 @@ This folder contains the Expo React Native app for helpers.
 - Android active-job guidance now uses the Google Navigation SDK through the official React Native package, while the helper dashboard uses a stable static map preview and the existing live-tracking pipeline still keeps customer/helper tracking in sync.
 - Accepted jobs seed `liveTracking/serviceRequests/{requestId}` in Realtime Database immediately, then update helper movement, destination, route geometry, and closure status through the same tracking node.
 - Provider offer acceptance and decline use the authenticated `respondToServiceRequestOffer` Cloud Function. Responses include the current offer token and revision so the backend can reject stale and expired actions; Cloud Tasks expires pending offers after the existing 30-second window.
-- Earnings, wallet balance, cancellation-aware payouts, and completed jobs grouped by week
+- Earnings history grouped by week, plus an authenticated server-read helper wallet showing available and reserved funds, outstanding cash commissions, and recent immutable wallet transactions
 - Automatic Monday helper payout batching backed by Firestore payout records
+- New wallet-accounted earnings are kept out of the legacy request-based earnings summary so the same amount is not counted twice. Failed new wallet payouts return to available wallet funds after Paystack confirms failure; pending outcomes remain reserved.
 - Map-driven job and route views
 - Browser build served from a dedicated Firebase Hosting site. It uses the same helper identity, profile-completion steps, and pending/verified status checks as the mobile app.
 - The Helpers website opens on a dedicated responsive landing page at `/`, with separate `/sign-in` and `/sign-up` routes. This marketing-style entry page is web-only; native apps continue to open the existing authentication flow.

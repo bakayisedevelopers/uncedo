@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { getServiceById } from '../constants/serviceCatalog';
 import { useAuth } from './AuthContext';
 import { updateHelperProfile } from '../services/userService';
@@ -7,6 +7,7 @@ import { deleteUploadedFile, uploadLocalFile } from '../services/storageService'
 import { groupCompletedJobsByWeek, HELPER_PAYOUT_RATE, PLATFORM_FEE_RATE, shouldIncludeJobInPayouts } from '../utils/payouts';
 import { acceptHelperAgreement as acceptHelperAgreementRequest } from '../services/legalAgreementService';
 import { subscribeToHelperWeeklyPayouts } from '../services/helperPayoutService';
+import { getHelperWalletSnapshot } from '../services/helperWalletService';
 import {
   requestHelperLocationPermission,
   syncHelperCurrentLocation,
@@ -88,6 +89,11 @@ const FALLBACK_PROFILE = {
 };
 
 const INITIAL_WEEKLY_PAYOUTS = [];
+const EMPTY_HELPER_WALLET = {
+  wallet: { availableMinor: 0, reservedMinor: 0, outstandingCommissionMinor: 0, reconciliationBlocked: false, currency: 'ZAR' },
+  nextPayoutEstimateMinor: 0,
+  transactions: [],
+};
 
 function createPicture(uri) {
   const normalizedUri = typeof uri === 'string' ? uri : uri?.uri;
@@ -264,6 +270,9 @@ export function HelpersAppProvider({ children }) {
   const [activeJobResolved, setActiveJobResolved] = useState(false);
   const [serviceRequests, setServiceRequests] = useState([]);
   const [weeklyPayouts, setWeeklyPayouts] = useState(INITIAL_WEEKLY_PAYOUTS);
+  const [helperWalletSnapshot, setHelperWalletSnapshot] = useState(EMPTY_HELPER_WALLET);
+  const [helperWalletLoading, setHelperWalletLoading] = useState(false);
+  const [helperWalletError, setHelperWalletError] = useState('');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
   const [offerResponseState, setOfferResponseState] = useState({ offerId: '', action: '' });
@@ -273,6 +282,29 @@ export function HelpersAppProvider({ children }) {
   const [helperServiceOfferingsState, setHelperServiceOfferingsState] = useState([]);
   const helperLocationWatchRef = useRef(null);
   const activeJobCleanupPromiseRef = useRef(null);
+
+  const refreshHelperWallet = useCallback(async () => {
+    if (!user?.uid) {
+      setHelperWalletSnapshot(EMPTY_HELPER_WALLET);
+      setHelperWalletError('');
+      return;
+    }
+    setHelperWalletLoading(true);
+    try {
+      const snapshot = await getHelperWalletSnapshot();
+      setHelperWalletSnapshot(snapshot);
+      setHelperWalletError('');
+    } catch (error) {
+      logError('HelpersAppContext.helperWallet', error);
+      setHelperWalletError(error?.message || 'Unable to load wallet details.');
+    } finally {
+      setHelperWalletLoading(false);
+    }
+  }, [user?.uid]);
+
+  useEffect(() => {
+    refreshHelperWallet();
+  }, [refreshHelperWallet]);
 
   useEffect(() => {
     if (!user?.uid) {
@@ -551,7 +583,7 @@ export function HelpersAppProvider({ children }) {
   const helperServiceOfferings = helperServiceOfferingsState;
 
   const completedJobs = useMemo(
-    () => serviceRequests.filter((item) => shouldIncludeJobInPayouts(item)),
+    () => serviceRequests.filter((item) => Number(item.raw?.helperWalletAccountingVersion || item.helperWalletAccountingVersion || 0) !== 1 && shouldIncludeJobInPayouts(item)),
     [serviceRequests],
   );
 
@@ -902,6 +934,10 @@ export function HelpersAppProvider({ children }) {
     weeklyGroups,
     weeklyPayouts,
     paymentSummary,
+    helperWalletSnapshot,
+    helperWalletLoading,
+    helperWalletError,
+    refreshHelperWallet,
     saving,
     saveError,
     serviceCatalog,
@@ -937,7 +973,11 @@ export function HelpersAppProvider({ children }) {
     offerResponseState,
     onboardingStatus,
     paymentSummary,
+    helperWalletError,
+    helperWalletLoading,
+    helperWalletSnapshot,
     profile,
+    refreshHelperWallet,
     saveError,
     saving,
     serviceCatalog,

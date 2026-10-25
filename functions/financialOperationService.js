@@ -1,6 +1,14 @@
 'use strict';
 
 const { createHash, randomUUID } = require('node:crypto');
+const {
+  helperWalletReference,
+  walletBalanceIsValid,
+  walletFromSnapshot,
+  walletLedgerId,
+  walletLedgerReference,
+  writeWalletLedger,
+} = require('./helperWalletService');
 
 const FINANCIAL_OPERATIONS_COLLECTION = 'financialOperations';
 const PAYSTACK_TRANSFER_REFERENCES_COLLECTION = 'paystackTransferReferences';
@@ -86,6 +94,12 @@ async function recordPaystackRefundObservation({ db, operationRef, outcome, refu
 
 function isTerminalServiceOperation(status) {
   return ['settled_success', 'settled_failed', 'settled_no_charge'].includes(String(status || '').toLowerCase());
+}
+
+function shouldDeferCompletionPayment(request = {}, existingOperation = null) {
+  return String(request.paymentFlowVersion || '') === 'explicit_v1'
+    && (!existingOperation || existingOperation.deferredPaymentSelection === true
+      || existingOperation.settlementData?.deferredPaymentSelection === true);
 }
 
 function normalizeMinorAmount(value) {
@@ -528,21 +542,23 @@ async function claimPayoutTransfer({
   recipientCode,
   now = Date.now(),
 }) {
-  const operationId = helperPayoutOperationId(weekKey, helperId);
-  const amountMinor = normalizeMinorAmount(amount);
-  if (!payoutId || !helperId || !weekKey || amountMinor === null) throw new Error('Invalid helper payout operation input.');
+  const requestedAmountMinor = normalizeMinorAmount(amount);
+  if (!payoutId || !helperId || !weekKey || requestedAmountMinor === null) throw new Error('Invalid helper payout operation input.');
   return db.runTransaction(async (transaction) => {
     const payoutSnap = await transaction.get(payoutRef);
-    if (!payoutSnap.exists) return { action: 'missing_payout', operationId };
+    if (!payoutSnap.exists) return { action: 'missing_payout' };
     const payout = payoutSnap.data() || {};
     const existingStatus = String(payout.status || 'unpaid').toLowerCase();
     const operationStatus = String(payout.operationStatus || '').toLowerCase();
     const reference = String(payout.transferReference || '').trim();
     const transferStatus = String(payout.transferStatus || '').toLowerCase();
+    const isWalletPayout = payout.walletAccountingVersion === 1;
+    const operationId = helperPayoutOperationId(isWalletPayout ? `wallet:${weekKey}` : weekKey, helperId);
 
     if (existingStatus === 'paid' && (!reference || ['success', 'completed'].includes(transferStatus))) {
       return { action: 'paid', operationId, payout };
     }
+    if (isWalletPayout && existingStatus === 'wallet_recovery') return { action: 'wallet_recovered', operationId, payout };
     if (reference && (['processing', 'pending_reconciliation', 'reconciliation_required', 'paid'].includes(existingStatus)
       || ['processing', 'pending_reconciliation', 'reconciliation_required', 'gateway_succeeded'].includes(operationStatus)
       || String(payout.transferStatus || '').toLowerCase() === 'pending')) {
@@ -557,6 +573,107 @@ async function claimPayoutTransfer({
     }
     if (!recipientCode) return { action: 'missing_recipient', operationId, payout };
 
+    let amountMinor = requestedAmountMinor;
+    let walletReservedMinor = 0;
+    if (isWalletPayout) {
+      const walletRef = helperWalletReference(db, helperId);
+      const walletSnapshot = await transaction.get(walletRef);
+      const wallet = walletFromSnapshot(walletSnapshot, helperId, now);
+      if (wallet.reconciliationBlocked || !walletBalanceIsValid(wallet)) return { action: 'reconciliation_blocked', operationId, payout, wallet };
+      const reserveLedgerRef = walletLedgerReference(walletRef, walletLedgerId(`payout-reserve:${payoutId}`, 'payout_reserve'));
+      const obligationsSnapshot = await transaction.get(walletRef.collection('commissionObligations')
+        .where('status', '==', 'outstanding').orderBy('createdAtMs', 'asc').limit(100));
+      const obligations = obligationsSnapshot.docs || [];
+      const recoveryPageKey = obligations.length
+        ? `${obligations[0].id}:${obligations[obligations.length - 1].id}:${obligations.length}`
+        : 'empty';
+      const recoveryLedgerRef = walletLedgerReference(walletRef, walletLedgerId(`payout-commission-recovery:${payoutId}:${recoveryPageKey}`, 'commission_recovery'));
+      const [reserveLedgerSnapshot, recoveryLedgerSnapshot] = await Promise.all([
+        transaction.get(reserveLedgerRef), transaction.get(recoveryLedgerRef),
+      ]);
+      if (reserveLedgerSnapshot.exists) return { action: 'reconciliation_required', operationId, payout, wallet };
+
+      let availableMinor = Math.max(0, Number(wallet.availableMinor || 0));
+      let outstandingCommissionMinor = Math.max(0, Number(wallet.outstandingCommissionMinor || 0));
+      let recoveredMinor = 0;
+      const obligationUpdates = [];
+      if (!recoveryLedgerSnapshot.exists) {
+        for (const obligationDoc of obligationsSnapshot.docs || []) {
+          if (availableMinor <= 0) break;
+          const obligation = obligationDoc.data() || {};
+          const due = Math.max(0, Number(obligation.outstandingMinor || 0));
+          const recovered = Math.min(availableMinor, due);
+          if (!recovered) continue;
+          availableMinor -= recovered;
+          outstandingCommissionMinor = Math.max(0, outstandingCommissionMinor - recovered);
+          recoveredMinor += recovered;
+          obligationUpdates.push({ ref: obligationDoc.ref, value: {
+            recoveredMinor: Number(obligation.recoveredMinor || 0) + recovered,
+            outstandingMinor: due - recovered,
+            status: due === recovered ? 'recovered' : 'outstanding',
+            updatedAtMs: now,
+            lastRecoveryOperationId: `payout:${payoutId}`,
+          } });
+        }
+      }
+      if (availableMinor <= 0) {
+        if (recoveredMinor > 0) {
+          transaction.set(walletRef, { ...wallet, availableMinor, outstandingCommissionMinor, updatedAtMs: now }, { merge: true });
+          obligationUpdates.forEach(({ ref: obligationRef, value }) => transaction.set(obligationRef, value, { merge: true }));
+          writeWalletLedger(transaction, recoveryLedgerRef, {
+            operationId: `payout:${payoutId}`, helperId, entryType: 'commission_recovery', amountMinor: recoveredMinor,
+            availableDeltaMinor: -recoveredMinor, outstandingCommissionDeltaMinor: -recoveredMinor,
+            availableBeforeMinor: Number(wallet.availableMinor || 0), availableAfterMinor: availableMinor,
+            description: 'Outstanding cash commission recovered before weekly payout.', createdAtMs: now,
+          });
+        }
+        return { action: 'no_wallet_balance', operationId, payout, wallet };
+      }
+
+      // Process bounded obligation pages across successive payout runs. Never pay out
+      // the remainder while an unprocessed commission page may still be outstanding.
+      if (obligations.length >= 100) {
+        if (recoveredMinor > 0) {
+          transaction.set(walletRef, { ...wallet, availableMinor, outstandingCommissionMinor, updatedAtMs: now }, { merge: true });
+          obligationUpdates.forEach(({ ref: obligationRef, value }) => transaction.set(obligationRef, value, { merge: true }));
+          if (!recoveryLedgerSnapshot.exists) {
+            writeWalletLedger(transaction, recoveryLedgerRef, {
+              operationId: `payout:${payoutId}`, helperId, entryType: 'commission_recovery', amountMinor: recoveredMinor,
+              availableDeltaMinor: -recoveredMinor, outstandingCommissionDeltaMinor: -recoveredMinor,
+              availableBeforeMinor: Number(wallet.availableMinor || 0), availableAfterMinor: availableMinor,
+              description: 'Outstanding cash commission recovered before weekly payout.', createdAtMs: now,
+            });
+          }
+        }
+        return { action: 'commission_recovery_pending', operationId, payout, wallet };
+      }
+
+      amountMinor = availableMinor;
+      walletReservedMinor = amountMinor;
+      transaction.set(walletRef, {
+        ...wallet,
+        availableMinor: 0,
+        reservedMinor: Math.max(0, Number(wallet.reservedMinor || 0)) + amountMinor,
+        outstandingCommissionMinor,
+        updatedAtMs: now,
+      }, { merge: true });
+      obligationUpdates.forEach(({ ref: obligationRef, value }) => transaction.set(obligationRef, value, { merge: true }));
+      if (recoveredMinor > 0 && !recoveryLedgerSnapshot.exists) {
+        writeWalletLedger(transaction, recoveryLedgerRef, {
+          operationId: `payout:${payoutId}`, helperId, entryType: 'commission_recovery', amountMinor: recoveredMinor,
+          availableDeltaMinor: -recoveredMinor, outstandingCommissionDeltaMinor: -recoveredMinor,
+          availableBeforeMinor: Number(wallet.availableMinor || 0), availableAfterMinor: availableMinor,
+          description: 'Outstanding cash commission recovered before weekly payout.', createdAtMs: now,
+        });
+      }
+      writeWalletLedger(transaction, reserveLedgerRef, {
+        operationId: `payout:${payoutId}`, payoutId, helperId, entryType: 'payout_reservation', amountMinor,
+        availableDeltaMinor: -amountMinor, reservedDeltaMinor: amountMinor,
+        availableBeforeMinor: availableMinor, availableAfterMinor: 0,
+        description: 'Wallet funds reserved for weekly Paystack payout.', createdAtMs: now,
+      });
+    }
+
     const attemptNo = Number(payout.transferAttempts || 0) + 1;
     const transferReference = paystackTransferReference(operationId, attemptNo);
     const transferAttemptRef = payoutRef.collection('transferAttempts').doc(String(attemptNo).padStart(4, '0'));
@@ -569,11 +686,12 @@ async function claimPayoutTransfer({
       helperId,
       weekKey,
       reference: transferReference,
-      amount: Number(amount),
+      amount: amountMinor / 100,
       amountMinor,
       currency: String(currency || 'ZAR').toUpperCase(),
       recipientCode,
       status: 'claimed',
+      ...(isWalletPayout ? { walletAccountingVersion: 1, walletFundsReserved: true, walletReservedMinor } : {}),
       claimToken,
       createdAtMs: now,
       updatedAtMs: now,
@@ -592,6 +710,7 @@ async function claimPayoutTransfer({
       operationId,
       operationStatus: 'processing',
       status: 'processing',
+      ...(isWalletPayout ? { walletAccountingVersion: 1, walletReservedMinor, walletReservedAtMs: now, helperAmount: amountMinor / 100 } : {}),
       transferReference,
       transferAttempts: attemptNo,
       lastProcessRunKey: String(runKey || ''),
@@ -649,6 +768,84 @@ async function recordPayoutObservation({
         ? 'processing'
         : 'unsuccessful';
     const isCurrentAttempt = String(payout.transferReference || '') === String(reference || '');
+    const walletAccounting = payout.walletAccountingVersion === 1 || attempt.walletAccountingVersion === 1;
+    let walletRef = null;
+    let walletPatch = null;
+    let walletLedger = null;
+    let walletBlocked = false;
+    if (walletAccounting && isCurrentAttempt && !['pending', 'unknown'].includes(outcome)) {
+      const helperId = String(payout.helperId || attempt.helperId || '');
+      walletRef = helperWalletReference(db, helperId);
+      const amountMinor = Math.max(0, Number(attempt.amountMinor || payout.transferAmountMinor || 0));
+      const wasReserved = attempt.walletFundsReserved === true;
+      const wasReleased = Number(attempt.walletFundsReleasedAtMs || 0) > 0;
+      const wasDebited = Number(attempt.walletFundsDebitedAtMs || 0) > 0;
+      const action = outcome === 'success'
+        ? (wasReleased ? 'late_success' : 'debit')
+        : outcome === 'reversed' && wasDebited ? 'reversal_credit'
+          : wasReserved ? 'reservation_release' : 'none';
+      if (action !== 'none') {
+        const ledgerRef = walletLedgerReference(walletRef, walletLedgerId(`${payout.id}:${attempt.attemptNo}:${action}`, `payout_${action}`));
+        const [walletSnapshot, ledgerSnapshot] = await Promise.all([transaction.get(walletRef), transaction.get(ledgerRef)]);
+        const wallet = walletFromSnapshot(walletSnapshot, helperId, now);
+        if (!ledgerSnapshot.exists) {
+          if (!walletBalanceIsValid(wallet)) {
+            walletBlocked = true;
+            walletPatch = { ...wallet, reconciliationBlocked: true, reconciliationReason: 'invalid_wallet_balance', reconciliationPayoutId: payout.id, updatedAtMs: now };
+          } else {
+          const availableBeforeMinor = Math.max(0, Number(wallet.availableMinor || 0));
+          const reservedBeforeMinor = Math.max(0, Number(wallet.reservedMinor || 0));
+          let availableMinor = availableBeforeMinor;
+          let reservedMinor = reservedBeforeMinor;
+          let availableDeltaMinor = 0;
+          let reservedDeltaMinor = 0;
+          let description = '';
+          if (action === 'debit' && wasReserved) {
+            if (reservedMinor < amountMinor) walletBlocked = true;
+            else { reservedMinor -= amountMinor; reservedDeltaMinor = -amountMinor; }
+            description = 'Reserved wallet funds paid out successfully.';
+          } else if (action === 'debit') {
+            walletBlocked = true;
+            description = 'Paystack reports success without a matching wallet reservation.';
+          } else if (action === 'late_success') {
+            if (availableMinor < amountMinor) walletBlocked = true;
+            else { availableMinor -= amountMinor; availableDeltaMinor = -amountMinor; }
+            description = 'Late Paystack success reconciled against recovered wallet funds.';
+          } else if (action === 'reservation_release') {
+            if (reservedMinor < amountMinor) walletBlocked = true;
+            else { reservedMinor -= amountMinor; availableMinor += amountMinor; reservedDeltaMinor = -amountMinor; availableDeltaMinor = amountMinor; }
+            description = 'Confirmed failed payout released back to available wallet balance.';
+          } else if (action === 'reversal_credit') {
+            availableMinor += amountMinor;
+            availableDeltaMinor = amountMinor;
+            description = 'Reversed Paystack payout returned to available wallet balance.';
+          }
+          walletPatch = {
+            ...wallet,
+            availableMinor,
+            reservedMinor,
+            ...(walletBlocked ? { reconciliationBlocked: true, reconciliationReason: 'payout_balance_conflict', reconciliationPayoutId: payout.id } : {}),
+            updatedAtMs: now,
+          };
+          if (!walletBlocked || action === 'late_success') {
+            walletLedger = { reference: ledgerRef, entry: {
+              operationId: payout.operationId || attempt.operationId,
+              payoutId: payout.id,
+              helperId,
+              entryType: action === 'debit' ? 'payout_debit' : action === 'late_success' ? 'late_payout_debit' : action === 'reservation_release' ? 'payout_reservation_release' : 'payout_reversal_credit',
+              amountMinor,
+              availableDeltaMinor,
+              reservedDeltaMinor,
+              availableBeforeMinor,
+              availableAfterMinor: availableMinor,
+              description: walletBlocked ? 'Payout outcome conflicts with wallet funds; manual reconciliation is required.' : description,
+              createdAtMs: now,
+            } };
+          }
+          }
+        }
+      }
+    }
     const attemptPatch = {
       status: operationStatus,
       transferStatus,
@@ -657,6 +854,11 @@ async function recordPayoutObservation({
       failures: transfer?.failures || null,
       lastVerifiedAtMs: now,
       updatedAtMs: now,
+      ...(walletAccounting && outcome === 'success' ? {
+        walletFundsReserved: false,
+        ...(walletBlocked ? { walletConflictAtMs: now } : { walletFundsDebitedAtMs: now }),
+      } : {}),
+      ...(walletAccounting && ['failed_confirmed', 'reversed'].includes(outcome) && attempt.walletFundsReserved === true && !walletBlocked ? { walletFundsReserved: false, walletFundsReleasedAtMs: now } : {}),
     };
     if (!isCurrentAttempt) {
       transaction.set(transferAttemptRef, attemptPatch, { merge: true });
@@ -673,6 +875,14 @@ async function recordPayoutObservation({
       lastVerifiedAtMs: now,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       ...(isCurrentAttempt ? { status: payoutStatus } : {}),
+      ...(walletAccounting && ['failed_confirmed', 'reversed'].includes(outcome) ? { status: 'wallet_recovery', walletRecoveredAtMs: now } : {}),
+      ...(walletAccounting && walletBlocked ? {
+        status: outcome === 'success' ? 'paid' : 'reconciliation_required',
+        operationStatus: 'manual_reconciliation_required',
+        reconciliationReason: outcome === 'success' ? 'late_transfer_success_wallet_funds_unavailable' : 'wallet_reservation_balance_conflict',
+        externalPaymentConfirmed: outcome === 'success',
+      } : {}),
+      ...(walletAccounting && outcome === 'success' && !walletBlocked ? { walletPaidAtMs: now } : {}),
     };
     if (outcome === 'success' && isCurrentAttempt) {
       patch.paidAt = admin.firestore.FieldValue.serverTimestamp();
@@ -681,6 +891,8 @@ async function recordPayoutObservation({
     } else if ((outcome === 'failed_confirmed' || outcome === 'reversed') && isCurrentAttempt) {
       patch.failureReason = outcome === 'reversed' ? 'Paystack transfer was reversed.' : 'Paystack confirmed the transfer failed.';
     }
+    if (walletPatch && walletRef) transaction.set(walletRef, walletPatch, { merge: true });
+    if (walletLedger) writeWalletLedger(transaction, walletLedger.reference, walletLedger.entry);
     transaction.set(payoutRef, patch, { merge: true });
     transaction.set(transferAttemptRef, attemptPatch, { merge: true });
     if (referenceRef) {
@@ -732,5 +944,6 @@ module.exports = {
   recordPaystackRefundObservation,
   recordServiceGatewayObservation,
   serviceFinancialOperationId,
+  shouldDeferCompletionPayment,
   settleServiceFinancialOperation,
 };

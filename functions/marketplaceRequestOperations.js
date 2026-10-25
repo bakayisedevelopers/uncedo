@@ -324,7 +324,7 @@ function createMarketplaceRequestOperations({ db, admin }) {
     });
   }
 
-  async function confirmDraft({ requestId, principalId, approvedQuote, quoteExpiresAtMs = 0, callId = '', source = 'customer_request_backend', now = Date.now() } = {}) {
+  async function confirmDraft({ requestId, principalId, approvedQuote, quoteExpiresAtMs = 0, callId = '', source = 'customer_request_backend', paymentFlowVersion = null, walletAccountingVersion = null, now = Date.now() } = {}) {
     const requestRef = db.collection('serviceRequests').doc(String(requestId || '').trim());
     const ownerId = String(principalId || '').trim();
     return db.runTransaction(async (transaction) => {
@@ -406,6 +406,8 @@ function createMarketplaceRequestOperations({ db, admin }) {
         helperQueue: [], currentOfferHelperId: null, offerExpiresAt: null, offerToken: null,
         offerCycleExcludedHelperIds: [], declinedHelperIds: [], lastOfferAt: null, offerRevision: 0,
         helperAssignment: null, matchingStartedAtMs: timingPreference === 'later' ? null : now,
+        ...(paymentFlowVersion === 'explicit_v1' ? { paymentFlowVersion: 'explicit_v1' } : {}),
+        ...(Number(walletAccountingVersion) === 1 ? { helperWalletAccountingVersion: 1 } : {}),
         location, serviceAddress, requestPayload: nextPayload, updatedAt: timestamp,
       });
       if (!submitEventSnap.exists) {

@@ -161,6 +161,65 @@ test('concurrent helper confirmations settle once and reconcile the legacy walle
   assert.equal(policyReviews[0][1].automatedCommissionRecovery, false);
 });
 
+test('wallet-enabled cash settlement deducts commission once and carries any shortfall as an obligation', async () => {
+  const db = new MemoryDb({
+    'serviceRequests/rq_123456': {
+      customerId: 'customer-1', status: 'completed', paymentStatus: 'awaiting_cash_confirmation', totalAmount: 100,
+      helperAssignment: { helperId: 'helper-1' }, helperPayoutBreakdown: { platformAmount: 15, helperAmount: 85 },
+    },
+    'servicePaymentOperations/rq_123456': { status: 'awaiting_cash_confirmation', activeAttemptId: 'attempt-1' },
+    'servicePaymentOperations/rq_123456/attempts/attempt-1': { method: 'cash', status: 'awaiting_cash_confirmation', amount: 100, customerId: 'customer-1' },
+    'helperWallets/helper-1': { helperId: 'helper-1', availableMinor: 1000, reservedMinor: 500, outstandingCommissionMinor: 0, currency: 'ZAR' },
+  });
+  const settle = () => settleRequestPayment({
+    db, admin, requestId: 'rq_123456', attemptId: 'attempt-1', outcome: 'success', helperId: 'helper-1', walletEnabled: true,
+  });
+  const results = await Promise.all([settle(), settle(), settle(), settle(), settle()]);
+  assert.equal(results.filter((result) => result.action === 'settled').length, 1);
+  assert.equal(results.filter((result) => result.action === 'already-paid').length, 4);
+  const wallet = (await db.collection('helperWallets').doc('helper-1').get()).data();
+  assert.equal(wallet.availableMinor, 0);
+  assert.equal(wallet.reservedMinor, 500);
+  assert.equal(wallet.outstandingCommissionMinor, 500);
+  const obligationPaths = [...db.records.keys()].filter((path) => path.startsWith('helperWallets/helper-1/commissionObligations/'));
+  const commissionEntries = [...db.records.entries()].filter(([path, entry]) => path.startsWith('helperWallets/helper-1/transactions/') && entry.entryType === 'cash_commission_assessed');
+  assert.equal(obligationPaths.length, 1);
+  assert.equal(commissionEntries.length, 1);
+  const obligation = db.records.get(obligationPaths[0]);
+  assert.equal(obligation.originalMinor, 1500);
+  assert.equal(obligation.recoveredMinor, 1000);
+  assert.equal(obligation.outstandingMinor, 500);
+  const request = (await db.collection('serviceRequests').doc('rq_123456').get()).data();
+  assert.equal(request.cashPayment.commissionStatus, 'partially_outstanding');
+  assert.equal(request.cashPayment.commissionRecoveredMinor, 1000);
+  assert.equal(request.cashPayment.commissionOutstandingMinor, 500);
+  assert.equal([...db.records.values()].filter((entry) => entry.type === 'direct_cash_platform_commission').length, 0);
+});
+
+test('wallet-enabled cash settlement deducts the full commission when available balance covers it', async () => {
+  const db = new MemoryDb({
+    'serviceRequests/rq_123456': {
+      customerId: 'customer-1', status: 'completed', totalAmount: 100,
+      helperAssignment: { helperId: 'helper-1' }, helperPayoutBreakdown: { platformAmount: 15, helperAmount: 85 },
+    },
+    'servicePaymentOperations/rq_123456': { status: 'awaiting_cash_confirmation', activeAttemptId: 'attempt-1' },
+    'servicePaymentOperations/rq_123456/attempts/attempt-1': { method: 'cash', status: 'awaiting_cash_confirmation', amount: 100, customerId: 'customer-1' },
+    'helperWallets/helper-1': { helperId: 'helper-1', availableMinor: 3000, reservedMinor: 700, outstandingCommissionMinor: 0, currency: 'ZAR' },
+  });
+  const result = await settleRequestPayment({
+    db, admin, requestId: 'rq_123456', attemptId: 'attempt-1', outcome: 'success', helperId: 'helper-1', walletEnabled: true,
+  });
+  assert.equal(result.action, 'settled');
+  const wallet = (await db.collection('helperWallets').doc('helper-1').get()).data();
+  assert.equal(wallet.availableMinor, 1500);
+  assert.equal(wallet.reservedMinor, 700);
+  assert.equal(wallet.outstandingCommissionMinor, 0);
+  assert.equal([...db.records.values()].filter((entry) => entry.entryType === 'cash_commission_assessed').length, 1);
+  const obligations = [...db.records.values()].filter((entry) => entry.requestId === 'rq_123456' && entry.originalMinor === 1500);
+  assert.equal(obligations.length, 1);
+  assert.equal(obligations[0].status, 'recovered');
+});
+
 test('concurrent verified Paystack callbacks create one settlement and one canonical completion outcome', async () => {
   const db = new MemoryDb({
     'serviceRequests/rq_123456': { customerId: 'customer-1', status: 'completed', paymentStatus: 'payment_processing', totalAmount: 72.5, helperAssignment: { helperId: 'helper-1' } },

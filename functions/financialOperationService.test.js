@@ -10,6 +10,7 @@ const {
   paystackChargeReference,
   paystackTransferReference,
   serviceFinancialOperationId,
+  shouldDeferCompletionPayment,
 } = require('./financialOperationService');
 
 test('service charge uses one stable reference and verifies after a timed out request', async () => {
@@ -118,4 +119,11 @@ test('Paystack classifiers require matching reference, exact amount and currency
   assert.equal(classifyPaystackTransaction({ status: true, data: transaction }, { reference: 'charge-ref', amountMinor: 1235, currency: 'ZAR' }).outcome, 'unknown');
   assert.equal(classifyPaystackTransfer({ status: true, data: { ...transaction, status: 'received' } }, { reference: 'charge-ref', amountMinor: 1234, currency: 'ZAR' }).outcome, 'pending');
   assert.equal(classifyPaystackTransfer({ status: true, data: { ...transaction, status: 'reversed' } }, { reference: 'charge-ref', amountMinor: 1234, currency: 'ZAR' }).outcome, 'reversed');
+});
+
+test('only newly versioned requests defer completion-time card charging; legacy and in-flight card operations keep their behavior', () => {
+  assert.equal(shouldDeferCompletionPayment({ paymentFlowVersion: 'explicit_v1' }), true);
+  assert.equal(shouldDeferCompletionPayment({}), false);
+  assert.equal(shouldDeferCompletionPayment({ paymentFlowVersion: 'explicit_v1' }, { status: 'processing' }), false);
+  assert.equal(shouldDeferCompletionPayment({ paymentFlowVersion: 'explicit_v1' }, { settlementData: { deferredPaymentSelection: true } }), true);
 });

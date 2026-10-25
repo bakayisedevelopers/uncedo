@@ -90,6 +90,28 @@ test('reward accounts and transactions are read-only to owners and private from 
   await assertSucceeds(adminDb.doc('rewardAccounts/customer-1').get());
 });
 
+test('helper wallet balances, transactions, and commission obligations are endpoint-only', async () => {
+  await seedDocument('helperWallets/helper-1', {
+    helperId: 'helper-1', availableMinor: 5000, reservedMinor: 1000, outstandingCommissionMinor: 200,
+  });
+  await seedDocument('helperWallets/helper-1/transactions/entry-1', {
+    helperId: 'helper-1', amountMinor: 5000, entryType: 'weekly_earning_credit',
+  });
+  await seedDocument('helperWallets/helper-1/commissionObligations/request-1', {
+    helperId: 'helper-1', requestId: 'request-1', outstandingMinor: 200, status: 'outstanding',
+  });
+
+  const helperDb = authedDb('helper-1');
+  const otherHelperDb = authedDb('helper-2');
+  const adminDb = authedDb('admin-user', { email: 'jabuobed1@gmail.com' });
+  await assertFails(helperDb.doc('helperWallets/helper-1').get());
+  await assertFails(helperDb.collection('helperWallets/helper-1/transactions').get());
+  await assertFails(helperDb.doc('helperWallets/helper-1/transactions/fake').set({ amountMinor: 999999 }));
+  await assertFails(helperDb.doc('helperWallets/helper-1/commissionObligations/request-1').get());
+  await assertFails(otherHelperDb.doc('helperWallets/helper-1').get());
+  await assertFails(adminDb.doc('helperWallets/helper-1').get());
+});
+
 test('referrals, referral milestones, and normalized ratings stay endpoint-only for clients', async () => {
   await seedDocument('referrals/referred-1', {
     referredUserId: 'referred-1',

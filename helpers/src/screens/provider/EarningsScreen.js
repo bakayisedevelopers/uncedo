@@ -12,8 +12,18 @@ import {
 } from '../../utils/payouts';
 
 export function EarningsScreen({ navigate, goBack }) {
-  const { paymentSummary, weeklyGroups } = useHelpersApp();
+  const { paymentSummary, weeklyGroups, helperWalletSnapshot, helperWalletLoading, helperWalletError, refreshHelperWallet } = useHelpersApp();
   const [expandedWeekKey, setExpandedWeekKey] = useState('');
+  const wallet = helperWalletSnapshot?.wallet || {};
+  const moneyMinor = (minor) => `R${(Math.max(0, Number(minor || 0)) / 100).toFixed(2)}`;
+  const transactionDetail = (entry) => {
+    if (entry.entryType === 'cash_commission_assessed') {
+      const deductedMinor = Math.max(0, -Number(entry.availableDeltaMinor || 0));
+      const owingMinor = Math.max(0, Number(entry.outstandingCommissionDeltaMinor || 0));
+      return `Deducted ${moneyMinor(deductedMinor)}${owingMinor ? ` · ${moneyMinor(owingMinor)} remains outstanding` : ''}`;
+    }
+    return entry.description || 'Wallet transaction';
+  };
 
   return (
     <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false}>
@@ -30,9 +40,35 @@ export function EarningsScreen({ navigate, goBack }) {
       <Card style={styles.walletCard}>
         <SectionHeading
           title="Wallet"
-          subtitle="This is the total amount currently owed to you and not yet marked as paid."
+          subtitle="These server-recorded wallet funds are separate from the legacy weekly request earnings below."
+          action={<ActionButton label={helperWalletLoading ? 'Refreshing…' : 'Refresh'} tone="secondary" disabled={helperWalletLoading} onPress={refreshHelperWallet} />}
         />
-        <Text style={styles.walletAmount}>{formatCurrency(paymentSummary.unpaidAmount)}</Text>
+        <Text style={styles.walletAmount}>{moneyMinor(wallet.availableMinor)}</Text>
+        <Text style={styles.walletLabel}>Available balance</Text>
+        <View style={styles.metricGrid}>
+          <MetricCard label="Reserved for payout" value={moneyMinor(wallet.reservedMinor)} helper="Held while Paystack confirms an active transfer." accent="muted" />
+          <MetricCard label="Cash commissions outstanding" value={moneyMinor(wallet.outstandingCommissionMinor)} helper="Recovered from future eligible wallet credits." accent={Number(wallet.outstandingCommissionMinor || 0) > 0 ? 'warning' : 'muted'} />
+          <MetricCard label="Next weekly payout estimate" value={moneyMinor(helperWalletSnapshot?.nextPayoutEstimateMinor)} helper="Available wallet funds; final payout is subject to payout eligibility and provider confirmation." accent="success" />
+        </View>
+        {wallet.reconciliationBlocked ? (
+          <View style={styles.noteCard}><Text style={styles.noteText}>A payout needs financial reconciliation. New wallet payouts are paused while Uncedo reviews it.</Text></View>
+        ) : null}
+        {helperWalletError ? <Text style={styles.walletError}>{helperWalletError}</Text> : null}
+        <View style={styles.transactionList}>
+          <Text style={styles.transactionHeading}>Recent wallet transactions</Text>
+          {helperWalletSnapshot?.transactions?.length ? helperWalletSnapshot.transactions.map((entry) => (
+            <View key={entry.id} style={styles.transactionRow}>
+              <View style={styles.transactionCopy}>
+                <Text style={styles.transactionTitle}>{transactionDetail(entry)}</Text>
+                <Text style={styles.transactionMeta}>{formatDate(entry.createdAtMs)} · {entry.entryType.replace(/_/g, ' ')}</Text>
+                {entry.requestId ? <Text style={styles.transactionMeta}>Request {entry.requestId}</Text> : null}
+              </View>
+              <Text style={styles.transactionAmount}>{moneyMinor(entry.amountMinor)}</Text>
+            </View>
+          )) : (
+            <Text style={styles.transactionEmpty}>Wallet credits and adjustments will appear here. Legacy unpaid payouts were not imported into this wallet.</Text>
+          )}
+        </View>
       </Card>
 
       <Card>
@@ -45,14 +81,14 @@ export function EarningsScreen({ navigate, goBack }) {
 
       <Card>
         <SectionHeading
-          title="Payment summary"
-          subtitle="Your totals are grouped by payout week and include both completed jobs and customer cancellations."
+          title="Legacy weekly earnings history"
+          subtitle="This request-based summary excludes new wallet-accounted earnings. Use the wallet above as the source for available, reserved, and outstanding funds."
         />
         <View style={styles.metricGrid}>
-          <MetricCard label="Lifetime helper earnings" value={formatCurrency(paymentSummary.lifetimeHelperEarnings)} />
-          <MetricCard label="Unpaid amount" value={formatCurrency(paymentSummary.unpaidAmount)} />
-          <MetricCard label="Paid amount" value={formatCurrency(paymentSummary.paidAmount)} accent="success" />
-          <MetricCard label="Current week amount" value={formatCurrency(paymentSummary.currentWeekAmount)} />
+          <MetricCard label="Legacy helper earnings" value={formatCurrency(paymentSummary.lifetimeHelperEarnings)} />
+          <MetricCard label="Legacy unpaid amount" value={formatCurrency(paymentSummary.unpaidAmount)} />
+          <MetricCard label="Legacy paid amount" value={formatCurrency(paymentSummary.paidAmount)} accent="success" />
+          <MetricCard label="Legacy current week" value={formatCurrency(paymentSummary.currentWeekAmount)} />
         </View>
         <View style={styles.ruleCard}>
           <Text style={styles.ruleText}>The platform gets 30% and you as a helper get 70%.</Text>
@@ -166,6 +202,58 @@ const styles = StyleSheet.create({
     color: colors.brandDark,
     fontSize: 32,
     fontWeight: '900',
+  },
+  walletLabel: {
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: '800',
+    marginTop: -8,
+  },
+  walletError: {
+    color: '#b91c1c',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  transactionList: {
+    gap: 10,
+    marginTop: 4,
+  },
+  transactionHeading: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  transactionRow: {
+    alignItems: 'flex-start',
+    borderTopColor: colors.border,
+    borderTopWidth: 1,
+    flexDirection: 'row',
+    gap: 10,
+    justifyContent: 'space-between',
+    paddingTop: 10,
+  },
+  transactionCopy: {
+    flex: 1,
+    gap: 3,
+  },
+  transactionTitle: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  transactionMeta: {
+    color: colors.muted,
+    fontSize: 11,
+  },
+  transactionAmount: {
+    color: colors.brandDark,
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  transactionEmpty: {
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 18,
   },
   metricGrid: {
     flexDirection: 'row',

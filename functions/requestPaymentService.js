@@ -1,6 +1,7 @@
 'use strict';
 
 const { createHash, randomBytes } = require('node:crypto');
+const { applyCashCommissionInTransaction } = require('./helperWalletService');
 
 const PAYMENT_OPERATIONS = 'servicePaymentOperations';
 const PAYMENT_SESSIONS = 'servicePaymentSessions';
@@ -382,7 +383,7 @@ async function revokeServicePaymentSession({ db, requestId, customerId, tokenHas
   });
 }
 
-async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, gatewayTransactionId = '', gatewayReference = '', providerStatus = '', helperId = '', now = Date.now() }) {
+async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, gatewayTransactionId = '', gatewayReference = '', providerStatus = '', helperId = '', walletEnabled = false, now = Date.now() }) {
   const requestRef = db.collection('serviceRequests').doc(String(requestId || ''));
   const paymentRef = db.collection(PAYMENT_OPERATIONS).doc(String(requestId || ''));
   const attemptRef = paymentRef.collection('attempts').doc(String(attemptId || ''));
@@ -432,6 +433,17 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
     const paymentMethod = String(attempt.method || '');
     const receiptId = `UNC-${digest(`${requestId}:${attemptId}`).slice(0, 16).toUpperCase()}`;
     const isCash = paymentMethod === 'cash';
+    const helperIdForCash = String(request.helperAssignment?.helperId || '');
+    const breakdown = request.helperPayoutBreakdown || legacy?.settlementData?.helperPayoutBreakdown || {};
+    const useHelperWallet = walletEnabled || Number(request.helperWalletAccountingVersion) === 1;
+    let cashCommission = { applied: false, recoveredMinor: 0, outstandingMinor: 0 };
+    const commissionMinor = Math.round(Number(breakdown.platformAmount || 0) * 100);
+    if (isCash && useHelperWallet && commissionMinor > 0) {
+      cashCommission = await applyCashCommissionInTransaction({
+        transaction, db, helperId: helperIdForCash, requestId, commissionMinor, now,
+      });
+      if (!cashCommission.applied && !cashCommission.duplicate) return { action: 'commission-conflict', reason: cashCommission.reason || 'cash-commission-not-applied' };
+    }
     if (!ledgerSnap.exists) {
       transaction.create(customerLedgerRef, {
         entryId: customerLedgerRef.id,
@@ -485,8 +497,7 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
     };
     if (legacySnap.exists) transaction.set(legacyRef, canonicalOperationPatch, { merge: true });
     else transaction.create(legacyRef, { ...canonicalOperationPatch, createdAtMs: now });
-    const breakdown = request.helperPayoutBreakdown || legacy?.settlementData?.helperPayoutBreakdown || {};
-    if (isCash && Number(breakdown.platformAmount || 0) > 0) {
+    if (isCash && !useHelperWallet && Number(breakdown.platformAmount || 0) > 0) {
       const policyReviewRef = db.collection('financialPolicyReviews').doc(`direct_cash_${digest(requestId).slice(0, 40)}`);
       transaction.set(policyReviewRef, {
         reviewId: policyReviewRef.id,
@@ -514,8 +525,14 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
       ...(isCash ? {
         cashPayment: {
           status: 'helper_confirmed', helperId, amount, currency: 'ZAR',
-          helperConfirmedAtMs: now, commissionReviewRequired: Number(breakdown.platformAmount || 0) > 0,
+          helperConfirmedAtMs: now, commissionReviewRequired: !useHelperWallet && Number(breakdown.platformAmount || 0) > 0,
           platformAmountForPolicyReview: Number(breakdown.platformAmount || 0),
+          ...(useHelperWallet && commissionMinor > 0 ? {
+            commissionStatus: cashCommission.outstandingMinor > 0 ? 'partially_outstanding' : 'recovered',
+            commissionMinor,
+            commissionRecoveredMinor: cashCommission.recoveredMinor,
+            commissionOutstandingMinor: cashCommission.outstandingMinor,
+          } : {}),
         },
       } : {}),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -530,7 +547,7 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
       settlement: { receiptId, amount, method: paymentMethod, paidAtMs: now, gatewayReference: String(gatewayReference || '') },
       gatewayReference: String(gatewayReference || '') || null, gatewayTransactionId: String(gatewayTransactionId || '') || null,
       settledAtMs: now, updatedAtMs: now,
-      ...(isCash ? { platformCommissionReviewRequired: Number(breakdown.platformAmount || 0) > 0 } : {}),
+      ...(isCash ? { platformCommissionReviewRequired: !useHelperWallet && Number(breakdown.platformAmount || 0) > 0 } : {}),
     }, { merge: true });
     return { action: 'settled', receiptId, amount, method: paymentMethod, customerId, helperId: String(request.helperAssignment?.helperId || '') };
   });

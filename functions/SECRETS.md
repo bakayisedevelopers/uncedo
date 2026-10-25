@@ -10,6 +10,8 @@ Firebase CLI loads `functions/.env` for local emulators and uploads configured v
 | --- | --- |
 | `PAYSTACK_SECRET_KEY` | Existing mobile billing and helper payouts, plus request-linked hosted checkout and explicitly authorised saved-card payments. |
 | `REQUEST_PAYMENTS_ENABLED` | Feature flag for post-completion cash confirmation, hosted checkout and saved-card request payments; defaults to `false`. |
+| `EXPLICIT_PAYMENT_SELECTION_ENABLED` | New requests confirmed while enabled are completed without an automatic saved-card charge; the customer chooses a payment method afterward. Existing requests and in-flight legacy financial operations retain their established behavior. Defaults to `false`. |
+| `HELPER_WALLET_ENABLED` | New requests confirmed while enabled use the server-only helper wallet. Cash commissions are assessed at helper confirmation, and new eligible non-cash earnings enter the wallet weekly payout path. Defaults to `false`; existing unpaid weekly payout records are never imported. |
 | `CUSTOMER_PAYMENT_URL` | Public customer website payment route used for secure request-bound checkout and WhatsApp links. |
 | `RESEND_API_KEY` | Existing queued email sender. |
 | `EMAIL_FROM` | Existing queued email sender. |
@@ -35,6 +37,8 @@ Firebase CLI loads `functions/.env` for local emulators and uploads configured v
 | `GEMINI_MODEL` | Fallback model identifier; defaults to `gemini-3.5-flash-lite`. |
 
 The WhatsApp values are placeholders only until Meta credentials and templates are available. Keep WhatsApp automation disabled operationally until the webhook is configured and tested. Request payment options also remain unavailable unless `REQUEST_PAYMENTS_ENABLED=true` is deliberately configured after staging validation.
+
+Helper wallets are stored under `helperWallets/{helperId}` with integer minor-unit balances, immutable transaction subcollections, and request-scoped commission obligations. Client Security Rules deny direct reads and writes; helper read access is through authenticated Functions only. Weekly wallet payouts use a versioned payout record and preserve legacy payout processing separately.
 
 See [`WHATSAPP_MEDIA_RETENTION.md`](./WHATSAPP_MEDIA_RETENTION.md) for the required Cloud Storage bucket lifecycle policy before enabling media storage.
 

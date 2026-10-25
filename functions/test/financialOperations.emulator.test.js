@@ -171,6 +171,37 @@ test('replayed completion after success does not claim another charge', { skip }
   assert.equal(replay.operation.finalOutcome, 'success');
 });
 
+test('explicit payment selection completes the service without executing a card charge', { skip }, async () => {
+  const id = `explicit-payment-${randomUUID()}`;
+  const requestRef = await seedRequest(id);
+  const claim = await claimServiceFinancialOperation({
+    db,
+    requestRef,
+    requestId: id,
+    operationType: 'completion',
+    amount: 42.75,
+    settlementData: {
+      ...settlementData(id),
+      deferredPaymentSelection: true,
+      noChargePaymentStatus: 'unpaid',
+      requestPatch: { status: 'completed' },
+    },
+  });
+  assert.equal(claim.action, 'charge');
+  const result = await settleServiceFinancialOperation({
+    db,
+    admin,
+    operationRef: claim.operationRef,
+    requestRef,
+    outcome: 'no_charge',
+  });
+  assert.equal(result.applied, true);
+  assert.equal(result.paymentStatus, 'unpaid');
+  assert.equal((await requestRef.get()).data().status, 'completed');
+  assert.equal((await requestRef.get()).data().paymentStatus, 'unpaid');
+  assert.equal((await claim.operationRef.get()).data().amountMinor, 4275);
+});
+
 test('legacy completion billing cannot claim a new charge while request payment is active or settled', { skip }, async () => {
   const activeId = `new-payment-active-${randomUUID()}`;
   const activeRequestRef = await seedRequest(activeId);

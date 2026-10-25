@@ -27,6 +27,7 @@ export function subscribeToHelperWeeklyPayouts(helperId, callback, onError) {
     (snapshot) => {
       const items = snapshot.docs
         .map((item) => ({ id: item.id, ...item.data() }))
+        .filter((item) => Number(item.walletAccountingVersion || 0) !== 1)
         .sort((left, right) => {
           const leftTime = normalizeTime(left.weekStart || left.updatedAt || left.createdAt);
           const rightTime = normalizeTime(right.weekStart || right.updatedAt || right.createdAt);

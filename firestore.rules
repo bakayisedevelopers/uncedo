@@ -302,6 +302,18 @@ service cloud.firestore {
       allow create, update, delete: if isAdmin();
     }
 
+    match /helperWallets/{helperId} {
+      allow read, write: if false;
+
+      match /transactions/{transactionId} {
+        allow read, write: if false;
+      }
+
+      match /commissionObligations/{obligationId} {
+        allow read, write: if false;
+      }
+    }
+
     function isLinkedWhatsAppGuestCustomer(customerId) {
       return signedIn()
         && customerId is string

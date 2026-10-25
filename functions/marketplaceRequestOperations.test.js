@@ -73,7 +73,7 @@ const answers = {
   full_body_wash_detailing_addons: 'yes',
 };
 
-async function createAndConfirm(operationsDb, operations, { requestId, principalId, channel }) {
+async function createAndConfirm(operationsDb, operations, { requestId, principalId, channel, versioned = false }) {
   const selection = { categoryId: 'car_wash', serviceIds: ['full_body_wash'], selectedPackageId: '', structuredAnswers: answers };
   const created = await operations.createDraft({
     requestId, principalId, ...selection, channel, identityId: channel === 'whatsapp' ? 'identity-1' : '', now: 1000,
@@ -84,7 +84,9 @@ async function createAndConfirm(operationsDb, operations, { requestId, principal
   const quoted = await operations.quoteDraft({ requestId, principalId, now: 3000 });
   assert.equal(quoted.code, 'quoted');
   const confirmed = await operations.confirmDraft({
-    requestId, principalId, approvedQuote: quoted.quote, quoteExpiresAtMs: quoted.quoteExpiresAtMs, source: channel, now: 4000,
+    requestId, principalId, approvedQuote: quoted.quote, quoteExpiresAtMs: quoted.quoteExpiresAtMs, source: channel,
+    ...(versioned ? { paymentFlowVersion: 'explicit_v1', walletAccountingVersion: 1 } : {}),
+    now: 4000,
   });
   assert.equal(confirmed.code, 'submitted');
   return { quote: quoted.quote, confirmed, request: operationsDb.documents.get(`serviceRequests/${requestId}`) };
@@ -108,6 +110,22 @@ test('customer and WhatsApp requests share quote calculation and submitted reque
   assert.equal(guest.request.originChannel, 'whatsapp');
   assert.equal(guest.request.originIdentityId, 'identity-1');
   assert.equal(customer.request.pricingSnapshot.total, guest.request.pricingSnapshot.total);
+});
+
+test('newly confirmed requests can be explicitly versioned for future payment and wallet accounting', async () => {
+  const operationsDb = createFirestoreMock({
+    ...catalog,
+    'users/customer-1': { uid: 'customer-1', role: 'customer', whatsappGuestPrincipalIds: [] },
+  });
+  const operations = createMarketplaceRequestOperations({
+    db: operationsDb,
+    admin: { firestore: { FieldValue: { serverTimestamp: () => 'server-time' } } },
+  });
+  const result = await createAndConfirm(operationsDb, operations, {
+    requestId: 'future-versioned-request', principalId: 'customer-1', channel: 'app', versioned: true,
+  });
+  assert.equal(result.request.paymentFlowVersion, 'explicit_v1');
+  assert.equal(result.request.helperWalletAccountingVersion, 1);
 });
 
 test('canonical request creation is idempotent and active-request policy includes linked guest history', async () => {

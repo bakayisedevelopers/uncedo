@@ -48,6 +48,7 @@ const {
   recordPaystackRefundObservation,
   recordServiceGatewayObservation,
   serviceFinancialOperationId,
+  shouldDeferCompletionPayment,
   settleServiceFinancialOperation,
 } = require('./financialOperationService');
 const {
@@ -69,6 +70,15 @@ const {
   safePaymentReceipt,
   settleRequestPayment,
 } = require('./requestPaymentService');
+const {
+  HELPER_WALLETS,
+  creditHelperWalletEarning,
+  emptyHelperWallet,
+  helperWalletReference,
+  isWalletEarningEligible,
+  minorAmount: normalizeWalletMinor,
+  normalizeWalletForClient,
+} = require('./helperWalletService');
 const { createCategoryPricingEngine } = require('./shared/categoryPricingEngineFactory.cjs');
 const {
   getQuestionnaireForSelection,
@@ -1835,6 +1845,8 @@ exports.confirmCustomerServiceRequest = onRequest({ cors: true, maxInstances: 5,
       approvedQuote,
       callId,
       source: 'customer_request_backend',
+      paymentFlowVersion: explicitPaymentSelectionEnabled() ? 'explicit_v1' : null,
+      walletAccountingVersion: helperWalletEnabled() ? 1 : null,
     });
 
     if (outcome.code === 'not-owner') {
@@ -2052,6 +2064,14 @@ function whatsappTranscriptionEnabled() {
 
 function requestPaymentsEnabled() {
   return String(process.env.REQUEST_PAYMENTS_ENABLED || '').trim().toLowerCase() === 'true';
+}
+
+function helperWalletEnabled() {
+  return String(process.env.HELPER_WALLET_ENABLED || '').trim().toLowerCase() === 'true';
+}
+
+function explicitPaymentSelectionEnabled() {
+  return String(process.env.EXPLICIT_PAYMENT_SELECTION_ENABLED || '').trim().toLowerCase() === 'true';
 }
 
 function whatsappPaymentsEnabled() {
@@ -2640,6 +2660,8 @@ async function confirmWhatsAppServiceDraft({ identityId, identity, conversationR
     approvedQuote: draft.quoteSnapshot || {},
     quoteExpiresAtMs: Number(draft.quoteExpiresAtMs || 0),
     source: 'whatsapp',
+    paymentFlowVersion: explicitPaymentSelectionEnabled() ? 'explicit_v1' : null,
+    walletAccountingVersion: helperWalletEnabled() ? 1 : null,
   });
   if (outcome.code === 'quote-changed') {
     const refreshedQuote = await marketplaceRequestOperations.quoteDraft({ requestId, principalId });
@@ -2923,7 +2945,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
                 authorizationCode: card.paystackAuthorizationCode,
                 paystack: { chargeAuthorization: (input) => chargeAuthorizationWithPaystack({ paystackSecretKey, ...input }), verifyTransaction: (input) => verifyPaystackTransaction({ paystackSecretKey, ...input }) },
               });
-              const result = await settleRequestPayment({ db, admin, requestId: pending.requestId, attemptId: pending.attemptId, outcome: outcome.outcome, gatewayTransactionId: outcome.transaction?.id ? String(outcome.transaction.id) : '', gatewayReference: reference, providerStatus: outcome.transaction?.status || outcome.outcome });
+              const result = await settleRequestPayment({ db, admin, requestId: pending.requestId, attemptId: pending.attemptId, outcome: outcome.outcome, gatewayTransactionId: outcome.transaction?.id ? String(outcome.transaction.id) : '', gatewayReference: reference, providerStatus: outcome.transaction?.status || outcome.outcome, walletEnabled: helperWalletEnabled() });
               if (['settled', 'already-paid'].includes(result.action)) await issuePaidRequestPostEffects({ requestId: pending.requestId, paymentResult: result });
               await reply(result.action === 'settled' || result.action === 'already-paid'
                 ? `Payment confirmed. Receipt ${result.receiptId || 'recorded'}.`
@@ -6822,6 +6844,13 @@ async function issuePaidRequestPostEffects({ requestId, paymentResult }) {
   const requestSnap = await db.collection('serviceRequests').doc(requestId).get();
   if (!requestSnap.exists) return;
   const request = { id: requestSnap.id, ...(requestSnap.data() || {}) };
+  if (request.serviceCreditRedemptionId) {
+    const operationSnap = await db.collection(FINANCIAL_OPERATIONS_COLLECTION).doc(serviceFinancialOperationId(requestId)).get().catch(() => null);
+    const appliedPoints = Number(operationSnap?.data()?.settlementData?.serviceCreditPoints || request.pricingSnapshot?.serviceCreditPoints || 0);
+    await finalizeServiceCredit({ db, admin, requestId, paymentSucceeded: true, appliedPoints, reason: 'final_cap' }).catch((error) => {
+      logger.warn('service_credit_finalization_after_payment_failed', { requestId, error: error.message });
+    });
+  }
   const customerId = String(request.customerId || '');
   const helperId = String(request.helperAssignment?.helperId || '');
   const customerConfig = await getRewardConfig(db, 'customer').catch(() => ({}));
@@ -6865,7 +6894,7 @@ async function verifyAndSettleRequestPayment({ requestId, attemptId, reference, 
       await saveReusablePaystackAuthorization({ uid: ownerUid, transaction: verification.transaction, consentAtMs: Number(attempt.saveCardConsentAtMs || Date.now()) }).catch(() => null);
     }
   }
-  const result = await settleRequestPayment({ db, admin, requestId, attemptId, outcome: verification.outcome, gatewayTransactionId: verification.transaction?.id ? String(verification.transaction.id) : '', gatewayReference: reference, providerStatus: verification.transaction?.status || verification.outcome, helperId });
+  const result = await settleRequestPayment({ db, admin, requestId, attemptId, outcome: verification.outcome, gatewayTransactionId: verification.transaction?.id ? String(verification.transaction.id) : '', gatewayReference: reference, providerStatus: verification.transaction?.status || verification.outcome, helperId, walletEnabled: helperWalletEnabled() });
   if (['settled', 'already-paid'].includes(result.action)) await issuePaidRequestPostEffects({ requestId, paymentResult: result });
   return { ...result, verification };
 }
@@ -7118,7 +7147,7 @@ exports.respondToCashServicePayment = onRequest({ cors: true, maxInstances: 5, .
   if (!['confirm', 'reject'].includes(action)) return res.status(400).json({ success: false, message: 'Choose confirm or reject.' });
   const result = action === 'reject'
     ? await rejectCashPayment({ db, admin, requestId, helperId: caller.uid, attemptId })
-    : await settleRequestPayment({ db, admin, requestId, attemptId, outcome: 'success', helperId: caller.uid, providerStatus: 'helper_confirmed' });
+    : await settleRequestPayment({ db, admin, requestId, attemptId, outcome: 'success', helperId: caller.uid, providerStatus: 'helper_confirmed', walletEnabled: helperWalletEnabled() });
   if (result.action === 'settled') await issuePaidRequestPostEffects({ requestId, paymentResult: result });
   return res.status(result.action === 'settled' || result.action === 'rejected' ? 200 : 409).json({ success: result.action === 'settled' || result.action === 'rejected', code: result.action, receiptId: result.receiptId || null });
 });
@@ -7156,6 +7185,67 @@ exports.getHelperCashPaymentConfirmations = onRequest({ cors: true, maxInstances
     if (pending.length >= 20) break;
   }
   return res.status(200).json({ success: true, confirmations: pending });
+});
+
+async function authenticateHelperWalletCaller(req, res) {
+  const token = getBearerToken(req);
+  const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) {
+    res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return null;
+  }
+  const profile = (await db.collection('users').doc(decoded.uid).get()).data() || {};
+  const roles = [profile.role, profile.activeRole, ...(Array.isArray(profile.roles) ? profile.roles : [])]
+    .map((value) => String(value || '').toLowerCase());
+  if (!roles.some((role) => ['helper', 'provider'].includes(role))) {
+    res.status(403).json({ success: false, message: 'Helper role required.' });
+    return null;
+  }
+  return decoded.uid;
+}
+
+exports.getHelperWallet = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
+  if (req.method !== 'GET') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  const helperId = await authenticateHelperWalletCaller(req, res);
+  if (!helperId) return;
+  const walletRef = helperWalletReference(db, helperId);
+  const walletSnapshot = await walletRef.get();
+  const wallet = walletSnapshot.exists ? walletSnapshot.data() || {} : emptyHelperWallet(helperId);
+  return res.status(200).json({
+    success: true,
+    wallet: normalizeWalletForClient(wallet),
+    nextPayoutEstimateMinor: wallet.reconciliationBlocked === true
+      ? 0
+      : Math.max(0, Number(wallet.availableMinor || 0) - Number(wallet.outstandingCommissionMinor || 0)),
+  });
+});
+
+exports.getHelperWalletTransactions = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
+  if (req.method !== 'GET') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  const helperId = await authenticateHelperWalletCaller(req, res);
+  if (!helperId) return;
+  const requestedLimit = Number.parseInt(String(req.query?.limit || '20'), 10);
+  const limit = Number.isInteger(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 50)) : 20;
+  const snapshot = await helperWalletReference(db, helperId).collection('transactions')
+    .orderBy('createdAtMs', 'desc')
+    .limit(limit)
+    .get();
+  const transactions = snapshot.docs.map((document) => {
+    const entry = document.data() || {};
+    return {
+      id: document.id,
+      entryType: String(entry.entryType || 'wallet_entry'),
+      amountMinor: Math.max(0, Number(entry.amountMinor || 0)),
+      availableDeltaMinor: Number(entry.availableDeltaMinor || 0),
+      reservedDeltaMinor: Number(entry.reservedDeltaMinor || 0),
+      outstandingCommissionDeltaMinor: Number(entry.outstandingCommissionDeltaMinor || 0),
+      description: String(entry.description || ''),
+      requestId: String(entry.requestId || ''),
+      payoutId: String(entry.payoutId || ''),
+      createdAtMs: Number(entry.createdAtMs || 0),
+    };
+  });
+  return res.status(200).json({ success: true, transactions });
 });
 
 exports.prepareSavedCardServicePayment = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
@@ -7221,7 +7311,7 @@ exports.confirmSavedCardServicePayment = onRequest({ cors: true, maxInstances: 5
       verifyTransaction: (input) => verifyPaystackTransaction({ paystackSecretKey, ...input }),
     },
   });
-  const settled = await settleRequestPayment({ db, admin, requestId, attemptId, outcome: outcome.outcome, gatewayTransactionId: outcome.transaction?.id ? String(outcome.transaction.id) : '', gatewayReference: reference, providerStatus: outcome.transaction?.status || outcome.outcome });
+  const settled = await settleRequestPayment({ db, admin, requestId, attemptId, outcome: outcome.outcome, gatewayTransactionId: outcome.transaction?.id ? String(outcome.transaction.id) : '', gatewayReference: reference, providerStatus: outcome.transaction?.status || outcome.outcome, walletEnabled: helperWalletEnabled() });
   if (['settled', 'already-paid'].includes(settled.action)) await issuePaidRequestPostEffects({ requestId, paymentResult: settled });
   return res.status(200).json({ success: ['settled', 'already-paid'].includes(settled.action), status: settled.action === 'settled' || settled.action === 'already-paid' ? 'paid' : settled.action === 'failed' ? 'payment_failed' : 'payment_reconciliation_required', receiptId: settled.receiptId || null });
 });
@@ -7776,7 +7866,9 @@ async function runServiceFinancialPostEffects(operationRef) {
       dayBucket: new Date(endedAt).toISOString().slice(0, 10),
     }, { merge: true }).catch((error) => logger.warn('service_completion_event_write_failed', { requestId, error: error.message }));
 
-    if (settlementData.redemptionId && ['success', 'failed_confirmed', 'reversed', 'no_charge'].includes(outcome)) {
+    if (settlementData.redemptionId
+      && ['success', 'failed_confirmed', 'reversed', 'no_charge'].includes(outcome)
+      && !(settlementData.deferredPaymentSelection === true && paymentStatus !== 'paid')) {
       await finalizeServiceCredit({
         db,
         admin,
@@ -7926,6 +8018,7 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true }, async (req, re
   const operationId = serviceFinancialOperationId(requestId);
   const operationRef = db.collection(FINANCIAL_OPERATIONS_COLLECTION).doc(operationId);
   const existingOperation = await operationRef.get();
+  const deferCompletionPayment = shouldDeferCompletionPayment(request, existingOperation.exists ? existingOperation.data() : null);
   if (['completed', 'canceled', 'cancelled'].includes(String(request.status || '').toLowerCase())
     && existingOperation.exists
     && existingOperation.data()?.operationType !== 'completion') {
@@ -7976,20 +8069,23 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true }, async (req, re
       serviceCreditAmount = toRand(serviceCreditPoints / pointsPerRand);
     }
     cashChargeAmount = toRand(Math.max(0, totalAmount - serviceCreditAmount));
-    const customerSnap = await db.collection('users').doc(request.customerId).get();
-    customerData = customerSnap.data() || {};
-    const paymentMethods = (await getServerPaymentMethods({ db, admin, uid: request.customerId }))
-      .filter((method) => String(method.paystackAuthorizationCode || '').trim());
-    const selectedCardId = request.selectedCardId || request.requestPayload?.selectedCardId || null;
-    selectedCard = paymentMethods.find((card) => card.id === selectedCardId)
-      || paymentMethods.find((card) => card.isDefault)
-      || paymentMethods[0]
-      || null;
+    if (!deferCompletionPayment) {
+      const customerSnap = await db.collection('users').doc(request.customerId).get();
+      customerData = customerSnap.data() || {};
+      const paymentMethods = (await getServerPaymentMethods({ db, admin, uid: request.customerId }))
+        .filter((method) => String(method.paystackAuthorizationCode || '').trim());
+      const selectedCardId = request.selectedCardId || request.requestPayload?.selectedCardId || null;
+      selectedCard = paymentMethods.find((card) => card.id === selectedCardId)
+        || paymentMethods.find((card) => card.isDefault)
+        || paymentMethods[0]
+        || null;
+    }
     settlementData = {
       customerId: String(request.customerId || ''),
       helperId,
       endedAt,
-      noChargePaymentStatus: 'paid',
+      noChargePaymentStatus: deferCompletionPayment && cashChargeAmount > 0 ? 'unpaid' : 'paid',
+      ...(deferCompletionPayment ? { deferredPaymentSelection: true } : {}),
       totalAmount,
       waitingMinutes,
       waitingCost,
@@ -8017,7 +8113,7 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true }, async (req, re
           finalizedAt: new Date(endedAt).toISOString(),
         },
         helperPayoutBreakdown: { ...helperPayoutBreakdown, finalizedAt: new Date(endedAt).toISOString() },
-        chargedCardLast4: selectedCard?.last4 || null,
+        ...(deferCompletionPayment ? {} : { chargedCardLast4: selectedCard?.last4 || null }),
       },
     };
   }
@@ -8034,7 +8130,7 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true }, async (req, re
   let paymentsSecrets = { PAYSTACK_SECRET_KEY: '' };
   const existingOperationData = existingOperation.exists ? existingOperation.data() || {} : null;
   const existingOperationStatus = String(existingOperationData?.status || '').toLowerCase();
-  const needsPaystack = existingOperation.exists
+  const needsPaystack = deferCompletionPayment ? false : existingOperation.exists
     ? (['processing', 'gateway_succeeded', 'gateway_failed_confirmed', 'gateway_reversed', 'reconciliation_required'].includes(existingOperationStatus)
       || (existingOperationStatus === 'settled_failed' && req.body?.retryConfirmedFailure === true))
     : cashChargeAmount > 0;
@@ -8061,6 +8157,25 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true }, async (req, re
     if (claim.action === 'conflict') return res.status(409).json({ success: false, message: 'A conflicting request financial operation already exists.' });
     if (claim.action === 'legacy_terminal') return res.status(200).json({ success: true, request: { id: requestId, ...claim.request }, charge: { ok: true, reason: null } });
     if (claim.action === 'missing_request') return res.status(404).json({ success: false, message: 'Service request not found.' });
+    if (deferCompletionPayment && ['charge', 'reconcile'].includes(claim.action)) {
+      const settlement = await settleServiceFinancialOperation({
+        db,
+        admin,
+        operationRef: claim.operationRef,
+        requestRef,
+        helperRef: helperId ? db.collection('users').doc(helperId) : null,
+        helperDispatchRef: helperId ? db.collection('helperDispatchIndex').doc(helperId) : null,
+        outcome: 'no_charge',
+      });
+      if (!settlement.applied && !settlement.duplicate) return res.status(409).json({ success: false, message: 'The service was completed, but payment selection needs reconciliation.' });
+      await runServiceFinancialPostEffects(claim.operationRef);
+      const current = await requestRef.get();
+      return res.status(200).json({
+        success: true,
+        request: { id: requestId, ...current.data() },
+        charge: { ok: true, paymentRequired: String(current.data()?.paymentStatus || '').toLowerCase() !== 'paid', paymentStatus: current.data()?.paymentStatus || 'unpaid' },
+      });
+    }
     if (claim.action === 'confirmed_failure' || claim.action === 'settled') {
       await runServiceFinancialPostEffects(claim.operationRef);
       const current = await requestRef.get();
@@ -8558,7 +8673,7 @@ async function createWhatsAppPaymentSession(context) {
 async function handleCashPaymentConfirmation({ requestId, attemptId, helperId, action }) {
   const result = action === 'reject'
     ? await rejectCashPayment({ db, admin, requestId, helperId, attemptId })
-    : await settleRequestPayment({ db, admin, requestId, attemptId, outcome: 'success', helperId, providerStatus: 'helper_confirmed' });
+    : await settleRequestPayment({ db, admin, requestId, attemptId, outcome: 'success', helperId, providerStatus: 'helper_confirmed', walletEnabled: helperWalletEnabled() });
   if (result.action === 'settled' || result.action === 'already-paid') {
     await issuePaidRequestPostEffects({ requestId, paymentResult: result });
     return { ...result, action: result.action === 'already-paid' ? 'settled' : result.action };
@@ -8637,13 +8752,14 @@ async function syncBackendHelperWeeklyPayoutRecords() {
   ]);
 
   const grouped = new Map();
-  [...completedSnap.docs, ...canceledSnap.docs].forEach((requestDoc) => {
+  for (const requestDoc of [...completedSnap.docs, ...canceledSnap.docs]) {
     const request = { id: requestDoc.id, ...(requestDoc.data() || {}) };
     const helperId = String(request?.helperAssignment?.helperId || '').trim();
-    if (!helperId) return;
-    // The helper has already received this amount directly from the customer;
-    // do not include it again in Uncedo's Paystack weekly payout batch.
-    if (String(request.cashPayment?.status || '').toLowerCase() === 'helper_confirmed') return;
+    if (!helperId) continue;
+    // New explicit-payment requests earn wallet funds only after settlement.
+    // Direct-to-helper cash is already paid to the helper and is never payable again.
+    if (Number(request.helperWalletAccountingVersion) === 1 && !isWalletEarningEligible(request)) continue;
+    if (String(request.cashPayment?.status || '').toLowerCase() === 'helper_confirmed') continue;
 
     const settledAtMs = timestampToMillis(
       request.endedAt
@@ -8651,14 +8767,28 @@ async function syncBackendHelperWeeklyPayoutRecords() {
       || request.canceledAt
       || request.updatedAt,
     );
-    if (!settledAtMs || settledAtMs < startWindow || settledAtMs >= currentWeekStart) return;
+    if (!settledAtMs || settledAtMs < startWindow || settledAtMs >= currentWeekStart) continue;
 
     const payoutBreakdown = computeStoredHelperPayoutBreakdown(request);
-    if (!payoutBreakdown) return;
+    if (!payoutBreakdown) continue;
 
     const settledDate = new Date(settledAtMs);
     const weekKey = getWeekKey(settledDate);
     const { weekStart, weekEnd } = getWeekRange(settledDate);
+    if (Number(request.helperWalletAccountingVersion) === 1) {
+      const amountMinor = normalizeWalletMinor(Math.round(Number(payoutBreakdown.helperAmount || 0) * 100));
+      if (amountMinor > 0) {
+        const earning = await creditHelperWalletEarning({
+          db,
+          helperId,
+          requestId: request.id,
+          amountMinor,
+          sourceWeekKey: weekKey,
+        });
+        if (earning.action === 'reconciliation-blocked') logger.error('helper_wallet_earning_blocked_for_reconciliation', { helperId, requestId: request.id });
+      }
+      continue;
+    }
     const groupId = buildHelperPayoutDocId(weekKey, helperId);
     const existing = grouped.get(groupId) || {
       helperId,
@@ -8688,7 +8818,7 @@ async function syncBackendHelperWeeklyPayoutRecords() {
     if (!existing.helperEmail && request?.helperAssignment?.helperEmail) existing.helperEmail = request.helperAssignment.helperEmail;
 
     grouped.set(groupId, existing);
-  });
+  }
 
   const upserted = [];
   for (const [docId, record] of grouped.entries()) {
@@ -8718,6 +8848,62 @@ async function syncBackendHelperWeeklyPayoutRecords() {
   }
 
   return upserted;
+}
+
+async function syncHelperWalletPayoutCandidates(weekKey) {
+  const walletCollection = db.collection(HELPER_WALLETS);
+  const candidates = [];
+  let page = walletCollection.orderBy(admin.firestore.FieldPath.documentId()).limit(200);
+  let lastDocument = null;
+  while (true) {
+    const pageQuery = lastDocument ? page.startAfter(lastDocument) : page;
+    const walletPage = await pageQuery.get();
+    if (walletPage.empty) break;
+    for (const walletDoc of walletPage.docs) {
+      const helperId = walletDoc.id;
+      const payoutId = `wallet_${weekKey}_${helperId}`;
+      const payoutRef = db.collection(HELPER_PAYOUT_COLLECTION).doc(payoutId);
+      const outcome = await db.runTransaction(async (transaction) => {
+        const [walletSnapshot, payoutSnapshot] = await Promise.all([transaction.get(walletDoc.ref), transaction.get(payoutRef)]);
+        const wallet = walletSnapshot.data() || {};
+        const existing = payoutSnapshot.exists ? payoutSnapshot.data() || {} : null;
+        if (wallet.reconciliationBlocked === true || Number(wallet.availableMinor || 0) <= 0) return { action: 'no-balance' };
+        if (existing && ['paid', 'processing', 'pending_reconciliation', 'reconciliation_required', 'wallet_recovery'].includes(String(existing.status || '').toLowerCase())) {
+          return { action: 'existing', record: { id: payoutId, ...existing } };
+        }
+        const amountMinor = Math.max(0, Number(wallet.availableMinor || 0));
+        const record = {
+          id: payoutId,
+          helperId,
+          helperName: '',
+          helperEmail: '',
+          weekKey,
+          weekStart: getWeekRange(new Date()).weekStart.toISOString(),
+          weekEnd: getWeekRange(new Date()).weekEnd.toISOString(),
+          totalJobs: 0,
+          completedJobs: 0,
+          canceledJobs: 0,
+          grossAmount: amountMinor / 100,
+          helperAmount: amountMinor / 100,
+          amountMinor,
+          platformAmount: 0,
+          requestIds: [],
+          walletAccountingVersion: 1,
+          payoutSource: 'helper_wallet',
+          status: 'unpaid',
+          transferAttempts: Number(existing?.transferAttempts || 0),
+          createdAt: existing?.createdAt || admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+        transaction.set(payoutRef, record, { merge: true });
+        return { action: 'created', record };
+      });
+      if (outcome.record) candidates.push(outcome.record);
+    }
+    lastDocument = walletPage.docs[walletPage.docs.length - 1];
+    if (walletPage.size < 200) break;
+  }
+  return candidates;
 }
 
 function payoutNotificationId(payoutId, state) {
@@ -8806,7 +8992,30 @@ async function reconcilePayoutTransfer({ payout, payoutRef, attemptNo, reference
   } else if (verification.outcome === 'reversed') {
     await notifyPayoutOutcome(payout, 'reversed', reference, 'Please contact support if you need help.').catch(() => null);
   } else if (verification.outcome === 'failed_confirmed') {
-    await notifyPayoutOutcome(payout, 'failed', reference, 'Paystack confirmed the transfer failed. It may be retried in a later payout run.').catch(() => null);
+    const message = payout.walletAccountingVersion === 1
+      ? 'Paystack confirmed the transfer failed. The reserved funds are available in your Uncedo wallet for a later weekly payout.'
+      : 'Paystack confirmed the transfer failed. It may be retried in a later payout run.';
+    await notifyPayoutOutcome(payout, 'failed', reference, message).catch(() => null);
+    if (payout.walletAccountingVersion === 1 && checkNo < 6) {
+      const scheduleLateCheck = await db.runTransaction(async (transaction) => {
+        const currentSnap = await transaction.get(payoutRef);
+        if (!currentSnap.exists || currentSnap.data()?.walletLateSuccessCheckScheduledAtMs) return false;
+        transaction.set(payoutRef, { walletLateSuccessCheckScheduledAtMs: Date.now(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return true;
+      }).catch(() => false);
+      if (scheduleLateCheck) {
+        const enqueued = await enqueueFinancialReconciliation({
+          operationId: String(payout.operationId || helperPayoutOperationId(`wallet:${payout.weekKey}`, payout.helperId)),
+          operationType: 'helper_payout',
+          attemptNo: 6,
+          delaySeconds: 3600,
+          payoutId: payout.id,
+        });
+        if (!enqueued) {
+          await payoutRef.set({ walletLateSuccessCheckEnqueueFailedAtMs: Date.now() }, { merge: true }).catch(() => null);
+        }
+      }
+    }
   }
   return { verification, result };
 }
@@ -8866,7 +9075,9 @@ exports.processWeeklyHelperPayouts = onSchedule({
     return;
   }
 
-  const syncedRecords = await syncBackendHelperWeeklyPayoutRecords();
+  const legacyPayouts = await syncBackendHelperWeeklyPayoutRecords();
+  const walletPayouts = await syncHelperWalletPayoutCandidates(getWeekKey(new Date()));
+  const syncedRecords = [...legacyPayouts, ...walletPayouts];
   const runKey = `weekly-${getWeekKey(new Date())}`;
   let paidCount = 0;
   let failedCount = 0;
@@ -8929,6 +9140,7 @@ exports.processWeeklyHelperPayouts = onSchedule({
       skippedCount += 1;
       continue;
     }
+    const transferAmount = Number(claim.attempt.amount || amount);
 
     await notifyPayoutOutcome({ ...payout, ...claim.attempt }, 'processing', claim.attempt.reference).catch(() => null);
     await enqueueFinancialReconciliation({
@@ -8940,7 +9152,7 @@ exports.processWeeklyHelperPayouts = onSchedule({
     });
     const paystackResult = await executePayoutTransferAttempt({
       claim,
-      amount,
+      amount: transferAmount,
       recipientCode,
       reason: `Uncedo helper payout ${payout.weekKey}`,
       paystack: {
