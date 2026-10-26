@@ -7,6 +7,7 @@ const { classifyMetaDeliveryError, shouldApplyDeliveryStatus } = require('./deli
 test('Meta delivery errors distinguish explicit rejection from uncertain outcome', () => {
   assert.equal(classifyMetaDeliveryError({ code: 'meta_http_400' }), 'failed');
   assert.equal(classifyMetaDeliveryError({ code: 'template-required' }), 'blocked_template_required');
+  assert.equal(classifyMetaDeliveryError({ code: 'recipient-not-allowlisted' }), 'blocked_test_cohort');
   assert.equal(classifyMetaDeliveryError({ code: 'meta_http_503' }), 'outcome_unknown');
   assert.equal(classifyMetaDeliveryError({ code: 'ETIMEDOUT' }), 'outcome_unknown');
 });

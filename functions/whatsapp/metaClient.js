@@ -25,6 +25,16 @@ const OUTBOUND_MEDIA_MAX_BYTES = Object.freeze({
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 10 * 1024 * 1024,
 });
 
+const DEFAULT_SEND_TIMEOUT_MS = 12_000;
+const MAX_SEND_TIMEOUT_MS = 30_000;
+
+function normalizeSendTimeout(value) {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  return Number.isFinite(parsed)
+    ? Math.max(1_000, Math.min(MAX_SEND_TIMEOUT_MS, parsed))
+    : DEFAULT_SEND_TIMEOUT_MS;
+}
+
 function normalizeRecipient(value) {
   const recipient = String(value || '').replace(/[^0-9]/g, '');
   return recipient.length >= 8 && recipient.length <= 15 ? recipient : '';
@@ -36,31 +46,50 @@ function validateGraphApiVersion(value) {
   return version;
 }
 
-function createMetaWhatsAppClient({ accessToken, phoneNumberId, graphApiVersion, approvedTemplateNames = [], fetchImpl = fetch }) {
+function createMetaWhatsAppClient({ accessToken, phoneNumberId, graphApiVersion, approvedTemplateNames = [], requestTimeoutMs, isRecipientAllowed = () => false, fetchImpl = fetch }) {
   const version = validateGraphApiVersion(graphApiVersion);
   const senderId = String(phoneNumberId || '').trim();
   const token = String(accessToken || '').trim();
   const approvedTemplates = new Set((Array.isArray(approvedTemplateNames) ? approvedTemplateNames : [])
     .map((name) => String(name || '').trim())
     .filter(Boolean));
+  const sendTimeoutMs = normalizeSendTimeout(requestTimeoutMs);
   if (!senderId || !token) throw new Error('WhatsApp Cloud API configuration is incomplete.');
 
   async function sendPayload(to, payload) {
     const recipient = normalizeRecipient(to);
     if (!recipient) throw new Error('A valid WhatsApp recipient is required.');
-    const response = await fetchImpl(`https://graph.facebook.com/${version}/${encodeURIComponent(senderId)}/messages`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to: recipient,
-        ...payload,
-      }),
-    });
+    if (!isRecipientAllowed(recipient)) {
+      const error = new Error('This recipient is not enabled for WhatsApp delivery in the current testing cohort.');
+      error.code = 'recipient-not-allowlisted';
+      throw error;
+    }
+    let response;
+    try {
+      response = await fetchImpl(`https://graph.facebook.com/${version}/${encodeURIComponent(senderId)}/messages`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: recipient,
+          ...payload,
+        }),
+        signal: AbortSignal.timeout(sendTimeoutMs),
+      });
+    } catch (cause) {
+      // A timeout or transport failure can happen after Meta accepted a send.
+      // Keep the error deliberately non-retryable and let callers persist the
+      // outcome as unknown rather than creating a duplicate message.
+      const error = new Error('WhatsApp send outcome is unknown because Meta returned no response.');
+      error.code = cause?.name === 'TimeoutError' || cause?.name === 'AbortError'
+        ? 'meta_send_timeout'
+        : 'meta_send_network_error';
+      throw error;
+    }
     const result = await response.json().catch(() => null);
     if (!response.ok) {
       const error = new Error('WhatsApp message delivery failed.');
@@ -69,9 +98,13 @@ function createMetaWhatsAppClient({ accessToken, phoneNumberId, graphApiVersion,
       error.metaSubcode = String(result?.error?.error_subcode || '');
       throw error;
     }
-    return {
-      messageId: String(result?.messages?.[0]?.id || ''),
-    };
+    const messageId = String(result?.messages?.[0]?.id || '');
+    if (!messageId) {
+      const error = new Error('Meta returned no message reference; delivery outcome is unknown.');
+      error.code = 'meta_response_missing_message_id';
+      throw error;
+    }
+    return { messageId };
   }
 
   async function uploadMedia({ buffer, mimeType, filename }) {
@@ -157,6 +190,13 @@ function createMetaWhatsAppClient({ accessToken, phoneNumberId, graphApiVersion,
       }
       const type = String(mediaType || '').trim().toLowerCase();
       if (!['image', 'audio', 'document'].includes(type)) throw new Error('WhatsApp outbound media type is not supported.');
+      const recipient = normalizeRecipient(to);
+      if (!recipient) throw new Error('A valid WhatsApp recipient is required.');
+      if (!isRecipientAllowed(recipient)) {
+        const error = new Error('This recipient is not enabled for WhatsApp delivery in the current testing cohort.');
+        error.code = 'recipient-not-allowlisted';
+        throw error;
+      }
       const contentType = String(mimeType || '').split(';')[0].trim().toLowerCase();
       if (!OUTBOUND_MEDIA_SIGNATURES[contentType]
         || !Buffer.isBuffer(buffer)
@@ -176,7 +216,10 @@ function createMetaWhatsAppClient({ accessToken, phoneNumberId, graphApiVersion,
 }
 
 module.exports = {
+  DEFAULT_SEND_TIMEOUT_MS,
+  MAX_SEND_TIMEOUT_MS,
   createMetaWhatsAppClient,
   normalizeRecipient,
+  normalizeSendTimeout,
   validateGraphApiVersion,
 };

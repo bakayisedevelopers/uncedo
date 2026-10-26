@@ -1,7 +1,7 @@
 {
   "project": "bakayise-uncedo-latest",
-  "branch": "codex/ai-first-whatsapp-support",
-  "deploymentAuthorized": false,
+  "branch": "main",
+  "deploymentAuthorized": true,
   "productionActivationAuthorized": false,
   "nodeRuntimeUpgrade": "Preserve the separate Node.js 22 rollout; verify its current deployment state before any Functions deploy.",
   "featureFlagsMustRemainDisabled": [
@@ -66,5 +66,69 @@
     "Inspect production function inventory without exposing secret values; preserve deployed-only functions.",
     "Obtain explicit approval before deploying rules, indexes, Functions, or Hosting.",
     "Keep WhatsApp, AI, auth, payments, relay, support, media, transcription, image interpretation, and retention cleanup flags disabled until separately configured and approved."
-  ]
+  ],
+  "controlledTesting": {
+    "testModeDefault": true,
+    "allowlistVariable": "WHATSAPP_TEST_PHONE_ALLOWLIST",
+    "allowlistEmptyBehavior": "deny all inbound processing and outbound sends",
+    "activationRequiresSeparateApproval": true
+  },
+  "thisHardeningChange": {
+    "deploymentAuthorized": true,
+    "modifiedFunctions": [
+      "whatsappWebhook",
+      "persistWhatsAppConversationEvent",
+      "processWhatsAppAssistantJobOnCreate",
+      "notifyWhatsAppHelperOfferOnServiceRequestWrite",
+      "startWhatsAppAuthChallenge",
+      "replyToWhatsAppSupportTicket",
+      "notifyWhatsAppServiceRequestLifecycle",
+      "reportCashServicePayment"
+    ],
+    "modifiedSharedModules": [
+      "whatsapp/metaWebhook.js",
+      "whatsapp/webhookHandler.js",
+      "whatsapp/metaClient.js",
+      "whatsapp/deliveryStatus.js",
+      "whatsapp/testCohort.js",
+      "whatsapp/templatePayloads.js",
+      "whatsapp/templateManagement.js",
+      "whatsapp/conversationMemory.js"
+    ],
+    "featureFlagsMustRemainDisabled": [
+      "WHATSAPP_MESSAGING_ENABLED",
+      "WHATSAPP_AI_ENABLED",
+      "WHATSAPP_AUTH_ENABLED",
+      "WHATSAPP_PAYMENTS_ENABLED",
+      "WHATSAPP_NOTIFICATIONS_ENABLED",
+      "WHATSAPP_RELAY_ENABLED",
+      "WHATSAPP_SUPPORT_ENABLED",
+      "WHATSAPP_MEDIA_ENABLED",
+      "WHATSAPP_TRANSCRIPTION_ENABLED",
+      "WHATSAPP_IMAGE_INTERPRETATION_ENABLED"
+    ],
+    "sourceOnlyFunctionsAtPreflight": [
+      "getCustomerNearbyHelpers",
+      "getMyOfferedTutorSummary",
+      "listWhatsAppAssistantFailures",
+      "retryWhatsAppAssistantJob"
+    ],
+    "deployedOnlyToPreserve": [
+      "scheduleServiceRequestOfferExpiryOnWrite"
+    ],
+    "scopedCommand": "firebase deploy --only functions:whatsappWebhook,functions:persistWhatsAppConversationEvent,functions:processWhatsAppAssistantJobOnCreate,functions:notifyWhatsAppHelperOfferOnServiceRequestWrite,functions:startWhatsAppAuthChallenge,functions:replyToWhatsAppSupportTicket,functions:notifyWhatsAppServiceRequestLifecycle,functions:reportCashServicePayment,functions:getCustomerNearbyHelpers,functions:getMyOfferedTutorSummary,functions:listWhatsAppAssistantFailures,functions:retryWhatsAppAssistantJob --project bakayise-uncedo-latest"
+  },
+  "preDeployInventory": {
+    "sourceExportCount": 86,
+    "deployedCount": 83,
+    "deployedRuntimeCounts": { "nodejs22": 82, "nodejs20": 1 },
+    "region": "us-central1",
+    "sourceOnlyFunctionsToDeploy": [
+      "getCustomerNearbyHelpers",
+      "getMyOfferedTutorSummary",
+      "listWhatsAppAssistantFailures",
+      "retryWhatsAppAssistantJob"
+    ],
+    "deployedOnlyFunctionToPreserve": "scheduleServiceRequestOfferExpiryOnWrite"
+  }
 }

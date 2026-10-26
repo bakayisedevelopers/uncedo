@@ -59,6 +59,20 @@ function normalizeMessage(message = {}, metadata = {}, contact = {}) {
       listDescription: String(interactive.list_reply?.description || '').trim().slice(0, 500),
     };
   }
+  // Quick replies sent from approved template buttons arrive as a top-level
+  // `button` message in Meta's webhook payload, unlike interactive buttons.
+  // Normalize both wire formats to the same internal `buttonId` contract so
+  // the existing canonical action handlers remain authoritative.
+  if (type === 'button') {
+    payload.interactive = {
+      type: 'button_reply',
+      buttonId: String(message.button?.payload || '').trim().slice(0, 512),
+      buttonTitle: String(message.button?.text || '').trim().slice(0, 200),
+      listId: '',
+      listTitle: '',
+      listDescription: '',
+    };
+  }
   if (type === 'location') {
     const latitude = Number(message.location?.latitude);
     const longitude = Number(message.location?.longitude);

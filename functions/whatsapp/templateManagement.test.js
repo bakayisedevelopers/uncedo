@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const {
   MetaTemplateError,
   buildUncedoTemplateCatalogue,
+  classifyTemplateApiError,
   createMetaTemplateManager,
   generateFirebaseConfiguration,
   toPreviewJSON,
@@ -166,6 +167,27 @@ test('Meta errors are sanitized and never include credentials or raw provider me
     assert.equal(JSON.stringify(error.toSafeJSON()).includes('mock-secret-token'), false);
     assert.equal(JSON.stringify(error.toSafeJSON()).includes('leaked by provider'), false);
     assert.equal(error.metaCode, '10');
+    assert.equal(error.category, 'permission_or_asset_access');
+    return true;
+  });
+});
+
+test('template diagnostics distinguish token, permission, Graph API version, template, and network failures', async () => {
+  assert.equal(classifyTemplateApiError(401, 190).category, 'oauth_token');
+  assert.equal(classifyTemplateApiError(403, 10).category, 'permission_or_asset_access');
+  assert.equal(classifyTemplateApiError(400, 12).category, 'graph_api_version');
+  assert.equal(classifyTemplateApiError(400, 100).category, 'template_request');
+
+  const manager = createMetaTemplateManager({
+    ...credentials,
+    maxRetries: 0,
+    fetchImpl: async () => { throw Object.assign(new Error('private URL/token details'), { cause: { code: 'ECONNREFUSED' } }); },
+  });
+  await assert.rejects(manager.listTemplates(), (error) => {
+    const safe = error.toSafeJSON();
+    assert.equal(safe.category, 'network');
+    assert.equal(safe.networkCode, 'ECONNREFUSED');
+    assert.doesNotMatch(JSON.stringify(safe), /private URL|token details|mock-secret-token/);
     return true;
   });
 });

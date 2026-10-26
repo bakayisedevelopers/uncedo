@@ -116,7 +116,15 @@ const {
   verifyWebhookSignature,
 } = require('./whatsapp/metaWebhook');
 const { createWhatsAppWebhookHandler } = require('./whatsapp/webhookHandler');
+const { isWhatsAppRecipientAllowed } = require('./whatsapp/testCohort');
 const { createMetaWhatsAppClient } = require('./whatsapp/metaClient');
+const {
+  buildCashConfirmationTemplateComponents,
+  buildHelperOfferTemplateComponents,
+  buildOtpTemplateComponents,
+  buildServiceUpdateTemplateComponents,
+  buildSupportReplyTemplateComponents,
+} = require('./whatsapp/templatePayloads');
 const {
   isWhatsAppCancellationEnabled,
   isWhatsAppImageInterpretationEnabled,
@@ -1924,6 +1932,7 @@ exports.whatsappWebhook = onRequest({
 }, createWhatsAppWebhookHandler({
   getSecrets: getWhatsAppSecrets,
   isMessagingEnabled: whatsappMessagingEnabled,
+  isRecipientAllowed: (phone) => isWhatsAppRecipientAllowed(phone, process.env),
   verifyWebhookChallenge,
   verifyWebhookSignature,
   normalizeWebhookPayload,
@@ -1993,7 +2002,14 @@ exports.persistWhatsAppConversationEvent = onDocumentCreated({
     const activeGuestPrincipalId = String(existingIdentity.guestPrincipalId || guestPrincipalId);
     const conversation = conversationSnap.data() || {};
     const timestampMs = normalizeTimestamp(normalized.timestampMs) || Date.now();
+    const receivedAtMs = normalizeTimestamp(normalized.receivedAtMs) || Date.now();
     const latestInboundAtMs = Math.max(Number(conversation.lastInboundMessageAtMs || 0), timestampMs);
+    const previousInboundAtMs = Number(conversation.lastInboundMessageAtMs || 0);
+    const previousReceivedAtMs = Number(conversation.lastInboundReceivedAtMs || 0);
+    const isLatestInbound = timestampMs > previousInboundAtMs
+      || (timestampMs === previousInboundAtMs && receivedAtMs > previousReceivedAtMs)
+      || (timestampMs === previousInboundAtMs && receivedAtMs === previousReceivedAtMs
+        && normalized.eventId > String(conversation.lastInboundEventId || ''));
     const now = admin.firestore.FieldValue.serverTimestamp();
     const memory = appendBoundedConversationTurn({
       recentHistory: conversation.recentHistory,
@@ -2011,6 +2027,8 @@ exports.persistWhatsAppConversationEvent = onDocumentCreated({
         text: normalized.text || normalized.media?.caption || '',
         type: normalized.type,
         timestampMs,
+        receivedAtMs,
+        eventId: normalized.eventId,
       },
     });
     transaction.set(identityRef, {
@@ -2035,11 +2053,10 @@ exports.persistWhatsAppConversationEvent = onDocumentCreated({
       activeDraftId: conversation.activeDraftId || null,
       activeServiceRequestId: conversation.activeServiceRequestId || null,
       activeSupportTicketId: conversation.activeSupportTicketId || null,
-      lastInboundEventId: timestampMs > Number(conversation.lastInboundMessageAtMs || 0)
-        || (timestampMs === Number(conversation.lastInboundMessageAtMs || 0)
-          && normalized.eventId > String(conversation.lastInboundEventId || ''))
+      lastInboundEventId: isLatestInbound
         ? normalized.eventId
         : conversation.lastInboundEventId || null,
+      lastInboundReceivedAtMs: isLatestInbound ? receivedAtMs : previousReceivedAtMs,
       lastInboundMessageAtMs: latestInboundAtMs,
       customerServiceWindowExpiresAtMs: latestInboundAtMs + (24 * 60 * 60 * 1000),
       humanHandoff: Boolean(conversation.humanHandoff),
@@ -2315,6 +2332,8 @@ function getWhatsAppMetaClient() {
       phoneNumberId: secrets.phoneNumberId,
       graphApiVersion: secrets.graphApiVersion,
       approvedTemplateNames: secrets.approvedTemplateNames,
+      requestTimeoutMs: process.env.WHATSAPP_META_SEND_TIMEOUT_MS,
+      isRecipientAllowed: (recipient) => isWhatsAppRecipientAllowed(recipient, process.env),
     }),
   };
 }
@@ -5021,19 +5040,19 @@ exports.notifyWhatsAppHelperOfferOnServiceRequestWrite = onDocumentWritten({
       phoneNumberId: secrets.phoneNumberId,
       graphApiVersion: secrets.graphApiVersion,
       approvedTemplateNames: secrets.approvedTemplateNames,
+      requestTimeoutMs: process.env.WHATSAPP_META_SEND_TIMEOUT_MS,
+      isRecipientAllowed: (recipient) => isWhatsAppRecipientAllowed(recipient, process.env),
     });
     const delivery = await client.sendTemplate({
       to: recipient,
       name: templateName,
       languageCode,
-      components: [
-        { type: 'body', parameters: [
-          { type: 'text', text: bodySummary },
-          { type: 'text', text: formatMoney(indicativeTotal) },
-        ] },
-        { type: 'button', sub_type: 'quick_reply', index: '0', parameters: [{ type: 'payload', payload: `wa_offer_accept_${acceptActionId}` }] },
-        { type: 'button', sub_type: 'quick_reply', index: '1', parameters: [{ type: 'payload', payload: `wa_offer_decline_${declineActionId}` }] },
-      ],
+      components: buildHelperOfferTemplateComponents({
+        serviceSummary: bodySummary,
+        amountText: formatMoney(indicativeTotal),
+        acceptActionId,
+        declineActionId,
+      }),
     });
     await outboundRef.set({ status: 'sent', metaMessageId: delivery.messageId || null, sentAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     await reconcileWhatsAppDeliveryStatuses({ metaMessageId: delivery.messageId, recipientId: recipient, messageRef: outboundRef });
@@ -6275,6 +6294,8 @@ function getWhatsAppAuthClient(config) {
     phoneNumberId: config.phoneNumberId,
     graphApiVersion: config.graphApiVersion,
     approvedTemplateNames: config.approvedTemplateNames,
+    requestTimeoutMs: process.env.WHATSAPP_META_SEND_TIMEOUT_MS,
+    isRecipientAllowed: (recipient) => isWhatsAppRecipientAllowed(recipient, process.env),
   });
 }
 
@@ -6450,7 +6471,7 @@ exports.startWhatsAppAuthChallenge = onCall({
         to: input.phoneNumber,
         name: config.templateName,
         languageCode: config.templateLanguage,
-        components: [{ type: 'body', parameters: [{ type: 'text', text: code }] }],
+        components: buildOtpTemplateComponents(code),
       });
       await challengeRef.set({ deliveryStatus: 'sent', metaMessageId: delivery.messageId || null, deliveredAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     } catch (error) {
@@ -6925,7 +6946,7 @@ exports.replyToWhatsAppSupportTicket = onCall({ maxInstances: 2, ...HALF_CPU_OPT
         await ticketMessageRef.set({ deliveryStatus: 'blocked_template_required', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         throw new HttpsError('failed-precondition', 'An approved support reply template is required outside the WhatsApp customer-service window.');
       }
-      delivery = await client.sendTemplate({ to: claim.to, name: templateName, languageCode, components: [{ type: 'body', parameters: [{ type: 'text', text }] }] });
+      delivery = await client.sendTemplate({ to: claim.to, name: templateName, languageCode, components: buildSupportReplyTemplateComponents(text) });
     }
     await outboundRef.set({ status: 'sent', metaMessageId: delivery.messageId || null, sentAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     await reconcileWhatsAppDeliveryStatuses({ metaMessageId: delivery.messageId, recipientId: claim.to, messageRef: outboundRef });
@@ -7075,7 +7096,7 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
   const languageCode = String(process.env[`WHATSAPP_TEMPLATE_${eventConfig.key}_LANGUAGE`] || '').trim();
   if (!templateName || !languageCode || !secrets.approvedTemplateNames.includes(templateName)
     || !secrets.accessToken || !secrets.phoneNumberId || !secrets.graphApiVersion) return;
-  const client = createMetaWhatsAppClient({ accessToken: secrets.accessToken, phoneNumberId: secrets.phoneNumberId, graphApiVersion: secrets.graphApiVersion, approvedTemplateNames: secrets.approvedTemplateNames });
+  const client = createMetaWhatsAppClient({ accessToken: secrets.accessToken, phoneNumberId: secrets.phoneNumberId, graphApiVersion: secrets.graphApiVersion, approvedTemplateNames: secrets.approvedTemplateNames, requestTimeoutMs: process.env.WHATSAPP_META_SEND_TIMEOUT_MS, isRecipientAllowed: (recipient) => isWhatsAppRecipientAllowed(recipient, process.env) });
 
   for (const recipient of identities) {
     if (!recipient.identityId) continue;
@@ -7105,10 +7126,10 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
     try {
       const delivery = await client.sendTemplate({
         to: identity.waId, name: templateName, languageCode,
-        components: [{ type: 'body', parameters: [
-          { type: 'text', text: String(after.serviceSummary || after.subject || 'Uncedo service').slice(0, 180) },
-          { type: 'text', text: String(eventConfig.description).slice(0, 240) },
-        ] }],
+        components: buildServiceUpdateTemplateComponents({
+          service: String(after.serviceSummary || after.subject || 'Uncedo service').slice(0, 180),
+          update: String(eventConfig.description).slice(0, 240),
+        }),
       });
       await outboundRef.set({ status: 'sent', metaMessageId: delivery.messageId || null, sentAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       await reconcileWhatsAppDeliveryStatuses({ metaMessageId: delivery.messageId, recipientId: identity.waId, messageRef: outboundRef });
@@ -9747,7 +9768,7 @@ async function notifyCashPaymentToHelper({ requestId, attemptId, helperId, amoun
     try {
       const configured = getWhatsAppSecrets();
       if (String(identity.phoneNumberId || '') !== configured.phoneNumberId) continue;
-      const client = createMetaWhatsAppClient({ accessToken: configured.accessToken, phoneNumberId: configured.phoneNumberId, graphApiVersion: configured.graphApiVersion, approvedTemplateNames: configured.approvedTemplateNames });
+      const client = createMetaWhatsAppClient({ accessToken: configured.accessToken, phoneNumberId: configured.phoneNumberId, graphApiVersion: configured.graphApiVersion, approvedTemplateNames: configured.approvedTemplateNames, requestTimeoutMs: process.env.WHATSAPP_META_SEND_TIMEOUT_MS, isRecipientAllowed: (recipient) => isWhatsAppRecipientAllowed(recipient, process.env) });
       if (isWithinCustomerServiceWindow(lastInboundAtMs)) {
         await persistWhatsAppAssistantReply({
           sourceEventId: stableEventId(`cash-payment-notification:${requestId}:${attemptId}:${identityDoc.id}`),
@@ -9788,7 +9809,15 @@ async function notifyCashPaymentToHelper({ requestId, attemptId, helperId, amoun
           });
           if (!claimed) continue;
           try {
-            const delivery = await client.sendTemplate({ to: identity.waId, name: templateName, languageCode, components: [{ type: 'body', parameters: [{ type: 'text', text: requestId }, { type: 'text', text: `R${Number(amount || 0).toFixed(2)}` }] }] });
+            const delivery = await client.sendTemplate({
+              to: identity.waId,
+              name: templateName,
+              languageCode,
+              components: buildCashConfirmationTemplateComponents({
+                requestReference: requestId,
+                amountText: `R${Number(amount || 0).toFixed(2)}`,
+              }),
+            });
             await outboundRef.set({ status: 'sent', metaMessageId: delivery.messageId || null, sentAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
             await reconcileWhatsAppDeliveryStatuses({ metaMessageId: delivery.messageId, recipientId: identity.waId, messageRef: outboundRef });
           } catch (error) {

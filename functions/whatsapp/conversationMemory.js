@@ -12,6 +12,8 @@ function normalizeTurn(turn = {}) {
     text: text.slice(0, 900),
     type: String(turn.type || 'text').slice(0, 40),
     timestampMs: Math.max(0, Number(turn.timestampMs || 0)),
+    receivedAtMs: Math.max(0, Number(turn.receivedAtMs || 0)),
+    eventId: String(turn.eventId || '').slice(0, 100),
   };
 }
 
@@ -19,7 +21,9 @@ function appendBoundedConversationTurn({ recentHistory = [], conversationSummary
   const normalizedTurn = normalizeTurn(turn);
   const history = (Array.isArray(recentHistory) ? recentHistory : []).map(normalizeTurn).filter(Boolean);
   if (normalizedTurn) history.push(normalizedTurn);
-  history.sort((left, right) => left.timestampMs - right.timestampMs);
+  history.sort((left, right) => left.timestampMs - right.timestampMs
+    || left.receivedAtMs - right.receivedAtMs
+    || left.eventId.localeCompare(right.eventId));
   const overflow = history.slice(0, Math.max(0, history.length - MAX_RECENT_TURNS));
   const recent = history.slice(-MAX_RECENT_TURNS);
   const olderTurns = [

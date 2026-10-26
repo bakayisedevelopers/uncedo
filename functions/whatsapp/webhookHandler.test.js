@@ -10,7 +10,7 @@ const {
 } = require('./metaWebhook');
 const { createWhatsAppWebhookHandler } = require('./webhookHandler');
 
-function makeHarness({ messagingEnabled = false, verifyToken = 'local-test-token', appSecret = 'local-test-app-secret' } = {}) {
+function makeHarness({ messagingEnabled = false, verifyToken = 'local-test-token', appSecret = 'local-test-app-secret', isRecipientAllowed = () => true } = {}) {
   const calls = { signatures: 0, normalizations: 0, collections: 0, transactions: 0, writes: 0 };
   const db = {
     collection(name) {
@@ -31,6 +31,7 @@ function makeHarness({ messagingEnabled = false, verifyToken = 'local-test-token
   const handler = createWhatsAppWebhookHandler({
     getSecrets: () => ({ verifyToken, appSecret, phoneNumberId: 'phone-number-1' }),
     isMessagingEnabled: () => messagingEnabled,
+    isRecipientAllowed,
     verifyWebhookChallenge,
     verifyWebhookSignature(rawBody, signature, secret) {
       calls.signatures += 1;
@@ -167,4 +168,26 @@ test('enabled signed messages retain transactional, duplicate-safe event persist
   assert.equal(calls.collections, 1);
   assert.equal(calls.transactions, 1);
   assert.equal(calls.writes, 1);
+});
+
+test('signed events from outside the test cohort are acknowledged but not persisted', async () => {
+  const { handler, calls } = makeHarness({ messagingEnabled: true, isRecipientAllowed: () => false });
+  const body = {
+    object: 'whatsapp_business_account',
+    entry: [{ changes: [{ value: {
+      metadata: { phone_number_id: 'phone-number-1' },
+      messages: [{ id: 'wamid.not-allowlisted', from: '27820000000', timestamp: '1792828800', type: 'text', text: { body: 'Hi' } }],
+    } }] }],
+  };
+  const rawBody = Buffer.from(JSON.stringify(body));
+  const signature = `sha256=${createHmac('sha256', 'local-test-app-secret').update(rawBody).digest('hex')}`;
+  const res = makeResponse();
+  await handler({ method: 'POST', rawBody, body, get: () => signature, headers: {} }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body, 'EVENT_RECEIVED');
+  assert.equal(calls.signatures, 1);
+  assert.equal(calls.normalizations, 1);
+  assert.equal(calls.collections, 0);
+  assert.equal(calls.transactions, 0);
+  assert.equal(calls.writes, 0);
 });

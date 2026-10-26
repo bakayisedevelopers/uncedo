@@ -64,6 +64,35 @@ test('webhook normalization creates stable, bounded message and status events', 
   })[0].eventId);
 });
 
+test('Meta template quick replies normalize top-level button payloads into the shared action contract', () => {
+  const events = normalizeWebhookPayload({
+    object: 'whatsapp_business_account',
+    entry: [{ changes: [{ value: {
+      metadata: { phone_number_id: '100200300' },
+      messages: [
+        {
+          id: 'wamid.offer-accept', from: '27820001111', timestamp: '1792828804', type: 'button',
+          button: { text: 'Accept', payload: `wa_offer_accept_wa_${'a'.repeat(64)}` },
+        },
+        {
+          id: 'wamid.offer-decline', from: '27820001111', timestamp: '1792828805', type: 'button',
+          button: { text: 'Decline', payload: `wa_offer_decline_wa_${'b'.repeat(64)}` },
+        },
+        {
+          id: 'wamid.button-malformed', from: '27820001111', timestamp: '1792828806', type: 'button',
+          button: { text: 'Accept' },
+        },
+      ],
+    } }] }],
+  });
+
+  assert.deepEqual(events.map((event) => event.interactive), [
+    { type: 'button_reply', buttonId: `wa_offer_accept_wa_${'a'.repeat(64)}`, buttonTitle: 'Accept', listId: '', listTitle: '', listDescription: '' },
+    { type: 'button_reply', buttonId: `wa_offer_decline_wa_${'b'.repeat(64)}`, buttonTitle: 'Decline', listId: '', listTitle: '', listDescription: '' },
+    { type: 'button_reply', buttonId: '', buttonTitle: 'Accept', listId: '', listTitle: '', listDescription: '' },
+  ]);
+});
+
 test('24-hour window is based on the latest inbound customer timestamp', () => {
   const now = 1_800_000_000_000;
   assert.equal(getWhatsAppOutboundMode(now - (23 * 60 * 60 * 1000), now), 'free_form_allowed');

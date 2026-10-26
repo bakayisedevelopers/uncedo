@@ -19,3 +19,12 @@ test('conversation memory excludes empty turns and bounds potentially hostile co
   assert.equal(result.recentHistory[0].role, 'user');
   assert.equal(result.recentHistory[0].text.length, 900);
 });
+
+test('messages with the same Meta second sort by webhook receipt order, not Firestore write time', () => {
+  const result = appendBoundedConversationTurn({
+    recentHistory: [{ role: 'user', text: 'second received', timestampMs: 1000, receivedAtMs: 200, eventId: 'event-b' }],
+    conversationSummary: {},
+    turn: { role: 'user', text: 'first received', timestampMs: 1000, receivedAtMs: 100, eventId: 'event-a' },
+  });
+  assert.deepEqual(result.recentHistory.map(({ text }) => text), ['first received', 'second received']);
+});

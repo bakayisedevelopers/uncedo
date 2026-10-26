@@ -3,6 +3,7 @@
 function createWhatsAppWebhookHandler({
   getSecrets,
   isMessagingEnabled,
+  isRecipientAllowed = () => false,
   verifyWebhookChallenge,
   verifyWebhookSignature,
   normalizeWebhookPayload,
@@ -71,13 +72,32 @@ function createWhatsAppWebhookHandler({
         res.status(403).send('Unexpected WhatsApp sender.');
         return;
       }
-      await Promise.all(normalizedEvents.map(async (normalized) => {
+      const acceptedEvents = [];
+      let rejectedRecipientCount = 0;
+      for (const normalized of normalizedEvents) {
+        const recipient = normalized.eventType === 'message_status' ? normalized.recipientId : normalized.from;
+        if (isRecipientAllowed(recipient, normalized)) acceptedEvents.push(normalized);
+        else rejectedRecipientCount += 1;
+      }
+      if (rejectedRecipientCount) {
+        logger.info('whatsapp_webhook_test_cohort_filtered', { rejectedEventCount: rejectedRecipientCount });
+      }
+      if (acceptedEvents.length === 0) {
+        // The signed event is intentionally excluded by the controlled tester
+        // cohort. Acknowledge it so Meta does not retry an event we will never
+        // process, without persisting any unapproved sender data.
+        res.status(200).send('EVENT_RECEIVED');
+        return;
+      }
+      const receivedAtMs = Date.now();
+      await Promise.all(acceptedEvents.map(async (normalized, index) => {
         const eventRef = db.collection('whatsappWebhookEvents').doc(normalized.eventId);
         await db.runTransaction(async (transaction) => {
           const eventSnap = await transaction.get(eventRef);
           if (eventSnap.exists) return;
           transaction.create(eventRef, {
             ...normalized,
+            receivedAtMs: receivedAtMs + index,
             status: 'received',
             attemptCount: 0,
             retentionExpiresAtMs: Date.now() + Math.max(1, Math.min(3650, Number.parseInt(String(process.env.WHATSAPP_EVENT_RETENTION_DAYS || '30'), 10) || 30)) * 24 * 60 * 60 * 1000,
@@ -86,7 +106,7 @@ function createWhatsAppWebhookHandler({
           });
         });
       }));
-      logger.info('whatsapp_webhook_events_persisted', { eventCount: normalizedEvents.length });
+      logger.info('whatsapp_webhook_events_persisted', { eventCount: acceptedEvents.length });
       res.status(200).send('EVENT_RECEIVED');
     } catch (error) {
       logger.error('whatsapp_webhook_event_persistence_failed', { error: error?.message || 'unknown_error' });

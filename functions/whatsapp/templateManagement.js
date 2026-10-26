@@ -31,7 +31,7 @@ const TEMPLATE_BINDINGS = Object.freeze({
 });
 
 class MetaTemplateError extends Error {
-  constructor(message, { status = 0, code = '', subcode = '', fbtraceId = '', retryable = false } = {}) {
+  constructor(message, { status = 0, code = '', subcode = '', fbtraceId = '', retryable = false, category = 'unknown', networkCode = '' } = {}) {
     super(message);
     this.name = 'MetaTemplateError';
     this.status = status;
@@ -39,6 +39,8 @@ class MetaTemplateError extends Error {
     this.metaSubcode = String(subcode || '');
     this.fbtraceId = String(fbtraceId || '');
     this.retryable = Boolean(retryable);
+    this.category = String(category || 'unknown');
+    this.networkCode = /^[A-Z0-9_]{2,40}$/i.test(String(networkCode || '')) ? String(networkCode) : '';
   }
 
   toSafeJSON() {
@@ -50,8 +52,46 @@ class MetaTemplateError extends Error {
       metaSubcode: this.metaSubcode,
       fbtraceId: this.fbtraceId,
       retryable: this.retryable,
+      category: this.category,
+      ...(this.networkCode ? { networkCode: this.networkCode } : {}),
     };
   }
+}
+
+function classifyTemplateApiError(status, code) {
+  const httpStatus = Number(status) || 0;
+  const metaCode = String(code || '');
+  if (httpStatus === 401 || metaCode === '190') {
+    return {
+      category: 'oauth_token',
+      message: 'Meta rejected the access token. Check token validity, expiry, app assignment, and WABA access.',
+    };
+  }
+  if (httpStatus === 403 || ['10', '200'].includes(metaCode)) {
+    return {
+      category: 'permission_or_asset_access',
+      message: 'Meta denied template access. Check whatsapp_business_management permission and assignment of this WABA to the app or system user.',
+    };
+  }
+  if (metaCode === '12') {
+    return {
+      category: 'graph_api_version',
+      message: 'Meta rejected the Graph API version. Check that the configured version is currently supported.',
+    };
+  }
+  if (metaCode === '100') {
+    return {
+      category: 'template_request',
+      message: 'Meta rejected the template request. Check its components, language, category, and required fields.',
+    };
+  }
+  if (httpStatus === 429 || ['4', '17', '32', '613'].includes(metaCode)) {
+    return { category: 'rate_limit', message: 'Meta rate limited the template-management request.' };
+  }
+  if (httpStatus >= 500) {
+    return { category: 'meta_unavailable', message: 'Meta template management is temporarily unavailable.' };
+  }
+  return { category: 'api_rejection', message: 'Meta rejected the template-management request.' };
 }
 
 function validateGraphApiVersion(value) {
@@ -289,9 +329,14 @@ function createMetaTemplateManager({
           attempt += 1;
           continue;
         }
+        const networkCode = String(error?.cause?.code || error?.code || '');
         throw new MetaTemplateError(method === 'POST'
           ? 'Meta did not return a definite template submission result; check the WABA before retrying.'
-          : 'Unable to reach the Meta Graph API.', { retryable: method === 'GET' });
+          : `Unable to reach the Meta Graph API${/^[A-Z0-9_]{2,40}$/i.test(networkCode) ? ` (${networkCode})` : ''}.`, {
+          retryable: method === 'GET',
+          category: 'network',
+          networkCode,
+        });
       }
 
       let result = null;
@@ -305,14 +350,14 @@ function createMetaTemplateManager({
         attempt += 1;
         continue;
       }
-      throw new MetaTemplateError(limited
-        ? 'Meta rate limited the template-management request.'
-        : 'Meta rejected the template-management request.', {
+      const diagnosis = classifyTemplateApiError(response.status, metaError.code);
+      throw new MetaTemplateError(diagnosis.message, {
         status: Number(response.status || 0),
         code: metaError.code,
         subcode: metaError.error_subcode,
         fbtraceId: metaError.fbtrace_id,
         retryable: method === 'GET' && (limited || transient),
+        category: diagnosis.category,
       });
     }
   }
@@ -439,6 +484,7 @@ module.exports = {
   MetaTemplateError,
   TEMPLATE_BINDINGS,
   buildUncedoTemplateCatalogue,
+  classifyTemplateApiError,
   createMetaTemplateManager,
   generateFirebaseConfiguration,
   getRequiredEnvironment,

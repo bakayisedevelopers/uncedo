@@ -1,11 +1,12 @@
 'use strict';
 
 const DELIVERY_RANK = { accepted: 1, sent: 1, delivered: 2, read: 3 };
-const KNOWN_STATES = new Set(['accepted', 'sent', 'delivered', 'read', 'failed', 'outcome_unknown', 'blocked_template_required']);
+const KNOWN_STATES = new Set(['accepted', 'sent', 'delivered', 'read', 'failed', 'outcome_unknown', 'blocked_template_required', 'blocked_test_cohort']);
 
 function classifyMetaDeliveryError(error = {}) {
   const code = String(error.code || '').trim().toLowerCase();
   if (['template-required', 'template-not-allowlisted'].includes(code)) return 'blocked_template_required';
+  if (code === 'recipient-not-allowlisted') return 'blocked_test_cohort';
   const httpStatus = Number(code.match(/^meta_http_(\d{3})$/)?.[1] || 0);
   if (httpStatus >= 400 && httpStatus < 500) return 'failed';
   return 'outcome_unknown';
