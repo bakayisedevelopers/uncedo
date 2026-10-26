@@ -443,21 +443,6 @@ export async function startActiveJobTracking({ requestId, helperId, customerId, 
   });
 
   try {
-    const { db } = getFirebaseClients();
-    logInfo('active-tracking.start-user-write', 'Updating helper tracking state', {
-      helperId,
-      requestId,
-      traceLabel: 'helpers:activeJobTrackingService:startActiveJobTracking',
-    });
-    await setDoc(doc(db, 'users', helperId), {
-      activeServiceRequestId: requestId,
-      updatedAt: serverTimestamp(),
-    }, { merge: true });
-  } catch (error) {
-    logError('active-tracking.start-user', error);
-  }
-
-  try {
     const currentPosition = await Location.getCurrentPositionAsync({
       accuracy: Location.Accuracy.Balanced,
     });
@@ -514,7 +499,6 @@ export async function stopActiveJobTracking({ finalStatus = '', keepLocationShar
           });
           await setDoc(doc(db, 'users', session.helperId), {
             locationSharingEnabled: keepLocationSharingEnabled,
-            activeServiceRequestId: null,
             updatedAt: serverTimestamp(),
           }, { merge: true });
         } catch (error) {

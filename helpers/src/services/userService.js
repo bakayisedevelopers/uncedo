@@ -109,19 +109,35 @@ export async function upsertHelperProfile({ uid, email, fullName, traceLabel = '
     || `helper_agreement_${currentAgreementVersion}`,
   ).trim();
 
-  logUserProfileWrite(traceLabel, uid, base);
+  const safeProfile = {
+    uid,
+    email: email || '',
+    fullName: base.fullName || fullName,
+    displayName: base.displayName || fullName,
+    role: 'helper',
+    activeRole: 'helper',
+    roles: ['helper'],
+    firstName: String(base.firstName || ''),
+    lastName: String(base.lastName || ''),
+    providerType: String(base.providerType || ''),
+    businessName: String(base.businessName || ''),
+    phoneNumber: String(base.phoneNumber || ''),
+    homeAddress: String(base.homeAddress || ''),
+    city: String(base.city || 'Johannesburg'),
+    profilePhoto: String(base.profilePhoto || ''),
+    profilePhotoObjectPath: String(base.profilePhotoObjectPath || ''),
+    onlineStatus: String(base.onlineStatus || 'offline'),
+    locationSharingEnabled: base.locationSharingEnabled === true,
+    agreement: base.agreement || {},
+    updatedAt: serverTimestamp(),
+    ...(existing.exists() ? {} : { createdAt: serverTimestamp() }),
+  };
+
+  logUserProfileWrite(traceLabel, uid, safeProfile);
 
   await setDoc(
     ref,
-    {
-      ...base,
-      uid,
-      email,
-      fullName: base.fullName || fullName,
-      displayName: base.displayName || fullName,
-      role: 'helper',
-      activeRole: 'helper',
-      roles: ['helper'],
+    { ...safeProfile,
       agreement: {
         ...(base.agreement || {}),
         documentId: 'helper_agreement',
@@ -134,8 +150,6 @@ export async function upsertHelperProfile({ uid, email, fullName, traceLabel = '
         currentVersionAccepted: base?.agreement?.acceptedVersion === currentAgreementVersion,
         acceptedCurrentVersion: base?.agreement?.acceptedVersion === currentAgreementVersion,
       },
-      updatedAt: serverTimestamp(),
-      createdAt: existing.exists() ? base.createdAt : serverTimestamp(),
     },
     { merge: true },
   );

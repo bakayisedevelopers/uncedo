@@ -17,11 +17,9 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
-import { doc, onSnapshot } from 'firebase/firestore';
 import { MapPlaceholder } from '../../components/customer/MapPlaceholder';
 import { useAuth } from '../../context/AuthContext';
 import { getCustomerServiceById } from '../../constants/serviceCatalog';
-import { getFirebaseClients } from '../../firebase/config';
 import {
   cancelServiceRequestByCustomer,
   submitServiceRequestRating,
@@ -226,7 +224,6 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
   const requestId = route?.params?.requestId || '';
   const [request, setRequest] = useState(null);
   const [helperLocation, setHelperLocation] = useState(null);
-  const [fallbackHelperLocation, setFallbackHelperLocation] = useState(null);
   const [routeCoordinates, setRouteCoordinates] = useState([]);
   const [routeDistanceMeters, setRouteDistanceMeters] = useState(null);
   const [routeDurationSeconds, setRouteDurationSeconds] = useState(null);
@@ -422,39 +419,6 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
       unsubscribe?.();
     };
   }, [requestId]);
-
-  useEffect(() => {
-    const helperId = request?.helperAssignment?.helperId;
-    if (!helperId || !requestId) {
-      setFallbackHelperLocation(null);
-      return () => {};
-    }
-
-    try {
-      const { db } = getFirebaseClients();
-      const unsubscribe = onSnapshot(doc(db, 'users', helperId), (snapshot) => {
-        if (!snapshot.exists()) {
-          setFallbackHelperLocation(null);
-          return;
-        }
-        const data = snapshot.data() || {};
-        if (
-          data.liveLocation
-          && data.locationSharingEnabled !== false
-          && String(data.activeServiceRequestId || '').trim() === requestId
-        ) {
-          setFallbackHelperLocation(data.liveLocation);
-          return;
-        }
-
-        setFallbackHelperLocation(null);
-      });
-      return unsubscribe;
-    } catch (nextError) {
-      console.warn('[uncedo:helper-location]', nextError?.message || nextError);
-      return () => {};
-    }
-  }, [request?.helperAssignment?.helperId, requestId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -661,8 +625,8 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
       return;
     }
 
-    setHelperLocation(fallbackHelperLocation || null);
-  }, [fallbackHelperLocation, isTrackingInactive, trackingDocHasData, trackingDocument]);
+    setHelperLocation(null);
+  }, [isTrackingInactive, trackingDocHasData, trackingDocument]);
 
   useEffect(() => {
     let interval = null;

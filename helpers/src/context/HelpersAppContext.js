@@ -888,10 +888,6 @@ export function HelpersAppProvider({ children }) {
     }
   };
 
-  const setVerificationStatus = async (verificationStatus) => {
-    return applyProfileUpdate((current) => ({ ...current, verificationStatus }), 'helpers:context:setVerificationStatus');
-  };
-
   const updateProfileBasics = async (updates = {}) => {
     return applyProfileUpdate((current) => {
       const next = {
@@ -961,7 +957,6 @@ export function HelpersAppProvider({ children }) {
       removeServiceOffering,
       removeServiceOfferingPicture,
       acceptAgreement,
-      setVerificationStatus,
       updateProfileBasics,
       updatePayoutDetails,
     },

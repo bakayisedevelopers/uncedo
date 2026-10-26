@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Headphones, Send, ShieldAlert } from 'lucide-react';
+import { AlertTriangle, Headphones, RotateCw, Send, ShieldAlert } from 'lucide-react';
 import { getFirebaseClients } from '../firebase/config';
 
 const TICKET_STATES = ['open', 'in_progress', 'waiting_on_customer', 'resolved', 'closed'];
@@ -17,6 +17,9 @@ export default function SupportTicketsPage() {
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [historyBusy, setHistoryBusy] = useState(false);
   const [ticketDetails, setTicketDetails] = useState(null);
+  const [assistantFailures, setAssistantFailures] = useState([]);
+  const [assistantFailuresBusy, setAssistantFailuresBusy] = useState(false);
+  const [retryingJobId, setRetryingJobId] = useState('');
   const selected = useMemo(() => tickets.find((ticket) => ticket.id === selectedId) || null, [tickets, selectedId]);
   const displayedMessages = useMemo(() => {
     const byId = new Map();
@@ -137,6 +140,37 @@ export default function SupportTicketsPage() {
     }
   }
 
+  async function loadAssistantFailures() {
+    if (assistantFailuresBusy) return;
+    setAssistantFailuresBusy(true);
+    setNotice('');
+    try {
+      const clients = await getFirebaseClients();
+      const result = await clients.httpsCallable(clients.functions, 'listWhatsAppAssistantFailures')({});
+      setAssistantFailures(Array.isArray(result.data?.jobs) ? result.data.jobs : []);
+    } catch (error) {
+      setNotice(error?.message || 'Unable to load assistant diagnostics.');
+    } finally {
+      setAssistantFailuresBusy(false);
+    }
+  }
+
+  async function retryAssistantJob(job) {
+    if (!job?.jobId || job.manualRecoveryAvailable !== true || retryingJobId) return;
+    setRetryingJobId(job.jobId);
+    setNotice('');
+    try {
+      const clients = await getFirebaseClients();
+      const result = await clients.httpsCallable(clients.functions, 'retryWhatsAppAssistantJob')({ jobId: job.jobId });
+      setNotice(result.data?.queued ? 'Safe classifier retry queued.' : result.data?.duplicate ? 'A safe retry was already queued.' : 'The assistant job was not queued.');
+      await loadAssistantFailures();
+    } catch (error) {
+      setNotice(error?.message || 'Unable to queue a safe assistant retry.');
+    } finally {
+      setRetryingJobId('');
+    }
+  }
+
   return (
     <section className="grid gap-5 xl:grid-cols-[360px_minmax(0,1fr)]">
       <div className="rounded-[28px] border border-white/10 bg-white/5 p-5 shadow-glow">
@@ -152,6 +186,23 @@ export default function SupportTicketsPage() {
             </button>
           ))}
           {!tickets.length ? <p className="rounded-2xl border border-dashed border-white/15 p-5 text-sm text-ink-300">No support tickets yet.</p> : null}
+        </div>
+        <div className="mt-6 border-t border-white/10 pt-5">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm font-bold"><AlertTriangle className="h-4 w-4 text-amber-300" />Assistant failures</div>
+            <button type="button" onClick={loadAssistantFailures} disabled={assistantFailuresBusy} className="rounded-lg border border-white/15 p-2 text-ink-200 disabled:opacity-50" aria-label="Refresh assistant failures"><RotateCw className={`h-4 w-4 ${assistantFailuresBusy ? 'animate-spin' : ''}`} /></button>
+          </div>
+          <p className="mt-2 text-xs text-ink-400">Only safe failures before tool execution or message sending can be retried here.</p>
+          <div className="mt-3 space-y-2">
+            {assistantFailures.map((job) => (
+              <div key={job.jobId} className="rounded-xl border border-white/10 bg-black/10 p-3">
+                <p className="truncate text-xs font-bold">{job.errorCode || 'Assistant failure'} · {job.phase || 'unknown phase'}</p>
+                <p className="mt-1 text-[11px] text-ink-400">Attempt {job.attemptCount || 0}{job.updatedAtMs ? ` · ${new Date(job.updatedAtMs).toLocaleString()}` : ''}</p>
+                {job.manualRecoveryAvailable ? <button type="button" onClick={() => retryAssistantJob(job)} disabled={Boolean(retryingJobId)} className="mt-2 rounded-lg border border-amber-300/20 px-2 py-1 text-xs font-bold text-amber-200 disabled:opacity-50">{retryingJobId === job.jobId ? 'Queueing…' : 'Retry safe classifier step'}</button> : <p className="mt-2 text-[11px] text-ink-400">Manual retry unavailable; inspect before taking action.</p>}
+              </div>
+            ))}
+            {!assistantFailures.length && !assistantFailuresBusy ? <p className="text-xs text-ink-400">Load the latest failed jobs when an investigation is needed.</p> : null}
+          </div>
         </div>
       </div>
 

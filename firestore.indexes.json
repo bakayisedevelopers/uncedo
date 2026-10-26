@@ -1,6 +1,14 @@
 {
   "indexes": [
     {
+      "collectionGroup": "whatsappAssistantJobs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "updatedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "whatsappMessages",
       "queryScope": "COLLECTION",
       "fields": [

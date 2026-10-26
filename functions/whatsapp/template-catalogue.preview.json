@@ -1,0 +1,147 @@
+{
+  "mode": "preview-only",
+  "note": "Proposed payloads only. No Meta endpoint was contacted and no templates were submitted.",
+  "templates": [
+    {
+      "name": "uncedo_auth_otp",
+      "language": "en_US",
+      "category": "AUTHENTICATION",
+      "purpose": "WhatsApp one-time code delivery",
+      "senderContract": {
+        "bodyParameterCount": 1,
+        "quickReplyButtons": []
+      },
+      "components": [
+        {
+          "type": "BODY",
+          "add_security_recommendation": true
+        },
+        {
+          "type": "FOOTER",
+          "code_expiration_minutes": 5
+        },
+        {
+          "type": "BUTTONS",
+          "buttons": [
+            {
+              "type": "OTP",
+              "otp_type": "COPY_CODE",
+              "text": "Copy code"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "uncedo_helper_offer",
+      "language": "en_US",
+      "category": "UTILITY",
+      "purpose": "Offer a service request to a linked helper",
+      "senderContract": {
+        "bodyParameterCount": 2,
+        "quickReplyButtons": [
+          "Accept",
+          "Decline"
+        ]
+      },
+      "components": [
+        {
+          "type": "BODY",
+          "text": "New Uncedo service offer: {{1}}. Indicative amount: {{2}}. Please respond within about 30 seconds.",
+          "example": {
+            "body_text": [
+              [
+                "Car wash",
+                "R250.00"
+              ]
+            ]
+          }
+        },
+        {
+          "type": "BUTTONS",
+          "buttons": [
+            {
+              "type": "QUICK_REPLY",
+              "text": "Accept"
+            },
+            {
+              "type": "QUICK_REPLY",
+              "text": "Decline"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "uncedo_support_reply",
+      "language": "en_US",
+      "category": "UTILITY",
+      "purpose": "Deliver an administrator support reply outside the service window",
+      "senderContract": {
+        "bodyParameterCount": 1,
+        "quickReplyButtons": []
+      },
+      "components": [
+        {
+          "type": "BODY",
+          "text": "Uncedo support update: {{1}}. Please reply to this message if you need further help.",
+          "example": {
+            "body_text": [
+              [
+                "Our team has replied to your request."
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "uncedo_service_update",
+      "language": "en_US",
+      "category": "UTILITY",
+      "purpose": "Shared booking, service, and payment status update",
+      "senderContract": {
+        "bodyParameterCount": 2,
+        "quickReplyButtons": []
+      },
+      "components": [
+        {
+          "type": "BODY",
+          "text": "Update for {{1}}: {{2}}. Reply to this message if you need help.",
+          "example": {
+            "body_text": [
+              [
+                "Car wash",
+                "Your helper has been assigned."
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "uncedo_cash_confirmation",
+      "language": "en_US",
+      "category": "UTILITY",
+      "purpose": "Ask the assigned helper to confirm or reject reported direct payment",
+      "senderContract": {
+        "bodyParameterCount": 2,
+        "quickReplyButtons": []
+      },
+      "components": [
+        {
+          "type": "BODY",
+          "text": "For request {{1}}, the customer reports a direct payment of {{2}}. Reply “cash received request” or “cash not received request”, followed by the request reference shown above.",
+          "example": {
+            "body_text": [
+              [
+                "REQ-123456",
+                "R500.00"
+              ]
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

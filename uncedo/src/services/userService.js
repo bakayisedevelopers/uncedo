@@ -68,6 +68,13 @@ export async function getUserProfile(uid) {
 export async function updateUserProfile(uid, updates) {
   const { db } = getFirebaseClients();
   const userRef = doc(db, 'users', uid);
+  const allowedFields = new Set([
+    'fullName', 'displayName', 'firstName', 'lastName', 'phoneNumber', 'providerType',
+    'businessName', 'homeAddress', 'city', 'profilePhoto', 'profilePhotoObjectPath',
+    'customerProfile', 'studentProfile', 'subjects',
+  ]);
+  const unsafeFields = Object.keys(updates || {}).filter((field) => !allowedFields.has(field));
+  if (unsafeFields.length) throw new Error('This profile change must be completed through an authorized Uncedo workflow.');
 
   await setDoc(
     userRef,
@@ -87,36 +94,10 @@ export async function deleteUserProfile(uid) {
 }
 
 export async function updateUserRatingSummary(uid, roleKey, overallScore) {
-  const existing = await getUserProfile(uid);
-  if (!existing) return null;
-
-  const currentStats = existing?.ratings?.[roleKey] || {};
-  const totalLessons = Number(currentStats.totalLessons ?? currentStats.count ?? 0);
-  const totalRatings = Number(currentStats.totalRatings ?? ((currentStats.average || 0) * totalLessons) ?? 0);
-  const nextTotalLessons = totalLessons + 1;
-  const nextTotalRatings = Number((totalRatings + Number(overallScore || 0)).toFixed(2));
-  const nextAverage = Number((nextTotalRatings / nextTotalLessons).toFixed(2));
-
-  return updateUserProfile(uid, {
-    ratings: {
-      ...(existing.ratings || {}),
-      [roleKey]: {
-        count: nextTotalLessons,
-        totalLessons: nextTotalLessons,
-        totalRatings: nextTotalRatings,
-        average: nextAverage,
-        updatedAt: Date.now(),
-      },
-    },
-    ...(roleKey === 'asTutor'
-      ? {
-          tutorProfile: {
-            ...(existing.tutorProfile || {}),
-            overallRating: nextAverage,
-          },
-        }
-      : {}),
-  });
+  // Rating aggregates are computed by the trusted backend. Keep this adapter
+  // for existing callers, but never let a client write authoritative ratings.
+  void uid; void roleKey; void overallScore;
+  return null;
 }
 
 export async function upsertCustomerProfile({ uid, email, displayName }) {
@@ -124,21 +105,26 @@ export async function upsertCustomerProfile({ uid, email, displayName }) {
   const userRef = doc(db, 'users', uid);
   const existing = await getDoc(userRef);
   const base = existing.exists() ? existing.data() : buildDefaultCustomerProfile({ uid, email, displayName });
+  const profile = {
+    uid,
+    email: email || '',
+    displayName: base.displayName || displayName,
+    fullName: base.fullName || displayName,
+    role: 'customer',
+    activeRole: 'customer',
+    roles: ['customer'],
+    profilePhoto: String(base.profilePhoto || ''),
+    phoneNumber: String(base.phoneNumber || ''),
+    subjects: Array.isArray(base.subjects) ? base.subjects : [],
+    studentProfile: base.studentProfile || {},
+    customerProfile: base.customerProfile || {},
+    updatedAt: serverTimestamp(),
+    ...(existing.exists() ? {} : { createdAt: serverTimestamp() }),
+  };
 
   await setDoc(
     userRef,
-    {
-      ...base,
-      uid,
-      email,
-      displayName: base.displayName || displayName,
-      fullName: base.fullName || displayName,
-      role: 'customer',
-      activeRole: 'customer',
-      roles: ['customer'],
-      updatedAt: serverTimestamp(),
-      createdAt: existing.exists() ? base.createdAt : serverTimestamp(),
-    },
+    profile,
     { merge: true },
   );
 

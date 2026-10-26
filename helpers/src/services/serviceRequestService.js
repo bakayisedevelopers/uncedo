@@ -10,10 +10,6 @@ import { getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
 import { updateLiveTracking } from './liveTrackingRealtimeService';
 import { logInfo } from './logger';
 import {
-  computeHelperDerivedStats,
-  syncHelperOfferSnapshot,
-} from './helperRequestStatsService';
-import {
   buildRouteSnapshot,
   fetchRouteData,
   normalizeCoordinate,
@@ -258,7 +254,6 @@ export function subscribeToHelperAvailableServiceRequests(helperId, callback, on
     (snapshot) => {
       const now = Date.now();
       const rawItems = snapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
-      syncHelperOfferSnapshot(helperId, rawItems).catch(() => null);
       logInfo('service-request.offer-subscription-snapshot', 'Received helper offer snapshot.', {
         helperId,
         snapshotSize: rawItems.length,
@@ -484,11 +479,6 @@ export async function finalizeServiceRequestBilling({ requestId }) {
     throw new Error(payload?.message || 'Unable to finalize service request billing.');
   }
 
-  const helperId = String(auth.currentUser?.uid || '').trim();
-  if (helperId) {
-    await computeHelperDerivedStats(helperId).catch(() => null);
-  }
-
   return payload;
 }
 
@@ -503,8 +493,6 @@ export async function cancelServiceRequest({ requestId, helperId, reason }) {
     action: 'cancel',
     reason: String(reason || ''),
   });
-
-  await computeHelperDerivedStats(helperId).catch(() => null);
 
   logInfo('service-request.cancel-helper-write', 'Clearing helper active request state after cancel', {
     helperId,

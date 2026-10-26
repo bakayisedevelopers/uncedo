@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createWhatsAppToolRegistry } = require('./toolRegistry');
+const { TOOL_DEFINITIONS, createWhatsAppToolRegistry } = require('./toolRegistry');
 
 const services = [
   {
@@ -81,6 +81,49 @@ test('tool output rejects undeclared fields that could expose backend secrets', 
   }), { code: 'tool-output-invalid' });
 });
 
+test('read tools reject fields outside the minimized booking, wallet, and payout projections', async () => {
+  const authorization = { uid: 'helper-1', role: 'helper', linked: true, verified: true, helperVerified: true };
+  const validBooking = {
+    requestId: 'request-123', summary: 'Car wash', status: 'completed', statusLabel: 'Completed',
+    helperName: 'Alex', createdAtMs: null,
+  };
+  const bookings = createWhatsAppToolRegistry({ handlers: {
+    listMyBookings: async () => ({ bookings: [validBooking] }),
+  } });
+  assert.equal((await bookings.execute('listMyBookings', {}, { role: 'helper', authorization })).bookings.length, 1);
+
+  const leakedBooking = createWhatsAppToolRegistry({ handlers: {
+    listMyBookings: async () => ({ bookings: [{ ...validBooking, serviceAddress: 'private address' }] }),
+  } });
+  await assert.rejects(leakedBooking.execute('listMyBookings', {}, { role: 'helper', authorization }), { code: 'tool-output-invalid' });
+
+  const validWalletEntry = {
+    entryType: 'commission_deduction', amountMinor: 100, availableDeltaMinor: -100,
+    outstandingCommissionDeltaMinor: 0, description: 'Commission collected', createdAtMs: 1000,
+  };
+  const wallet = createWhatsAppToolRegistry({ handlers: {
+    listMyWalletTransactions: async () => ({ transactions: [validWalletEntry] }),
+  } });
+  assert.equal((await wallet.execute('listMyWalletTransactions', { limit: 5 }, { role: 'helper', authorization })).transactions.length, 1);
+  const leakedWallet = createWhatsAppToolRegistry({ handlers: {
+    listMyWalletTransactions: async () => ({ transactions: [{ ...validWalletEntry, payoutId: 'private-operation-id' }] }),
+  } });
+  await assert.rejects(leakedWallet.execute('listMyWalletTransactions', { limit: 5 }, { role: 'helper', authorization }), { code: 'tool-output-invalid' });
+
+  const validPayout = {
+    status: 'pending', amount: 120, currency: 'ZAR', periodStart: '', periodEnd: '', weekKey: '2026-W42',
+    scheduledAtMs: null, reason: '',
+  };
+  const payouts = createWhatsAppToolRegistry({ handlers: {
+    getMyPayoutStatus: async () => ({ payouts: [validPayout] }),
+  } });
+  assert.equal((await payouts.execute('getMyPayoutStatus', {}, { role: 'helper', authorization })).payouts.length, 1);
+  const leakedPayout = createWhatsAppToolRegistry({ handlers: {
+    getMyPayoutStatus: async () => ({ payouts: [{ ...validPayout, payoutId: 'private-operation-id' }] }),
+  } });
+  await assert.rejects(leakedPayout.execute('getMyPayoutStatus', {}, { role: 'helper', authorization }), { code: 'tool-output-invalid' });
+});
+
 test('human escalation requires a user request, a recognized issue, or a backend knowledge miss', async () => {
   const registry = createWhatsAppToolRegistry({
     handlers: { requestHumanSupport: async () => ({ code: 'handed_off', ticketId: 'wa_support_123', duplicate: false }) },
@@ -91,4 +134,34 @@ test('human escalation requires a user request, a recognized issue, or a backend
   assert.equal(result.code, 'handed_off');
   const backendEscalation = await registry.execute('requestHumanSupport', { reason: 'No approved answer' }, { role: 'guest', authorization, escalationRequired: true });
   assert.equal(backendEscalation.code, 'handed_off');
+});
+
+test('helper offer and earnings tools are read-only, helper-only, and require a verified helper identity', async () => {
+  const registry = createWhatsAppToolRegistry({ handlers: {
+    listMyAvailableOffers: async (_args, context) => ({ offers: [{ serviceSummary: 'Car wash', amount: 350, currency: 'ZAR', expiresAtMs: 1000 }] }),
+    getMyEarningsSummary: async (_args, context) => ({
+      currency: 'ZAR', availableWalletMinor: 1200, reservedWalletMinor: 300, outstandingCommissionMinor: 50,
+      recentPeriods: [{ weekKey: '2026-W42', status: 'pending', completedJobs: 2, helperAmount: 300, platformAmount: 30, paidAtMs: null, scheduledAtMs: null }],
+    }),
+  } });
+  const auth = { uid: 'helper-1', role: 'helper', linked: true, verified: true, helperVerified: true };
+  await assert.rejects(registry.execute('listMyAvailableOffers', {}, { role: 'customer', authorization: { ...auth, role: 'customer' } }), { code: 'tool-permission-denied' });
+  await assert.rejects(registry.execute('getMyEarningsSummary', {}, { role: 'helper', authorization: { ...auth, helperVerified: false } }), { code: 'helper-verification-required' });
+  const offers = await registry.execute('listMyAvailableOffers', {}, { role: 'helper', authorization: auth });
+  const earnings = await registry.execute('getMyEarningsSummary', {}, { role: 'helper', authorization: auth });
+  assert.equal(offers.offers[0].serviceSummary, 'Car wash');
+  assert.equal(earnings.recentPeriods[0].helperAmount, 300);
+  assert.equal(registry.isReadOnly('listMyAvailableOffers'), true);
+  assert.equal(registry.isReadOnly('getMyEarningsSummary'), true);
+  assert.equal(registry.definitions({ authorization: { role: 'guest' } }).some((tool) => tool.name === 'listMyAvailableOffers'), false);
+});
+
+test('registry exposes the existing fourteen approved tools plus the two read-only helper tools', () => {
+  const registry = createWhatsAppToolRegistry();
+  const tools = registry.definitions({ authorization: { role: 'helper' } });
+  assert.equal(Object.keys(TOOL_DEFINITIONS).length, 16);
+  assert.equal(tools.length, 15);
+  assert.ok(tools.some((tool) => tool.name === 'listMyAvailableOffers'));
+  assert.ok(tools.some((tool) => tool.name === 'getMyEarningsSummary'));
+  assert.equal(tools.filter((tool) => tool.stateChanging).length, 2);
 });

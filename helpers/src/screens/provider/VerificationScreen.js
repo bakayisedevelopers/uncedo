@@ -5,7 +5,7 @@ import { useHelpersApp } from '../../context/HelpersAppContext';
 import { colors } from '../../theme/colors';
 
 export function VerificationScreen({ navigate, goBack }) {
-  const { profile, actions, saveError, saving } = useHelpersApp();
+  const { profile } = useHelpersApp();
   const isVerified = profile.verificationStatus === 'verified';
 
   return (
@@ -34,13 +34,8 @@ export function VerificationScreen({ navigate, goBack }) {
           <Text style={styles.item}>4. Payout destination verified for weekly disbursement</Text>
         </View>
 
-        {saveError ? <Text style={styles.error}>{saveError}</Text> : null}
         <View style={styles.buttonRow}>
-          <ActionButton
-            label={saving ? 'Saving...' : isVerified ? 'Mark pending review' : 'Mark verified'}
-            onPress={() => actions.setVerificationStatus(isVerified ? 'pending' : 'verified')}
-            disabled={saving}
-          />
+          <Text style={styles.item}>Verification status is updated by Uncedo after review. You cannot change it from this screen.</Text>
           <ActionButton label="Review agreement" tone="secondary" onPress={() => navigate({ key: 'Agreement', params: { parentTab: 'Profile' } })} />
         </View>
       </Card>

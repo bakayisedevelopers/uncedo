@@ -55,32 +55,79 @@ service cloud.firestore {
         );
     }
 
+    function safeCustomerProfile(data) {
+      return !('customerProfile' in data) || (data.customerProfile is map
+        && data.customerProfile.keys().hasOnly(['accountType', 'customerType', 'serviceAddress', 'discoverySource', 'preferredServiceCategories', 'businessName', 'businessEmail', 'businessCategory']));
+    }
+
+    function safeStudentProfile(data) {
+      return !('studentProfile' in data) || (data.studentProfile is map
+        && data.studentProfile.keys().hasOnly(['grade', 'curriculum', 'discoverySource']));
+    }
+
+    function safeInitialAgreement(data) {
+      return !('agreement' in data) || (data.agreement is map
+        && (!('acceptedVersion' in data.agreement) || data.agreement.acceptedVersion == '')
+        && (!('currentVersionAccepted' in data.agreement) || data.agreement.currentVersionAccepted == false)
+        && (!('acceptedCurrentVersion' in data.agreement) || data.agreement.acceptedCurrentVersion == false));
+    }
+
+    function safeSelfEmail(data) {
+      return !('email' in data) || data.email == request.auth.token.get('email', '');
+    }
+
+    function safePayoutProfileChange() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['payout'])
+        || (request.resource.data.payout is map && resource.data.get('payout', {}) is map
+          && request.resource.data.payout.diff(resource.data.get('payout', {})).affectedKeys().hasOnly(['bankName', 'accountHolder', 'accountNumber']));
+    }
+
     function hasOnlySafeUserFieldChanges() {
-      return !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-        'ratings', 'metrics', 'wallet', 'paymentMethods', 'verificationStatus', 'payout',
-        'referralRewardCount', 'rewardAccount', 'rewards', 'membership', 'mastery',
-        'eligibleCompletedPaidBookings', 'eligibleCompletedPaidJobs', 'completedJobs',
-        'completionCounters', 'acceptanceRate', 'cancellationRate', 'completionRate',
-        'responseMetrics', 'earningsTotals', 'admin', 'adminNotes', 'blocked',
-        'isBlocked', 'suspended', 'isSuspended', 'role', 'roles', 'activeRole',
-        'isAdmin', 'adminStatus', 'isStaff', 'staffRole', 'supportRole', 'helperVerified', 'isVerified',
-        'payout', 'payoutVerificationStatus', 'accountStatus', 'restrictedStatus', 'dispatchPaused'
-      ]);
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'fullName', 'displayName', 'firstName', 'lastName', 'phoneNumber', 'providerType',
+        'email', 'businessName', 'homeAddress', 'city', 'profilePhoto', 'profilePhotoObjectPath',
+        'selfieUrl', 'selfieCapturedAt', 'selfieCaptureSource', 'onlineStatus',
+        'locationSharingEnabled', 'liveLocation',
+        'customerProfile', 'studentProfile', 'subjects', 'agreement', 'payout',
+        'updatedAt'
+      ])
+        && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['email']) || safeSelfEmail(request.resource.data))
+        && safeCustomerProfile(request.resource.data)
+        && safeStudentProfile(request.resource.data)
+        && safePayoutProfileChange()
+        && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['updatedAt']) || request.resource.data.updatedAt == request.time);
+    }
+
+    function safeUserCreateKeys(data) {
+      return data.keys().hasOnly([
+        'uid', 'email', 'fullName', 'displayName', 'firstName', 'lastName', 'phoneNumber',
+        'providerType', 'businessName', 'homeAddress', 'city', 'profilePhoto',
+        'profilePhotoObjectPath', 'selfieUrl', 'selfieCapturedAt', 'selfieCaptureSource',
+        'role', 'activeRole', 'roles', 'onlineStatus', 'locationSharingEnabled', 'liveLocation',
+        'customerProfile', 'studentProfile', 'subjects', 'verificationStatus', 'agreement',
+        'createdAt', 'updatedAt'
+      ])
+        && safeCustomerProfile(data)
+        && safeStudentProfile(data);
     }
 
     match /users/{userId} {
-      allow get: if isOwner(userId) || isAdmin() || (signedIn() && resource.data.get('activeRole', '') == 'tutor');
-      allow list: if isAdmin() || signedIn();
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
       allow create: if isAdmin() || (isOwner(userId)
+        && request.resource.data.uid == userId
+        && safeUserCreateKeys(request.resource.data)
+        && safeSelfEmail(request.resource.data)
         && hasSafeSelfAssignedRoles(request.resource.data)
         && hasSafeSelfAssignedVerification(request.resource.data)
+        && safeInitialAgreement(request.resource.data)
         && !request.resource.data.keys().hasAny(['admin', 'isAdmin', 'isStaff', 'staffRole', 'supportRole', 'adminNotes']));
       allow update: if isAdmin() || (isOwner(userId) && hasOnlySafeUserFieldChanges());
       allow delete: if isOwner(userId) || isAdmin();
 
       match /aiLogs/{logId} {
         allow read: if isOwner(userId) || isAdmin();
-        allow create: if isOwner(userId) || isAdmin();
+        allow create: if false;
         allow update, delete: if isAdmin();
       }
     }
@@ -351,28 +398,16 @@ service cloud.firestore {
         );
     }
 
-    function isCustomerCreatingSafeServiceRequest() {
-      return signedIn()
-        && request.resource.data.customerId == request.auth.uid
-        && request.resource.data.status in ['collecting_details', 'scheduled_pending', 'matching']
-        && (!('helperAssignment' in request.resource.data) || request.resource.data.helperAssignment == null)
-        && (!('paymentStatus' in request.resource.data) || request.resource.data.paymentStatus == null)
-        && (!('paymentTransactionId' in request.resource.data) || request.resource.data.paymentTransactionId == null)
-        && (!('helperPayoutBreakdown' in request.resource.data) || request.resource.data.helperPayoutBreakdown == null)
-        && (!('currentOfferHelperId' in request.resource.data) || request.resource.data.currentOfferHelperId == null)
-        && (!('offerToken' in request.resource.data) || request.resource.data.offerToken == null);
-    }
-
-    function isCustomerUpdatingOwnServiceRequest() {
+    function isCustomerUpdatingOwnRequestMetadata() {
       return signedIn()
         && (resource.data.customerId == request.auth.uid || isLinkedWhatsAppGuestCustomer(resource.data.customerId))
         && request.resource.data.customerId == resource.data.customerId
-        && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-          'helperAssignment', 'currentOfferHelperId', 'helperQueue', 'offerToken', 'offerExpiresAt',
-          'offerRevision', 'offerCycleExcludedHelperIds', 'declinedHelperIds', 'lastOfferAt',
-          'paymentStatus', 'paymentTransactionId', 'chargedCardLast4', 'helperPayoutBreakdown',
-          'cancellationFeeAmount', 'endedAt', 'completedAt', 'ratings', 'metrics'
-        ]);
+        && resource.data.status == 'collecting_details'
+        && request.resource.data.status == resource.data.status
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'transcript', 'referenceAttachments', 'selectedPortfolioReferences', 'aiUsageSnapshot', 'updatedAt'
+        ])
+        && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['updatedAt']) || request.resource.data.updatedAt == request.time);
     }
 
     function isOfferedHelperAcceptingServiceRequest() {
@@ -404,9 +439,11 @@ service cloud.firestore {
 
     match /serviceRequests/{requestId} {
       allow get, list: if isAdmin() || isServiceRequestParticipant(resource.data);
-      allow create: if isAdmin() || isCustomerCreatingSafeServiceRequest();
+      // Request creation, questionnaire changes, quotes, confirmation, status,
+      // assignment and all financial fields are written by canonical backend services.
+      allow create: if isAdmin();
       allow update: if isAdmin()
-        || isCustomerUpdatingOwnServiceRequest()
+        || isCustomerUpdatingOwnRequestMetadata()
         || isOfferedHelperAcceptingServiceRequest()
         || isOfferedHelperDecliningServiceRequest()
         || isAssignedHelperUpdatingStatus();

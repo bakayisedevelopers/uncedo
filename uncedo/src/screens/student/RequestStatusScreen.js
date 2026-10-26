@@ -8,7 +8,7 @@ import { ErrorState, LoadingState } from '../../components/ui/States';
 import { useAuth } from '../../context/AuthContext';
 import { cancelClassRequest, subscribeToRequestById } from '../../services/classRequestService';
 import { subscribeToStudentSessions } from '../../services/sessionService';
-import { getUserProfile } from '../../services/userService';
+import { getFirebaseClients } from '../../firebase/config';
 import { colors } from '../../theme/colors';
 import { TERMINAL_REQUEST_STATUSES } from '../../utils/requestStatus';
 
@@ -193,10 +193,14 @@ export function RequestStatusScreen({ route, navigate, goBack }) {
     }
 
     let isMounted = true;
-    getUserProfile(offeredTutorId)
-      .then((profile) => {
+    Promise.resolve()
+      .then(() => {
+        const clients = getFirebaseClients();
+        return clients.firestoreModule.httpsCallable(clients.functions, 'getMyOfferedTutorSummary')({ requestId });
+      })
+      .then((result) => {
         if (isMounted) {
-          setOfferedTutorProfile(profile || null);
+          setOfferedTutorProfile(result.data || null);
         }
       })
       .catch(() => {
@@ -208,7 +212,7 @@ export function RequestStatusScreen({ route, navigate, goBack }) {
     return () => {
       isMounted = false;
     };
-  }, [request?.currentOfferTutorId, request?.status, request?.tutorId]);
+  }, [requestId, request?.currentOfferTutorId, request?.status, request?.tutorId]);
 
   const relatedSession = useMemo(
     () => sessions.find((item) => item.requestId === requestId) || null,
@@ -251,12 +255,11 @@ export function RequestStatusScreen({ route, navigate, goBack }) {
   const statusMeta = getStatusMeta(effectiveStatus);
   const tone = getToneStyles(statusMeta.tone);
   const isWaitingTutorAcceptance = String(request?.status || '').toLowerCase() === 'offered';
-  const tutorDisplayName = offeredTutorProfile?.fullName || offeredTutorProfile?.displayName || request?.tutorName || 'Helper';
+  const tutorDisplayName = offeredTutorProfile?.name || request?.tutorName || 'Helper';
   const tutorAvatarLetter = tutorDisplayName.charAt(0).toUpperCase();
   const canCancel = !TERMINAL_REQUEST_STATUSES.includes(String(request.status || '').toLowerCase());
   const tutorRating = Number(
-    offeredTutorProfile?.tutorProfile?.overallRating
-    ?? offeredTutorProfile?.ratings?.asTutor?.average
+    offeredTutorProfile?.rating
     ?? 0,
   );
 

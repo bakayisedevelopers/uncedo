@@ -19,7 +19,6 @@ export function ProfileCompletionScreen({ navigate, goBack }) {
   const [bankName, setBankName] = useState(payout.bankName || '');
   const [accountHolder, setAccountHolder] = useState(payout.accountHolder || '');
   const [accountNumber, setAccountNumber] = useState(payout.accountNumber || '');
-  const [recipientCode, setRecipientCode] = useState(payout.recipientCode || '');
   const [message, setMessage] = useState('');
 
   useEffect(() => {
@@ -31,8 +30,7 @@ export function ProfileCompletionScreen({ navigate, goBack }) {
     setBankName(payout.bankName || '');
     setAccountHolder(payout.accountHolder || '');
     setAccountNumber(payout.accountNumber || '');
-    setRecipientCode(payout.recipientCode || '');
-  }, [payout.accountHolder, payout.accountNumber, payout.bankName, payout.recipientCode, profile.businessName, profile.firstName, profile.lastName, profile.phoneNumber, profile.providerType]);
+  }, [payout.accountHolder, payout.accountNumber, payout.bankName, profile.businessName, profile.firstName, profile.lastName, profile.phoneNumber, profile.providerType]);
 
   const saveBasics = async () => {
     if (String(phoneNumber || '').trim() === '' && !whatsappAuthenticated) {
@@ -57,11 +55,9 @@ export function ProfileCompletionScreen({ navigate, goBack }) {
       bankName,
       accountHolder,
       accountNumber,
-      recipientCode,
-      verificationStatus: bankName && accountHolder && accountNumber && recipientCode ? 'verified' : 'pending',
     });
     if (result?.success) {
-      setMessage('Payout details saved.');
+      setMessage('Payout details saved. Uncedo must verify the payout destination before it can be used.');
     }
   };
 
@@ -178,13 +174,6 @@ export function ProfileCompletionScreen({ navigate, goBack }) {
           placeholderTextColor={colors.muted}
           value={accountNumber}
           onChangeText={setAccountNumber}
-          style={styles.input}
-        />
-        <TextInput
-          placeholder="Recipient code"
-          placeholderTextColor={colors.muted}
-          value={recipientCode}
-          onChangeText={setRecipientCode}
           style={styles.input}
         />
         <ActionButton label={saving ? 'Saving...' : 'Save payout details'} onPress={savePayout} disabled={saving} />

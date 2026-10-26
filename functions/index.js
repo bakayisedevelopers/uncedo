@@ -102,6 +102,10 @@ const { createWhatsAppSupportMediaUrl } = require('./whatsapp/supportMedia');
 const { appendBoundedConversationTurn } = require('./whatsapp/conversationMemory');
 const { getWhatsAppConversationHistory: queryWhatsAppConversationHistory } = require('./whatsapp/conversationHistory');
 const { createWhatsAppIntentRouter } = require('./whatsapp/aiIntentRouter');
+const { createWhatsAppResponseGenerator, supportsNaturalResponse } = require('./whatsapp/aiResponseGenerator');
+const { isManuallyRetryableAssistantJob, sanitizeAssistantFailure } = require('./whatsapp/assistantJobRecovery');
+const { buildNearbyHelperMapResults, validOrigin: validMapOrigin } = require('./nearbyHelperMapService');
+const { buildPublicTutorSummary } = require('./publicProfileSummary');
 const { createWhatsAppToolRegistry } = require('./whatsapp/toolRegistry');
 const { retentionDays, retentionExpiryMs, shouldDeleteConversationMessage } = require('./whatsapp/retentionPolicy');
 const {
@@ -1148,6 +1152,8 @@ function buildHelperDispatchIndexDocument(helperId = '', helper = {}, catalogInd
     recentAssignmentCount: normalizePositiveNumber(metrics.recentAssignmentsCount ?? metrics.recentAssignmentCount, 0),
     lastOfferAt: helper.lastOfferAt || null,
     lastLocationUpdatedAt: liveLocation?.updatedAtMs || null,
+    publicName: String(helper.fullName || helper.displayName || helper.firstName || 'Helper').trim().slice(0, 120),
+    publicProfilePhoto: String(helper.profilePhoto || helper.selfieUrl || helper.photoURL || '').trim().slice(0, 1000),
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     sourceUpdatedAt: helper.updatedAt || null,
   };
@@ -1699,11 +1705,17 @@ exports.getCustomerServicePricingQuote = onRequest({ cors: true, maxInstances: 5
   }
 });
 
+async function hasCustomerServiceRole(uid) {
+  const snapshot = await db.collection('users').doc(uid).get();
+  return snapshot.exists && profileAllowsRole(snapshot.data() || {}, 'customer');
+}
+
 exports.quoteCustomerServiceRequest = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   const token = getBearerToken(req);
   const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
   if (!decoded?.uid) return res.status(401).json({ success: false, message: 'Unauthorized request.' });
+  if (!(await hasCustomerServiceRole(decoded.uid))) return res.status(403).json({ success: false, message: 'A customer account is required.' });
   const requestId = String(req.body?.requestId || '').trim();
   if (!requestId) return res.status(400).json({ success: false, message: 'A request ID is required.' });
   try {
@@ -1734,6 +1746,7 @@ exports.updateCustomerServiceRequestDraft = onRequest({ cors: true, maxInstances
   const token = getBearerToken(req);
   const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
   if (!decoded?.uid) return res.status(401).json({ success: false, message: 'Unauthorized request.' });
+  if (!(await hasCustomerServiceRole(decoded.uid))) return res.status(403).json({ success: false, message: 'A customer account is required.' });
   const requestId = String(req.body?.requestId || '').trim();
   if (!requestId) return res.status(400).json({ success: false, message: 'A request ID is required.' });
   try {
@@ -1766,6 +1779,10 @@ exports.createCustomerServiceRequest = onRequest({ cors: true, maxInstances: 5, 
   const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
   if (!decoded?.uid) {
     res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+  if (!(await hasCustomerServiceRole(decoded.uid))) {
+    res.status(403).json({ success: false, message: 'A customer account is required.' });
     return;
   }
 
@@ -1831,6 +1848,10 @@ exports.confirmCustomerServiceRequest = onRequest({ cors: true, maxInstances: 5,
   const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
   if (!decoded?.uid) {
     res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    return;
+  }
+  if (!(await hasCustomerServiceRole(decoded.uid))) {
+    res.status(403).json({ success: false, message: 'A customer account is required.' });
     return;
   }
 
@@ -2069,6 +2090,10 @@ function whatsappRetentionDays(variableName, defaultDays) {
 
 function whatsappAiEnabled() {
   return String(process.env.WHATSAPP_AI_ENABLED || '').trim().toLowerCase() === 'true';
+}
+
+function whatsappNaturalResponsesEnabled() {
+  return String(process.env.WHATSAPP_NATURAL_RESPONSES_ENABLED || '').trim().toLowerCase() === 'true';
 }
 
 function whatsappMessagingEnabled() {
@@ -3017,7 +3042,10 @@ function buildWhatsAppAssistantToolRegistry({ identity, authorization, conversat
       async listMyBookings(_args, context) {
         const requestIdentity = { ...identity, linkedFirebaseUid: context.authorization.uid, role: context.authorization.role };
         const requests = await listWhatsAppRequests({ db, identity: requestIdentity, perPrincipalLimit: 25, resultLimit: 5 });
-        return { bookings: requests.map((request) => ({ ...buildWhatsAppRequestSummary(request), createdAtMs: normalizeTimestamp(request.createdAtMs || request.createdAt) })) };
+        return { bookings: requests.map((request) => ({
+          ...buildWhatsAppRequestSummary(request),
+          createdAtMs: normalizeTimestamp(request.createdAtMs || request.createdAt) || null,
+        })) };
       },
       async getBookingStatus(args, context) {
         const requestIdentity = { ...identity, linkedFirebaseUid: context.authorization.uid, role: context.authorization.role };
@@ -3059,8 +3087,6 @@ function buildWhatsAppAssistantToolRegistry({ identity, authorization, conversat
             availableDeltaMinor: Number(entry.availableDeltaMinor || 0),
             outstandingCommissionDeltaMinor: Number(entry.outstandingCommissionDeltaMinor || 0),
             description: String(entry.description || '').slice(0, 240),
-            requestId: String(entry.requestId || '').slice(0, 128),
-            payoutId: String(entry.payoutId || '').slice(0, 128),
             createdAtMs: Number(entry.createdAtMs || 0),
           };
         }) };
@@ -3070,16 +3096,77 @@ function buildWhatsAppAssistantToolRegistry({ identity, authorization, conversat
         const payouts = snapshot.docs.map((document) => {
           const payout = document.data() || {};
           return {
-            payoutId: document.id,
+            documentId: document.id,
             status: String(payout.status || 'unknown').slice(0, 40),
             amount: Number(payout.amount ?? payout.amountZar ?? payout.totalAmount ?? payout.helperAmount ?? (Number(payout.amountMinor || 0) / 100)) || 0,
             currency: String(payout.currency || 'ZAR').toUpperCase(),
             periodStart: String(payout.periodStart || payout.weekStart || '').slice(0, 40),
             periodEnd: String(payout.periodEnd || payout.weekEnd || '').slice(0, 40),
             weekKey: String(payout.weekKey || '').slice(0, 40),
+            scheduledAtMs: normalizeTimestamp(payout.scheduledAt || payout.scheduledFor || payout.nextPayoutAt) || null,
+            reason: String(payout.pendingReason || payout.reconciliationReason || '').slice(0, 160),
           };
-        }).sort((left, right) => right.weekKey.localeCompare(left.weekKey) || right.payoutId.localeCompare(left.payoutId)).slice(0, 5);
-        return { payouts };
+        }).sort((left, right) => right.weekKey.localeCompare(left.weekKey) || right.documentId.localeCompare(left.documentId)).slice(0, 5);
+        return { payouts: payouts.map(({ documentId, ...payout }) => payout) };
+      },
+      async listMyAvailableOffers(_args, context) {
+        const snapshot = await db.collection('serviceRequests')
+          .where('currentOfferHelperId', '==', context.authorization.uid)
+          .limit(20)
+          .get();
+        const catalog = await getLiveServiceCatalogEntries();
+        const catalogById = new Map((Array.isArray(catalog) ? catalog : [])
+          .filter((service) => service.active === true && service.approved === true)
+          .map((service) => [String(service.id || ''), service]));
+        const now = Date.now();
+        const offers = snapshot.docs.map((document) => {
+          const request = document.data() || {};
+          const expiresAtMs = normalizeTimestamp(request.offerExpiresAt);
+          if (request.status !== 'helper_found' || request.helperAssignment?.helperId || !request.offerToken || expiresAtMs <= now) return null;
+          const total = Number(request.pricingSnapshot?.total ?? request.totalAmount);
+          const serviceIds = [...new Set([
+            ...(Array.isArray(request.serviceIds) ? request.serviceIds : []),
+            request.selectedPackageId,
+          ].map((id) => String(id || '').trim()).filter(Boolean))];
+          const serviceSummary = serviceIds.map((id) => catalogById.get(id)?.label).filter(Boolean).slice(0, 4).join(', ')
+            || String(request.categoryId || '').replace(/[_-]+/g, ' ').slice(0, 80)
+            || 'Service request';
+          return {
+            serviceSummary,
+            amount: Number.isFinite(total) ? total : null,
+            currency: String(request.pricingSnapshot?.currency || request.currency || 'ZAR').toUpperCase(),
+            expiresAtMs,
+          };
+        }).filter(Boolean).slice(0, 10);
+        return { offers };
+      },
+      async getMyEarningsSummary(_args, context) {
+        const uid = context.authorization.uid;
+        const [walletSnapshot, payoutSnapshot] = await Promise.all([
+          helperWalletReference(db, uid).get(),
+          db.collection(HELPER_PAYOUT_COLLECTION).where('helperId', '==', uid).limit(24).get(),
+        ]);
+        const wallet = normalizeWalletForClient(walletSnapshot.exists ? walletSnapshot.data() || {} : emptyHelperWallet(uid));
+        const recentPeriods = payoutSnapshot.docs.map((document) => {
+          const payout = document.data() || {};
+          const money = (value) => Number.isFinite(Number(value)) ? Number(value) : null;
+          return {
+            weekKey: String(payout.weekKey || '').slice(0, 40),
+            status: String(payout.status || 'unknown').slice(0, 40),
+            completedJobs: Number.isFinite(Number(payout.completedJobs || 0)) ? Math.max(0, Number(payout.completedJobs || 0)) : 0,
+            helperAmount: money(payout.helperAmount ?? payout.amount ?? (Number.isFinite(Number(payout.amountMinor)) ? Number(payout.amountMinor) / 100 : null)),
+            platformAmount: money(payout.platformAmount),
+            paidAtMs: normalizeTimestamp(payout.paidAt || payout.transferCompletedAt) || null,
+            scheduledAtMs: normalizeTimestamp(payout.scheduledAt || payout.scheduledFor || payout.nextPayoutAt) || null,
+          };
+        }).sort((left, right) => right.weekKey.localeCompare(left.weekKey)).slice(0, 8);
+        return {
+          currency: 'ZAR',
+          availableWalletMinor: wallet.availableMinor,
+          reservedWalletMinor: wallet.reservedMinor,
+          outstandingCommissionMinor: wallet.outstandingCommissionMinor,
+          recentPeriods,
+        };
       },
       async requestHumanSupport(args, context) {
         const result = await createOrAppendWhatsAppSupportMessage({
@@ -3122,8 +3209,14 @@ function formatWhatsAppToolResult(toolName, result = {}) {
     ? `Recent helper wallet entries:\n${result.transactions.slice(0, 10).map((item) => `• ${item.description || item.entryType}: R${(Number(item.amountMinor || 0) / 100).toFixed(2)}`).join('\n')}`
     : 'There are no recent helper wallet transactions.';
   if (toolName === 'getMyPayoutStatus') return (result.payouts || []).length
-    ? `Recent weekly payout records:\n${result.payouts.map((item) => `• ${item.payoutId}: ${item.status}, R${Number(item.amount || 0).toFixed(2)} ${item.currency}`).join('\n')}`
+    ? `Recent weekly payout records:\n${result.payouts.map((item) => `• ${item.status}, R${Number(item.amount || 0).toFixed(2)} ${item.currency}${item.weekKey ? ` for ${item.weekKey}` : ''}${item.scheduledAtMs ? `; scheduled ${new Date(item.scheduledAtMs).toLocaleDateString('en-ZA')}` : ''}${item.reason ? `; ${item.reason}` : ''}`).join('\n')}`
     : 'I could not find a weekly payout record for this helper account.';
+  if (toolName === 'listMyAvailableOffers') return (result.offers || []).length
+    ? `You have ${result.offers.length} unexpired offer${result.offers.length === 1 ? '' : 's'} addressed to you:\n${result.offers.map((item) => `• ${item.serviceSummary}${item.amount === null ? '' : ` — R${Number(item.amount).toFixed(2)} ${item.currency}`}; expires ${new Date(item.expiresAtMs).toLocaleTimeString('en-ZA')}`).join('\n')}\nOpen the helper app to review and accept or decline an offer.`
+    : 'You do not have any current unexpired offers.';
+  if (toolName === 'getMyEarningsSummary') return (result.recentPeriods || []).length
+    ? `Your recent payout records:\n${result.recentPeriods.map((item) => `• ${item.weekKey || 'Period'}: ${item.status}; ${item.completedJobs} completed jobs${item.helperAmount === null ? '' : `; helper earnings R${Number(item.helperAmount).toFixed(2)}`}${item.platformAmount === null ? '' : `; platform commission R${Number(item.platformAmount).toFixed(2)}`}`).join('\n')}\nWallet: available R${(Number(result.availableWalletMinor || 0) / 100).toFixed(2)}, reserved R${(Number(result.reservedWalletMinor || 0) / 100).toFixed(2)}, outstanding commission R${(Number(result.outstandingCommissionMinor || 0) / 100).toFixed(2)}.`
+    : `I could not find a weekly earnings record yet. Your wallet currently shows available R${(Number(result.availableWalletMinor || 0) / 100).toFixed(2)}, reserved R${(Number(result.reservedWalletMinor || 0) / 100).toFixed(2)}, and outstanding commission R${(Number(result.outstandingCommissionMinor || 0) / 100).toFixed(2)}.`;
   if (toolName === 'requestHumanSupport') return `I’ve referred this to Uncedo support. Ticket reference: ${result.ticketId}. AI replies are paused while a support person handles it.`;
   return 'I could not complete that request safely.';
 }
@@ -3159,11 +3252,19 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
   const claim = await db.runTransaction(async (transaction) => {
     const jobSnap = await transaction.get(jobRef);
     if (!jobSnap.exists || jobSnap.data()?.status !== 'pending') return false;
-    transaction.update(jobRef, { status: 'processing', startedAt: admin.firestore.FieldValue.serverTimestamp() });
+    transaction.update(jobRef, {
+      status: 'processing',
+      phase: 'preparation',
+      attemptCount: Number(jobSnap.data()?.attemptCount || 0) + 1,
+      startedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
     return true;
   });
   if (!claim) return;
 
+  let assistantPhase = 'preparation';
+  let toolExecutionStarted = false;
+  let outboundAttempted = false;
   try {
     const identityId = String(initialJob.identityId || '').trim();
     const eventId = String(initialJob.eventId || event.params.jobId || '').trim();
@@ -3185,6 +3286,9 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     }
 
     const reply = async (text, interactive = null) => {
+      outboundAttempted = true;
+      assistantPhase = 'outbound_attempted';
+      await jobRef.set({ phase: assistantPhase, outboundAttempted: true, retrySafe: false, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       await persistWhatsAppAssistantReply({
         sourceEventId: eventId,
         identityId,
@@ -3193,6 +3297,8 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         text,
         interactive,
       });
+      assistantPhase = 'outbound_completed';
+      await jobRef.set({ phase: assistantPhase, outboundCompleted: true, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     };
 
     if (conversation.humanHandoff === true) {
@@ -4091,6 +4197,8 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     const toolAuthorization = toolPrincipal.authorization;
     const toolRegistry = buildWhatsAppAssistantToolRegistry({ identity: toolIdentity, authorization: toolAuthorization, conversationRef, eventId, inbound });
     const availableTools = toolRegistry.definitions({ identity: toolIdentity, authorization: toolAuthorization });
+    assistantPhase = 'classification';
+    await jobRef.set({ phase: assistantPhase, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     const intentResult = await model.classify({
       message: inbound,
       recentHistory: Array.isArray(conversation.recentHistory) ? conversation.recentHistory : [],
@@ -4106,6 +4214,8 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       questions,
       availableTools,
     });
+    assistantPhase = 'workflow';
+    await jobRef.set({ phase: assistantPhase, retrySafe: false, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
 
     const latestConversationSnapshot = await conversationRef.get();
     if (!latestConversationSnapshot.exists || String(latestConversationSnapshot.data()?.lastInboundEventId || '') !== eventId) {
@@ -4117,7 +4227,11 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     let selectedToolArguments = intentResult.toolArguments || {};
     if (!selectedTool && ['customer_support', 'provider_support', 'platform_information'].includes(intentResult.intent)) {
       selectedTool = 'getSupportKnowledge';
-      selectedToolArguments = { query: String(inbound.text || '').slice(0, 300) };
+      const priorUserTurns = (Array.isArray(conversation.recentHistory) ? conversation.recentHistory : [])
+        .filter((turn) => turn?.role === 'user')
+        .slice(-2)
+        .map((turn) => String(turn.text || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 180));
+      selectedToolArguments = { query: [String(inbound.text || '').slice(0, 300), ...priorUserTurns].filter(Boolean).join(' ').slice(0, 600) };
     }
     if (selectedTool) {
       if (selectedTool === 'requestHumanSupport' && !whatsappSupportEnabled()) {
@@ -4134,6 +4248,9 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       const executionId = stableEventId(`whatsapp-tool:${eventId}:${selectedTool}`);
       let toolResult = null;
       let executionCode = 'ok';
+      toolExecutionStarted = true;
+      assistantPhase = 'tool_execution';
+      await jobRef.set({ phase: assistantPhase, toolExecutionStarted: true, retrySafe: false, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       try {
         toolResult = await runWhatsAppToolWithTimeout(() => toolRegistry.execute(selectedTool, selectedToolArguments, { identity: toolIdentity, authorization: toolAuthorization, role: toolAuthorization.role, eventId, inbound, originalUserText }));
       } catch (error) {
@@ -4187,6 +4304,30 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         return;
       }
       const toolText = formatWhatsAppToolResult(selectedTool, toolResult);
+      let responseText = toolText;
+      if (whatsappNaturalResponsesEnabled() && toolRegistry.isReadOnly(selectedTool) && supportsNaturalResponse(selectedTool)
+        && !(selectedTool === 'getSupportKnowledge' && toolResult.found !== true)) {
+        try {
+          const responseGenerator = createWhatsAppResponseGenerator({
+            openAiApiKey: String(process.env.OPENAI_API_KEY || '').trim(),
+            openAiModel: String(process.env.OPENAI_MODEL || 'gpt-6-luna').trim(),
+            geminiApiKey: String(process.env.GEMINI_API_KEY || '').trim(),
+            geminiModel: String(process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite').trim(),
+          });
+          const generated = await runWhatsAppToolWithTimeout(() => responseGenerator.generate({
+            question: originalUserText,
+            recentHistory: Array.isArray(conversation.recentHistory) ? conversation.recentHistory : [],
+            toolName: selectedTool,
+            toolResult,
+          }), 9000);
+          responseText = generated.response;
+          await jobRef.set({ responseProvider: generated.provider, responseModel: generated.model, responseGeneration: 'natural', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        } catch (error) {
+          logger.warn('whatsapp_natural_response_fallback', { eventId, toolName: selectedTool, errorCode: String(error?.code || 'response_generation_failed').slice(0, 100) });
+          responseText = toolText;
+          await jobRef.set({ responseGeneration: 'deterministic_fallback', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        }
+      }
       if (selectedTool === 'requestHumanSupport') {
         await reply(toolText);
       } else if (selectedTool === 'getSupportKnowledge' && toolResult.found !== true
@@ -4200,7 +4341,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
               { type: 'reply', reply: { id: `wa_profile_cancel_${toolResult.proposalId}`, title: 'Cancel' } },
             ] },
           });
-        } else await reply(toolText);
+        } else await reply(responseText);
       }
       await jobRef.set({
         status: 'completed', intent: intentResult.intent, toolName: selectedTool,
@@ -4467,9 +4608,59 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     await jobRef.set({
       status: 'failed',
       errorCode: String(error?.code || 'assistant_processing_failed').slice(0, 120),
+      phase: assistantPhase,
+      toolExecutionStarted,
+      outboundAttempted,
+      retrySafe: assistantPhase === 'classification' && !toolExecutionStarted && !outboundAttempted,
+      manualRecoveryAvailable: assistantPhase === 'classification' && !toolExecutionStarted && !outboundAttempted,
+      attemptCount: Math.max(1, Number(initialJob.attemptCount || 0) + 1),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     }, { merge: true }).catch(() => null);
   }
+});
+
+exports.listWhatsAppAssistantFailures = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 20 }, async (request) => {
+  await requireWhatsAppSupportAdmin(request);
+  const snapshot = await db.collection('whatsappAssistantJobs').where('status', '==', 'failed').orderBy('updatedAt', 'desc').limit(50).get();
+  return { jobs: snapshot.docs.map((document) => sanitizeAssistantFailure(document.id, document.data() || {})) };
+});
+
+exports.retryWhatsAppAssistantJob = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 20 }, async (request) => {
+  const adminUid = await requireWhatsAppSupportAdmin(request);
+  const jobId = String(request.data?.jobId || '').trim();
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(jobId)) throw new HttpsError('invalid-argument', 'A valid assistant job is required.');
+  const oldRef = db.collection('whatsappAssistantJobs').doc(jobId);
+  const oldSnapshot = await oldRef.get();
+  if (!oldSnapshot.exists) throw new HttpsError('not-found', 'Assistant job not found.');
+  const oldJob = oldSnapshot.data() || {};
+  if (!isManuallyRetryableAssistantJob(oldJob)) throw new HttpsError('failed-precondition', 'This job is not safe for manual retry.');
+  const retryJobId = stableEventId(`whatsapp-assistant-manual-retry:${jobId}:${Number(oldJob.attemptCount || 0)}`);
+  const retryRef = db.collection('whatsappAssistantJobs').doc(retryJobId);
+  const outcome = await db.runTransaction(async (transaction) => {
+    const [current, existingRetry] = await Promise.all([transaction.get(oldRef), transaction.get(retryRef)]);
+    const job = current.data() || {};
+    if (!current.exists || !isManuallyRetryableAssistantJob(job)) return { code: 'not-retryable' };
+    if (job.recoveryJobId) return { code: 'already-retried', retryJobId: job.recoveryJobId };
+    if (existingRetry.exists) {
+      transaction.update(oldRef, { recoveryJobId: retryJobId, manualRecoveryRequestedBy: adminUid, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+      return { code: 'already-retried', retryJobId };
+    }
+    transaction.create(retryRef, {
+      identityId: String(job.identityId), eventId: String(job.eventId), status: 'pending',
+      attemptCount: Number(job.attemptCount || 0), retryOfJobId: jobId,
+      manualRecoveryRequestedBy: adminUid, createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      retentionExpiresAtMs: Date.now() + whatsappRetentionDays('WHATSAPP_JOB_RETENTION_DAYS', 30) * 24 * 60 * 60 * 1000,
+    });
+    transaction.update(oldRef, { recoveryJobId: retryJobId, manualRecoveryRequestedBy: adminUid, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+    transaction.create(db.collection('auditEvents').doc(stableEventId(`whatsapp-assistant-manual-retry:${jobId}:${adminUid}`)), {
+      eventType: 'whatsapp_assistant_job_manual_retry_requested', jobId, retryJobId, actorUid: adminUid,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    return { code: 'queued', retryJobId };
+  });
+  if (outcome.code === 'not-retryable') throw new HttpsError('failed-precondition', 'This job is not safe for manual retry.');
+  return { queued: outcome.code === 'queued', duplicate: outcome.code === 'already-retried', retryJobId: outcome.retryJobId };
 });
 
 exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{requestId}', async (event) => {
@@ -5420,6 +5611,52 @@ exports.rebuildHelperDispatchIndex = onRequest({ cors: true, ...HALF_CPU_OPTIONS
 
   logger.info('helper_dispatch_index_rebuild_complete', counts);
   res.json({ ok: true, ...counts });
+});
+
+exports.getCustomerNearbyHelpers = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 20 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  const token = getBearerToken(req);
+  const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+  if (!decoded?.uid) return res.status(401).json({ success: false, message: 'Sign in to view nearby helpers.' });
+  const profileSnapshot = await db.collection('users').doc(decoded.uid).get();
+  if (!profileSnapshot.exists || !profileAllowsRole(profileSnapshot.data() || {}, 'customer')) {
+    return res.status(403).json({ success: false, message: 'A customer account is required.' });
+  }
+  const origin = validMapOrigin(req.body?.latitude, req.body?.longitude);
+  if (!origin) return res.status(400).json({ success: false, message: 'A valid customer location is required.' });
+  const radiusKm = Math.max(1, Math.min(50, Number(req.body?.radiusKm) || 20));
+  const limit = Math.max(1, Math.min(50, Math.floor(Number(req.body?.limit) || 24)));
+  const cells = getH3QueryCellsForLocation(origin);
+  const pages = await Promise.all(chunkList(cells, 10).map((cellChunk) => db.collection('helperDispatchIndex')
+    .where('h3Cell', 'in', cellChunk).limit(60).get()));
+  const documents = [...new Map(pages.flatMap((page) => page.docs).map((document) => [document.id, document]))
+    .values()].map((document) => ({ id: document.id, data: document.data() || {} }));
+  const helpers = buildNearbyHelperMapResults({ documents, origin, radiusKm, limit });
+  return res.status(200).json({ success: true, currentUser: { id: decoded.uid, ...origin }, helpers, radiusKm });
+});
+
+exports.getMyOfferedTutorSummary = onCall({ maxInstances: 5, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 15 }, async (request) => {
+  const uid = String(request.auth?.uid || '').trim();
+  if (!uid) throw new HttpsError('unauthenticated', 'Sign in to view this offer.');
+  const requestId = String(request.data?.requestId || '').trim();
+  if (!/^[A-Za-z0-9_-]{6,128}$/.test(requestId)) throw new HttpsError('invalid-argument', 'A valid request is required.');
+
+  const requestSnapshot = await db.collection('classRequests').doc(requestId).get();
+  const classRequest = requestSnapshot.exists ? requestSnapshot.data() || {} : null;
+  if (!classRequest || String(classRequest.studentId || '') !== uid) {
+    throw new HttpsError('not-found', 'The request is unavailable.');
+  }
+  if (String(classRequest.status || '').toLowerCase() !== 'offered') {
+    throw new HttpsError('failed-precondition', 'There is no current offer for this request.');
+  }
+
+  const tutorId = String(classRequest.currentOfferTutorId || classRequest.tutorId || '').trim();
+  if (!tutorId) throw new HttpsError('not-found', 'The offer is unavailable.');
+  const tutorSnapshot = await db.collection('users').doc(tutorId).get();
+  const tutor = tutorSnapshot.exists ? tutorSnapshot.data() || {} : {};
+  if (!profileAllowsRole(tutor, 'tutor')) throw new HttpsError('not-found', 'The offer is unavailable.');
+
+  return buildPublicTutorSummary(tutor, classRequest.tutorName);
 });
 
 exports.syncHelperQueueOnHelperOnline = onDocumentWritten('users/{uid}', async (event) => {

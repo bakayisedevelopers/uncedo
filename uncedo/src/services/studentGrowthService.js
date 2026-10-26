@@ -1,4 +1,4 @@
-import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { doc, getDoc } from 'firebase/firestore';
 import { getFirebaseClients } from '../firebase/config';
 import { getStudentOnboardingStatus } from '../utils/onboarding';
 
@@ -44,9 +44,7 @@ export async function syncCustomerGrowth() {
   const referralSlug = String(userProfile.referralSlug || '').trim() || `clx-${currentUser.uid.slice(0, 12)}`;
 
   const growthPatch = {
-    referralSlug,
     emailVerified,
-    emailVerifiedAt: emailVerified ? (userProfile.emailVerifiedAt || serverTimestamp()) : null,
     growth: {
       ...(userProfile.growth || {}),
       completionRequirements: {
@@ -56,10 +54,10 @@ export async function syncCustomerGrowth() {
       },
       lastGrowthSyncedAt: new Date().toISOString(),
     },
-    updatedAt: serverTimestamp(),
   };
-
-  await setDoc(userRef, growthPatch, { merge: true });
+  // Profile-growth and email-verification state are server-authoritative. This
+  // adapter returns a local projection for the existing onboarding UI only.
+  void referralSlug;
   return {
     ...userProfile,
     ...growthPatch,

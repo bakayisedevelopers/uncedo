@@ -12,10 +12,38 @@ const resultSchema = (properties, required = []) => Object.freeze({
 const stringSchema = Object.freeze({ type: 'string' });
 const numberSchema = Object.freeze({ type: 'number' });
 const booleanSchema = Object.freeze({ type: 'boolean' });
+const nullableNumberSchema = Object.freeze({ type: ['number', 'null'] });
+const PUBLIC_PRICING_SCHEMA = resultSchema({
+  pricingMode: stringSchema,
+  currency: stringSchema,
+  basePrice: nullableNumberSchema,
+  materialFee: numberSchema,
+  minimumTotal: nullableNumberSchema,
+});
+const PUBLIC_QUESTION_OPTION_SCHEMA = resultSchema({ value: stringSchema, label: stringSchema }, ['value', 'label']);
+const PUBLIC_QUESTION_SCHEMA = resultSchema({
+  id: stringSchema,
+  prompt: stringSchema,
+  label: stringSchema,
+  answerType: stringSchema,
+  type: stringSchema,
+  required: booleanSchema,
+  options: { type: 'array', items: PUBLIC_QUESTION_OPTION_SCHEMA },
+  placeholder: stringSchema,
+  helpText: stringSchema,
+  unit: stringSchema,
+  minimum: nullableNumberSchema,
+  maximum: nullableNumberSchema,
+  multiple: booleanSchema,
+}, ['id', 'required']);
+const BOOKING_SUMMARY_SCHEMA = resultSchema({
+  requestId: stringSchema, summary: stringSchema, status: stringSchema, statusLabel: stringSchema, helperName: stringSchema,
+  createdAtMs: nullableNumberSchema,
+}, ['requestId', 'status', 'statusLabel']);
 const PUBLIC_SERVICE_SCHEMA = resultSchema({
   id: stringSchema, categoryId: stringSchema, categoryName: stringSchema, label: stringSchema,
   description: stringSchema, type: stringSchema, includedServiceIds: { type: 'array', items: stringSchema },
-  pricing: { type: ['object', 'null'] },
+  pricing: { ...PUBLIC_PRICING_SCHEMA, type: ['object', 'null'] },
 }, ['id', 'label']);
 
 const TOOL_DEFINITIONS = Object.freeze({
@@ -32,12 +60,12 @@ const TOOL_DEFINITIONS = Object.freeze({
   getServiceQuestionnaire: {
     description: 'Read the exact active questionnaire for one real catalogue service.', roles: ['guest', 'customer', 'helper'], auth: 'public',
     fields: { serviceId: 'service-id' }, required: ['serviceId'], handler: 'getServiceQuestionnaire', canonicalBackend: 'serviceRequestPricing.getQuestionnaireForSelection',
-    outputSchema: resultSchema({ serviceId: stringSchema, categoryId: stringSchema, questions: { type: 'array', items: { type: 'object' } } }, ['serviceId', 'questions']),
+    outputSchema: resultSchema({ serviceId: stringSchema, categoryId: stringSchema, questions: { type: 'array', items: PUBLIC_QUESTION_SCHEMA } }, ['serviceId', 'questions']),
   },
   getServicePricingInformation: {
     description: 'Read public pricing inputs and requirements for a real active service. Do not calculate a final quote.', roles: ['guest', 'customer', 'helper'], auth: 'public',
     fields: { serviceId: 'service-id' }, required: ['serviceId'], handler: 'getServicePricingInformation', canonicalBackend: 'liveServiceCatalogReader',
-    outputSchema: resultSchema({ serviceId: stringSchema, pricing: { type: ['object', 'null'] }, requiredQuestionIds: { type: 'array', items: stringSchema }, note: stringSchema }, ['serviceId', 'requiredQuestionIds', 'note']),
+    outputSchema: resultSchema({ serviceId: stringSchema, pricing: { ...PUBLIC_PRICING_SCHEMA, type: ['object', 'null'] }, requiredQuestionIds: { type: 'array', items: stringSchema }, note: stringSchema }, ['serviceId', 'requiredQuestionIds', 'note']),
   },
   getSupportKnowledge: {
     description: 'Search administrator-approved, published public support articles.', roles: ['guest', 'customer', 'helper'], auth: 'public',
@@ -58,12 +86,12 @@ const TOOL_DEFINITIONS = Object.freeze({
   listMyBookings: {
     description: 'List a small page of bookings belonging to this customer or assigned to this helper.', roles: ['customer', 'helper'], auth: 'verified-linked',
     fields: {}, handler: 'listMyBookings', canonicalBackend: 'listWhatsAppRequests',
-    outputSchema: resultSchema({ bookings: { type: 'array', items: { type: 'object' } } }, ['bookings']),
+    outputSchema: resultSchema({ bookings: { type: 'array', items: BOOKING_SUMMARY_SCHEMA } }, ['bookings']),
   },
   getBookingStatus: {
     description: 'Read the current authorized status and minimal details for a booking.', roles: ['customer', 'helper'], auth: 'verified-linked',
     fields: { requestId: 'request-id' }, required: ['requestId'], handler: 'getBookingStatus', canonicalBackend: 'getWhatsAppRequestForIdentity',
-    outputSchema: resultSchema({ code: stringSchema, booking: { type: 'object' } }),
+    outputSchema: resultSchema({ code: stringSchema, booking: BOOKING_SUMMARY_SCHEMA }),
   },
   getMyPaymentSummary: {
     description: 'Read the canonical payment status and amount due for one owned booking. Never returns card or gateway credentials.', roles: ['customer'], auth: 'verified-linked',
@@ -78,12 +106,45 @@ const TOOL_DEFINITIONS = Object.freeze({
   listMyWalletTransactions: {
     description: 'Read recent helper wallet ledger summaries without bank or Paystack credentials.', roles: ['helper'], auth: 'verified-verified-helper',
     fields: { limit: 'small-limit' }, handler: 'listMyWalletTransactions', canonicalBackend: 'helperWalletService.readOwnLedger',
-    outputSchema: resultSchema({ transactions: { type: 'array', items: { type: 'object' } } }, ['transactions']),
+    outputSchema: resultSchema({ transactions: { type: 'array', items: resultSchema({
+      entryType: stringSchema, amountMinor: numberSchema, availableDeltaMinor: numberSchema,
+      outstandingCommissionDeltaMinor: numberSchema, description: stringSchema, createdAtMs: numberSchema,
+    }) } }, ['transactions']),
   },
   getMyPayoutStatus: {
     description: 'Read recent weekly payout statuses and amounts for the authenticated helper.', roles: ['helper'], auth: 'verified-verified-helper',
     fields: {}, handler: 'getMyPayoutStatus', canonicalBackend: 'helperWeeklyPayoutReader',
-    outputSchema: resultSchema({ payouts: { type: 'array', items: { type: 'object' } } }, ['payouts']),
+    outputSchema: resultSchema({ payouts: { type: 'array', items: resultSchema({
+      status: stringSchema, amount: numberSchema, currency: stringSchema, periodStart: stringSchema,
+      periodEnd: stringSchema, weekKey: stringSchema, scheduledAtMs: { type: ['number', 'null'] }, reason: stringSchema,
+    }) } }, ['payouts']),
+  },
+  listMyAvailableOffers: {
+    description: 'List current unexpired service offers addressed to the authenticated helper. This does not accept or decline offers.', roles: ['helper'], auth: 'verified-verified-helper',
+    fields: {}, handler: 'listMyAvailableOffers', canonicalBackend: 'serviceRequestOfferReader',
+    outputSchema: resultSchema({ offers: { type: 'array', items: resultSchema({ serviceSummary: stringSchema, amount: { type: ['number', 'null'] }, currency: stringSchema, expiresAtMs: numberSchema }) } }, ['offers']),
+  },
+  getMyEarningsSummary: {
+    description: 'Read recent canonical weekly earnings and payout records for the authenticated helper.', roles: ['helper'], auth: 'verified-verified-helper',
+    fields: {}, handler: 'getMyEarningsSummary', canonicalBackend: 'helperWeeklyPayoutReader',
+    outputSchema: resultSchema({
+      currency: stringSchema,
+      availableWalletMinor: numberSchema,
+      reservedWalletMinor: numberSchema,
+      outstandingCommissionMinor: numberSchema,
+      recentPeriods: {
+        type: 'array',
+        items: resultSchema({
+          weekKey: stringSchema,
+          status: stringSchema,
+          completedJobs: numberSchema,
+          helperAmount: { type: ['number', 'null'] },
+          platformAmount: { type: ['number', 'null'] },
+          paidAtMs: { type: ['number', 'null'] },
+          scheduledAtMs: { type: ['number', 'null'] },
+        }),
+      },
+    }, ['currency', 'recentPeriods']),
   },
   requestHumanSupport: {
     description: 'Create or reuse a support handoff for a user who asks for a person or whose issue requires human judgement.', roles: ['guest', 'customer', 'helper'], auth: 'conversation',
@@ -207,7 +268,27 @@ function createWhatsAppToolRegistry({ getCatalogEntries = async () => [], getSup
         ? (await activeCatalog()).filter((item) => service.includedServiceIds.includes(item.id) || item.id === service.id)
         : [service];
       const questions = getQuestionnaireForSelection({ services: selectedServices, selectedPackageId: service.id });
-      return { serviceId, categoryId: service.categoryId, questions };
+      return {
+        serviceId,
+        categoryId: safeText(service.categoryId, 120),
+        questions: questions.slice(0, 80).map((question) => ({
+          id: safeText(question.id, 120),
+          prompt: safeText(question.prompt || question.label || '', 400),
+          ...(question.label ? { label: safeText(question.label, 200) } : {}),
+          ...(question.answerType ? { answerType: safeText(question.answerType, 40) } : {}),
+          ...(question.type ? { type: safeText(question.type, 40) } : {}),
+          required: question.required === true,
+          options: (Array.isArray(question.options) ? question.options : []).slice(0, 50).map((option) => typeof option === 'string'
+            ? { value: safeText(option, 160), label: safeText(option, 200) }
+            : { value: safeText(option?.value, 160), label: safeText(option?.label || option?.value, 200) }),
+          ...(question.placeholder ? { placeholder: safeText(question.placeholder, 200) } : {}),
+          ...(question.helpText ? { helpText: safeText(question.helpText, 400) } : {}),
+          ...(question.unit ? { unit: safeText(question.unit, 40) } : {}),
+          ...(question.minimum != null && Number.isFinite(Number(question.minimum)) ? { minimum: Number(question.minimum) } : {}),
+          ...(question.maximum != null && Number.isFinite(Number(question.maximum)) ? { maximum: Number(question.maximum) } : {}),
+          ...(typeof question.multiple === 'boolean' ? { multiple: question.multiple } : {}),
+        })),
+      };
     },
     async getServicePricingInformation({ serviceId }) {
       const service = (await activeCatalog()).find((item) => String(item.id) === serviceId);
@@ -260,6 +341,7 @@ function createWhatsAppToolRegistry({ getCatalogEntries = async () => [], getSup
           required: definition.required || [],
         },
         stateChanging: definition.stateChanging === true,
+        readOnly: definition.stateChanging !== true,
         auth: definition.auth,
         confirmation: definition.confirmation || 'not-required',
         idempotency: definition.idempotency || 'read-only',
@@ -313,7 +395,12 @@ function createWhatsAppToolRegistry({ getCatalogEntries = async () => [], getSup
     return normalizeAndValidateAnswers({ answers, questions, strictUnknown: true });
   }
 
-  return { definitions, execute, validateServiceAnswers };
+  return {
+    definitions,
+    execute,
+    isReadOnly(name) { return Boolean(TOOL_DEFINITIONS[name] && TOOL_DEFINITIONS[name].stateChanging !== true); },
+    validateServiceAnswers,
+  };
 }
 
 module.exports = { TOOL_DEFINITIONS, createWhatsAppToolRegistry, isHumanEscalationEligible, publicService, validateToolArguments };

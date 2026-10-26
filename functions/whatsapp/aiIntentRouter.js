@@ -26,6 +26,7 @@ const ALLOWED_TOOL_NAMES = new Set([
   '', 'listAvailableServices', 'getServiceDetails', 'getServiceQuestionnaire', 'getServicePricingInformation',
   'getSupportKnowledge', 'getMyProfile', 'listMyBookings', 'getBookingStatus', 'getMyPaymentSummary',
   'proposeProfileChange', 'getMyWalletSummary', 'listMyWalletTransactions', 'getMyPayoutStatus', 'requestHumanSupport',
+  'listMyAvailableOffers', 'getMyEarningsSummary',
 ]);
 
 const INTENT_SCHEMA = {

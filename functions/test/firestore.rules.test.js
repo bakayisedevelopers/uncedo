@@ -171,6 +171,7 @@ test('users allow safe profile updates but reject protected fields and privilege
     fullName: 'Customer One Updated',
     phoneNumber: '+27 71 000 0000',
   }));
+  await assertFails(customerDb.doc('users/customer-1').update({ email: 'another-person@example.com' }));
   await assertFails(customerDb.doc('users/customer-1').update({
     role: 'admin',
   }));
@@ -191,6 +192,18 @@ test('users allow safe profile updates but reject protected fields and privilege
   await assertFails(customerDb.doc('users/customer-1').update({
     metrics: { completionRate: 1 },
   }));
+  await assertFails(customerDb.doc('users/customer-1').update({ activeServiceRequestId: 'forged-request' }));
+});
+
+test('user profiles are private by document and cannot be enumerated by ordinary users', async () => {
+  await seedDocument('users/customer-1', { uid: 'customer-1', role: 'customer' });
+  await seedDocument('users/customer-2', { uid: 'customer-2', role: 'customer' });
+  const customerDb = authedDb('customer-1');
+  const adminDb = authedDb('admin-user', { email: 'jabuobed1@gmail.com', email_verified: true });
+  await assertSucceeds(customerDb.doc('users/customer-1').get());
+  await assertFails(customerDb.doc('users/customer-2').get());
+  await assertFails(customerDb.collection('users').get());
+  await assertSucceeds(adminDb.collection('users').get());
 });
 
 test('ordinary profile creation cannot self-assign administrator or verified helper status', async () => {
@@ -208,6 +221,8 @@ test('a forged admin profile cannot read support records; a trusted admin claim 
   const claimedDb = authedDb('claimed-admin', { admin: true });
   await assertFails(forgedDb.doc('supportTickets/ticket-forged').get());
   await assertSucceeds(claimedDb.doc('supportTickets/ticket-forged').get());
+  await assertFails(forgedDb.doc('supportArticles/policy-1').set({ published: true, content: 'Forged policy' }));
+  await assertFails(forgedDb.doc('supportArticles/policy-1').get());
 });
 
 test('saved Paystack authorizations are inaccessible to all Firebase clients', async () => {
@@ -290,10 +305,10 @@ test('request payment attempts, opaque checkout sessions, references, and financ
   }
 });
 
-test('service requests enforce customer ownership on create and block payment or helper assignment forgery', async () => {
+test('service request creation and lifecycle are backend-only while draft metadata remains narrowly editable', async () => {
   const customerDb = authedDb('customer-1');
 
-  await assertSucceeds(customerDb.collection('serviceRequests').doc('valid').set({
+  await assertFails(customerDb.collection('serviceRequests').doc('valid').set({
     customerId: 'customer-1',
     customerName: 'Customer One',
     customerEmail: 'c1@example.com',
@@ -375,6 +390,17 @@ test('service requests enforce customer ownership on create and block payment or
     createdAt: new Date(),
     updatedAt: new Date(),
   }));
+
+  await seedDocument('serviceRequests/draft-1', {
+    customerId: 'customer-1', status: 'collecting_details', structuredAnswers: { service_address: '1 Main Street' },
+    pricingSnapshot: null, paymentStatus: null, helperAssignment: null, currentOfferHelperId: null, transcript: [],
+  });
+  await assertSucceeds(customerDb.doc('serviceRequests/draft-1').update({ transcript: [{ role: 'user', text: 'Hello' }] }));
+  await assertFails(customerDb.doc('serviceRequests/draft-1').update({ status: 'matching' }));
+  await assertFails(customerDb.doc('serviceRequests/draft-1').update({ pricingSnapshot: { total: 0 } }));
+  await assertFails(customerDb.doc('serviceRequests/draft-1').update({ helperAssignment: { helperId: 'customer-1' } }));
+  await assertFails(customerDb.doc('serviceRequests/draft-1').update({ paymentStatus: 'paid' }));
+  await assertFails(customerDb.doc('serviceRequests/draft-1').update({ newAuthoritativeField: 'bypass' }));
 });
 
 test('service request offers can only be accepted or declined through the backend and assigned helpers have limited transitions', async () => {

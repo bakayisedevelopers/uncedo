@@ -1,5 +1,5 @@
 import * as Location from 'expo-location';
-import { collection, doc, getDoc, getDocs, query, where } from 'firebase/firestore';
+import { collection, getDocs, query, where } from 'firebase/firestore';
 import { getFirebaseClients } from '../firebase/config';
 
 function normalizeLocation(coords = {}) {
@@ -89,33 +89,30 @@ export async function fetchNearbyActiveCustomersMapData({ latitude, longitude, r
 
   const activeStatuses = ['matching', 'helper_found', 'accepted', 'driving', 'en_route', 'buying_resources', 'arrived', 'work_started', 'scheduled_pending'];
   const requestsSnapshot = await getDocs(
-    query(collection(db, 'serviceRequests'), where('status', 'in', activeStatuses)),
+    query(
+      collection(db, 'serviceRequests'),
+      where('helperAssignment.helperId', '==', auth.currentUser.uid),
+      where('status', 'in', activeStatuses),
+    ),
   );
-  const customerIds = [...new Set(
-    requestsSnapshot.docs
-      .map((item) => String(item.data()?.customerId || '').trim())
-      .filter(Boolean),
-  )];
 
-  const customerSnapshots = await Promise.all(customerIds.map((customerId) => getDoc(doc(db, 'users', customerId)).catch(() => null)));
-
-  const customers = customerSnapshots
-    .filter((snapshot) => snapshot?.exists?.())
-    .map((item) => ({ id: item.id, ...item.data() }))
+  const customers = requestsSnapshot.docs
+    .map((item) => ({ id: item.id, ...(item.data() || {}) }))
     .map((customer) => {
-      const location = normalizeLocation(customer?.lastKnownLocation || customer?.homeLocation || null);
+      const location = normalizeLocation(customer?.location || customer?.requestPayload?.location || null);
       if (!location) return null;
       const distanceKm = computeDistanceKm(origin, location);
       return {
         id: customer.id,
-        fullName: String(customer.fullName || customer.displayName || 'Customer').trim(),
-        initials: getInitials(customer.fullName || customer.displayName || 'Customer'),
-        customerType: String(customer?.customerProfile?.customerType || customer?.customerProfile?.accountType || '').trim(),
+        requestId: customer.id,
+        fullName: String(customer.customerName || 'Customer').trim(),
+        initials: getInitials(customer.customerName || 'Customer'),
+        customerType: String(customer?.customerType || '').trim(),
         distanceKm,
-        lastKnownLocation: {
+        serviceLocation: {
           latitude: location.latitude,
           longitude: location.longitude,
-          updatedAtMs: Number(customer?.lastKnownLocation?.updatedAtMs || 0) || null,
+          updatedAtMs: Number(location?.updatedAtMs || 0) || null,
         },
       };
     })
