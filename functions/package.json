@@ -4,7 +4,7 @@
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "test": "node --test helperDispatchEligibility.test.js helperLegalAgreements.test.js helperWalletService.test.js legalAgreements.test.js pricingEngine.test.js marketplaceRequestOperations.test.js serviceRequestCancellation.test.js serviceRequestOfferLogic.test.js serviceRequestOfferOperations.test.js serviceRequestPricing.test.js subjectExtraction.test.js financialOperationService.test.js requestPaymentService.test.js paymentMethodStore.test.js nearbyHelperMapService.test.js publicProfileSummary.test.js rewards/*.test.js security/*.test.js whatsapp/*.test.js",
+    "test": "node --test helperDispatchEligibility.test.js helperLegalAgreements.test.js helperWalletService.test.js legalAgreements.test.js pricingEngine.test.js marketplaceRequestOperations.test.js serviceRequestCancellation.test.js serviceRequestOfferLogic.test.js serviceRequestOfferOperations.test.js serviceRequestPricing.test.js subjectExtraction.test.js financialOperationService.test.js requestPaymentService.test.js paymentMethodStore.test.js nearbyHelperMapService.test.js publicProfileSummary.test.js account/*.test.js rewards/*.test.js security/*.test.js whatsapp/*.test.js",
     "test:emulator": "node --test test/firestore.rules.test.js test/rewards.integration.test.js test/rewards.test.js test/financialOperations.emulator.test.js test/helperWallet.emulator.test.js",
     "whatsapp:templates": "node scripts/manage-whatsapp-templates.js"
   },

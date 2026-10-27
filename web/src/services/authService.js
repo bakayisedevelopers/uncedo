@@ -58,63 +58,30 @@ async function saveCustomerContactNumber(phoneNumber) {
 export async function ensureCustomerProfile(firebaseUser) {
   requireFirebase();
   const userRef = doc(db, 'users', firebaseUser.uid);
-  let existing;
   try {
-    existing = await getDoc(userRef);
+    const { getFunctions, httpsCallable } = await import('firebase/functions');
+    const bootstrap = httpsCallable(getFunctions(auth.app, 'us-central1'), 'ensureCustomerUserProfile');
+    await bootstrap({});
   } catch (error) {
-    throw withSignupStage(error, 'customer_profile_read');
-  }
-  const profile = existing.exists() ? existing.data() : {};
-  if (hasHelperRole(profile)) {
-    await signOut(auth);
-    throw new Error('This is a helper account. Please sign in through Uncedo Helpers.');
-  }
-
-  const displayName = String(profile.fullName || profile.displayName || firebaseUser.displayName || '').trim();
-  const defaults = {
-    uid: firebaseUser.uid,
-    email: firebaseUser.email || '',
-    fullName: displayName,
-    displayName,
-    role: 'customer',
-    activeRole: 'customer',
-    roles: ['customer'],
-    phoneNumber: '',
-    paymentMethods: [],
-    customerProfile: {
-      accountType: '',
-      customerType: '',
-      serviceAddress: '',
-      discoverySource: '',
-      preferredServiceCategories: [],
-      businessName: '',
-      businessEmail: '',
-      businessCategory: '',
-    },
-  };
-  try {
-    await setDoc(userRef, {
-      ...defaults,
-      ...profile,
-      uid: firebaseUser.uid,
-      email: firebaseUser.email || profile.email || '',
-      fullName: profile.fullName || defaults.fullName,
-      displayName: profile.displayName || defaults.displayName,
-      role: 'customer',
-      activeRole: 'customer',
-      roles: ['customer'],
-      customerProfile: { ...defaults.customerProfile, ...(profile.customerProfile || {}) },
-      createdAt: existing.exists() ? profile.createdAt || serverTimestamp() : serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    }, { merge: true });
-  } catch (error) {
-    throw withSignupStage(error, 'customer_profile_write');
+    if (String(error?.code || '').endsWith('/permission-denied')) {
+      await signOut(auth).catch(() => null);
+      throw new Error('This is a helper account. Please sign in through Uncedo Helpers.');
+    }
+    throw withSignupStage(error, 'customer_profile_bootstrap');
   }
   let saved;
   try {
     saved = await getDoc(userRef);
   } catch (error) {
     throw withSignupStage(error, 'customer_profile_verify');
+  }
+  if (!saved.exists()) {
+    throw withSignupStage(new Error('The customer profile was not created. Please retry or contact Uncedo support.'), 'customer_profile_verify');
+  }
+  const profile = saved.data() || {};
+  if (hasHelperRole(profile)) {
+    await signOut(auth);
+    throw new Error('This is a helper account. Please sign in through Uncedo Helpers.');
   }
   return { uid: firebaseUser.uid, ...saved.data() };
 }

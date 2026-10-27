@@ -33,6 +33,7 @@ const { submitServiceRequestRating, serviceIdsFor } = require('./rewards/ratingS
 const { incrementCompletedPaid, recalculateMastery, recalculateMembership } = require('./rewards/progressionService');
 const { getFunctions } = require('firebase-admin/functions');
 const { applyTrustedAdminRole, isTrustedAdminToken } = require('./security/adminAuthorization');
+const { ensureCustomerProfileRecord } = require('./account/customerProfileBootstrap');
 // A single-concurrency fractional-CPU profile for Functions that previously
 // failed deployment under the project's regional CPU quota.
 const HALF_CPU_OPTIONS = Object.freeze({ cpu: 0.5, concurrency: 1 });
@@ -8882,6 +8883,37 @@ exports.completeWhatsAppAccountLink = onCall({
     returnUrl: buildWhatsAppReturnUrl('27605239926'),
     expiresInMs: WHATSAPP_ACCOUNT_LINK_TTL_MS,
   };
+});
+
+exports.ensureCustomerUserProfile = onCall({
+  maxInstances: 5,
+  ...HALF_CPU_OPTIONS,
+  memory: '256MiB',
+  timeoutSeconds: 20,
+}, async (request) => {
+  const uid = String(request.auth?.uid || '').trim();
+  if (!uid) throw new HttpsError('unauthenticated', 'Sign in to finish setting up your Uncedo account.');
+  const actorHash = whatsappDiagnosticHash(uid);
+  try {
+    // Read identity fields from Firebase Auth, never from callable input.
+    const authUser = await admin.auth().getUser(uid);
+    const result = await ensureCustomerProfileRecord({
+      db,
+      uid,
+      email: authUser.email || '',
+      displayName: authUser.displayName || '',
+      serverTimestamp: () => admin.firestore.FieldValue.serverTimestamp(),
+    });
+    logger.info('customer_profile_bootstrap_completed', { actorHash, ...result });
+    return { uid, role: 'customer', ...result };
+  } catch (error) {
+    const errorCode = String(error?.code || 'profile-bootstrap-failed').slice(0, 80);
+    logger.warn('customer_profile_bootstrap_failed', { actorHash, errorCode });
+    if (errorCode === 'permission-denied' || errorCode === 'failed-precondition') {
+      throw new HttpsError(errorCode, error.message || 'This account cannot be initialized as a customer account.');
+    }
+    throw new HttpsError('internal', 'We could not finish setting up your customer profile. Please try again.');
+  }
 });
 
 exports.setWhatsAppContactNumber = onCall({ maxInstances: 5, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 20 }, async (request) => {
