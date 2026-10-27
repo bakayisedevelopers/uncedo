@@ -20,7 +20,6 @@ export default function AuthPage({ mode = 'login' }) {
     requestWhatsAppAuthCode,
     verifyWhatsAppAuthCode,
   } = useAuth();
-  const isSignup = mode === 'signup';
   const [method, setMethod] = useState('email');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -36,15 +35,19 @@ export default function AuthPage({ mode = 'login' }) {
   const [linking, setLinking] = useState(false);
   const linkPromiseRef = useRef(null);
   const autoLinkAttemptedTokenRef = useRef('');
+  const isSignup = signupLink?.token
+    ? signupLink.mode === 'signup'
+    : mode === 'signup';
 
   useEffect(() => {
     const params = new URLSearchParams(String(window.location.hash || '').replace(/^#/, ''));
     const token = String(params.get('wa_signup_token') || '').trim();
     const role = String(params.get('wa_role') || '').trim().toLowerCase();
     const phone = String(params.get('wa_phone') || '').trim();
+    const entryMode = String(params.get('wa_mode') || '').trim().toLowerCase();
     const fromNavigation = location.state?.whatsappSignupLink || null;
     const link = /^[A-Za-z0-9_-]{40,60}$/.test(token)
-      ? { token, role: ['customer', 'helper'].includes(role) ? role : '', phone }
+      ? { token, role: ['customer', 'helper'].includes(role) ? role : '', phone, mode: entryMode === 'signin' ? 'signin' : 'signup' }
       : fromNavigation;
     if (token) window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}`);
     setSignupLink(link);
@@ -168,7 +171,9 @@ export default function AuthPage({ mode = 'login' }) {
             <div className="mb-5 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950">
               <p className="font-bold">Connect your WhatsApp chat</p>
               <p className="mt-1">{signupLink.role === 'helper' ? 'Helper' : 'Customer'} account · WhatsApp number {signupLink.phone || 'will be verified by the secure link'}.</p>
-              <p className="mt-1">Your email remains your sign-in method. The number is attached only after you sign in or create the matching account.</p>
+              <p className="mt-1">{signupLink.mode === 'signin'
+                ? 'Your email remains your sign-in method. Sign in to the matching account to connect this WhatsApp number.'
+                : 'Create your account with your email to connect this WhatsApp number.'}</p>
             </div>
           ) : null}
           {error && signupLink?.token && user ? (
@@ -210,14 +215,14 @@ export default function AuthPage({ mode = 'login' }) {
           <p className="mt-4 text-center text-xs leading-5 text-zinc-500">
             By continuing, you agree to Uncedo’s <Link className="font-semibold underline" to="/terms">Terms of Service</Link> and <Link className="font-semibold underline" to="/privacy-policy">Privacy Policy</Link>.
           </p>
-          <p className="mt-6 text-center text-sm text-zinc-600">
-            {isSignup ? 'Already registered?' : 'New to Uncedo?'}{' '}
-            <Link
-              className="font-bold text-brand underline"
-              to={isSignup ? '/sign-in' : '/sign-up'}
-              state={signupLink?.token ? { whatsappSignupLink: signupLink } : undefined}
-            >{isSignup ? 'Sign in' : 'Create an account'}</Link>
-          </p>
+          {!signupLink?.token ? (
+            <p className="mt-6 text-center text-sm text-zinc-600">
+              {isSignup ? 'Already registered?' : 'New to Uncedo?'}{' '}
+              <Link className="font-bold text-brand underline" to={isSignup ? '/sign-in' : '/sign-up'}>
+                {isSignup ? 'Sign in' : 'Create an account'}
+              </Link>
+            </p>
+          ) : null}
         </section>
       </main>
     </MainLayout>

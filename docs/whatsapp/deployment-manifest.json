@@ -18,15 +18,51 @@
   ],
   "functions": {
     "new": [
-      { "name": "cleanupWhatsAppRetention", "trigger": "scheduled daily at 03:15 Africa/Johannesburg", "enabledByDefault": false },
-      { "name": "getWhatsAppConversationHistory", "trigger": "callable HTTPS", "enabledByDefault": true },
-      { "name": "assignWhatsAppSupportTicket", "trigger": "callable HTTPS", "enabledByDefault": true },
-      { "name": "getWhatsAppSupportTicketDetails", "trigger": "callable HTTPS", "enabledByDefault": true },
-      { "name": "listWhatsAppSupportArticles", "trigger": "callable HTTPS", "enabledByDefault": true },
-      { "name": "saveWhatsAppSupportArticle", "trigger": "callable HTTPS", "enabledByDefault": true },
-      { "name": "archiveWhatsAppSupportArticle", "trigger": "callable HTTPS", "enabledByDefault": true },
-      { "name": "markWhatsAppSupportTicketRead", "trigger": "callable HTTPS", "enabledByDefault": true },
-      { "name": "setTrustedAdminRole", "trigger": "callable HTTPS", "enabledByDefault": true }
+      {
+        "name": "cleanupWhatsAppRetention",
+        "trigger": "scheduled daily at 03:15 Africa/Johannesburg",
+        "enabledByDefault": false
+      },
+      {
+        "name": "getWhatsAppConversationHistory",
+        "trigger": "callable HTTPS",
+        "enabledByDefault": true
+      },
+      {
+        "name": "assignWhatsAppSupportTicket",
+        "trigger": "callable HTTPS",
+        "enabledByDefault": true
+      },
+      {
+        "name": "getWhatsAppSupportTicketDetails",
+        "trigger": "callable HTTPS",
+        "enabledByDefault": true
+      },
+      {
+        "name": "listWhatsAppSupportArticles",
+        "trigger": "callable HTTPS",
+        "enabledByDefault": true
+      },
+      {
+        "name": "saveWhatsAppSupportArticle",
+        "trigger": "callable HTTPS",
+        "enabledByDefault": true
+      },
+      {
+        "name": "archiveWhatsAppSupportArticle",
+        "trigger": "callable HTTPS",
+        "enabledByDefault": true
+      },
+      {
+        "name": "markWhatsAppSupportTicketRead",
+        "trigger": "callable HTTPS",
+        "enabledByDefault": true
+      },
+      {
+        "name": "setTrustedAdminRole",
+        "trigger": "callable HTTPS",
+        "enabledByDefault": true
+      }
     ],
     "modifiedExisting": [
       "persistWhatsAppConversationEvent",
@@ -121,7 +157,10 @@
   "preDeployInventory": {
     "sourceExportCount": 86,
     "deployedCount": 83,
-    "deployedRuntimeCounts": { "nodejs22": 82, "nodejs20": 1 },
+    "deployedRuntimeCounts": {
+      "nodejs22": 82,
+      "nodejs20": 1
+    },
     "region": "us-central1",
     "sourceOnlyFunctionsToDeploy": [
       "getCustomerNearbyHelpers",
@@ -130,5 +169,71 @@
       "retryWhatsAppAssistantJob"
     ],
     "deployedOnlyFunctionToPreserve": "scheduleServiceRequestOfferExpiryOnWrite"
+  },
+  "activeWhatsAppOnboardingLocationChange": {
+    "deploymentAuthorized": true,
+    "deploymentStatus": "deployed",
+    "project": "bakayise-uncedo-latest",
+    "region": "us-central1",
+    "modifiedFunctions": [
+      "whatsappWebhook",
+      "processWhatsAppAssistantJobOnCreate",
+      "syncServiceRequestLifecycle",
+      "syncHelperDispatchIndexOnServiceOfferingWrite",
+      "syncHelperDispatchIndex",
+      "rebuildHelperDispatchIndex",
+      "syncHelperQueueOnHelperOnline"
+    ],
+    "hostingSites": [
+      {
+        "site": "bakayise-uncedo-latest",
+        "source": "web/dist"
+      },
+      {
+        "site": "bakayise-uncedo-latest-admin",
+        "source": "admin/dist"
+      },
+      {
+        "site": "bakayise-uncedo-latest-helpers",
+        "source": "helpers/dist"
+      }
+    ],
+    "featureFlagsChanged": [],
+    "deployedOnlyFunctionsPreserved": [
+      "scheduleServiceRequestOfferExpiryOnWrite"
+    ],
+    "functionsCommand": "./node_modules/.bin/firebase deploy --only functions:whatsappWebhook,functions:processWhatsAppAssistantJobOnCreate,functions:syncServiceRequestLifecycle,functions:syncHelperDispatchIndexOnServiceOfferingWrite,functions:syncHelperDispatchIndex,functions:rebuildHelperDispatchIndex,functions:syncHelperQueueOnHelperOnline --project bakayise-uncedo-latest --non-interactive",
+    "hostingCommand": "./node_modules/.bin/firebase deploy --only hosting:bakayise-uncedo-latest,hosting:bakayise-uncedo-latest-admin,hosting:bakayise-uncedo-latest-helpers --project bakayise-uncedo-latest --non-interactive",
+    "deploymentDate": "2026-10-27",
+    "functionsDeployed": [
+      "whatsappWebhook",
+      "processWhatsAppAssistantJobOnCreate",
+      "syncServiceRequestLifecycle",
+      "syncHelperDispatchIndexOnServiceOfferingWrite",
+      "syncHelperDispatchIndex",
+      "rebuildHelperDispatchIndex",
+      "syncHelperQueueOnHelperOnline"
+    ],
+    "functionRuntimeVerification": {
+      "allSelectedFunctions": "nodejs22 in us-central1",
+      "deployedOnlyPreserved": {
+        "name": "scheduleServiceRequestOfferExpiryOnWrite",
+        "runtime": "nodejs20"
+      },
+      "deployedFunctionCountAtVerification": 99
+    },
+    "hostingStatus": "deployed",
+    "lastFunctionsUpdate": "processWhatsAppAssistantJobOnCreate",
+    "verification": {
+      "functionsUnitTests": "262 passed, 0 failed",
+      "adminBuild": "passed",
+      "customerWebBuild": "passed",
+      "helpersWebBuild": "passed",
+      "customDomainChecks": {
+        "uncedo.bakayise.com/sign-in": "HTTP 200",
+        "helpers.bakayise.com/sign-in": "HTTP 200"
+      },
+      "adminHostingCheck": "HTTP 200"
+    }
   }
 }

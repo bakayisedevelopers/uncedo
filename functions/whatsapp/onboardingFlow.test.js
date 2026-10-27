@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   WHATSAPP_ONBOARDING_BUTTONS,
+  getWhatsAppAccountSetupMode,
   roleSelectionPrompt,
   transitionWhatsAppOnboarding,
 } = require('./onboardingFlow');
@@ -68,6 +69,14 @@ test('helper account creation or linking is selected before a secure link is iss
   });
   assert.equal(helperLink.action, 'link-helper-account');
   assert.equal(helperLink.state.accountMode, 'link-existing');
+});
+
+test('account choice uses sign-in for an existing account and sign-up for a new account', () => {
+  assert.equal(getWhatsAppAccountSetupMode('link-customer-account'), 'signin');
+  assert.equal(getWhatsAppAccountSetupMode('link-helper-account'), 'signin');
+  assert.equal(getWhatsAppAccountSetupMode('create-customer-signup-link'), 'signup');
+  assert.equal(getWhatsAppAccountSetupMode('create-helper-signup-link'), 'signup');
+  assert.equal(getWhatsAppAccountSetupMode('unexpected-action'), '');
 });
 
 test('guest preferred name and home address are explicit and optional', () => {

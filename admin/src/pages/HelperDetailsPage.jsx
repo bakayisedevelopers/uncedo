@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Check, Image as ImageIcon, Pause, ShieldAlert, ShieldCheck, Trash2 } from 'lucide-react';
+import { ArrowLeft, Check, Image as ImageIcon, Pause, RefreshCw, ShieldAlert, ShieldCheck, Trash2 } from 'lucide-react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Badge, Card, EmptyState, LoadingState, SectionTitle } from '../components/ui';
 import {
@@ -350,9 +350,21 @@ export default function HelperDetailsPage() {
                     </p>
                   ) : null}
                 </div>
-                <Badge tone={statusTone(clearanceStatusLabel)}>
-                  {clearanceStatusLabel}
-                </Badge>
+                <div className="flex items-center gap-2">
+                  <Badge tone={statusTone(clearanceStatusLabel)}>
+                    {clearanceStatusLabel}
+                  </Badge>
+                  <button
+                    type="button"
+                    aria-label="Refresh police-clearance status"
+                    title="Refresh police-clearance status"
+                    disabled={isClearanceLoading}
+                    onClick={() => refreshClearanceReview(selected?.uid)}
+                    className="rounded-xl border border-white/10 bg-white/5 p-2 text-white disabled:opacity-50"
+                  >
+                    <RefreshCw className={`h-4 w-4 ${isClearanceLoading ? 'animate-spin' : ''}`} />
+                  </button>
+                </div>
               </div>
               {clearanceError ? <p className="mt-3 text-sm text-rose-200">{clearanceError}</p> : null}
               {clearanceReview?.submission?.reviewReason ? (

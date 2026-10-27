@@ -29,7 +29,7 @@ export default function Navbar() {
 
           {/* Action Buttons */}
           <div className="flex items-center gap-3">
-            <a href="https://bakayise-uncedo-latest-helpers.web.app" className="hidden text-sm font-bold text-zinc-700 transition hover:text-brand lg:inline">Helpers</a>
+            <a href="https://helpers.bakayise.com" className="hidden text-sm font-bold text-zinc-700 transition hover:text-brand lg:inline">Helpers</a>
             <Link to="/sign-in" className="hidden text-sm font-bold text-zinc-700 transition hover:text-brand sm:inline">Sign in</Link>
             <Link to="/sign-up" className="rounded-xl bg-brand px-4 py-2.5 text-sm font-bold text-white shadow-sm transition hover:bg-brand-dark">Create account</Link>
           </div>

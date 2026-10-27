@@ -25,8 +25,8 @@ Firebase CLI loads `functions/.env` for local emulators and uploads configured v
 | `WHATSAPP_AUTH_TEMPLATE_NAME` | Approved Meta authentication template name; it must also be in `APPROVED_TEMPLATE_NAMES` and accept one body text code parameter. |
 | `WHATSAPP_AUTH_TEMPLATE_LANGUAGE` | Locale code configured for the approved authentication template. |
 | `WHATSAPP_ONBOARDING_ENABLED` | Enables deterministic WhatsApp guest/account onboarding and helper agreement-link creation. Keep `false` until the onboarding routes and linked-account flow are deployed and reviewed. |
-| `WHATSAPP_CUSTOMER_SIGNUP_URL` | HTTPS customer email-signup route used for short-lived WhatsApp account-link challenges. |
-| `WHATSAPP_HELPER_SIGNUP_URL` | HTTPS Helpers email-signup route used for short-lived WhatsApp account-link challenges. |
+| `WHATSAPP_CUSTOMER_SIGNUP_URL` | HTTPS customer site base used for WhatsApp account links; the selected action routes to `/sign-up` or `/sign-in`. Defaults to `https://uncedo.bakayise.com`. |
+| `WHATSAPP_HELPER_SIGNUP_URL` | HTTPS Helpers site base used for WhatsApp account links; the selected action routes to `/sign-up` or `/sign-in`. Defaults to `https://helpers.bakayise.com`. |
 | `WHATSAPP_HELPER_AGREEMENT_URL` | HTTPS Helpers route for reviewing and signing the current agreement through a WhatsApp-bound challenge. |
 | `WHATSAPP_AI_ENABLED` | Feature flag for the WhatsApp AI turn processor. It defaults to `false`. |
 | `WHATSAPP_MEDIA_ENABLED` | Feature flag for private WhatsApp media download/storage. It is effective only while messaging is enabled and defaults to `false`. |

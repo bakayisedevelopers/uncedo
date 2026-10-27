@@ -43,6 +43,7 @@ test('webhook normalization creates stable, bounded message and status events', 
           messages: [
             { id: 'wamid.1', from: '27820001111', timestamp: '1792828800', type: 'text', text: { body: 'Hello' } },
             { id: 'wamid.2', from: '27820001111', timestamp: '1792828801', type: 'location', location: { latitude: -25.8, longitude: 28.2, address: 'Centurion' } },
+            { id: 'wamid.2-invalid', from: '27820001111', timestamp: '1792828801', type: 'location', location: { latitude: 91, longitude: 28.2 } },
             { id: 'wamid.3', from: '27820001111', timestamp: '1792828802', type: 'image', image: { id: 'media-1', mime_type: 'image/jpeg', caption: 'My car' } },
           ],
           statuses: [{ id: 'wamid.out', recipient_id: '27820001111', status: 'delivered', timestamp: '1792828803' }],
@@ -50,12 +51,13 @@ test('webhook normalization creates stable, bounded message and status events', 
       }],
     }],
   });
-  assert.equal(events.length, 4);
+  assert.equal(events.length, 5);
   assert.equal(events[0].eventType, 'message');
   assert.equal(events[0].text, 'Hello');
   assert.equal(events[1].location.latitude, -25.8);
-  assert.equal(events[2].media.mediaId, 'media-1');
-  assert.equal(events[3].eventType, 'message_status');
+  assert.equal(events[2].location, undefined);
+  assert.equal(events[3].media.mediaId, 'media-1');
+  assert.equal(events[4].eventType, 'message_status');
   assert.equal(events[0].eventId, normalizeWebhookPayload({
     entry: [{ changes: [{ value: {
       metadata: { phone_number_id: '100200300' },

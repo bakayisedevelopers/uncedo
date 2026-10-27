@@ -88,9 +88,14 @@ function normalizeMessage(message = {}, metadata = {}, contact = {}) {
     };
   }
   if (type === 'location') {
-    const latitude = Number(message.location?.latitude);
-    const longitude = Number(message.location?.longitude);
-    if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+    const rawLatitude = message.location?.latitude;
+    const rawLongitude = message.location?.longitude;
+    const latitude = Number(rawLatitude);
+    const longitude = Number(rawLongitude);
+    if (rawLatitude !== null && rawLatitude !== undefined
+      && rawLongitude !== null && rawLongitude !== undefined
+      && Number.isFinite(latitude) && latitude >= -90 && latitude <= 90
+      && Number.isFinite(longitude) && longitude >= -180 && longitude <= 180) {
       payload.location = {
         latitude,
         longitude,

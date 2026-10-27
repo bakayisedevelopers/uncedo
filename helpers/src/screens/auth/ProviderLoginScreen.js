@@ -55,10 +55,13 @@ export function ProviderLoginScreen({ initialMode = 'login', onRouteChange, onHo
     const token = String(params.get('wa_signup_token') || '').trim();
     const role = String(params.get('wa_role') || '').trim().toLowerCase();
     const phone = String(params.get('wa_phone') || '').trim();
+    const entryMode = String(params.get('wa_mode') || '').trim().toLowerCase();
     if (token) {
       window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}`);
       if (/^[A-Za-z0-9_-]{40,60}$/.test(token)) {
-        setSignupLink({ token, role: ['customer', 'helper'].includes(role) ? role : '', phone });
+        const mode = entryMode === 'signin' ? 'signin' : 'signup';
+        setSignupLink({ token, role: ['customer', 'helper'].includes(role) ? role : '', phone, mode });
+        setMode(mode === 'signin' ? 'login' : 'signup');
         if (phone) setPhoneNumber(phone);
       }
     }
@@ -169,7 +172,9 @@ export function ProviderLoginScreen({ initialMode = 'login', onRouteChange, onHo
     setNotice(`${label} sign-${mode === 'signup' ? 'up' : 'in'} is coming soon for Helpers.`);
   };
 
-  const isSignup = mode === 'signup';
+  const isSignup = signupLink?.token
+    ? signupLink.mode === 'signup'
+    : mode === 'signup';
   const whatsappEnabled = process.env.EXPO_PUBLIC_WHATSAPP_AUTH_ENABLED === 'true';
   const googleEnabled = process.env.EXPO_PUBLIC_GOOGLE_AUTH_ENABLED === 'true';
   const socialButtons = Platform.OS === 'web' ? webSocialButtons : nativeSocialButtons;
@@ -178,7 +183,7 @@ export function ProviderLoginScreen({ initialMode = 'login', onRouteChange, onHo
     <AuthScaffold
       brandName="Uncedo Helpers"
       footerLinks={[
-        ...(!disableSignupMode ? [{
+        ...(!disableSignupMode && !signupLink?.token ? [{
           label: isSignup ? 'Sign in' : 'Sign up',
           onPress: () => {
             const nextMode = isSignup ? 'login' : 'signup';
@@ -186,10 +191,7 @@ export function ProviderLoginScreen({ initialMode = 'login', onRouteChange, onHo
             setNotice('');
             setMode(nextMode);
             const route = nextMode === 'signup' ? '/sign-up' : '/sign-in';
-            const fragment = Platform.OS === 'web' && signupLink?.token
-              ? `#${new URLSearchParams({ wa_signup_token: signupLink.token, wa_role: signupLink.role || 'helper', wa_phone: signupLink.phone || '' }).toString()}`
-              : '';
-            onRouteChange?.(`${route}${fragment}`);
+            onRouteChange?.(route);
           },
         }] : []),
         ...(!emailOnly ? [{
@@ -236,7 +238,9 @@ export function ProviderLoginScreen({ initialMode = 'login', onRouteChange, onHo
           <View style={styles.signupLinkNotice}>
             <Text style={styles.signupLinkTitle}>Connect your WhatsApp chat</Text>
             <Text style={styles.signupLinkText}>{signupLink.role === 'helper' ? 'Helper' : 'Customer'} account · WhatsApp number {signupLink.phone || 'will be verified by the secure link'}.</Text>
-            <Text style={styles.signupLinkText}>Your email remains your sign-in method. The number is linked only after you sign in or create the matching account.</Text>
+            <Text style={styles.signupLinkText}>{signupLink.mode === 'signin'
+              ? 'Your email remains your sign-in method. Sign in to the matching account to connect this WhatsApp number.'
+              : 'Create your account with your email to connect this WhatsApp number.'}</Text>
           </View>
         ) : null}
         {formError && signupLink?.token && user?.uid ? (

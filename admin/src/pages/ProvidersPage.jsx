@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronRight, Search } from 'lucide-react';
+import { ChevronRight, RefreshCw, Search } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { Badge, Card, EmptyState, LoadingState, SectionTitle } from '../components/ui';
 import { flattenProviderServices, listHelperProfiles } from '../services/adminService';
@@ -49,17 +49,31 @@ function helperAgreementLabel(profile = {}) {
   return requiredVersion ? `Agreement pending (needs v${requiredVersion})` : 'Agreement pending';
 }
 
+function helperClearanceStatus(profile = {}) {
+  const status = String(profile.policeClearanceStatus || 'missing').trim().toLowerCase();
+  if (status === 'pending' || status === 'uploading') return { label: 'Clearance awaiting review', tone: 'warning', pending: true };
+  if (status === 'approved') return { label: 'Clearance approved', tone: 'success', pending: false };
+  if (status === 'resubmission_required') return { label: 'Replacement requested', tone: 'danger', pending: false };
+  if (status === 'expired') return { label: 'Clearance review expired', tone: 'danger', pending: false };
+  if (status === 'failed') return { label: 'Upload needs attention', tone: 'danger', pending: false };
+  return { label: 'Clearance not submitted', tone: 'neutral', pending: false };
+}
+
 export default function HelpersPage() {
   const navigate = useNavigate();
   const [helpers, setHelpers] = useState([]);
   const [search, setSearch] = useState('');
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
 
   const load = async () => {
     setIsLoading(true);
+    setLoadError('');
     try {
       const items = await listHelperProfiles();
       setHelpers(items);
+    } catch (error) {
+      setLoadError(error?.message || 'Unable to refresh helper profiles.');
     } finally {
       setIsLoading(false);
     }
@@ -86,13 +100,16 @@ export default function HelpersPage() {
       .map((profile) => {
         const serviceRows = flattenProviderServices([profile]);
         const pendingCount = serviceRows.filter((row) => isPendingServiceOfferingStatus(row.offeringStatus)).length;
+        const clearance = helperClearanceStatus(profile);
         return {
           profile,
           serviceRows,
           pendingCount,
+          clearance,
         };
       })
       .sort((left, right) => {
+        if (right.clearance.pending !== left.clearance.pending) return Number(right.clearance.pending) - Number(left.clearance.pending);
         if (right.pendingCount !== left.pendingCount) {
           return right.pendingCount - left.pendingCount;
         }
@@ -105,7 +122,8 @@ export default function HelpersPage() {
   const summary = useMemo(() => {
     const totalPending = helperCards.reduce((count, item) => count + item.pendingCount, 0);
     const helpersWithPending = helperCards.filter((item) => item.pendingCount > 0).length;
-    return { totalPending, helpersWithPending };
+    const pendingClearances = helperCards.filter((item) => item.clearance.pending).length;
+    return { totalPending, helpersWithPending, pendingClearances };
   }, [helperCards]);
 
   return (
@@ -116,7 +134,8 @@ export default function HelpersPage() {
           title="Helpers"
           description="Review helper profiles first, then open a helper to inspect its collapsible service submissions and photos."
           action={(
-            <label className="relative block">
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="relative block">
               <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-300" />
               <input
                 value={search}
@@ -124,11 +143,22 @@ export default function HelpersPage() {
                 placeholder="Search helpers"
                 className="w-full rounded-2xl border border-white/10 bg-ink-950/50 py-3 pl-11 pr-4 text-sm text-white outline-none placeholder:text-ink-400 focus:border-brand"
               />
-            </label>
+              </label>
+              <button
+                type="button"
+                onClick={load}
+                disabled={isLoading}
+                aria-label="Refresh helpers and clearance statuses"
+                className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-bold text-white disabled:opacity-50"
+              >
+                <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
+                Refresh
+              </button>
+            </div>
           )}
         />
 
-        <div className="grid gap-3 md:grid-cols-3">
+        <div className="grid gap-3 md:grid-cols-4">
           <div className="rounded-[22px] border border-white/10 bg-white/5 p-4">
             <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-ink-300">Helpers</p>
             <p className="mt-2 text-2xl font-bold text-white">{helperCards.length}</p>
@@ -141,8 +171,13 @@ export default function HelpersPage() {
             <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-ink-300">Helpers needing review</p>
             <p className="mt-2 text-2xl font-bold text-white">{summary.helpersWithPending}</p>
           </div>
+          <div className="rounded-[22px] border border-white/10 bg-white/5 p-4">
+            <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-ink-300">Clearances awaiting review</p>
+            <p className="mt-2 text-2xl font-bold text-white">{summary.pendingClearances}</p>
+          </div>
         </div>
 
+        {loadError ? <p role="alert" className="mt-4 text-sm text-rose-200">{loadError}</p> : null}
         {isLoading ? <LoadingState label="Loading helpers..." /> : null}
 
         {!isLoading && !helperCards.length ? (
@@ -154,7 +189,7 @@ export default function HelpersPage() {
 
         {!isLoading && helperCards.length ? (
           <div className="mt-4 grid gap-4 lg:grid-cols-2">
-            {helperCards.map(({ profile, serviceRows, pendingCount }) => (
+            {helperCards.map(({ profile, serviceRows, pendingCount, clearance }) => (
               <button
                 key={profile.uid}
                 type="button"
@@ -176,6 +211,7 @@ export default function HelpersPage() {
                 <div className="mt-4 flex flex-wrap gap-2">
                   <Badge tone={statusTone(profile.verificationStatus)}>{helperStateLabel(profile)}</Badge>
                   <Badge tone={profile.suspended ? 'danger' : 'neutral'}>{profile.suspended ? 'Blocked' : 'Active'}</Badge>
+                  <Badge tone={clearance.tone}>{clearance.label}</Badge>
                   <Badge tone={pendingCount ? 'warning' : 'success'}>{pendingCount} pending</Badge>
                   <Badge tone="neutral">{serviceRows.length} offerings</Badge>
                 </div>

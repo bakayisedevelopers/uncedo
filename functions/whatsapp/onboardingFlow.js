@@ -20,6 +20,13 @@ function cleanOnboardingText(value, maximum = 240) {
     .slice(0, maximum);
 }
 
+function getWhatsAppAccountSetupMode(action) {
+  const normalized = String(action || '').trim();
+  if (['link-customer-account', 'link-helper-account'].includes(normalized)) return 'signin';
+  if (['create-customer-signup-link', 'create-helper-signup-link'].includes(normalized)) return 'signup';
+  return '';
+}
+
 function roleSelectionPrompt() {
   const text = 'Welcome to Uncedo. Are you looking for a service or joining as a helper?';
   return {
@@ -295,6 +302,7 @@ module.exports = {
   addressChoicePrompt,
   cleanOnboardingText,
   customerChoicePrompt,
+  getWhatsAppAccountSetupMode,
   helperAccountChoicePrompt,
   helperProviderTypePrompt,
   roleSelectionPrompt,

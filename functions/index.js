@@ -125,6 +125,21 @@ const {
 } = require('./whatsapp/metaWebhook');
 const { createWhatsAppWebhookHandler } = require('./whatsapp/webhookHandler');
 const {
+  WHATSAPP_HELPER_ONLINE_LOCATION_TTL_MS,
+  buildHelperLocationMapUrl,
+  isIncomingWhatsAppLocationNewer,
+  isHelperLocationFresh,
+  isHelperProfileBlocked,
+  normalizeWhatsAppHelperLocation,
+  parseWhatsAppHelperAvailabilityCommand,
+  resolveWhatsAppHelperLocationMode,
+} = require('./whatsapp/helperLocation');
+const {
+  getWhatsAppSignupUrl,
+  getWhatsAppAccountLinkUrl,
+  getWhatsAppHelperAgreementUrl,
+} = require('./whatsapp/signupLinks');
+const {
   selectUniqueVerifiedWhatsAppAccount,
   selectUniqueWhatsAppAccountCandidate,
 } = require('./whatsapp/accountResolution');
@@ -140,6 +155,7 @@ const {
   addressChoicePrompt,
   helperAccountChoicePrompt,
   helperProviderTypePrompt,
+  getWhatsAppAccountSetupMode,
   roleSelectionPrompt,
   transitionWhatsAppOnboarding,
 } = require('./whatsapp/onboardingFlow');
@@ -746,7 +762,6 @@ const EARTH_RADIUS_KM = 6371;
 const DEFAULT_NEARBY_HELPERS_RADIUS_KM = 20;
 const MAX_NEARBY_HELPERS_RADIUS_KM = 50;
 const MAX_NEARBY_HELPERS_LIMIT = 50;
-const HELPER_LOCATION_STALE_MS = 15 * 60 * 1000;
 const CUSTOMER_LOCATION_STALE_MS = 10 * 60 * 1000;
 
 function normalizeServiceToken(value = '') {
@@ -1176,7 +1191,8 @@ function buildHelperDispatchIndexDocument(helperId = '', helper = {}, catalogInd
     && payoutVerificationStatus === 'verified'
     && agreementCurrent
     && hasApprovedServices
-    && Boolean(liveLocation);
+    && Boolean(liveLocation)
+    && isHelperLocationFresh(liveLocation);
 
   const location = liveLocation || null;
   const geohash = location ? encodeGeohash(location.latitude, location.longitude) : null;
@@ -1366,6 +1382,7 @@ function isHelperDispatchEligible(helper = {}, categoryId = '', requestServiceId
   const verificationStatus = String(helper?.verificationStatus || '').toLowerCase();
 
   return verificationStatus === 'verified'
+    && isHelperLocationFresh(getLiveLocationSnapshot(helper))
     && meetsHelperPoliceClearanceRequirement(helperPoliceClearanceRequired(), helper?.policeClearanceStatus)
     && payoutVerificationStatus === 'verified'
     && isHelperAgreementCurrent(helper)
@@ -1416,6 +1433,7 @@ function getLiveLocationSnapshot(user = {}) {
     altitudeAccuracy: normalizeCoordinate(location.altitudeAccuracy),
     heading: normalizeCoordinate(location.heading),
     speed: normalizeCoordinate(location.speed),
+    source: String(location.source || 'device').trim().toLowerCase() || 'device',
     updatedAtMs: normalizeMillis(location.updatedAtMs ?? location.updatedAt),
   };
 }
@@ -1464,13 +1482,12 @@ function isHelperMapVisible(helper = {}) {
   const isOnline = String(helper?.onlineStatus || '').toLowerCase() === 'online';
   const hasLocationSharing = helper?.locationSharingEnabled !== false;
   const location = getLiveLocationSnapshot(helper);
-  const isFresh = location?.updatedAtMs ? (Date.now() - location.updatedAtMs) <= HELPER_LOCATION_STALE_MS : false;
   const verificationStatus = String(helper?.verificationStatus || '').toLowerCase();
   const isDispatchPaused = isTruthyFlag(helper.dispatchPaused ?? helper.isDispatchPaused);
 
   return isOnline
     && hasLocationSharing
-    && isFresh
+    && isHelperLocationFresh(location)
     && verificationStatus === 'verified'
     && isHelperAgreementCurrent(helper)
     && !isDispatchPaused
@@ -2186,29 +2203,20 @@ function whatsappOnboardingEnabled() {
   return String(process.env.WHATSAPP_ONBOARDING_ENABLED || '').trim().toLowerCase() === 'true';
 }
 
-function getWhatsAppSignupBaseUrl(role) {
-  const configured = role === 'helper'
-    ? process.env.WHATSAPP_HELPER_SIGNUP_URL || 'https://bakayise-uncedo-latest-helpers.web.app/sign-up'
-    : process.env.WHATSAPP_CUSTOMER_SIGNUP_URL || 'https://uncedo.bakayise.com/sign-up';
-  let url;
+function getWhatsAppSignupBaseUrl(role, mode = 'signup') {
   try {
-    url = new URL(String(configured || '').trim());
+    return getWhatsAppSignupUrl({ role, mode, env: process.env });
   } catch (_) {
-    throw new HttpsError('failed-precondition', 'The WhatsApp account setup page is not configured.');
+    throw new HttpsError('failed-precondition', 'The WhatsApp account setup page is not configured with a valid HTTPS URL.');
   }
-  if (url.protocol !== 'https:' || url.username || url.password) {
-    throw new HttpsError('failed-precondition', 'The WhatsApp account setup page must use a secure HTTPS address.');
-  }
-  url.searchParams.set('source', 'whatsapp');
-  return url;
 }
 
 function getWhatsAppAccountLinkBaseUrl(role) {
-  const url = getWhatsAppSignupBaseUrl(role);
-  url.pathname = '/whatsapp-link';
-  url.search = '';
-  url.hash = '';
-  return url.toString();
+  try {
+    return getWhatsAppAccountLinkUrl({ role, env: process.env }).toString();
+  } catch (_) {
+    throw new HttpsError('failed-precondition', 'The WhatsApp account-link page is not configured with a valid HTTPS URL.');
+  }
 }
 
 async function createWhatsAppExistingAccountLink({ identityId, sourceEventId, candidate }) {
@@ -2282,7 +2290,7 @@ async function createWhatsAppExistingAccountLink({ identityId, sourceEventId, ca
   return { code: 'created', url, expiresAtMs: challenge.challenge.expiresAtMs, role };
 }
 
-async function createWhatsAppSignupLink({ identityId, role, sourceEventId }) {
+async function createWhatsAppSignupLink({ identityId, role, sourceEventId, mode = 'signup' }) {
   if (!whatsappOnboardingEnabled()) throw new HttpsError('failed-precondition', 'WhatsApp account onboarding is not enabled.');
   if (!['customer', 'helper'].includes(String(role || '').trim().toLowerCase())) {
     throw new HttpsError('invalid-argument', 'A customer or helper account type is required.');
@@ -2300,6 +2308,7 @@ async function createWhatsAppSignupLink({ identityId, role, sourceEventId }) {
   await db.collection('whatsappSignupChallenges').doc(tokenHash).create({
     identityId: String(identityId || ''),
     role: String(role).toLowerCase(),
+    entryMode: String(mode).toLowerCase() === 'signin' ? 'signin' : 'signup',
     phoneHash: createHash('sha256').update(phone.phoneNumber).digest('hex'),
     sourceEventId: String(sourceEventId || ''),
     status: 'pending',
@@ -2308,30 +2317,25 @@ async function createWhatsAppSignupLink({ identityId, role, sourceEventId }) {
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     retentionExpiresAtMs: expiresAtMs + (24 * 60 * 60 * 1000),
   });
-  const url = getWhatsAppSignupBaseUrl(String(role).toLowerCase());
+  const normalizedMode = String(mode).toLowerCase() === 'signin' ? 'signin' : 'signup';
+  const url = getWhatsAppSignupBaseUrl(String(role).toLowerCase(), normalizedMode);
   // Fragment values stay in the browser and are removed by the signup page;
   // the server still trusts only the opaque, short-lived challenge token.
   url.hash = new URLSearchParams({
     wa_signup_token: token,
     wa_role: String(role).toLowerCase(),
     wa_phone: phone.phoneNumber,
+    wa_mode: normalizedMode,
   }).toString();
   return { url: url.toString(), tokenHash, expiresAtMs };
 }
 
 function getWhatsAppHelperAgreementBaseUrl() {
-  const configured = process.env.WHATSAPP_HELPER_AGREEMENT_URL
-    || 'https://bakayise-uncedo-latest-helpers.web.app/sign-agreement';
-  let url;
   try {
-    url = new URL(String(configured || '').trim());
+    return getWhatsAppHelperAgreementUrl({ env: process.env });
   } catch (_) {
-    throw new HttpsError('failed-precondition', 'The helper agreement page is not configured.');
+    throw new HttpsError('failed-precondition', 'The helper agreement page is not configured with a valid HTTPS URL.');
   }
-  if (url.protocol !== 'https:' || url.username || url.password) {
-    throw new HttpsError('failed-precondition', 'The helper agreement page must use a secure HTTPS address.');
-  }
-  return url.toString();
 }
 
 function getWhatsAppBusinessReturnUrl() {
@@ -3958,6 +3962,352 @@ async function getWhatsAppHelperReadiness(uid) {
   };
 }
 
+function describeWhatsAppHelperReadiness(readiness = {}) {
+  const missing = Array.isArray(readiness.missing) ? readiness.missing : [];
+  return missing.length
+    ? `You cannot go online yet. Please complete these helper requirements first:\n${missing.map((item) => `• ${item}`).join('\n')}`
+    : 'Your helper profile is not currently eligible to go online. Please use the Helpers app or contact Uncedo support.';
+}
+
+function isCurrentWhatsAppHelperLink({ identity = {}, expectedIdentity = {}, link = {}, profile = {}, identityId = '', helperId = '' } = {}) {
+  let expectedPhone = '';
+  let profilePhone = '';
+  try {
+    expectedPhone = normalizeWhatsAppIdentityPhone(`+${String(identity.waId || '')}`).phoneNumber;
+    profilePhone = normalizeWhatsAppIdentityPhone(String(profile.whatsappPhoneNumber || '')).phoneNumber;
+  } catch (_) {
+    return false;
+  }
+  return Boolean(helperId && identityId && profilePhone && expectedPhone === profilePhone
+    && String(identity.waId || '') === String(expectedIdentity.waId || '')
+    && String(identity.phoneNumberId || '') === String(expectedIdentity.phoneNumberId || '')
+    && String(identity.linkedFirebaseUid || '') === helperId
+    && String(identity.role || '').toLowerCase() === 'helper'
+    && String(link.uid || '') === helperId
+    && String(link.identityId || '') === identityId
+    && String(link.role || '').toLowerCase() === 'helper'
+    && normalizeTimestamp(identity.verifiedAt) > 0
+    && normalizeTimestamp(profile.whatsappVerifiedAt) > 0
+    && isHelperUserRecord(profile)
+    && String(profile.verificationStatus || '').toLowerCase() === 'verified');
+}
+
+async function beginWhatsAppHelperOnline({ identityId, eventId, identity, conversationRef, reply }) {
+  if (!whatsappOnboardingEnabled()) {
+    await reply('WhatsApp helper availability is not enabled yet. Please use the Helpers app to change your availability.');
+    return { code: 'disabled' };
+  }
+  const resolution = await resolveWhatsAppToolAuthorization(identityId, identity);
+  const authorization = resolution.authorization || {};
+  const helperId = String(authorization.uid || '').trim();
+  if (authorization.role !== 'helper' || !helperId || authorization.verified !== true || authorization.linked !== true) {
+    await reply('Only a verified helper account linked to this WhatsApp chat can go online. Please link your helper account first.');
+    return { code: 'helper-link-required' };
+  }
+
+  const userRef = db.collection('users').doc(helperId);
+  const [profileSnapshot, readiness] = await Promise.all([userRef.get(), getWhatsAppHelperReadiness(helperId)]);
+  const profile = profileSnapshot.data() || {};
+  if (!profileSnapshot.exists || isHelperProfileBlocked(profile)) {
+    await reply('Your helper account cannot go online at the moment. Please contact Uncedo support.');
+    return { code: 'helper-unavailable' };
+  }
+  if (!readiness.readyByCurrentAppRules) {
+    await reply(describeWhatsAppHelperReadiness(readiness));
+    return { code: 'profile-not-ready' };
+  }
+
+  const requestId = String(profile.activeServiceRequestId || '').trim();
+  if (requestId) {
+    await reply('You already have an active service request. Finish that request before going online for new offers.');
+    return { code: 'active-request' };
+  }
+  if (String(profile.onlineStatus || '').toLowerCase() === 'online' && isHelperLocationFresh(getLiveLocationSnapshot(profile))) {
+    await reply('You are already online. Send “offline” when you want to stop receiving new offers.');
+    return { code: 'already-online' };
+  }
+
+  const identityRef = db.collection('whatsappIdentities').doc(identityId);
+  const linkRef = db.collection('whatsappUserLinks').doc(helperId);
+  const auditRef = db.collection('auditEvents').doc(stableEventId(`whatsapp-helper-online-location-request:${eventId}`));
+  const nowMs = Date.now();
+  const result = await db.runTransaction(async (transaction) => {
+    const [identitySnapshot, linkSnapshot, currentProfileSnapshot, conversationSnapshot, auditSnapshot] = await Promise.all([
+      transaction.get(identityRef), transaction.get(linkRef), transaction.get(userRef), transaction.get(conversationRef), transaction.get(auditRef),
+    ]);
+    const currentIdentity = identitySnapshot.data() || {};
+    const currentProfile = currentProfileSnapshot.data() || {};
+    if (!identitySnapshot.exists || !linkSnapshot.exists || !currentProfileSnapshot.exists
+      || !conversationSnapshot.exists || String(conversationSnapshot.data()?.lastInboundEventId || '') !== eventId
+      || !isCurrentWhatsAppHelperLink({ identity: currentIdentity, expectedIdentity: identity, link: linkSnapshot.data(), profile: currentProfile, identityId, helperId })
+      || isHelperProfileBlocked(currentProfile)) return { code: 'state-changed' };
+    const currentRequestId = String(currentProfile.activeServiceRequestId || conversationSnapshot.data()?.activeServiceRequestId || '').trim();
+    if (currentRequestId) return { code: 'active-request' };
+    if (String(currentProfile.onlineStatus || '').toLowerCase() === 'online'
+      && isHelperLocationFresh(getLiveLocationSnapshot(currentProfile), nowMs)) return { code: 'already-online' };
+    const expiresAtMs = nowMs + WHATSAPP_HELPER_ONLINE_LOCATION_TTL_MS;
+    transaction.set(conversationRef, {
+      pendingHelperOnlineLocation: {
+        purpose: 'go_online', helperId, identityId, sourceEventId: eventId,
+        requestedAtMs: nowMs, expiresAtMs,
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    if (!auditSnapshot.exists) transaction.create(auditRef, {
+      eventType: 'whatsapp_helper_online_location_requested', actorUid: helperId,
+      identityId, sourceEventId: eventId, createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    return { code: 'location-required', expiresAtMs };
+  });
+
+  if (result.code === 'location-required') {
+    await reply('Before I can put you online, please share your current WhatsApp location pin. This is a one-time location update, not continuous tracking. If you move while online, send another pin. The request expires in 10 minutes, and a shared pin can be used for matching for up to 60 minutes.');
+  } else if (result.code === 'already-online') {
+    await reply('You are already online. Send “offline” when you want to stop receiving new offers.');
+  } else if (result.code === 'active-request') {
+    await reply('You already have an active service request. Finish that request before going online for new offers.');
+  } else {
+    await reply('I could not verify that your helper account is still linked and ready. No availability change was made. Please try again or contact Uncedo support.');
+  }
+  return result;
+}
+
+async function setWhatsAppHelperOffline({ identityId, eventId, identity, conversationRef, reply }) {
+  if (!whatsappOnboardingEnabled()) {
+    await reply('WhatsApp helper availability is not enabled yet. Please use the Helpers app to change your availability.');
+    return { code: 'disabled' };
+  }
+  const resolution = await resolveWhatsAppToolAuthorization(identityId, identity);
+  const authorization = resolution.authorization || {};
+  const helperId = String(authorization.uid || '').trim();
+  if (authorization.role !== 'helper' || !helperId || authorization.verified !== true || authorization.linked !== true) {
+    await reply('Only a verified helper account linked to this WhatsApp chat can change availability.');
+    return { code: 'helper-link-required' };
+  }
+
+  const userRef = db.collection('users').doc(helperId);
+  const identityRef = db.collection('whatsappIdentities').doc(identityId);
+  const linkRef = db.collection('whatsappUserLinks').doc(helperId);
+  const auditRef = db.collection('auditEvents').doc(stableEventId(`whatsapp-helper-offline:${eventId}`));
+  const result = await db.runTransaction(async (transaction) => {
+    const [identitySnapshot, linkSnapshot, profileSnapshot, conversationSnapshot, auditSnapshot] = await Promise.all([
+      transaction.get(identityRef), transaction.get(linkRef), transaction.get(userRef), transaction.get(conversationRef), transaction.get(auditRef),
+    ]);
+    const currentIdentity = identitySnapshot.data() || {};
+    const profile = profileSnapshot.data() || {};
+    if (!identitySnapshot.exists || !linkSnapshot.exists || !profileSnapshot.exists || !conversationSnapshot.exists
+      || String(conversationSnapshot.data()?.lastInboundEventId || '') !== eventId
+      || !isCurrentWhatsAppHelperLink({ identity: currentIdentity, expectedIdentity: identity, link: linkSnapshot.data(), profile, identityId, helperId })) {
+      return { code: 'state-changed' };
+    }
+    if (String(profile.activeServiceRequestId || conversationSnapshot.data()?.activeServiceRequestId || '').trim()) return { code: 'active-request' };
+    if (String(profile.onlineStatus || '').toLowerCase() === 'offline') {
+      transaction.set(conversationRef, { pendingHelperOnlineLocation: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return { code: 'already-offline' };
+    }
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    transaction.update(userRef, { onlineStatus: 'offline', locationSharingEnabled: false, updatedAt: now });
+    transaction.set(conversationRef, { pendingHelperOnlineLocation: admin.firestore.FieldValue.delete(), updatedAt: now }, { merge: true });
+    if (!auditSnapshot.exists) transaction.create(auditRef, {
+      eventType: 'whatsapp_helper_went_offline', actorUid: helperId,
+      identityId, sourceEventId: eventId, createdAt: now,
+    });
+    return { code: 'offline' };
+  });
+
+  if (result.code === 'offline') {
+    await syncHelperDispatchIndexById(helperId).catch((error) => logger.warn('whatsapp_helper_offline_dispatch_sync_failed', {
+      helperId, errorCode: String(error?.code || 'dispatch_sync_failed').slice(0, 80),
+    }));
+    await reply('You are offline and will not receive new service offers. Your last shared location remains saved as your last known location.');
+  } else if (result.code === 'already-offline') {
+    await reply('You are already offline and will not receive new service offers.');
+  } else if (result.code === 'active-request') {
+    await reply('You have an active service request. I cannot take you offline until it is finished or handled through the Helpers app.');
+  } else {
+    await reply('I could not verify your helper account state, so I did not change your availability. Please try again or contact Uncedo support.');
+  }
+  return result;
+}
+
+async function processWhatsAppHelperLocation({ identityId, eventId, identity, conversation, conversationRef, inbound, reply }) {
+  const resolution = await resolveWhatsAppToolAuthorization(identityId, identity);
+  const authorization = resolution.authorization || {};
+  const helperId = String(authorization.uid || '').trim();
+  if (authorization.role !== 'helper' || !helperId || authorization.verified !== true || authorization.linked !== true) {
+    await reply('I could not verify this as a location from the helper account linked to this WhatsApp chat. No helper location was changed.');
+    return { code: 'helper-link-required' };
+  }
+  if (!whatsappOnboardingEnabled()) {
+    await reply('WhatsApp helper location updates are not enabled yet. Please use the Helpers app to manage availability and location.');
+    return { code: 'disabled' };
+  }
+
+  const nowMs = Date.now();
+  const location = normalizeWhatsAppHelperLocation(inbound.location || {}, {
+    capturedAtMs: inbound.createdAtMs || inbound.timestampMs,
+    receivedAtMs: inbound.receivedAtMs,
+    sourceEventId: eventId,
+  });
+  if (!location || !isHelperLocationFresh(location, nowMs)) {
+    await reply('I could not use that location pin because its coordinates or timestamp are invalid or too old. Please share your current location again.');
+    return { code: 'invalid-or-stale-location' };
+  }
+
+  const userRef = db.collection('users').doc(helperId);
+  const [profileSnapshot, readiness] = await Promise.all([userRef.get(), getWhatsAppHelperReadiness(helperId)]);
+  if (!profileSnapshot.exists) {
+    await reply('I could not find the linked helper profile. No location was saved.');
+    return { code: 'helper-profile-not-found' };
+  }
+  const profile = profileSnapshot.data() || {};
+  const pending = conversation.pendingHelperOnlineLocation || {};
+  const activeRequestId = String(profile.activeServiceRequestId || conversation.activeServiceRequestId || '').trim();
+  const requestRef = activeRequestId ? db.collection('serviceRequests').doc(activeRequestId) : null;
+  const activeRequestSnapshot = requestRef ? await requestRef.get() : null;
+  const activeRequest = activeRequestSnapshot?.exists ? activeRequestSnapshot.data() || {} : null;
+  const assignedActiveRequest = activeRequest && isWhatsAppRelayRequestOpen(activeRequest)
+    ? { id: activeRequestId, helperId: String(activeRequest.helperAssignment?.helperId || ''), open: true }
+    : null;
+  const effectiveProfile = { ...profile, activeServiceRequestId: activeRequestId };
+  const mode = resolveWhatsAppHelperLocationMode({
+    authorization, identityId, helperId, profile: effectiveProfile, pending,
+    assignedActiveRequest, readinessReady: readiness.readyByCurrentAppRules, nowMs,
+  });
+  if (mode.code === 'profile-not-ready') {
+    await reply(describeWhatsAppHelperReadiness(readiness));
+    return mode;
+  }
+  if (mode.code === 'online-command-required') {
+    await reply('Send “online” first, then share a current location pin when asked. If you are already online, send “online” again to refresh a location that has gone stale.');
+    return mode;
+  }
+  if (!['activate-online', 'refresh-online', 'active-request'].includes(mode.code)) {
+    await reply(mode.code === 'active-request-unavailable'
+      ? 'I could not verify an active service request for this location. No location was shared.'
+      : 'Your helper account is not available for location updates right now. No location was saved.');
+    return mode;
+  }
+
+  const identityRef = db.collection('whatsappIdentities').doc(identityId);
+  const linkRef = db.collection('whatsappUserLinks').doc(helperId);
+  const auditRef = db.collection('auditEvents').doc(stableEventId(`whatsapp-helper-location:${eventId}`));
+  const requestId = assignedActiveRequest?.id || '';
+  const txRequestRef = requestId ? db.collection('serviceRequests').doc(requestId) : null;
+  const transactionResult = await db.runTransaction(async (transaction) => {
+    const reads = [transaction.get(identityRef), transaction.get(linkRef), transaction.get(userRef), transaction.get(conversationRef), transaction.get(auditRef)];
+    if (txRequestRef) reads.push(transaction.get(txRequestRef));
+    const [identitySnapshot, linkSnapshot, currentProfileSnapshot, conversationSnapshot, auditSnapshot, requestSnapshot] = await Promise.all(reads);
+    const currentIdentity = identitySnapshot.data() || {};
+    const currentProfile = currentProfileSnapshot.data() || {};
+    const currentConversation = conversationSnapshot.data() || {};
+    if (!identitySnapshot.exists || !linkSnapshot.exists || !currentProfileSnapshot.exists || !conversationSnapshot.exists
+      || String(currentConversation.lastInboundEventId || '') !== eventId
+      || !isCurrentWhatsAppHelperLink({ identity: currentIdentity, expectedIdentity: identity, link: linkSnapshot.data(), profile: currentProfile, identityId, helperId })) {
+      return { code: 'state-changed' };
+    }
+
+    const currentActiveRequestId = String(currentProfile.activeServiceRequestId || currentConversation.activeServiceRequestId || '').trim();
+    if (currentActiveRequestId !== activeRequestId) return { code: 'state-changed' };
+    const currentRequest = requestSnapshot?.exists ? requestSnapshot.data() || {} : null;
+    const currentAssignedRequest = currentRequest && isWhatsAppRelayRequestOpen(currentRequest)
+      ? { id: requestId, helperId: String(currentRequest.helperAssignment?.helperId || ''), open: true }
+      : null;
+    const currentMode = resolveWhatsAppHelperLocationMode({
+      authorization, identityId, helperId,
+      profile: { ...currentProfile, activeServiceRequestId: currentActiveRequestId },
+      pending: currentConversation.pendingHelperOnlineLocation || {},
+      assignedActiveRequest: currentAssignedRequest,
+      readinessReady: readiness.readyByCurrentAppRules,
+      nowMs: Date.now(),
+    });
+    if (!['activate-online', 'refresh-online', 'active-request'].includes(currentMode.code)) return currentMode;
+    if (String(currentProfile.liveLocation?.sourceEventId || '') === eventId) return { code: 'duplicate' };
+    if (!isIncomingWhatsAppLocationNewer(location, currentProfile.liveLocation || {})) return { code: 'newer-location-exists' };
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    const updates = {
+      liveLocation: { ...location, updatedAt: now },
+      locationSharingEnabled: true,
+      updatedAt: now,
+    };
+    if (currentMode.code === 'activate-online') updates.onlineStatus = 'online';
+    transaction.update(userRef, updates);
+    transaction.set(conversationRef, {
+      pendingHelperOnlineLocation: admin.firestore.FieldValue.delete(),
+      updatedAt: now,
+    }, { merge: true });
+    if (!auditSnapshot.exists) transaction.create(auditRef, {
+      eventType: 'whatsapp_helper_location_updated', actorUid: helperId,
+      identityId, requestId: currentMode.code === 'active-request' ? requestId : '',
+      sourceEventId: eventId, locationSource: 'whatsapp', createdAt: now,
+    });
+    return { code: 'updated', mode: currentMode.code, requestId: currentMode.code === 'active-request' ? requestId : '' };
+  });
+
+  if (transactionResult.code === 'newer-location-exists') {
+    await reply('A more recent location is already saved, so I left it unchanged.');
+    return transactionResult;
+  }
+  if (transactionResult.code === 'duplicate') {
+    await reply('I already saved that location pin.');
+    return transactionResult;
+  }
+  if (transactionResult.code !== 'updated') {
+    await reply('I could not confirm your current helper status, so I did not update or share this location. Please send “online” again or contact Uncedo support.');
+    return transactionResult;
+  }
+
+  await syncHelperDispatchIndexById(helperId).catch((error) => logger.warn('whatsapp_helper_location_dispatch_sync_failed', {
+    helperId, errorCode: String(error?.code || 'dispatch_sync_failed').slice(0, 80),
+  }));
+
+  let trackingUpdated = false;
+  if (transactionResult.requestId) {
+    const customerTrackingLocation = {
+      latitude: location.latitude, longitude: location.longitude,
+      accuracy: null, altitude: null, altitudeAccuracy: null, heading: null, speed: null,
+      source: 'whatsapp', updatedAtMs: location.updatedAtMs,
+    };
+    try {
+      await admin.database().ref(`liveTracking/serviceRequests/${transactionResult.requestId}`).update({
+        helperLocation: customerTrackingLocation,
+        helperLocationUpdatedAtMs: location.updatedAtMs,
+        updatedAtMs: Date.now(),
+      });
+      trackingUpdated = true;
+    } catch (error) {
+      logger.warn('whatsapp_helper_location_tracking_update_failed', {
+        requestId: transactionResult.requestId, errorCode: String(error?.code || 'tracking_update_failed').slice(0, 80),
+      });
+    }
+
+    const mapUrl = buildHelperLocationMapUrl(location);
+    try {
+      await relayWhatsAppText({
+        eventId, identityId, identity,
+        conversation: { ...conversation, activeServiceRequestId: transactionResult.requestId },
+        inbound: { type: 'text', text: `Your assigned helper shared a current location pin for this request: ${mapUrl}` },
+        conversationRef,
+      });
+    } catch (error) {
+      logger.warn('whatsapp_helper_location_customer_relay_failed', {
+        requestId: transactionResult.requestId, eventId, errorCode: String(error?.code || 'location_relay_failed').slice(0, 80),
+      });
+    }
+  }
+
+  if (transactionResult.mode === 'activate-online') {
+    await reply('Your current location is saved and you are online. This is your last shared location, not continuous tracking. Send a new pin if you move. A pin is used for new matching for up to 60 minutes; send “offline” to stop receiving offers.');
+  } else if (transactionResult.mode === 'active-request') {
+    await reply(trackingUpdated
+      ? 'Your current location pin is saved for your active request and is available in its tracking view. It is a static update, not continuous tracking.'
+      : 'Your location pin is saved for your active request, but I could not update its tracking view just now. Please try again or contact Uncedo support.');
+  } else {
+    await reply('Your current location pin has been refreshed. It is used for new matching for up to 60 minutes. Send another pin if you move.');
+  }
+  return transactionResult;
+}
+
 async function resolveWhatsAppToolAuthorization(identityId, eventIdentity) {
   const identity = await getWhatsAppIdentityForCurrentSender(identityId, eventIdentity);
   if (!identity) return { identity: null, authorization: { role: 'guest', verified: false, linked: false } };
@@ -4212,7 +4562,7 @@ function formatWhatsAppToolResult(toolName, result = {}) {
   if (toolName === 'getMyEarningsSummary') return (result.recentPeriods || []).length
     ? `Your recent payout records:\n${result.recentPeriods.map((item) => `• ${item.weekKey || 'Period'}: ${item.status}; ${item.completedJobs} completed jobs${item.helperAmount === null ? '' : `; helper earnings R${Number(item.helperAmount).toFixed(2)}`}${item.platformAmount === null ? '' : `; platform commission R${Number(item.platformAmount).toFixed(2)}`}`).join('\n')}\nWallet: available R${(Number(result.availableWalletMinor || 0) / 100).toFixed(2)}, reserved R${(Number(result.reservedWalletMinor || 0) / 100).toFixed(2)}, outstanding commission R${(Number(result.outstandingCommissionMinor || 0) / 100).toFixed(2)}.`
     : `I could not find a weekly earnings record yet. Your wallet currently shows available R${(Number(result.availableWalletMinor || 0) / 100).toFixed(2)}, reserved R${(Number(result.reservedWalletMinor || 0) / 100).toFixed(2)}, and outstanding commission R${(Number(result.outstandingCommissionMinor || 0) / 100).toFixed(2)}.`;
-  if (toolName === 'requestHumanSupport') return `I’ve referred this to Uncedo support. Ticket reference: ${result.ticketId}. AI replies are paused while a support person handles it.`;
+  if (toolName === 'requestHumanSupport') return `I’ve referred this to Uncedo support. Ticket reference: ${result.ticketId}. A support person will handle this chat until the request is closed.`;
   return 'I could not complete that request safely.';
 }
 
@@ -4353,7 +4703,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         inbound,
       }).catch((error) => logger.warn('whatsapp_support_message_append_failed', { eventId, errorCode: String(error?.code || 'ticket_write_failed').slice(0, 80) }));
       const mediaNote = inbound.media && mediaResult?.code !== 'stored' ? ' I could not securely attach that media yet; please describe the issue in text.' : '';
-      await reply(`Your message is with the Uncedo support team. AI responses are paused while a person is handling this conversation.${mediaNote}`);
+      await reply(`Your message is with the Uncedo support team. A support person is handling this conversation.${mediaNote}`);
       await jobRef.set({ status: 'completed', intent: 'human_escalation', reason: 'human_handoff_active', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
     }
@@ -4497,6 +4847,35 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         }
       }
     }
+    const helperAvailabilityCommand = inbound.type === 'text'
+      ? parseWhatsAppHelperAvailabilityCommand(originalUserText)
+      : '';
+    if (helperAvailabilityCommand) {
+      const result = helperAvailabilityCommand === 'go_online'
+        ? await beginWhatsAppHelperOnline({ identityId, eventId, identity, conversationRef, reply })
+        : await setWhatsAppHelperOffline({ identityId, eventId, identity, conversationRef, reply });
+      await jobRef.set({
+        status: 'completed', intent: 'helper_availability', reason: result.code,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      return;
+    }
+    const helperOnboardingStage = String(onboardingState.stage || '').trim();
+    const helperLocationBelongsToAvailabilityFlow = ['complete', 'helper_readiness'].includes(helperOnboardingStage)
+      || Boolean(conversation.pendingHelperOnlineLocation)
+      || Boolean(conversation.activeServiceRequestId);
+    if (inbound.type === 'location'
+      && String(identity.role || '').toLowerCase() === 'helper'
+      && helperLocationBelongsToAvailabilityFlow) {
+      const result = await processWhatsAppHelperLocation({
+        identityId, eventId, identity, conversation, conversationRef, inbound, reply,
+      });
+      await jobRef.set({
+        status: 'completed', intent: 'helper_location', reason: result.code,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      return;
+    }
     if (whatsappOnboardingEnabled()
       && linkedHelperUid
       && String(identity.role || '').toLowerCase() === 'helper'
@@ -4515,7 +4894,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       } else {
         const result = await receiveWhatsAppPoliceClearance({ uid: linkedHelperUid, identityId, eventId, inbound });
         if (result.code === 'submitted' || result.code === 'duplicate') {
-          await reply('I received your police-clearance document securely. Its status is pending Uncedo administrator review; I will not share its contents with the AI assistant.');
+          await reply('I received your police-clearance document securely. Its status is pending Uncedo administrator review. Its contents will only be shared with relevant, authorised parties who need them for the review.');
         } else if (result.code === 'already-in-review-or-approved') {
           await reply(result.status === 'approved'
             ? 'Your police-clearance document is already approved.'
@@ -4561,7 +4940,8 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           let signup = null;
           try {
             const role = transition.action.includes('helper') ? 'helper' : 'customer';
-            signup = await createWhatsAppSignupLink({ identityId, role, sourceEventId: eventId });
+            const mode = getWhatsAppAccountSetupMode(transition.action);
+            signup = await createWhatsAppSignupLink({ identityId, role, sourceEventId: eventId, mode });
             await conversationRef.set({
               whatsappOnboarding: { ...transition.state, signupChallengeHash: signup.tokenHash, signupLinkExpiresAtMs: signup.expiresAtMs, updatedAtMs: Date.now() },
             }, { merge: true });
@@ -4572,10 +4952,14 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
             await reply('I could not create the secure account link right now. Please choose the account option again or try again shortly.');
           }
           if (signup) {
-            const purpose = transition.action.startsWith('link-')
+            const linkExistingAccount = transition.action.startsWith('link-');
+            const purpose = linkExistingAccount
               ? 'sign in with your existing email account'
               : 'create your account using your email address';
-            await reply(`Use this secure link to ${purpose}: ${signup.url}\n\nYour WhatsApp number is prefilled for linking. After you sign in or create the account, you’ll return to this chat. The link expires in 30 minutes.`);
+            const returnInstructions = linkExistingAccount
+              ? 'After you sign in to your existing account, you’ll return to this chat.'
+              : 'After you create your account, you’ll return to this chat.';
+            await reply(`Use this secure link to ${purpose}: ${signup.url}\n\nYour WhatsApp number is prefilled for linking. ${returnInstructions} The link expires in 30 minutes.`);
           }
         } else if (transition.action === 'choose-customer-mode' || transition.action === 'reask-customer-mode'
           || transition.action === 'choose-helper-account-mode' || transition.action === 'reask-helper-account-mode'
@@ -4665,7 +5049,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
               }
             } else {
               const items = readiness.missing.length ? readiness.missing.map((item) => `• ${item}`).join('\n') : '• Your existing helper profile meets the current app checks.';
-              await reply(`Your helper profile still needs:\n${items}\n\nYou can manage your availability in the Helpers app after every required item is complete and approved.`);
+              await reply(`Your helper profile still needs:\n${items}\n\nAfter each item is complete and approved, you can send “online” here and share a current WhatsApp location pin, or manage availability in the Helpers app.`);
             }
           }
         } else if (transition.action === 'submit-helper-services') {
@@ -5055,7 +5439,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           inbound,
         });
         if (inbound.media?.assetId) await associateWhatsAppMediaWithSupportTicket({ assetId: inbound.media.assetId, identityId, ticketId: ticket.ticketId });
-        await reply(`I’ve sent this conversation to Uncedo support. Your ticket reference is ${ticket.ticketId}. AI replies are paused until the support team closes the handoff.`);
+        await reply(`I’ve sent this conversation to Uncedo support. Your ticket reference is ${ticket.ticketId}. A support person will handle this chat until the request is closed.`);
       }
       await jobRef.set({ status: 'completed', intent: 'human_escalation', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
@@ -5331,7 +5715,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         await reply('WhatsApp message relay is not enabled yet. Please use the Uncedo app chat for this request.');
       } else {
         await conversationRef.set({ currentMode: 'provider_relay', currentIntent: 'provider_relay', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-        await reply('You can message your assigned helper here. Ordinary messages will be relayed without AI.');
+        await reply('You can message your assigned helper here. I’ll pass your messages to them.');
       }
       await jobRef.set({ status: 'completed', intent: 'provider_relay', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
@@ -5378,7 +5762,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     }
 
     if (!whatsappAiEnabled()) {
-      if (relayCommand) await reply('The WhatsApp assistant is not enabled yet. You can still use the Uncedo app, or send “status” to check this request.');
+      if (relayCommand) await reply('WhatsApp service support is temporarily unavailable. You can use the Uncedo app, or send “status” to check this request.');
       await jobRef.set({ status: 'disabled', reason: 'whatsapp_ai_disabled', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
     }
@@ -5774,7 +6158,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           requestId: conversation.activeServiceRequestId || '', inbound,
         });
         if (inbound.media?.assetId) await associateWhatsAppMediaWithSupportTicket({ assetId: inbound.media.assetId, identityId, ticketId: ticket.ticketId });
-        await reply(`I’ve sent this conversation to Uncedo support. Your ticket reference is ${ticket.ticketId}. AI replies are paused until the support team closes the handoff.`);
+        await reply(`I’ve sent this conversation to Uncedo support. Your ticket reference is ${ticket.ticketId}. A support person will handle this chat until the request is closed.`);
       }
       await jobRef.set({ status: 'completed', intent: intentResult.intent, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
