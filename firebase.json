@@ -20,6 +20,18 @@
       ],
       "headers": [
         {
+          "source": "/",
+          "headers": [
+            { "key": "Cache-Control", "value": "no-cache, max-age=0, must-revalidate" }
+          ]
+        },
+        {
+          "source": "/assets/**",
+          "headers": [
+            { "key": "Cache-Control", "value": "no-cache, max-age=0, must-revalidate" }
+          ]
+        },
+        {
           "source": "/payment",
           "headers": [
             { "key": "Cache-Control", "value": "no-store, max-age=0" },
@@ -38,6 +50,7 @@
         {
           "source": "/index.html",
           "headers": [
+            { "key": "Cache-Control", "value": "no-cache, max-age=0, must-revalidate" },
             { "key": "Referrer-Policy", "value": "no-referrer" }
           ]
         }
