@@ -248,6 +248,30 @@ export async function updateHelperModeration(uid, updates = {}) {
   }, 'admin:updateHelperModeration');
 }
 
+export async function getHelperPoliceClearanceReview(helperUid) {
+  const clients = await getFirebaseClients();
+  if (!clients) throw new Error('Firebase is not configured for the admin app.');
+  const call = clients.httpsCallable(clients.functions, 'getHelperPoliceClearanceReview');
+  const result = await call({ helperUid: String(helperUid || '').trim() });
+  return result.data || { helperUid, status: 'missing', submission: null };
+}
+
+export async function getHelperPoliceClearanceViewUrl(helperUid) {
+  const clients = await getFirebaseClients();
+  if (!clients) throw new Error('Firebase is not configured for the admin app.');
+  const call = clients.httpsCallable(clients.functions, 'getHelperPoliceClearanceViewUrl');
+  const result = await call({ helperUid: String(helperUid || '').trim() });
+  return result.data || null;
+}
+
+export async function reviewHelperPoliceClearance(helperUid, decision, reason = '') {
+  const clients = await getFirebaseClients();
+  if (!clients) throw new Error('Firebase is not configured for the admin app.');
+  const call = clients.httpsCallable(clients.functions, 'reviewHelperPoliceClearance');
+  const result = await call({ helperUid: String(helperUid || '').trim(), decision, reason });
+  return result.data || null;
+}
+
 function normalizeHelperServiceOfferingRow(docId = '', data = {}, helperProfilesById = new Map()) {
   const helperId = String(data.helperId || '').trim();
   const helper = helperProfilesById.get(helperId) || {};

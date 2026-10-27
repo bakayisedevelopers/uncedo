@@ -153,6 +153,25 @@ export function ProfileCompletionScreen({ navigate, goBack }) {
         <ActionButton label="Open agreement" onPress={() => navigate({ key: 'Agreement', params: { parentTab: 'Profile' } })} />
       </Card>
 
+      {profile.policeClearanceRequired === true ? (
+        <Card>
+          <SectionHeading
+            title="Police clearance"
+            subtitle={profile.policeClearanceStatus === 'approved'
+              ? 'Your police-clearance document has been approved.'
+              : profile.policeClearanceStatus === 'pending' || profile.policeClearanceStatus === 'uploading'
+                ? 'Your document is waiting for Uncedo review.'
+                : 'Send the document in your linked WhatsApp chat when Uncedo asks for it. Uploads are private and reviewed by an administrator.'}
+            action={(
+              <StatusBadge
+                label={profile.policeClearanceStatus || 'missing'}
+                tone={profile.policeClearanceStatus === 'approved' ? 'success' : profile.policeClearanceStatus === 'rejected' ? 'danger' : 'warning'}
+              />
+            )}
+          />
+        </Card>
+      ) : null}
+
       <Card>
         <SectionHeading title="Payout details" subtitle="Verified payout details are required before going online." />
         <TextInput

@@ -96,7 +96,7 @@ function helperProviderTypePrompt() {
   };
 }
 
-function transitionWhatsAppOnboarding({ state = {}, buttonId = '', text = '' } = {}) {
+function transitionWhatsAppOnboarding({ state = {}, buttonId = '', text = '', inboundType = 'text' } = {}) {
   const current = {
     stage: String(state.stage || '').trim(),
     role: ['customer', 'helper'].includes(String(state.role || '').toLowerCase())
@@ -256,6 +256,25 @@ function transitionWhatsAppOnboarding({ state = {}, buttonId = '', text = '' } =
       return { state: current, action: 'create-helper-agreement-link' };
     }
     return { state: current, action: 'await-helper-agreement' };
+  }
+
+  if (current.stage === 'awaiting_helper_police_clearance') {
+    if (['document', 'image'].includes(String(inboundType || '').trim().toLowerCase())) {
+      return { state: { ...current, stage: 'awaiting_helper_police_clearance_review' }, action: 'submit-helper-police-clearance' };
+    }
+    return {
+      state: current,
+      reply: 'Please upload your police-clearance document here as a PDF or a clear JPG/PNG image. It will be kept private and sent to Uncedo for review. Do not send identity or banking documents in this step.',
+      action: 'await-helper-police-clearance',
+    };
+  }
+
+  if (current.stage === 'awaiting_helper_police_clearance_review') {
+    return {
+      state: current,
+      reply: 'Your police-clearance document is awaiting Uncedo review. I will update the helper setup status after an administrator reviews it.',
+      action: 'await-helper-police-clearance-review',
+    };
   }
 
   if (current.stage === 'helper_readiness') {

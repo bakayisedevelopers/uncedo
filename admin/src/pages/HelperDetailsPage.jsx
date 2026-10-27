@@ -5,7 +5,10 @@ import { Badge, Card, EmptyState, LoadingState, SectionTitle } from '../componen
 import {
   flattenProviderServices,
   listHelperProfiles,
+  getHelperPoliceClearanceReview,
+  getHelperPoliceClearanceViewUrl,
   removeHelperServiceOffering,
+  reviewHelperPoliceClearance,
   updateHelperModeration,
   updateHelperServiceStatus,
 } from '../services/adminService';
@@ -63,6 +66,9 @@ export default function HelperDetailsPage() {
   const [helpers, setHelpers] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isMutating, setIsMutating] = useState(false);
+  const [clearanceReview, setClearanceReview] = useState(null);
+  const [isClearanceLoading, setIsClearanceLoading] = useState(false);
+  const [clearanceError, setClearanceError] = useState('');
 
   const load = async () => {
     setIsLoading(true);
@@ -80,6 +86,39 @@ export default function HelperDetailsPage() {
 
   const selected = helpers.find((item) => item.uid === helperId) || null;
   const focusedServiceId = searchParams.get('serviceId') || '';
+  const rawClearanceStatus = clearanceReview?.status || selected?.policeClearanceStatus || 'missing';
+  const clearanceStatusLabel = rawClearanceStatus === 'missing' && clearanceReview?.required === false
+    ? 'not required'
+    : rawClearanceStatus;
+
+  const refreshClearanceReview = async (uid) => {
+    if (!uid) return;
+    setIsClearanceLoading(true);
+    setClearanceError('');
+    try {
+      setClearanceReview(await getHelperPoliceClearanceReview(uid));
+    } catch (error) {
+      setClearanceError(error?.message || 'Police-clearance review information is unavailable.');
+    } finally {
+      setIsClearanceLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const uid = selected?.uid || '';
+    if (!uid) {
+      setClearanceReview(null);
+      return undefined;
+    }
+    let active = true;
+    setIsClearanceLoading(true);
+    setClearanceError('');
+    getHelperPoliceClearanceReview(uid)
+      .then((result) => { if (active) setClearanceReview(result); })
+      .catch((error) => { if (active) setClearanceError(error?.message || 'Police-clearance review information is unavailable.'); })
+      .finally(() => { if (active) setIsClearanceLoading(false); });
+    return () => { active = false; };
+  }, [selected?.uid]);
 
   const serviceRows = useMemo(() => flattenProviderServices(selected ? [selected] : []), [selected]);
   const serviceGroups = useMemo(() => groupRowsByService(serviceRows), [serviceRows]);
@@ -123,6 +162,41 @@ export default function HelperDetailsPage() {
         offeringId: row.offeringId,
       });
       await load();
+    } finally {
+      setIsMutating(false);
+    }
+  };
+
+  const openPoliceClearance = async () => {
+    const popup = window.open('about:blank', '_blank');
+    if (!popup) {
+      setClearanceError('Allow pop-ups for the admin site to open this private document.');
+      return;
+    }
+    popup.opener = null;
+    try {
+      const result = await getHelperPoliceClearanceViewUrl(selected?.uid);
+      if (!result?.url) throw new Error('The document is not available.');
+      popup.location = result.url;
+    } catch (error) {
+      popup?.close();
+      setClearanceError(error?.message || 'Unable to open the police-clearance document.');
+    }
+  };
+
+  const applyPoliceClearanceReview = async (decision) => {
+    if (!selected?.uid) return;
+    const reason = decision === 'resubmission_required'
+      ? (window.prompt('Reason for requesting a replacement document (optional):') || '')
+      : '';
+    setIsMutating(true);
+    setClearanceError('');
+    try {
+      await reviewHelperPoliceClearance(selected.uid, decision, reason);
+      await load();
+      await refreshClearanceReview(selected.uid);
+    } catch (error) {
+      setClearanceError(error?.message || 'Unable to update police-clearance review.');
     } finally {
       setIsMutating(false);
     }
@@ -251,6 +325,61 @@ export default function HelperDetailsPage() {
                 <Check className="h-4 w-4" />
                 Restore
               </button>
+            </div>
+
+            <div className="mt-6 rounded-[22px] border border-white/10 bg-ink-950/35 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-ink-300">Police clearance</p>
+                  <p className="mt-2 text-sm text-white">
+                    {isClearanceLoading ? 'Loading review status…' : clearanceStatusLabel}
+                  </p>
+                  {clearanceReview?.submission?.uploadedAtMs ? (
+                    <p className="mt-1 text-xs text-ink-300">
+                      Uploaded {new Date(clearanceReview.submission.uploadedAtMs).toLocaleString()}
+                      {clearanceReview.submission.size ? ` · ${(clearanceReview.submission.size / (1024 * 1024)).toFixed(2)} MB` : ''}
+                    </p>
+                  ) : null}
+                </div>
+                <Badge tone={statusTone(clearanceStatusLabel)}>
+                  {clearanceStatusLabel}
+                </Badge>
+              </div>
+              {clearanceError ? <p className="mt-3 text-sm text-rose-200">{clearanceError}</p> : null}
+              {clearanceReview?.submission?.reviewReason ? (
+                <p className="mt-3 text-sm text-ink-200">Review note: {clearanceReview.submission.reviewReason}</p>
+              ) : null}
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={isMutating || isClearanceLoading || !clearanceReview?.submission?.canView}
+                  onClick={openPoliceClearance}
+                  className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-bold text-white disabled:opacity-50"
+                >
+                  Open document
+                </button>
+                {clearanceReview?.status === 'pending' ? (
+                  <>
+                    <button
+                      type="button"
+                      disabled={isMutating || isClearanceLoading}
+                      onClick={() => applyPoliceClearanceReview('approved')}
+                      className="rounded-2xl bg-brand px-4 py-2.5 text-sm font-bold text-white disabled:opacity-50"
+                    >
+                      Approve clearance
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isMutating || isClearanceLoading}
+                      onClick={() => applyPoliceClearanceReview('resubmission_required')}
+                      className="rounded-2xl border border-amber-400/20 bg-amber-400/10 px-4 py-2.5 text-sm font-bold text-amber-100 disabled:opacity-50"
+                    >
+                      Request replacement
+                    </button>
+                  </>
+                ) : null}
+              </div>
+              <p className="mt-3 text-xs text-ink-300">Document access uses a short-lived private link. This status is separate from Uncedo’s existing helper verification and service-offering approvals.</p>
             </div>
           </Card>
 

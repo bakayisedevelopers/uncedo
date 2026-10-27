@@ -112,6 +112,38 @@ test('helper wallet balances, transactions, and commission obligations are endpo
   await assertFails(adminDb.doc('helperWallets/helper-1').get());
 });
 
+test('police-clearance metadata remains inaccessible to clients and user status is server-managed', async () => {
+  await seedDocument('users/helper-clearance', {
+    uid: 'helper-clearance', role: 'helper', activeRole: 'helper', roles: ['helper'],
+    policeClearanceStatus: 'pending',
+  });
+  await seedDocument('helperPoliceClearanceRecords/helper-clearance', {
+    helperUid: 'helper-clearance', status: 'pending', currentSubmissionId: 'a'.repeat(64),
+  });
+  await seedDocument(`helperPoliceClearanceSubmissions/${'a'.repeat(64)}`, {
+    helperUid: 'helper-clearance', status: 'pending', storagePath: 'helper-police-clearance-private/x/y.pdf',
+  });
+
+  const helperDb = authedDb('helper-clearance');
+  const adminDb = authedDb('admin-user', { admin: true });
+  await assertSucceeds(helperDb.doc('users/helper-clearance').get());
+  await assertFails(helperDb.doc('users/helper-clearance').set({ policeClearanceStatus: 'approved' }, { merge: true }));
+  await assertFails(helperDb.doc('users/helper-clearance').set({ policeClearanceRequired: false }, { merge: true }));
+  await assertFails(helperDb.doc('helperPoliceClearanceRecords/helper-clearance').get());
+  await assertFails(helperDb.collection('helperPoliceClearanceSubmissions').get());
+  await assertFails(adminDb.doc('helperPoliceClearanceRecords/helper-clearance').get());
+  await assertFails(adminDb.doc(`helperPoliceClearanceSubmissions/${'a'.repeat(64)}`).get());
+});
+
+test('police-clearance Storage objects deny client read and write even to the helper owner', async () => {
+  const helperStorage = authedStorage('helper-clearance');
+  const adminStorage = authedStorage('admin-user', { admin: true });
+  const path = 'helper-police-clearance-private/hashed-helper/hashed-event.pdf';
+  await assertFails(uploadStorageFile(helperStorage, path, 'application/pdf'));
+  await assertFails(getBytes(ref(helperStorage, path)));
+  await assertFails(uploadStorageFile(adminStorage, path, 'application/pdf'));
+});
+
 test('referrals, referral milestones, and normalized ratings stay endpoint-only for clients', async () => {
   await seedDocument('referrals/referred-1', {
     referredUserId: 'referred-1',

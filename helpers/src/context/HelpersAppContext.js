@@ -247,6 +247,18 @@ function getHelperOnboardingStatus(profile, { serviceCatalog = [], serviceCatalo
     return { complete: false, step: 'agreement', message: 'Accept the latest Helper Agreement before going online.' };
   }
 
+  if (profile?.policeClearanceRequired === true
+    && String(profile?.policeClearanceStatus || '').trim().toLowerCase() !== 'approved') {
+    const clearanceStatus = String(profile?.policeClearanceStatus || '').trim().toLowerCase();
+    return {
+      complete: false,
+      step: 'verification',
+      message: clearanceStatus === 'pending' || clearanceStatus === 'uploading'
+        ? 'Your police-clearance document is waiting for Uncedo review.'
+        : 'Send your police-clearance document in your linked WhatsApp chat and wait for Uncedo review.',
+    };
+  }
+
   if (!hasPayout) {
     return { complete: false, step: 'payout', message: 'Add verified payout details so Uncedo can pay your helper share.' };
   }

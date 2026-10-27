@@ -163,6 +163,18 @@ const { isExpectedWhatsAppRelayRecipient, isWhatsAppRelayRequestOpen } = require
 const { buildWhatsAppPaymentSummary, formatWhatsAppPaymentSummary } = require('./whatsapp/paymentSummary');
 const { buildWhatsAppRequestSummary, formatWhatsAppRequestHistory, formatWhatsAppRequestSummary } = require('./whatsapp/requestSummary');
 const { downloadMetaMedia, storeWhatsAppMedia } = require('./whatsapp/mediaProcessor');
+const {
+  MAX_CLEARANCE_RETENTION_DAYS,
+  isHelperPoliceClearanceApproved,
+  isPoliceClearanceUploadConfigured,
+  meetsHelperPoliceClearanceRequirement,
+  normalizePoliceClearanceInbound,
+  normalizePoliceClearanceStatus,
+  policeClearanceRetentionDays,
+  policeClearanceStoragePath,
+  policeClearanceSubmissionId,
+  storePoliceClearanceObject,
+} = require('./whatsapp/policeClearance');
 const { transcribeWhatsAppAudio } = require('./whatsapp/transcription');
 const { extractWhatsAppDocumentText } = require('./whatsapp/documentExtractor');
 const { classifyMetaDeliveryError, shouldApplyDeliveryStatus } = require('./whatsapp/deliveryStatus');
@@ -1123,6 +1135,10 @@ function getHelperPayoutVerificationStatus(helper = {}) {
   return String(helper?.payout?.verificationStatus || helper?.payoutVerificationStatus || '').trim().toLowerCase();
 }
 
+function helperPoliceClearanceRequired() {
+  return isPoliceClearanceUploadConfigured(process.env);
+}
+
 function buildHelperDispatchIndexDocument(helperId = '', helper = {}, catalogIndex = buildActiveServiceCatalogIndex([]), helperOfferings = []) {
   const liveLocation = getLiveLocationSnapshot(helper);
   const dispatchServices = buildHelperDispatchServiceIds(helperOfferings, catalogIndex);
@@ -1133,6 +1149,8 @@ function buildHelperDispatchIndexDocument(helperId = '', helper = {}, catalogInd
   const suspended = isTruthyFlag(helper.suspended ?? helper.isSuspended);
   const blocked = isTruthyFlag(helper.blocked ?? helper.isBlocked);
   const verificationStatus = String(helper.verificationStatus || '').trim().toLowerCase();
+  const policeClearanceStatus = normalizePoliceClearanceStatus(helper.policeClearanceStatus);
+  const policeClearanceRequired = helperPoliceClearanceRequired();
   const payoutVerificationStatus = getHelperPayoutVerificationStatus(helper);
   const agreementCurrent = isHelperAgreementCurrent(helper);
   const online = activeRole === 'helper' && onlineStatus === 'online';
@@ -1144,6 +1162,7 @@ function buildHelperDispatchIndexDocument(helperId = '', helper = {}, catalogInd
     && !suspended
     && !blocked
     && verificationStatus === 'verified'
+    && meetsHelperPoliceClearanceRequirement(policeClearanceRequired, policeClearanceStatus)
     && payoutVerificationStatus === 'verified'
     && agreementCurrent
     && hasApprovedServices
@@ -1170,6 +1189,8 @@ function buildHelperDispatchIndexDocument(helperId = '', helper = {}, catalogInd
     city: String(helper.city || helper.address?.city || helper.location?.city || '').trim(),
     province: String(helper.province || helper.address?.province || helper.location?.province || '').trim(),
     verificationStatus,
+    policeClearanceStatus,
+    policeClearanceRequired,
     payoutVerificationStatus,
     agreementCurrent,
     dispatchPaused,
@@ -1194,6 +1215,14 @@ function buildHelperDispatchIndexDocument(helperId = '', helper = {}, catalogInd
 async function writeHelperDispatchIndexFromUser(helperId = '', helper = {}, catalogIndex = null) {
   if (!helperId || !isHelperUserRecord(helper)) {
     return { skipped: true };
+  }
+  const policeClearanceRequired = helperPoliceClearanceRequired();
+  if (Boolean(helper.policeClearanceRequired) !== policeClearanceRequired) {
+    await db.collection('users').doc(helperId).set({
+      policeClearanceRequired,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    helper = { ...helper, policeClearanceRequired };
   }
   const index = catalogIndex || buildActiveServiceCatalogIndex(await getLiveServiceCatalogEntries());
   const helperOfferings = await getHelperServiceOfferings(helperId);
@@ -1230,7 +1259,9 @@ async function queryHelperDispatchCandidates(categoryId = '', requestServiceIds 
       })
     )));
     snapshots.forEach((snap) => snap.docs.forEach((docSnap) => byId.set(docSnap.id, { uid: docSnap.id, ...docSnap.data() })));
-    return [...byId.values()];
+    return helperPoliceClearanceRequired()
+      ? [...byId.values()].filter((helper) => isHelperPoliceClearanceApproved(helper.policeClearanceStatus))
+      : [...byId.values()];
   }
 
   const categoryToken = normalizeServiceToken(categoryId);
@@ -1243,7 +1274,9 @@ async function queryHelperDispatchCandidates(categoryId = '', requestServiceIds 
     return query.get();
   }));
   snapshots.forEach((snap) => snap.docs.forEach((docSnap) => byId.set(docSnap.id, { uid: docSnap.id, ...docSnap.data() })));
-  return [...byId.values()];
+  return helperPoliceClearanceRequired()
+    ? [...byId.values()].filter((helper) => isHelperPoliceClearanceApproved(helper.policeClearanceStatus))
+    : [...byId.values()];
 }
 
 
@@ -1323,6 +1356,7 @@ function isHelperDispatchEligible(helper = {}, categoryId = '', requestServiceId
   const verificationStatus = String(helper?.verificationStatus || '').toLowerCase();
 
   return verificationStatus === 'verified'
+    && meetsHelperPoliceClearanceRequirement(helperPoliceClearanceRequired(), helper?.policeClearanceStatus)
     && payoutVerificationStatus === 'verified'
     && isHelperAgreementCurrent(helper)
     && helperSupportsCategory(helper, categoryId, requestServiceIds, catalogIndex, helperOfferings)
@@ -2434,6 +2468,53 @@ async function cleanupExpiredWhatsAppMedia(now, limit = 100) {
   return deleted;
 }
 
+async function cleanupExpiredPoliceClearances(now, limit = 50) {
+  const snapshot = await db.collection('helperPoliceClearanceSubmissions')
+    .where('retentionExpiresAtMs', '<=', now).limit(limit).get();
+  let deleted = 0;
+  for (const submissionSnapshot of snapshot.docs) {
+    const submissionRef = submissionSnapshot.ref;
+    const initial = submissionSnapshot.data() || {};
+    const helperUid = String(initial.helperUid || '').trim();
+    const submissionId = String(initial.submissionId || submissionSnapshot.id);
+    const path = String(initial.storagePath || '');
+    if (!helperUid || !/^[a-f0-9]{64}$/.test(submissionId)
+      || !path.startsWith('helper-police-clearance-private/')) continue;
+    const claimed = await db.runTransaction(async (transaction) => {
+      const current = await transaction.get(submissionRef);
+      if (!current.exists) return false;
+      const value = current.data() || {};
+      if (Number(value.retentionExpiresAtMs || 0) > now || String(value.storagePath || '') !== path
+        || String(value.status || '') === 'deleting') return false;
+      transaction.set(submissionRef, { status: 'deleting', cleanupClaimedAtMs: now, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return true;
+    });
+    if (!claimed) continue;
+    try {
+      await admin.storage().bucket().file(path).delete({ ignoreNotFound: true });
+      const recordRef = db.collection('helperPoliceClearanceRecords').doc(helperUid);
+      const profileRef = db.collection('users').doc(helperUid);
+      await db.runTransaction(async (transaction) => {
+        const [currentSubmission, currentRecord, currentProfile] = await Promise.all([
+          transaction.get(submissionRef), transaction.get(recordRef), transaction.get(profileRef),
+        ]);
+        const record = currentRecord.data() || {};
+        if (currentSubmission.exists && String(currentSubmission.data()?.status || '') === 'deleting') transaction.delete(submissionRef);
+        if (String(record.currentSubmissionId || '') === submissionId) {
+          const nowValue = admin.firestore.FieldValue.serverTimestamp();
+          transaction.set(recordRef, { status: 'expired', updatedAt: nowValue, retentionExpiresAtMs: null }, { merge: true });
+          if (currentProfile.exists) transaction.set(profileRef, { policeClearanceStatus: 'expired', updatedAt: nowValue }, { merge: true });
+        }
+      });
+      deleted += 1;
+    } catch (error) {
+      await submissionRef.set({ status: String(initial.status || 'pending'), cleanupFailedAtMs: now, cleanupErrorCode: String(error?.code || 'storage-delete-failed').slice(0, 60) }, { merge: true }).catch(() => null);
+      logger.warn('helper_police_clearance_retention_delete_failed', { submissionId, errorCode: String(error?.code || 'storage-delete-failed').slice(0, 60) });
+    }
+  }
+  return deleted;
+}
+
 async function cleanupClosedWhatsAppSupportTickets(now, limit = 50) {
   const snapshot = await db.collection('supportTickets').where('retentionExpiresAtMs', '<=', now).limit(limit).get();
   let deleted = 0;
@@ -2496,6 +2577,7 @@ exports.cleanupWhatsAppRetention = onSchedule({
     counts[collectionName] = await deleteExpiredWhatsAppCollectionDocuments(collectionName, now, 300);
   }
   counts.mediaAssets = await cleanupExpiredWhatsAppMedia(now, 100);
+  counts.helperPoliceClearances = await cleanupExpiredPoliceClearances(now, 50);
   counts.supportTickets = await cleanupClosedWhatsAppSupportTickets(now, 50);
   counts.conversationMemories = await clearExpiredWhatsAppConversationMemory(now);
   logger.info('whatsapp_retention_cleanup_completed', counts);
@@ -2631,6 +2713,233 @@ async function processWhatsAppInboundMedia({ identityId, eventId, identity, conv
     mediaType: media.mediaType, mimeType: media.mimeType, size: media.size,
     buffer: media.buffer, storagePath: stored.path, duplicate: stored.duplicate,
   };
+}
+
+function helperPoliceClearanceUploadReady() {
+  return whatsappMessagingEnabled()
+    && whatsappOnboardingEnabled()
+    && isPoliceClearanceUploadConfigured(process.env);
+}
+
+async function scrubWhatsAppPoliceClearanceInbound(eventId) {
+  const removeSensitiveMediaMetadata = {
+    'media.mediaId': admin.firestore.FieldValue.delete(),
+    'media.sha256': admin.firestore.FieldValue.delete(),
+    'media.filename': admin.firestore.FieldValue.delete(),
+    'media.caption': admin.firestore.FieldValue.delete(),
+  };
+  await Promise.all([
+    db.collection('whatsappMessages').doc(eventId).update(removeSensitiveMediaMetadata).catch(() => null),
+    db.collection('whatsappWebhookEvents').doc(eventId).update(removeSensitiveMediaMetadata).catch(() => null),
+  ]);
+}
+
+async function receiveWhatsAppPoliceClearance({ uid, identityId, eventId, inbound }) {
+  if (!helperPoliceClearanceUploadReady()) return { code: 'disabled' };
+  const descriptor = normalizePoliceClearanceInbound(inbound);
+  if (!descriptor) return { code: 'unsupported' };
+  const retention = policeClearanceRetentionDays(process.env);
+  if (!retention) return { code: 'retention-not-configured' };
+  const submissionId = policeClearanceSubmissionId(uid, eventId);
+  const submissionRef = db.collection('helperPoliceClearanceSubmissions').doc(submissionId);
+  const recordRef = db.collection('helperPoliceClearanceRecords').doc(uid);
+  const identityRef = db.collection('whatsappIdentities').doc(identityId);
+  const userLinkRef = db.collection('whatsappUserLinks').doc(uid);
+  const profileRef = db.collection('users').doc(uid);
+  const conversationRef = db.collection('whatsappConversations').doc(identityId);
+  const auditRef = db.collection('auditEvents').doc(stableEventId(`helper-police-clearance-upload:${submissionId}`));
+  const objectPath = policeClearanceStoragePath(uid, eventId, descriptor.extension);
+  const initialRetentionExpiresAtMs = Date.now() + retention * 24 * 60 * 60 * 1000;
+
+  const reservation = await db.runTransaction(async (transaction) => {
+    const [identitySnapshot, linkSnapshot, profileSnapshot, conversationSnapshot, recordSnapshot, submissionSnapshot] = await Promise.all([
+      transaction.get(identityRef), transaction.get(userLinkRef), transaction.get(profileRef),
+      transaction.get(conversationRef), transaction.get(recordRef), transaction.get(submissionRef),
+    ]);
+    if (submissionSnapshot.exists) {
+      const existing = submissionSnapshot.data() || {};
+      if (String(existing.helperUid || '') !== uid || String(existing.sourceEventId || '') !== eventId) return { code: 'conflict' };
+      if (existing.status === 'uploading') return { code: 'resume' };
+      return { code: existing.status === 'pending' ? 'duplicate' : 'already-processed', status: existing.status };
+    }
+
+    const identity = identitySnapshot.data() || {};
+    const userLink = linkSnapshot.data() || {};
+    const profile = profileSnapshot.data() || {};
+    const conversation = conversationSnapshot.data() || {};
+    const currentRecord = recordSnapshot.data() || {};
+    let senderPhoneHash = '';
+    let profilePhoneMatches = false;
+    try {
+      const senderPhone = normalizeWhatsAppIdentityPhone(`+${String(identity.waId || '')}`).phoneNumber;
+      senderPhoneHash = createHash('sha256').update(senderPhone).digest('hex');
+      profilePhoneMatches = normalizeWhatsAppIdentityPhone(String(profile.whatsappPhoneNumber || '')).phoneNumber === senderPhone;
+    } catch (_) {
+      return { code: 'helper-identity-required' };
+    }
+    if (!identitySnapshot.exists || !profileSnapshot.exists || !isHelperUserRecord(profile)
+      || String(identity.linkedFirebaseUid || '') !== uid || String(identity.role || '').toLowerCase() !== 'helper'
+      || !normalizeTimestamp(identity.verifiedAt) || !normalizeTimestamp(profile.whatsappVerifiedAt)
+      || String(userLink.uid || '') !== uid || String(userLink.identityId || '') !== identityId
+      || String(userLink.phoneHash || '') !== senderPhoneHash || !profilePhoneMatches) {
+      return { code: 'helper-identity-required' };
+    }
+    if (String(conversation.lastInboundEventId || '') !== eventId
+      || String(conversation.whatsappOnboarding?.stage || '') !== 'awaiting_helper_police_clearance') {
+      return { code: 'not-current-onboarding-step' };
+    }
+    const currentStatus = normalizePoliceClearanceStatus(currentRecord.status || profile.policeClearanceStatus);
+    if (['pending', 'uploading', 'approved'].includes(currentStatus)) return { code: 'already-in-review-or-approved', status: currentStatus };
+
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    transaction.create(submissionRef, {
+      submissionId,
+      helperUid: uid,
+      identityId,
+      sourceEventId: eventId,
+      status: 'uploading',
+      mimeType: descriptor.mimeType,
+      storagePath: objectPath,
+      retentionDays: retention,
+      retentionExpiresAtMs: initialRetentionExpiresAtMs,
+      createdAtMs: Date.now(),
+      createdAt: now,
+    });
+    transaction.set(recordRef, {
+      helperUid: uid,
+      currentSubmissionId: submissionId,
+      status: 'uploading',
+      updatedAt: now,
+      retentionExpiresAtMs: initialRetentionExpiresAtMs,
+    }, { merge: true });
+    transaction.set(profileRef, { policeClearanceStatus: 'uploading', updatedAt: now }, { merge: true });
+    transaction.set(conversationRef, {
+      whatsappOnboarding: { stage: 'awaiting_helper_police_clearance_review', updatedAtMs: Date.now() },
+      currentMode: 'onboarding', updatedAt: now,
+    }, { merge: true });
+    transaction.create(auditRef, {
+      eventType: 'helper_police_clearance_uploaded',
+      helperUid: uid,
+      submissionId,
+      sourceEventId: eventId,
+      createdAt: now,
+    });
+    return { code: 'reserved' };
+  });
+
+  if (!['reserved', 'resume'].includes(reservation.code)) return reservation;
+
+  let stored;
+  try {
+    const { secrets } = getWhatsAppMetaClient();
+    const media = await downloadMetaMedia({
+      mediaId: inbound.media.mediaId,
+      mediaType: descriptor.mediaType,
+      mimeType: descriptor.mimeType,
+      sha256: inbound.media.sha256,
+      accessToken: secrets.accessToken,
+      graphApiVersion: secrets.graphApiVersion,
+    });
+    if (media.size > descriptor.maxBytes || media.mimeType !== descriptor.mimeType) {
+      throw new Error('Police-clearance document validation failed.');
+    }
+    stored = await storePoliceClearanceObject({
+      storageBucket: admin.storage().bucket(), uid, eventId, media, retentionDays: retention,
+    });
+
+    const finalized = await db.runTransaction(async (transaction) => {
+      const [identitySnapshot, linkSnapshot, profileSnapshot, conversationSnapshot, recordSnapshot, submissionSnapshot] = await Promise.all([
+        transaction.get(identityRef), transaction.get(userLinkRef), transaction.get(profileRef),
+        transaction.get(conversationRef), transaction.get(recordRef), transaction.get(submissionRef),
+      ]);
+      const identity = identitySnapshot.data() || {};
+      const link = linkSnapshot.data() || {};
+      const profile = profileSnapshot.data() || {};
+      const conversation = conversationSnapshot.data() || {};
+      const record = recordSnapshot.data() || {};
+      const submission = submissionSnapshot.data() || {};
+      let senderPhoneMatches = false;
+      try {
+        const senderPhone = normalizeWhatsAppIdentityPhone(`+${String(identity.waId || '')}`).phoneNumber;
+        senderPhoneMatches = normalizeWhatsAppIdentityPhone(String(profile.whatsappPhoneNumber || '')).phoneNumber === senderPhone
+          && String(link.phoneHash || '') === createHash('sha256').update(senderPhone).digest('hex');
+      } catch (_) {
+        senderPhoneMatches = false;
+      }
+      if (!identitySnapshot.exists || !profileSnapshot.exists || !submissionSnapshot.exists
+        || String(identity.linkedFirebaseUid || '') !== uid || String(identity.role || '').toLowerCase() !== 'helper'
+        || !normalizeTimestamp(identity.verifiedAt) || String(link.uid || '') !== uid
+        || String(link.identityId || '') !== identityId || !normalizeTimestamp(profile.whatsappVerifiedAt)
+        || !senderPhoneMatches
+        || String(record.currentSubmissionId || '') !== submissionId
+        || String(submission.status || '') !== 'uploading'
+        || String(conversation.whatsappOnboarding?.stage || '') !== 'awaiting_helper_police_clearance_review') {
+        return { code: 'state-changed' };
+      }
+      const now = admin.firestore.FieldValue.serverTimestamp();
+      transaction.set(submissionRef, {
+        status: 'pending',
+        mimeType: media.mimeType,
+        size: media.size,
+        storagePath: stored.path,
+        uploadedAtMs: Date.now(),
+        uploadedAt: now,
+        retentionExpiresAtMs: initialRetentionExpiresAtMs,
+        updatedAt: now,
+      }, { merge: true });
+      transaction.set(recordRef, {
+        status: 'pending',
+        currentSubmissionId: submissionId,
+        updatedAt: now,
+        retentionExpiresAtMs: initialRetentionExpiresAtMs,
+      }, { merge: true });
+      transaction.set(profileRef, { policeClearanceStatus: 'pending', updatedAt: now }, { merge: true });
+      return { code: 'submitted' };
+    });
+    if (finalized.code !== 'submitted') {
+      const current = await submissionRef.get();
+      if (String(current.data()?.status || '') !== 'pending') {
+        await admin.storage().bucket().file(stored.path).delete({ ignoreNotFound: true }).catch(() => null);
+        throw Object.assign(new Error('Police-clearance onboarding state changed during upload.'), { code: 'helper_clearance_state_changed' });
+      }
+    }
+    await scrubWhatsAppPoliceClearanceInbound(eventId);
+    return { code: 'submitted', duplicate: stored.duplicate === true };
+  } catch (error) {
+    if (stored?.path) {
+      const current = await submissionRef.get().catch(() => null);
+      const currentSubmission = current?.data() || {};
+      if (current?.exists && String(currentSubmission.status || '') === 'pending'
+        && String(currentSubmission.storagePath || '') === stored.path) {
+        await scrubWhatsAppPoliceClearanceInbound(eventId);
+        return { code: 'submitted', duplicate: true };
+      }
+    }
+    if (stored?.path) await admin.storage().bucket().file(stored.path).delete({ ignoreNotFound: true }).catch(() => null);
+    await db.runTransaction(async (transaction) => {
+      const [submissionSnapshot, recordSnapshot, profileSnapshot, conversationSnapshot] = await Promise.all([
+        transaction.get(submissionRef), transaction.get(recordRef), transaction.get(profileRef), transaction.get(conversationRef),
+      ]);
+      const submission = submissionSnapshot.data() || {};
+      const record = recordSnapshot.data() || {};
+      if (!submissionSnapshot.exists || String(record.currentSubmissionId || '') !== submissionId
+        || String(submission.status || '') !== 'uploading') return;
+      const now = admin.firestore.FieldValue.serverTimestamp();
+      transaction.set(submissionRef, { status: 'failed', errorCode: String(error?.code || 'media_processing_failed').slice(0, 80), updatedAt: now }, { merge: true });
+      transaction.set(recordRef, { status: 'failed', updatedAt: now }, { merge: true });
+      transaction.set(profileRef, { policeClearanceStatus: 'failed', updatedAt: now }, { merge: true });
+      if (conversationSnapshot.exists) transaction.set(conversationRef, {
+        whatsappOnboarding: { stage: 'awaiting_helper_police_clearance', updatedAtMs: Date.now() },
+        currentMode: 'onboarding', updatedAt: now,
+      }, { merge: true });
+    }).catch(() => null);
+    logger.warn('whatsapp_helper_police_clearance_upload_failed', {
+      submissionId,
+      errorCode: String(error?.code || 'media_processing_failed').slice(0, 80),
+    });
+    await scrubWhatsAppPoliceClearanceInbound(eventId);
+    return { code: 'failed' };
+  }
 }
 
 async function associateWhatsAppMediaWithSupportTicket({ assetId, identityId, ticketId }) {
@@ -3484,11 +3793,15 @@ async function submitWhatsAppHelperServices({ identityId, identity, conversation
 }
 
 async function getWhatsAppHelperReadiness(uid) {
-  const [profileSnapshot, offerings, catalogue, agreementBundle] = await Promise.all([
+  const [profileSnapshot, offerings, catalogue, agreementBundle, clearanceSnapshot] = await Promise.all([
     db.collection('users').doc(uid).get(), getHelperServiceOfferings(uid), getLiveServiceCatalogEntries(),
     getCanonicalHelperAgreementBundle({ db, admin, userId: uid }),
+    db.collection('helperPoliceClearanceRecords').doc(uid).get(),
   ]);
   const profile = profileSnapshot.data() || {};
+  const clearanceRecord = clearanceSnapshot.data() || {};
+  const policeClearanceStatus = normalizePoliceClearanceStatus(clearanceRecord.status || profile.policeClearanceStatus);
+  const policeClearanceRequired = helperPoliceClearanceRequired();
   const activeCatalogIds = new Set(catalogue.filter((entry) => entry.active !== false && entry.approved !== false).map((entry) => normalizeServiceToken(entry.id)));
   const approvedOffering = offerings.some((offering) => (
     offering.active !== false && offering.approved === true && offering.verified === true
@@ -3501,21 +3814,38 @@ async function getWhatsAppHelperReadiness(uid) {
   const agreementCurrent = Boolean(activeAgreementVersion
     && String(profile.agreement?.acceptedVersion || '').trim() === activeAgreementVersion
     && isHelperAgreementCurrent(profile));
-  const missing = [];
   const hasName = Boolean(String(profile.fullName || '').trim() || (String(profile.firstName || '').trim() && String(profile.lastName || '').trim()));
-  if (!hasName) missing.push('your full name');
-  if (!String(profile.homeAddress || '').trim()) missing.push('your home address');
+  const hasAddress = Boolean(String(profile.homeAddress || '').trim());
   const providerType = String(profile.providerType || '').toLowerCase();
-  if (!['individual', 'business'].includes(providerType)) missing.push('whether you are an individual or a business');
-  if (providerType === 'business' && !String(profile.businessName || '').trim()) missing.push('your business name');
-  if (!String(profile.profilePhoto || profile.selfieUrl || '').trim()) missing.push('a helper profile photo');
+  const hasProviderType = ['individual', 'business'].includes(providerType);
+  const hasBusinessName = providerType !== 'business' || Boolean(String(profile.businessName || '').trim());
+  const hasProfilePhoto = Boolean(String(profile.profilePhoto || profile.selfieUrl || '').trim());
+  const clearancePrerequisitesComplete = Boolean(hasName && hasAddress && hasProviderType && hasBusinessName
+    && hasProfilePhoto && approvedOffering && agreementCurrent);
+  const missing = [];
+  if (!hasName) missing.push('your full name');
+  if (!hasAddress) missing.push('your home address');
+  if (!hasProviderType) missing.push('whether you are an individual or a business');
+  if (!hasBusinessName) missing.push('your business name');
+  if (!hasProfilePhoto) missing.push('a helper profile photo');
   if (!offerings.length) missing.push('at least one service offering');
   else if (!approvedOffering) missing.push(pendingOffering ? 'admin approval and portfolio photos for your service offering' : 'an approved service offering with portfolio photos');
   if (!agreementCurrent) missing.push('acceptance of the current Helper Agreement');
+  if (policeClearanceRequired && !isHelperPoliceClearanceApproved(policeClearanceStatus)) {
+    missing.push(policeClearanceStatus === 'pending' || policeClearanceStatus === 'uploading'
+      ? 'admin review of your police-clearance document'
+      : 'an approved police-clearance document');
+  }
   if (getHelperPayoutVerificationStatus(profile) !== 'verified') missing.push('verified payout details');
   if (String(profile.verificationStatus || '').toLowerCase() !== 'verified') missing.push('Uncedo helper verification');
   if (!profile.whatsappVerifiedAt || !profile.whatsappPhoneNumber) missing.push('a verified WhatsApp link');
-  return { profile, missing, hasOfferings: offerings.length > 0, approvedOffering, agreementCurrent, activeAgreementVersion, readyByCurrentAppRules: missing.length === 0 };
+  return {
+    profile, missing, hasOfferings: offerings.length > 0, approvedOffering, agreementCurrent, activeAgreementVersion,
+    policeClearanceStatus,
+    policeClearanceRequired,
+    policeClearanceEligible: policeClearanceRequired && clearancePrerequisitesComplete && policeClearanceStatus !== 'approved',
+    readyByCurrentAppRules: missing.length === 0,
+  };
 }
 
 async function resolveWhatsAppToolAuthorization(identityId, eventIdentity) {
@@ -3877,6 +4207,23 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     sendAssistantReply = reply;
 
     if (conversation.humanHandoff === true) {
+      const clearanceStepActive = String(conversation.whatsappOnboarding?.stage || '')
+        .startsWith('awaiting_helper_police_clearance');
+      if (clearanceStepActive && inbound.media) {
+        await scrubWhatsAppPoliceClearanceInbound(eventId);
+        const safeInbound = { ...inbound, media: null, text: '' };
+        await createOrAppendWhatsAppSupportMessage({
+          db, admin, identityId, conversationRef, eventId,
+          principalId: identity.linkedFirebaseUid || identity.guestPrincipalId || '',
+          linkedUid: identity.linkedFirebaseUid || '',
+          role: identity.role || 'unknown',
+          requestId: conversation.activeServiceRequestId || '',
+          inbound: safeInbound,
+        }).catch((error) => logger.warn('whatsapp_support_message_append_failed', { eventId, errorCode: String(error?.code || 'ticket_write_failed').slice(0, 80) }));
+        await reply('A support person is currently handling this chat. I did not attach this file to the support conversation. Please wait for support to return the chat to onboarding, then resend your police-clearance document when asked.');
+        await jobRef.set({ status: 'completed', intent: 'helper_police_clearance', reason: 'human_handoff_active', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
       let mediaResult = null;
       if (inbound.media) {
         try {
@@ -3989,7 +4336,17 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       if (helperAuthorization.role === 'helper' && helperAuthorization.uid === linkedHelperUid
         && helperAuthorization.verified === true && helperAuthorization.linked === true) {
         const readiness = await getWhatsAppHelperReadiness(linkedHelperUid);
-        const readinessState = resolveWhatsAppHelperReadinessState({ state: onboardingState, ready: readiness.readyByCurrentAppRules });
+        let readinessState = resolveWhatsAppHelperReadinessState({ state: onboardingState, ready: readiness.readyByCurrentAppRules });
+        const readinessStage = String(readinessState.state.stage || '');
+        if (helperPoliceClearanceUploadReady() && readiness.policeClearanceEligible
+          && ['helper_readiness', 'complete', 'awaiting_helper_police_clearance', 'awaiting_helper_police_clearance_review'].includes(readinessStage)) {
+          const clearanceStage = ['pending', 'uploading'].includes(readiness.policeClearanceStatus)
+            ? 'awaiting_helper_police_clearance_review'
+            : 'awaiting_helper_police_clearance';
+          if (readinessStage !== clearanceStage) {
+            readinessState = { changed: true, state: { ...readinessState.state, role: 'helper', accountMode: 'account', stage: clearanceStage, updatedAtMs: Date.now() } };
+          }
+        }
         if (!readiness.readyByCurrentAppRules && !readinessState.changed
           && isWhatsAppHelperProfileCaptureStage(onboardingState.stage)) {
           // Recalculate current profile and agreement state, but do not replace
@@ -4002,8 +4359,50 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         }
       }
     }
+    if (whatsappOnboardingEnabled()
+      && linkedHelperUid
+      && String(identity.role || '').toLowerCase() === 'helper'
+      && normalizeTimestamp(identity.verifiedAt)
+      && ['awaiting_helper_police_clearance', 'awaiting_helper_police_clearance_review'].includes(String(onboardingState.stage || ''))) {
+      const clearanceAuthorization = (await resolveWhatsAppToolAuthorization(identityId, identity)).authorization || {};
+      if (clearanceAuthorization.role !== 'helper' || clearanceAuthorization.uid !== linkedHelperUid
+        || clearanceAuthorization.verified !== true || clearanceAuthorization.linked !== true) {
+        await reply('I could not verify this WhatsApp number as the linked helper account. No police-clearance file was processed.');
+      } else if (onboardingState.stage === 'awaiting_helper_police_clearance_review') {
+        await reply('Your police-clearance document is awaiting Uncedo review. I will update the helper setup status after an administrator reviews it.');
+      } else if (!helperPoliceClearanceUploadReady()) {
+        await reply('Police-clearance uploads are temporarily unavailable because secure file retention has not been configured. Please do not send the document until Uncedo confirms this step is ready.');
+      } else if (!['document', 'image'].includes(String(inbound.type || '').toLowerCase())) {
+        await reply('Please upload your police-clearance document here as a PDF or a clear JPG/PNG image. It will be stored privately for Uncedo review.');
+      } else {
+        const result = await receiveWhatsAppPoliceClearance({ uid: linkedHelperUid, identityId, eventId, inbound });
+        if (result.code === 'submitted' || result.code === 'duplicate') {
+          await reply('I received your police-clearance document securely. Its status is pending Uncedo administrator review; I will not share its contents with the AI assistant.');
+        } else if (result.code === 'already-in-review-or-approved') {
+          await reply(result.status === 'approved'
+            ? 'Your police-clearance document is already approved.'
+            : 'A police-clearance document is already awaiting review. Please wait for an administrator update.');
+        } else if (result.code === 'unsupported') {
+          await reply('This file type is not supported for police clearance. Please send a PDF, JPG or PNG file.');
+        } else if (result.code === 'helper-identity-required') {
+          await reply('I could not verify this WhatsApp number as the linked helper account. No police-clearance file was processed.');
+        } else if (result.code === 'not-current-onboarding-step') {
+          await reply('Your helper profile is not currently at the police-clearance upload step. Please send “Hi” to check your current setup requirements.');
+        } else if (result.code === 'disabled' || result.code === 'retention-not-configured') {
+          await reply('Police-clearance uploads are temporarily unavailable. Please do not resend the document until Uncedo confirms this step is ready.');
+        } else {
+          await reply('I could not safely receive that document. Please try sending it again as a PDF, JPG or PNG, or contact Uncedo support.');
+        }
+      }
+      if (inbound.media) await scrubWhatsAppPoliceClearanceInbound(eventId);
+      await jobRef.set({
+        status: 'completed', intent: 'helper_police_clearance',
+        reason: String(onboardingState.stage || ''), updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      return;
+    }
     if (whatsappOnboardingEnabled() && onboardingState.stage && onboardingState.stage !== 'complete') {
-      const transition = transitionWhatsAppOnboarding({ state: onboardingState, buttonId, text: originalUserText });
+      const transition = transitionWhatsAppOnboarding({ state: onboardingState, buttonId, text: originalUserText, inboundType: inbound.type });
       if (transition.action !== 'not-in-onboarding') {
         if (transition.homeAddress && transition.action === 'check-helper-readiness') {
           const addressSaved = await persistWhatsAppOnboardingDetails({
@@ -4114,9 +4513,21 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
                 await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
                 await reply(`Please read and sign the current Uncedo Helper Agreement (version ${agreement.version}) using this secure link: ${agreement.url}\n\nSign in with the email account linked to this WhatsApp number. We will verify the link belongs to your helper account before recording acceptance. It expires in 30 minutes; after signing, return to this chat to continue setup.`);
               }
+            } else if (readiness.policeClearanceRequired && readiness.policeClearanceStatus !== 'approved') {
+              if (['pending', 'uploading'].includes(readiness.policeClearanceStatus)) {
+                const nextState = { ...transition.state, stage: 'awaiting_helper_police_clearance_review' };
+                await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
+                await reply('Your police-clearance document is awaiting Uncedo review. I will update the helper setup status after an administrator reviews it.');
+              } else if (!helperPoliceClearanceUploadReady()) {
+                await reply('Police-clearance upload is required for helper setup, but secure storage retention is not configured yet. Please do not send the document until Uncedo confirms this step is ready.');
+              } else {
+                const nextState = { ...transition.state, stage: 'awaiting_helper_police_clearance' };
+                await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
+                await reply('Please upload your police-clearance document here as a PDF or a clear JPG/PNG image. It will be stored privately for Uncedo administrator review. Do not send identity or banking documents in this step.');
+              }
             } else {
               const items = readiness.missing.length ? readiness.missing.map((item) => `• ${item}`).join('\n') : '• Your existing helper profile meets the current app checks.';
-              await reply(`Your helper profile still needs:\n${items}\n\nA secure police-clearance submission and review step is not available in WhatsApp or the Helpers app yet. Please do not send this sensitive document in chat. Contact Uncedo support to arrange its review before relying on helper activation. You can go online and manage live request matching in the Helpers app; it requests live location only when you choose to go online.`);
+              await reply(`Your helper profile still needs:\n${items}\n\nYou can manage your availability in the Helpers app after every required item is complete and approved.`);
             }
           }
         } else if (transition.action === 'submit-helper-services') {
@@ -6485,7 +6896,10 @@ exports.getCustomerNearbyHelpers = onRequest({ cors: true, maxInstances: 5, ...H
     .where('h3Cell', 'in', cellChunk).limit(60).get()));
   const documents = [...new Map(pages.flatMap((page) => page.docs).map((document) => [document.id, document]))
     .values()].map((document) => ({ id: document.id, data: document.data() || {} }));
-  const helpers = buildNearbyHelperMapResults({ documents, origin, radiusKm, limit });
+  const eligibleDocuments = helperPoliceClearanceRequired()
+    ? documents.filter((document) => isHelperPoliceClearanceApproved(document.data?.policeClearanceStatus))
+    : documents;
+  const helpers = buildNearbyHelperMapResults({ documents: eligibleDocuments, origin, radiusKm, limit });
   return res.status(200).json({ success: true, currentUser: { id: decoded.uid, ...origin }, helpers, radiusKm });
 });
 
@@ -7812,6 +8226,163 @@ async function requireWhatsAppSupportAdmin(request) {
   if (!isAdminToken(token)) throw new HttpsError('permission-denied', 'Admin authorization is required.');
   return uid;
 }
+
+function requireHelperUid(value) {
+  const uid = String(value || '').trim();
+  if (!/^[A-Za-z0-9:_-]{1,128}$/.test(uid)) throw new HttpsError('invalid-argument', 'A valid helper account is required.');
+  return uid;
+}
+
+exports.getHelperPoliceClearanceReview = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 20 }, async (request) => {
+  await requireWhatsAppSupportAdmin(request);
+  const helperUid = requireHelperUid(request.data?.helperUid);
+  const [profileSnapshot, recordSnapshot] = await Promise.all([
+    db.collection('users').doc(helperUid).get(),
+    db.collection('helperPoliceClearanceRecords').doc(helperUid).get(),
+  ]);
+  const profile = profileSnapshot.data() || {};
+  if (!profileSnapshot.exists || !isHelperUserRecord(profile)) throw new HttpsError('not-found', 'Helper profile not found.');
+  const record = recordSnapshot.data() || {};
+  const submissionId = String(record.currentSubmissionId || '').trim();
+  if (!/^[a-f0-9]{64}$/.test(submissionId)) {
+    return { helperUid, required: helperPoliceClearanceRequired(), status: normalizePoliceClearanceStatus(record.status || profile.policeClearanceStatus), submission: null };
+  }
+  const submissionSnapshot = await db.collection('helperPoliceClearanceSubmissions').doc(submissionId).get();
+  if (!submissionSnapshot.exists) {
+    return { helperUid, required: helperPoliceClearanceRequired(), status: 'expired', submission: null };
+  }
+  const submission = submissionSnapshot.data() || {};
+  if (String(submission.helperUid || '') !== helperUid || String(submission.submissionId || '') !== submissionId) {
+    throw new HttpsError('permission-denied', 'Police-clearance record is not available for this helper.');
+  }
+  return {
+    helperUid,
+    required: helperPoliceClearanceRequired(),
+    status: normalizePoliceClearanceStatus(record.status || submission.status || profile.policeClearanceStatus),
+    submission: {
+      id: submissionId,
+      status: normalizePoliceClearanceStatus(submission.status),
+      mimeType: String(submission.mimeType || '').slice(0, 80),
+      size: Number(submission.size || 0),
+      uploadedAtMs: Number(submission.uploadedAtMs || submission.createdAtMs || 0),
+      reviewedAtMs: Number(submission.reviewedAtMs || 0) || null,
+      reviewReason: String(submission.reviewReason || '').slice(0, 500),
+      canView: ['pending', 'approved', 'rejected', 'resubmission_required'].includes(String(submission.status || ''))
+        && String(submission.storagePath || '').startsWith('helper-police-clearance-private/'),
+    },
+  };
+});
+
+exports.getHelperPoliceClearanceViewUrl = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 20 }, async (request) => {
+  const adminUid = await requireWhatsAppSupportAdmin(request);
+  const helperUid = requireHelperUid(request.data?.helperUid);
+  const recordSnapshot = await db.collection('helperPoliceClearanceRecords').doc(helperUid).get();
+  const record = recordSnapshot.data() || {};
+  const submissionId = String(record.currentSubmissionId || '').trim();
+  if (!/^[a-f0-9]{64}$/.test(submissionId)) throw new HttpsError('not-found', 'Police-clearance document not found.');
+  const submissionSnapshot = await db.collection('helperPoliceClearanceSubmissions').doc(submissionId).get();
+  const submission = submissionSnapshot.data() || {};
+  const storagePath = String(submission.storagePath || '');
+  const helperHash = createHash('sha256').update(helperUid).digest('hex');
+  if (!submissionSnapshot.exists || String(submission.helperUid || '') !== helperUid
+    || String(submission.status || '') === 'deleting'
+    || !storagePath.startsWith(`helper-police-clearance-private/${helperHash}/`)
+    || !/^helper-police-clearance-private\/[a-f0-9]{64}\/[a-f0-9]{64}\.(pdf|jpg|png)$/.test(storagePath)) {
+    throw new HttpsError('not-found', 'Police-clearance document is not available.');
+  }
+  const file = admin.storage().bucket().file(storagePath);
+  const [exists] = await file.exists();
+  if (!exists) throw new HttpsError('not-found', 'Police-clearance document has expired or was removed.');
+  const expiresAtMs = Date.now() + 5 * 60 * 1000;
+  const [url] = await file.getSignedUrl({
+    action: 'read',
+    expires: expiresAtMs,
+    version: 'v4',
+    responseDisposition: `inline; filename="police-clearance.${storagePath.split('.').pop()}"`,
+    responseType: String(submission.mimeType || 'application/pdf'),
+  });
+  await db.collection('auditEvents').doc(stableEventId(`helper-police-clearance-view:${submissionId}:${adminUid}:${randomUUID()}`)).create({
+    eventType: 'helper_police_clearance_view_url_issued',
+    helperUid,
+    submissionId,
+    actorUid: adminUid,
+    expiresAtMs,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+  return { url, expiresAtMs, mimeType: String(submission.mimeType || 'application/pdf') };
+});
+
+exports.reviewHelperPoliceClearance = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+  const adminUid = await requireWhatsAppSupportAdmin(request);
+  const helperUid = requireHelperUid(request.data?.helperUid);
+  const decision = String(request.data?.decision || '').trim().toLowerCase();
+  const reviewReason = String(request.data?.reason || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 500);
+  if (!['approved', 'resubmission_required'].includes(decision)) {
+    throw new HttpsError('invalid-argument', 'Choose approval or request a replacement document.');
+  }
+  const recordRef = db.collection('helperPoliceClearanceRecords').doc(helperUid);
+  const profileRef = db.collection('users').doc(helperUid);
+  const recordSnapshot = await recordRef.get();
+  const submissionId = String(recordSnapshot.data()?.currentSubmissionId || '').trim();
+  if (!/^[a-f0-9]{64}$/.test(submissionId)) throw new HttpsError('failed-precondition', 'There is no police-clearance submission to review.');
+  const submissionRef = db.collection('helperPoliceClearanceSubmissions').doc(submissionId);
+  const auditRef = db.collection('auditEvents').doc(stableEventId(`helper-police-clearance-review:${submissionId}:${decision}:${adminUid}`));
+  const result = await db.runTransaction(async (transaction) => {
+    const [recordCurrent, submissionCurrent, profileCurrent, auditCurrent] = await Promise.all([
+      transaction.get(recordRef), transaction.get(submissionRef), transaction.get(profileRef), transaction.get(auditRef),
+    ]);
+    const record = recordCurrent.data() || {};
+    const submission = submissionCurrent.data() || {};
+    const profile = profileCurrent.data() || {};
+    if (!profileCurrent.exists || !isHelperUserRecord(profile)) return { code: 'helper-not-found' };
+    if (!recordCurrent.exists || String(record.currentSubmissionId || '') !== submissionId
+      || !submissionCurrent.exists || String(submission.helperUid || '') !== helperUid) return { code: 'submission-not-found' };
+    if (String(record.status || '') === decision && String(submission.status || '') === decision) return { code: 'already-applied' };
+    if (String(record.status || '') !== 'pending' || String(submission.status || '') !== 'pending'
+      || !String(submission.storagePath || '').startsWith('helper-police-clearance-private/')) return { code: 'not-reviewable' };
+    const retention = Number(submission.retentionDays);
+    if (!Number.isInteger(retention) || retention < 1 || retention > MAX_CLEARANCE_RETENTION_DAYS) return { code: 'retention-not-configured' };
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    const expiresAtMs = Date.now() + retention * 24 * 60 * 60 * 1000;
+    transaction.set(submissionRef, {
+      status: decision,
+      reviewedByUid: adminUid,
+      reviewedAtMs: Date.now(),
+      reviewedAt: now,
+      reviewReason,
+      retentionExpiresAtMs: expiresAtMs,
+      updatedAt: now,
+    }, { merge: true });
+    transaction.set(recordRef, { status: decision, updatedAt: now, retentionExpiresAtMs: expiresAtMs }, { merge: true });
+    transaction.set(profileRef, {
+      policeClearanceStatus: decision,
+      policeClearanceReviewedAt: now,
+      updatedAt: now,
+    }, { merge: true });
+    if (!auditCurrent.exists) transaction.create(auditRef, {
+      eventType: 'helper_police_clearance_reviewed',
+      helperUid,
+      submissionId,
+      decision,
+      reason: reviewReason,
+      actorUid: adminUid,
+      createdAt: now,
+    });
+    return { code: 'reviewed', expiresAtMs, storagePath: String(submission.storagePath || '') };
+  });
+  if (result.code === 'helper-not-found' || result.code === 'submission-not-found') throw new HttpsError('not-found', 'Police-clearance submission not found.');
+  if (result.code === 'not-reviewable') throw new HttpsError('failed-precondition', 'This police-clearance submission is no longer waiting for review.');
+  if (result.code === 'retention-not-configured') throw new HttpsError('failed-precondition', 'The retention period saved with this police-clearance document is invalid.');
+  if (result.code === 'reviewed' && result.storagePath && Number.isFinite(result.expiresAtMs)) {
+    await admin.storage().bucket().file(result.storagePath).setMetadata({
+      metadata: { retentionExpiresAtMs: String(result.expiresAtMs) },
+    }).catch((error) => logger.warn('helper_police_clearance_expiry_metadata_update_failed', {
+      submissionId,
+      errorCode: String(error?.code || 'storage-metadata-update-failed').slice(0, 80),
+    }));
+  }
+  return { helperUid, submissionId, status: decision, idempotent: result.code === 'already-applied' };
+});
 
 exports.setWhatsAppSupportTicketState = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
   const adminUid = await requireWhatsAppSupportAdmin(request);

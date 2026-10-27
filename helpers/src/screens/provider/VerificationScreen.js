@@ -7,6 +7,7 @@ import { colors } from '../../theme/colors';
 export function VerificationScreen({ navigate, goBack }) {
   const { profile } = useHelpersApp();
   const isVerified = profile.verificationStatus === 'verified';
+  const clearanceStatus = String(profile.policeClearanceStatus || 'missing').toLowerCase();
 
   return (
     <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false}>
@@ -23,7 +24,9 @@ export function VerificationScreen({ navigate, goBack }) {
       <Card>
         <SectionHeading
           title="Verification status"
-          subtitle="Helpers need agreement acceptance, work proof, and verified payout details before fully activating."
+          subtitle={profile.policeClearanceRequired === true
+            ? 'Uncedo verification and police-clearance review are separate checks. Both must be complete before helper activation.'
+            : 'Uncedo verification is a trust checkpoint before full helper activation.'}
           action={<StatusBadge label={profile.verificationStatus} tone={isVerified ? 'success' : 'warning'} />}
         />
 
@@ -32,10 +35,13 @@ export function VerificationScreen({ navigate, goBack }) {
           <Text style={styles.item}>2. Profile selfie captured for helper identity</Text>
           <Text style={styles.item}>3. ServiceOfferings include uploaded work photos</Text>
           <Text style={styles.item}>4. Payout destination verified for weekly disbursement</Text>
+          {profile.policeClearanceRequired === true ? <Text style={styles.item}>5. Police clearance: {clearanceStatus}</Text> : null}
         </View>
 
         <View style={styles.buttonRow}>
-          <Text style={styles.item}>Verification status is updated by Uncedo after review. You cannot change it from this screen.</Text>
+          <Text style={styles.item}>{profile.policeClearanceRequired === true
+            ? 'Verification and police-clearance statuses are updated by Uncedo after review. You cannot change them from this screen. When requested, upload the clearance in your linked WhatsApp chat; it is not uploaded from this screen.'
+            : 'Your verification status is updated by Uncedo after review. You cannot change it from this screen.'}</Text>
           <ActionButton label="Review agreement" tone="secondary" onPress={() => navigate({ key: 'Agreement', params: { parentTab: 'Profile' } })} />
         </View>
       </Card>

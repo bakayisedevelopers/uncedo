@@ -83,6 +83,13 @@ service firebase.storage {
       allow delete: if isOwner(userId) || isAdmin();
     }
 
+    // Police-clearance documents are downloaded from Meta and stored by the
+    // Admin SDK. Clients never receive direct bucket access; an admin callable
+    // issues a short-lived signed URL only after checking trusted claims.
+    match /helper-police-clearance-private/{allPaths=**} {
+      allow read, write: if false;
+    }
+
     match /{allPaths=**} {
       allow read, write: if false;
     }

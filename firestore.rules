@@ -460,6 +460,16 @@ service cloud.firestore {
       }
     }
 
+    // Police-clearance contents and review metadata are accessible only through
+    // trusted backend functions that verify administrator claims.
+    match /helperPoliceClearanceRecords/{helperId} {
+      allow read, write: if false;
+    }
+
+    match /helperPoliceClearanceSubmissions/{submissionId} {
+      allow read, write: if false;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

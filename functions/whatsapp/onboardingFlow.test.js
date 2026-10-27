@@ -108,6 +108,23 @@ test('helper agreement stage waits for acceptance and can issue a replacement li
   assert.equal(replacement.action, 'create-helper-agreement-link');
 });
 
+test('police-clearance onboarding accepts only document or image messages and waits for admin review', () => {
+  const stage = { stage: 'awaiting_helper_police_clearance', role: 'helper', accountMode: 'account' };
+  const document = transitionWhatsAppOnboarding({ state: stage, inboundType: 'document' });
+  assert.equal(document.action, 'submit-helper-police-clearance');
+  assert.equal(document.state.stage, 'awaiting_helper_police_clearance_review');
+
+  const image = transitionWhatsAppOnboarding({ state: stage, inboundType: 'image' });
+  assert.equal(image.action, 'submit-helper-police-clearance');
+  const text = transitionWhatsAppOnboarding({ state: stage, inboundType: 'text', text: 'I will upload later' });
+  assert.equal(text.action, 'await-helper-police-clearance');
+  assert.match(text.reply, /PDF or a clear JPG\/PNG image/);
+
+  const pending = transitionWhatsAppOnboarding({ state: { ...stage, stage: 'awaiting_helper_police_clearance_review' }, inboundType: 'document' });
+  assert.equal(pending.action, 'await-helper-police-clearance-review');
+  assert.match(pending.reply, /awaiting Uncedo review/);
+});
+
 test('invalid onboarding input is re-prompted and control characters are removed', () => {
   const invalidName = transitionWhatsAppOnboarding({ state: { stage: 'awaiting_preferred_name' }, text: '\u0000   ' });
   assert.equal(invalidName.action, 'reask-preferred-name');

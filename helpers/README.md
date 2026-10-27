@@ -6,6 +6,7 @@ This folder contains the Expo React Native app for helpers.
 
 - Helper signup, login, and profile completion
 - Versioned helper agreement review, signing, and profile-completion gating
+- Police-clearance review status and profile-completion gating. Helpers submit the document in their linked WhatsApp onboarding chat; the app never stores or downloads the clearance file.
 - Firestore-backed service browsing, skill setup, bundle-service enrollment, and service approval flow
 - Multi-image uploads for helper service submissions
 - Availability management and active job handling
