@@ -9,9 +9,85 @@ const HELPER_PROFILE_CAPTURE_STAGES = Object.freeze([
   'awaiting_helper_services',
 ]);
 
-function resolveWhatsAppHelperReadinessState({ state = {}, ready = false, nowMs = Date.now() } = {}) {
+const POLICE_CLEARANCE_STAGES = Object.freeze([
+  'awaiting_helper_police_clearance',
+  'awaiting_helper_police_clearance_review',
+]);
+
+function resolveWhatsAppHelperReadinessState({
+  state = {},
+  ready = false,
+  policeClearanceRequired = true,
+  policeClearanceStatus = '',
+  nowMs = Date.now(),
+} = {}) {
   const current = { ...state };
   const stage = String(current.stage || '');
+
+  // Clearance-review stages are durable conversation state, so every new
+  // helper message must reconcile them with the authoritative backend status.
+  // Otherwise an approval made in the admin app leaves the chat permanently
+  // stuck on the old "awaiting review" prompt.
+  if (POLICE_CLEARANCE_STAGES.includes(stage)) {
+    const status = String(policeClearanceStatus || '').trim().toLowerCase();
+    if (policeClearanceRequired !== true) {
+      return {
+        changed: true,
+        reason: 'police-clearance-not-required',
+        state: {
+          ...current,
+          role: 'helper',
+          accountMode: 'account',
+          stage: ready ? 'complete' : 'helper_readiness',
+          updatedAtMs: nowMs,
+        },
+      };
+    }
+
+    if (status === 'approved') {
+      return {
+        changed: true,
+        reason: 'police-clearance-approved',
+        state: {
+          ...current,
+          role: 'helper',
+          accountMode: 'account',
+          stage: ready ? 'complete' : 'helper_readiness',
+          updatedAtMs: nowMs,
+        },
+      };
+    }
+
+    if (stage === 'awaiting_helper_police_clearance_review'
+      && !['pending', 'uploading'].includes(status)) {
+      return {
+        changed: true,
+        reason: 'police-clearance-resubmission-required',
+        state: {
+          ...current,
+          role: 'helper',
+          accountMode: 'account',
+          stage: 'awaiting_helper_police_clearance',
+          updatedAtMs: nowMs,
+        },
+      };
+    }
+
+    if (stage === 'awaiting_helper_police_clearance' && ['pending', 'uploading'].includes(status)) {
+      return {
+        changed: true,
+        reason: 'police-clearance-under-review',
+        state: {
+          ...current,
+          role: 'helper',
+          accountMode: 'account',
+          stage: 'awaiting_helper_police_clearance_review',
+          updatedAtMs: nowMs,
+        },
+      };
+    }
+  }
+
   if (ready && ['helper_readiness', 'awaiting_helper_agreement'].includes(stage)) {
     return { changed: true, state: { ...current, role: 'helper', accountMode: 'account', stage: 'complete', updatedAtMs: nowMs } };
   }
@@ -25,4 +101,9 @@ function isWhatsAppHelperProfileCaptureStage(stage = '') {
   return HELPER_PROFILE_CAPTURE_STAGES.includes(String(stage || ''));
 }
 
-module.exports = { HELPER_PROFILE_CAPTURE_STAGES, isWhatsAppHelperProfileCaptureStage, resolveWhatsAppHelperReadinessState };
+module.exports = {
+  HELPER_PROFILE_CAPTURE_STAGES,
+  POLICE_CLEARANCE_STAGES,
+  isWhatsAppHelperProfileCaptureStage,
+  resolveWhatsAppHelperReadinessState,
+};

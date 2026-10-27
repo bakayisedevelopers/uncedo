@@ -4815,6 +4815,9 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     }
 
     let onboardingState = conversation.whatsappOnboarding || {};
+    const helperAvailabilityCommand = inbound.type === 'text'
+      ? parseWhatsAppHelperAvailabilityCommand(originalUserText)
+      : '';
     const linkedHelperUid = String(identity.linkedFirebaseUid || '').trim();
     if (whatsappOnboardingEnabled()
       && linkedHelperUid
@@ -4824,7 +4827,12 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       if (helperAuthorization.role === 'helper' && helperAuthorization.uid === linkedHelperUid
         && helperAuthorization.verified === true && helperAuthorization.linked === true) {
         const readiness = await getWhatsAppHelperReadiness(linkedHelperUid);
-        let readinessState = resolveWhatsAppHelperReadinessState({ state: onboardingState, ready: readiness.readyByCurrentAppRules });
+        let readinessState = resolveWhatsAppHelperReadinessState({
+          state: onboardingState,
+          ready: readiness.readyByCurrentAppRules,
+          policeClearanceRequired: readiness.policeClearanceRequired,
+          policeClearanceStatus: readiness.policeClearanceStatus,
+        });
         const readinessStage = String(readinessState.state.stage || '');
         if (helperPoliceClearanceUploadReady() && readiness.policeClearanceEligible
           && ['helper_readiness', 'complete', 'awaiting_helper_police_clearance', 'awaiting_helper_police_clearance_review'].includes(readinessStage)) {
@@ -4845,11 +4853,20 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           await conversationRef.set({ whatsappOnboarding: onboardingState, currentMode, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
           conversation = { ...conversation, whatsappOnboarding: onboardingState, currentMode };
         }
+        if (readinessState.reason === 'police-clearance-approved'
+          && !['go_online', 'go_offline'].includes(helperAvailabilityCommand)) {
+          const response = readiness.readyByCurrentAppRules
+            ? 'Your police-clearance document has been approved. Your helper profile meets the current setup checks. Send “online” when you are ready to receive offers, then share your current WhatsApp location pin.'
+            : `Your police-clearance document has been approved. Your helper profile still needs:\n${readiness.missing.map((item) => `• ${item}`).join('\n')}\n\nOnce those are complete, send “online” to continue.`;
+          await reply(response);
+          await jobRef.set({
+            status: 'completed', intent: 'helper_police_clearance', reason: 'admin_approved',
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+          return;
+        }
       }
     }
-    const helperAvailabilityCommand = inbound.type === 'text'
-      ? parseWhatsAppHelperAvailabilityCommand(originalUserText)
-      : '';
     if (helperAvailabilityCommand) {
       const result = helperAvailabilityCommand === 'go_online'
         ? await beginWhatsAppHelperOnline({ identityId, eventId, identity, conversationRef, reply })
