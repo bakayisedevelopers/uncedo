@@ -70,7 +70,8 @@ export default function AuthPage({ mode = 'login' }) {
       else navigate('/account', { replace: true });
       return result;
     } catch (nextError) {
-      setError(`You are signed in, but this WhatsApp number was not linked. ${nextError?.message || 'Please retry or contact Uncedo support.'}`);
+      const stage = String(nextError?.setupStage || 'whatsapp_identity_link').replaceAll('_', ' ');
+      setError(`Your Uncedo account is signed in, but WhatsApp linking stopped during ${stage}. ${nextError?.message || 'Please retry or contact Uncedo support.'}`);
       throw nextError;
     } finally {
       linkPromiseRef.current = null;
@@ -100,7 +101,9 @@ export default function AuthPage({ mode = 'login' }) {
         navigate('/account', { replace: true });
       }
     } catch (nextError) {
-      setError(nextError?.message || 'Unable to continue. Please try again.');
+      const message = nextError?.message || 'Unable to continue. Please try again.';
+      const stage = nextError?.setupStage ? String(nextError.setupStage).replaceAll('_', ' ') : '';
+      setError(stage ? `Account setup stopped during ${stage}. ${message}` : message);
     } finally {
       setBusy(false);
     }

@@ -32,20 +32,38 @@ function requireE164PhoneNumber(value) {
   return phoneNumber;
 }
 
+function withSignupStage(error, stage) {
+  const message = String(error?.message || 'The account setup step failed.');
+  const wrapped = new Error(message);
+  wrapped.code = error?.code || 'setup-failed';
+  wrapped.setupStage = stage;
+  wrapped.cause = error;
+  return wrapped;
+}
+
 async function saveCustomerContactNumber(phoneNumber) {
   const safePhone = requireE164PhoneNumber(phoneNumber);
   const { getFunctions, httpsCallable } = await import('firebase/functions');
-  const result = await httpsCallable(getFunctions(auth.app, 'us-central1'), 'setWhatsAppContactNumber')({
-    role: 'customer',
-    phoneNumber: safePhone,
-  });
-  return result.data || {};
+  try {
+    const result = await httpsCallable(getFunctions(auth.app, 'us-central1'), 'setWhatsAppContactNumber')({
+      role: 'customer',
+      phoneNumber: safePhone,
+    });
+    return result.data || {};
+  } catch (error) {
+    throw withSignupStage(error, 'whatsapp_number_reservation');
+  }
 }
 
 export async function ensureCustomerProfile(firebaseUser) {
   requireFirebase();
   const userRef = doc(db, 'users', firebaseUser.uid);
-  const existing = await getDoc(userRef);
+  let existing;
+  try {
+    existing = await getDoc(userRef);
+  } catch (error) {
+    throw withSignupStage(error, 'customer_profile_read');
+  }
   const profile = existing.exists() ? existing.data() : {};
   if (hasHelperRole(profile)) {
     await signOut(auth);
@@ -74,21 +92,30 @@ export async function ensureCustomerProfile(firebaseUser) {
       businessCategory: '',
     },
   };
-  await setDoc(userRef, {
-    ...defaults,
-    ...profile,
-    uid: firebaseUser.uid,
-    email: firebaseUser.email || profile.email || '',
-    fullName: profile.fullName || defaults.fullName,
-    displayName: profile.displayName || defaults.displayName,
-    role: 'customer',
-    activeRole: 'customer',
-    roles: ['customer'],
-    customerProfile: { ...defaults.customerProfile, ...(profile.customerProfile || {}) },
-    createdAt: existing.exists() ? profile.createdAt || serverTimestamp() : serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  }, { merge: true });
-  const saved = await getDoc(userRef);
+  try {
+    await setDoc(userRef, {
+      ...defaults,
+      ...profile,
+      uid: firebaseUser.uid,
+      email: firebaseUser.email || profile.email || '',
+      fullName: profile.fullName || defaults.fullName,
+      displayName: profile.displayName || defaults.displayName,
+      role: 'customer',
+      activeRole: 'customer',
+      roles: ['customer'],
+      customerProfile: { ...defaults.customerProfile, ...(profile.customerProfile || {}) },
+      createdAt: existing.exists() ? profile.createdAt || serverTimestamp() : serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+  } catch (error) {
+    throw withSignupStage(error, 'customer_profile_write');
+  }
+  let saved;
+  try {
+    saved = await getDoc(userRef);
+  } catch (error) {
+    throw withSignupStage(error, 'customer_profile_verify');
+  }
   return { uid: firebaseUser.uid, ...saved.data() };
 }
 
@@ -165,9 +192,13 @@ export async function completeWhatsAppSignupLink({ token }) {
     throw new Error('This WhatsApp account link is invalid or expired. Return to the Uncedo chat and request a fresh link.');
   }
   const { getFunctions, httpsCallable } = await import('firebase/functions');
-  const callable = httpsCallable(getFunctions(auth.app, 'us-central1'), 'completeWhatsAppSignupLink');
-  const result = await callable({ token: safeToken });
-  return result.data || {};
+  try {
+    const callable = httpsCallable(getFunctions(auth.app, 'us-central1'), 'completeWhatsAppSignupLink');
+    const result = await callable({ token: safeToken });
+    return result.data || {};
+  } catch (error) {
+    throw withSignupStage(error, 'whatsapp_identity_link');
+  }
 }
 
 export async function completeWhatsAppAccountLink({ token }) {

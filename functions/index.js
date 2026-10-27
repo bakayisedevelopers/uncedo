@@ -3596,6 +3596,10 @@ async function confirmWhatsAppServiceDraft({ identityId, identity, conversationR
   return outcome;
 }
 
+function whatsappDiagnosticHash(value) {
+  return createHash('sha256').update(String(value || '')).digest('hex').slice(0, 16);
+}
+
 async function commitWhatsAppIdentityLink({ uid, role, identityId, phone }) {
   const phoneNumberId = String(getWhatsAppSecrets().phoneNumberId || '').trim();
   if (!phoneNumberId || !uid || !identityId || !phone?.phoneNumber || !phone?.waId) {
@@ -8607,6 +8611,8 @@ exports.completeWhatsAppSignupLink = onCall({
   if (!uid) throw new HttpsError('unauthenticated', 'Sign in with your Uncedo email account before linking WhatsApp.');
   if (!/^[A-Za-z0-9_-]{40,60}$/.test(token)) throw new HttpsError('invalid-argument', 'The WhatsApp link is invalid or expired.');
   if (!whatsappOnboardingEnabled()) throw new HttpsError('failed-precondition', 'WhatsApp account onboarding is not enabled.');
+  const actorHash = whatsappDiagnosticHash(uid);
+  logger.info('whatsapp_signup_link_attempt', { actorHash });
 
   const tokenHash = createHash('sha256').update(token).digest('hex');
   const challengeRef = db.collection('whatsappSignupChallenges').doc(tokenHash);
@@ -8622,12 +8628,23 @@ exports.completeWhatsAppSignupLink = onCall({
     profileRef.get(), db.collection('whatsappIdentities').doc(String(challenge.identityId || '')).get(),
   ]);
   if (!profileSnap.exists || !profileAllowsRole(profileSnap.data() || {}, challenge.role)) {
+    logger.warn('whatsapp_signup_link_rejected', {
+      actorHash,
+      identityHash: whatsappDiagnosticHash(challenge.identityId),
+      reason: profileSnap.exists ? 'profile_role_mismatch' : 'profile_missing',
+    });
     throw new HttpsError('permission-denied', 'This Uncedo account does not match the account type selected in WhatsApp.');
   }
-  if (!identitySnap.exists) throw new HttpsError('failed-precondition', 'The WhatsApp conversation could not be found. Start again from that chat.');
+  if (!identitySnap.exists) {
+    logger.warn('whatsapp_signup_link_rejected', { actorHash, reason: 'identity_missing' });
+    throw new HttpsError('failed-precondition', 'The WhatsApp conversation could not be found. Start again from that chat.');
+  }
   const identity = identitySnap.data() || {};
   const phone = normalizeWhatsAppIdentityPhone(`+${String(identity.waId || '')}`);
   if (String(challenge.phoneHash || '') !== createHash('sha256').update(phone.phoneNumber).digest('hex')) {
+    logger.warn('whatsapp_signup_link_rejected', {
+      actorHash, identityHash: whatsappDiagnosticHash(challenge.identityId), reason: 'phone_hash_mismatch',
+    });
     throw new HttpsError('failed-precondition', 'The WhatsApp identity has changed. Start again from that chat.');
   }
 
@@ -8647,19 +8664,47 @@ exports.completeWhatsAppSignupLink = onCall({
     return { code: 'claimed' };
   });
   if (!['claimed', 'already-used'].includes(claim.code)) {
+    logger.warn('whatsapp_signup_link_rejected', {
+      actorHash, identityHash: whatsappDiagnosticHash(challenge.identityId), reason: `challenge_${claim.code}`,
+    });
     throw new HttpsError(claim.code === 'expired' ? 'deadline-exceeded' : 'already-exists', 'This WhatsApp signup link is no longer available. Start again from your WhatsApp chat.');
   }
 
   if (claim.code !== 'already-used') {
-    const linked = await commitWhatsAppIdentityLink({
-      uid,
-      role: challenge.role,
-      identityId: String(challenge.identityId),
-      phone,
-    });
-    if (!['linked', 'already-linked'].includes(linked.code)) {
-      throw new HttpsError('already-exists', 'This WhatsApp identity or Uncedo account is already linked elsewhere. Contact support if you believe this is an error.');
+    let linked;
+    try {
+      linked = await commitWhatsAppIdentityLink({
+        uid,
+        role: challenge.role,
+        identityId: String(challenge.identityId),
+        phone,
+      });
+    } catch (error) {
+      logger.error('whatsapp_signup_link_commit_failed', {
+        actorHash,
+        identityHash: whatsappDiagnosticHash(challenge.identityId),
+        errorCode: String(error?.code || 'commit_failed').slice(0, 80),
+      });
+      throw error;
     }
+    if (!['linked', 'already-linked'].includes(linked.code)) {
+      logger.warn('whatsapp_signup_link_conflict', {
+        actorHash,
+        identityHash: whatsappDiagnosticHash(challenge.identityId),
+        conflictCode: String(linked.code || 'unknown').slice(0, 80),
+      });
+      const conflictMessages = {
+        'identity-linked-elsewhere': 'This WhatsApp chat is still linked to a different Uncedo account. Deleting a Firebase Auth user does not automatically unlink its WhatsApp history. Contact support to review the old link safely.',
+        'account-linked-elsewhere': 'This Uncedo account is already linked to a different WhatsApp chat. Contact support to review the existing link safely.',
+        'guest-history-linked-elsewhere': 'This WhatsApp conversation history is linked to another Uncedo account. Contact support to review the existing link safely.',
+        'whatsapp-number-linked-elsewhere': 'This WhatsApp number is reserved by another Uncedo account. Contact support to review the existing link safely.',
+        'account-whatsapp-already-set': 'This Uncedo account already has a different WhatsApp number linked. Contact support to change it safely.',
+      };
+      throw new HttpsError('already-exists', conflictMessages[linked.code] || 'This WhatsApp identity is linked to another Uncedo account. Contact support to review it safely.');
+    }
+    logger.info('whatsapp_signup_link_committed', {
+      actorHash, identityHash: whatsappDiagnosticHash(challenge.identityId), result: linked.code,
+    });
     await db.runTransaction(async (transaction) => {
       const currentSnap = await transaction.get(challengeRef);
       const current = currentSnap.data() || {};
@@ -8850,6 +8895,8 @@ exports.setWhatsAppContactNumber = onCall({ maxInstances: 5, ...HALF_CPU_OPTIONS
   }
   const role = String(request.data?.role || '').trim().toLowerCase();
   if (!['customer', 'helper'].includes(role)) throw new HttpsError('invalid-argument', 'A customer or helper account is required.');
+  const actorHash = whatsappDiagnosticHash(uid);
+  logger.info('whatsapp_contact_number_reservation_attempt', { actorHash, role });
   const phoneHash = createHash('sha256').update(phone.phoneNumber).digest('hex');
   const userRef = db.collection('users').doc(uid);
   const claimRef = db.collection('whatsappContactPhoneClaims').doc(phoneHash);
@@ -8857,14 +8904,25 @@ exports.setWhatsAppContactNumber = onCall({ maxInstances: 5, ...HALF_CPU_OPTIONS
   const profileMatches = await db.collection('users').where('phoneNumber', '==', phone.phoneNumber).get();
   const whatsappMatches = await db.collection('users').where('whatsappPhoneNumber', '==', phone.phoneNumber).get();
   if ([...profileMatches.docs, ...whatsappMatches.docs].some((document) => document.id !== uid)) {
+    logger.warn('whatsapp_contact_number_reservation_rejected', { actorHash, role, reason: 'number_in_another_profile' });
     throw new HttpsError('already-exists', 'This WhatsApp number is already associated with another Uncedo account. Use a different number or contact support.');
   }
   try {
     const authOwner = await admin.auth().getUserByPhoneNumber(phone.phoneNumber);
-    if (authOwner.uid !== uid) throw new HttpsError('already-exists', 'This number is already verified on another Uncedo account. Contact support if you need to change it.');
+    if (authOwner.uid !== uid) {
+      logger.warn('whatsapp_contact_number_reservation_rejected', {
+        actorHash, role, reason: 'number_in_another_auth_account',
+      });
+      throw new HttpsError('already-exists', 'This number is already verified on another Uncedo account. Contact support if you need to change it.');
+    }
   } catch (error) {
     if (error instanceof HttpsError) throw error;
-    if (error?.code !== 'auth/user-not-found') throw new HttpsError('unavailable', 'Unable to verify that this number is available right now.');
+    if (error?.code !== 'auth/user-not-found') {
+      logger.error('whatsapp_contact_number_auth_lookup_failed', {
+        actorHash, role, errorCode: String(error?.code || 'lookup_failed').slice(0, 80),
+      });
+      throw new HttpsError('unavailable', 'Unable to verify that this number is available right now.');
+    }
   }
   const result = await db.runTransaction(async (transaction) => {
     const profileSnapshot = await transaction.get(userRef);
@@ -8897,10 +8955,16 @@ exports.setWhatsAppContactNumber = onCall({ maxInstances: 5, ...HALF_CPU_OPTIONS
     if (oldClaimRef && oldClaimSnapshot?.exists && String(oldClaimSnapshot.data()?.uid || '') === uid) transaction.delete(oldClaimRef);
     return { code: 'saved' };
   });
+  if (result.code !== 'saved') {
+    logger.warn('whatsapp_contact_number_reservation_rejected', {
+      actorHash, role, reason: String(result.code || 'unknown').slice(0, 80),
+    });
+  }
   if (result.code === 'profile-not-found') throw new HttpsError('not-found', 'Your Uncedo account profile is unavailable.');
   if (result.code === 'role-mismatch') throw new HttpsError('permission-denied', 'This account does not match the selected Uncedo app.');
   if (result.code === 'verified-contact-immutable') throw new HttpsError('failed-precondition', 'A WhatsApp-verified account number cannot be changed here. Contact Uncedo support for account recovery.');
   if (result.code !== 'saved') throw new HttpsError('already-exists', 'This WhatsApp number is already linked to another account. Use a different number or contact Uncedo support.');
+  logger.info('whatsapp_contact_number_reserved', { actorHash, role });
   return { saved: true, phoneNumber: phone.phoneNumber };
 });
 
