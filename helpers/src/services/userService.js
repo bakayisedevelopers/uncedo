@@ -77,14 +77,20 @@ function logUserProfileWrite(traceLabel, uid, updates = {}) {
 }
 
 export async function updateHelperProfile(uid, updates, traceLabel = 'helpers:updateHelperProfile') {
-  const { db } = getFirebaseClients();
+  const { db, functions, authProviders } = getFirebaseClients();
   const ref = doc(db, 'users', uid);
   logUserProfileWrite(traceLabel, uid, updates);
+  const safeUpdates = { ...updates };
+  if (Object.hasOwn(safeUpdates, 'phoneNumber')) {
+    const saveNumber = authProviders.httpsCallable(functions, 'setWhatsAppContactNumber');
+    await saveNumber({ role: 'helper', phoneNumber: safeUpdates.phoneNumber });
+    delete safeUpdates.phoneNumber;
+  }
 
   await setDoc(
     ref,
     {
-      ...updates,
+      ...safeUpdates,
       role: 'helper',
       activeRole: 'helper',
       roles: ['helper'],

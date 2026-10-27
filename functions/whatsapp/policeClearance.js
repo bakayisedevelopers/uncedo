@@ -13,7 +13,7 @@ const CLEARANCE_STATUSES = Object.freeze([
   'failed',
 ]);
 
-const MAX_CLEARANCE_RETENTION_DAYS = 365;
+const MAX_CLEARANCE_REVIEW_VALIDITY_DAYS = 365;
 
 function normalizePoliceClearanceInbound(inbound = {}) {
   const incomingType = String(inbound.type || '').trim().toLowerCase();
@@ -32,19 +32,31 @@ function normalizePoliceClearanceInbound(inbound = {}) {
   return null;
 }
 
-function policeClearanceRetentionDays(env = {}) {
-  const raw = String(env.WHATSAPP_HELPER_CLEARANCE_RETENTION_DAYS || '').trim();
+function policeClearanceReviewValidityDays(env = {}) {
+  const raw = String(env.WHATSAPP_HELPER_CLEARANCE_REVIEW_VALIDITY_DAYS || '').trim();
   if (!/^\d{1,3}$/.test(raw)) return null;
   const days = Number(raw);
-  return Number.isInteger(days) && days >= 1 && days <= MAX_CLEARANCE_RETENTION_DAYS ? days : null;
+  return Number.isInteger(days) && days >= 1 && days <= MAX_CLEARANCE_REVIEW_VALIDITY_DAYS ? days : null;
 }
 
 function isPoliceClearanceUploadConfigured(env = {}) {
   return String(env.WHATSAPP_HELPER_POLICE_CLEARANCE_ENABLED || '').trim().toLowerCase() === 'true'
-    && String(env.WHATSAPP_MEDIA_RETENTION_ENFORCED || '').trim().toLowerCase() === 'true'
-    && String(env.WHATSAPP_RETENTION_CLEANUP_ENABLED || '').trim().toLowerCase() === 'true'
-    && String(env.WHATSAPP_STORAGE_RETENTION_POLICY_VERIFIED || '').trim().toLowerCase() === 'true'
-    && policeClearanceRetentionDays(env) !== null;
+    && policeClearanceReviewValidityDays(env) !== null;
+}
+
+function clearanceReviewDeadlineMs(uploadedAtMs, validityDays) {
+  const uploadedAt = Number(uploadedAtMs);
+  const days = Number(validityDays);
+  if (!Number.isFinite(uploadedAt) || uploadedAt <= 0
+    || !Number.isInteger(days) || days < 1 || days > MAX_CLEARANCE_REVIEW_VALIDITY_DAYS) return null;
+  return uploadedAt + days * 24 * 60 * 60 * 1000;
+}
+
+function isClearanceReviewExpired(status, reviewDeadlineAtMs, nowMs = Date.now()) {
+  return String(status || '').trim().toLowerCase() !== 'approved'
+    && String(status || '').trim().toLowerCase() !== 'resubmission_required'
+    && Number(reviewDeadlineAtMs || 0) > 0
+    && Number(reviewDeadlineAtMs) <= Number(nowMs);
 }
 
 function policeClearanceStoragePath(uid, eventId, extension) {
@@ -68,13 +80,9 @@ function policeClearanceSubmissionId(uid, eventId) {
   return createHash('sha256').update(`${helperUid}:${sourceEventId}`).digest('hex');
 }
 
-async function storePoliceClearanceObject({ storageBucket, uid, eventId, media, retentionDays, now = Date.now() } = {}) {
+async function storePoliceClearanceObject({ storageBucket, uid, eventId, media } = {}) {
   if (!storageBucket?.file || !Buffer.isBuffer(media?.buffer) || !media.buffer.length) {
     throw new Error('Police-clearance storage context is incomplete.');
-  }
-  const days = Number(retentionDays);
-  if (!Number.isInteger(days) || days < 1 || days > MAX_CLEARANCE_RETENTION_DAYS) {
-    throw new Error('Police-clearance retention is not configured.');
   }
   const path = policeClearanceStoragePath(uid, eventId, media.extension);
   const file = storageBucket.file(path);
@@ -86,11 +94,13 @@ async function storePoliceClearanceObject({ storageBucket, uid, eventId, media, 
         contentType: media.mimeType,
         cacheControl: 'private, no-store, max-age=0',
         contentDisposition: 'inline',
+        // Keep a Cloud Storage object hold in place so lifecycle rules and
+        // ordinary delete calls cannot remove submitted clearance evidence.
+        temporaryHold: true,
         metadata: {
           documentType: 'police_clearance',
           helperHash: createHash('sha256').update(String(uid)).digest('hex'),
           sourceEventHash: createHash('sha256').update(String(eventId)).digest('hex'),
-          retentionExpiresAtMs: String(now + days * 24 * 60 * 60 * 1000),
         },
       },
     });
@@ -116,13 +126,15 @@ function meetsHelperPoliceClearanceRequirement(required, status) {
 
 module.exports = {
   CLEARANCE_STATUSES,
-  MAX_CLEARANCE_RETENTION_DAYS,
+  MAX_CLEARANCE_REVIEW_VALIDITY_DAYS,
+  clearanceReviewDeadlineMs,
+  isClearanceReviewExpired,
   isPoliceClearanceUploadConfigured,
   isHelperPoliceClearanceApproved,
   meetsHelperPoliceClearanceRequirement,
   normalizePoliceClearanceInbound,
   normalizePoliceClearanceStatus,
-  policeClearanceRetentionDays,
+  policeClearanceReviewValidityDays,
   policeClearanceStoragePath,
   policeClearanceSubmissionId,
   storePoliceClearanceObject,

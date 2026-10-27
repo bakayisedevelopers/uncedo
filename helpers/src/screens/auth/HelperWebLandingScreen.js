@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import { Platform, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { ProviderLoginScreen } from './ProviderLoginScreen';
+import { WhatsAppAccountLinkScreen } from './WhatsAppAccountLinkScreen';
 
 const palette = {
   background: '#101713',
@@ -20,6 +21,7 @@ function getPageFromPath() {
   if (window.location.pathname === '/sign-in') return 'login';
   if (window.location.pathname === '/sign-up') return 'signup';
   if (window.location.pathname === '/sign-agreement') return 'agreement';
+  if (window.location.pathname === '/whatsapp-link') return 'whatsapp-link';
   return 'home';
 }
 
@@ -38,6 +40,8 @@ export function HelperWebEntryScreen() {
     }
     setPage(getPageFromPath());
   };
+
+  if (page === 'whatsapp-link') return <WhatsAppAccountLinkScreen />;
 
   if (page === 'login' || page === 'signup' || page === 'agreement') {
     return (

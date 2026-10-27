@@ -12,6 +12,24 @@ function profileRole(profile = {}) {
   return roles.length === 1 ? roles[0] : '';
 }
 
+function selectUniqueWhatsAppAccountCandidate(records = [], phoneNumber = '') {
+  const expectedPhone = normalizeAccountPhone(phoneNumber);
+  if (!expectedPhone) return null;
+  const eligibleByUid = new Map();
+  for (const record of Array.isArray(records) ? records : []) {
+    const profile = record?.profile || {};
+    const role = profileRole(profile);
+    const profilePhones = [profile.whatsappPhoneNumber, profile.phoneNumber]
+      .map(normalizeAccountPhone)
+      .filter(Boolean);
+    const authPhone = normalizeAccountPhone(record?.authPhone);
+    if (!record?.uid || !role || !profilePhones.includes(expectedPhone)) continue;
+    if (authPhone && authPhone !== expectedPhone) continue;
+    eligibleByUid.set(String(record.uid), { uid: String(record.uid), role });
+  }
+  return eligibleByUid.size === 1 ? [...eligibleByUid.values()][0] : null;
+}
+
 function selectUniqueVerifiedWhatsAppAccount(records = [], phoneNumber = '') {
   const expectedPhone = normalizeAccountPhone(phoneNumber);
   if (!expectedPhone) return null;
@@ -27,4 +45,9 @@ function selectUniqueVerifiedWhatsAppAccount(records = [], phoneNumber = '') {
   return eligible.length === 1 ? { uid: String(eligible[0].uid), role: profileRole(eligible[0].profile) } : null;
 }
 
-module.exports = { normalizeAccountPhone, profileRole, selectUniqueVerifiedWhatsAppAccount };
+module.exports = {
+  normalizeAccountPhone,
+  profileRole,
+  selectUniqueVerifiedWhatsAppAccount,
+  selectUniqueWhatsAppAccountCandidate,
+};

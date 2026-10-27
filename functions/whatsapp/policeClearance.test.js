@@ -8,7 +8,9 @@ const {
   meetsHelperPoliceClearanceRequirement,
   normalizePoliceClearanceInbound,
   normalizePoliceClearanceStatus,
-  policeClearanceRetentionDays,
+  policeClearanceReviewValidityDays,
+  clearanceReviewDeadlineMs,
+  isClearanceReviewExpired,
   policeClearanceStoragePath,
   policeClearanceSubmissionId,
   storePoliceClearanceObject,
@@ -23,19 +25,27 @@ test('police-clearance uploads accept only PDF, JPEG, and PNG attachments', () =
   assert.equal(normalizePoliceClearanceInbound({ type: 'document', media: { mediaId: '', mimeType: 'application/pdf' } }), null);
 });
 
-test('police-clearance upload requires explicit enablement and enforced retention', () => {
+test('police-clearance upload requires explicit enablement and a review validity period', () => {
   const configured = {
     WHATSAPP_HELPER_POLICE_CLEARANCE_ENABLED: 'true',
-    WHATSAPP_MEDIA_RETENTION_ENFORCED: 'true',
-    WHATSAPP_RETENTION_CLEANUP_ENABLED: 'true',
-    WHATSAPP_STORAGE_RETENTION_POLICY_VERIFIED: 'true',
-    WHATSAPP_HELPER_CLEARANCE_RETENTION_DAYS: '90',
+    WHATSAPP_HELPER_CLEARANCE_REVIEW_VALIDITY_DAYS: '90',
   };
   assert.equal(isPoliceClearanceUploadConfigured(configured), true);
-  assert.equal(isPoliceClearanceUploadConfigured({ ...configured, WHATSAPP_STORAGE_RETENTION_POLICY_VERIFIED: 'false' }), false);
-  assert.equal(isPoliceClearanceUploadConfigured({ ...configured, WHATSAPP_HELPER_CLEARANCE_RETENTION_DAYS: '0' }), false);
-  assert.equal(policeClearanceRetentionDays(configured), 90);
-  assert.equal(policeClearanceRetentionDays({ WHATSAPP_HELPER_CLEARANCE_RETENTION_DAYS: '366' }), null);
+  assert.equal(isPoliceClearanceUploadConfigured({ ...configured, WHATSAPP_HELPER_POLICE_CLEARANCE_ENABLED: 'false' }), false);
+  assert.equal(isPoliceClearanceUploadConfigured({ ...configured, WHATSAPP_HELPER_CLEARANCE_REVIEW_VALIDITY_DAYS: '0' }), false);
+  assert.equal(policeClearanceReviewValidityDays(configured), 90);
+  assert.equal(policeClearanceReviewValidityDays({ WHATSAPP_HELPER_CLEARANCE_REVIEW_VALIDITY_DAYS: '366' }), null);
+});
+
+test('pending clearance expires for approval after its review deadline but approved status never expires', () => {
+  const uploadedAtMs = 1_000;
+  const deadline = clearanceReviewDeadlineMs(uploadedAtMs, 90);
+  assert.equal(deadline, uploadedAtMs + 90 * 24 * 60 * 60 * 1000);
+  assert.equal(isClearanceReviewExpired('pending', deadline, deadline - 1), false);
+  assert.equal(isClearanceReviewExpired('pending', deadline, deadline), true);
+  assert.equal(isClearanceReviewExpired('approved', deadline, deadline + 1), false);
+  assert.equal(isClearanceReviewExpired('resubmission_required', deadline, deadline + 1), false);
+  assert.equal(clearanceReviewDeadlineMs(0, 90), null);
 });
 
 test('police-clearance paths and submission IDs do not expose sender or source event identifiers', () => {
@@ -58,7 +68,7 @@ test('only an administrator-approved clearance opens helper dispatch readiness',
   assert.equal(meetsHelperPoliceClearanceRequirement(true, 'approved'), true);
 });
 
-test('private police-clearance object is create-only, no-store, and retention-tagged', async () => {
+test('private police-clearance object is create-only and no-store without a deletion timestamp', async () => {
   let saved = null;
   const storageBucket = { file: (path) => ({ save: async (buffer, options) => { saved = { path, buffer, options }; } }) };
   const result = await storePoliceClearanceObject({
@@ -66,14 +76,13 @@ test('private police-clearance object is create-only, no-store, and retention-ta
     uid: 'helper_123',
     eventId: 'wa_event_456',
     media: { buffer: Buffer.from('%PDF-test'), extension: 'pdf', mimeType: 'application/pdf' },
-    retentionDays: 30,
-    now: 1000,
   });
   assert.equal(result.duplicate, false);
   assert.equal(saved.options.preconditionOpts.ifGenerationMatch, 0);
   assert.equal(saved.options.metadata.cacheControl, 'private, no-store, max-age=0');
+  assert.equal(saved.options.metadata.temporaryHold, true);
   assert.equal(saved.options.metadata.metadata.documentType, 'police_clearance');
-  assert.equal(saved.options.metadata.metadata.retentionExpiresAtMs, String(1000 + 30 * 24 * 60 * 60 * 1000));
+  assert.equal(Object.hasOwn(saved.options.metadata.metadata, 'retentionExpiresAtMs'), false);
   assert.equal(normalizePoliceClearanceStatus('approved'), 'approved');
   assert.equal(normalizePoliceClearanceStatus('untrusted'), 'missing');
 });

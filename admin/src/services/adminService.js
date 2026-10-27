@@ -256,11 +256,11 @@ export async function getHelperPoliceClearanceReview(helperUid) {
   return result.data || { helperUid, status: 'missing', submission: null };
 }
 
-export async function getHelperPoliceClearanceViewUrl(helperUid) {
+export async function getHelperPoliceClearanceViewUrl(helperUid, submissionId = '') {
   const clients = await getFirebaseClients();
   if (!clients) throw new Error('Firebase is not configured for the admin app.');
   const call = clients.httpsCallable(clients.functions, 'getHelperPoliceClearanceViewUrl');
-  const result = await call({ helperUid: String(helperUid || '').trim() });
+  const result = await call({ helperUid: String(helperUid || '').trim(), submissionId: String(submissionId || '').trim() });
   return result.data || null;
 }
 

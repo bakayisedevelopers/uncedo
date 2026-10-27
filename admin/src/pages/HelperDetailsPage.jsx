@@ -69,6 +69,7 @@ export default function HelperDetailsPage() {
   const [clearanceReview, setClearanceReview] = useState(null);
   const [isClearanceLoading, setIsClearanceLoading] = useState(false);
   const [clearanceError, setClearanceError] = useState('');
+  const [openingClearanceSubmissionId, setOpeningClearanceSubmissionId] = useState('');
 
   const load = async () => {
     setIsLoading(true);
@@ -167,21 +168,29 @@ export default function HelperDetailsPage() {
     }
   };
 
-  const openPoliceClearance = async () => {
+  const openPoliceClearance = async (submissionId = '') => {
     const popup = window.open('about:blank', '_blank');
     if (!popup) {
       setClearanceError('Allow pop-ups for the admin site to open this private document.');
+      setOpeningClearanceSubmissionId('');
       return;
     }
     popup.opener = null;
     try {
-      const result = await getHelperPoliceClearanceViewUrl(selected?.uid);
+      const result = await getHelperPoliceClearanceViewUrl(selected?.uid, submissionId);
       if (!result?.url) throw new Error('The document is not available.');
       popup.location = result.url;
     } catch (error) {
       popup?.close();
       setClearanceError(error?.message || 'Unable to open the police-clearance document.');
+    } finally {
+      setOpeningClearanceSubmissionId('');
     }
+  };
+
+  const openPoliceClearanceSubmission = async (submissionId) => {
+    setOpeningClearanceSubmissionId(submissionId);
+    await openPoliceClearance(submissionId);
   };
 
   const applyPoliceClearanceReview = async (decision) => {
@@ -349,11 +358,32 @@ export default function HelperDetailsPage() {
               {clearanceReview?.submission?.reviewReason ? (
                 <p className="mt-3 text-sm text-ink-200">Review note: {clearanceReview.submission.reviewReason}</p>
               ) : null}
+              {Array.isArray(clearanceReview?.submissions) && clearanceReview.submissions.length > 0 ? (
+                <div className="mt-4 space-y-2 border-t border-white/10 pt-4">
+                  <p className="text-xs font-bold uppercase tracking-[0.16em] text-ink-300">Submission archive</p>
+                  {clearanceReview.submissions.map((submission) => (
+                    <div key={submission.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-white/5 px-3 py-2">
+                      <div>
+                        <p className="text-sm font-semibold capitalize text-white">{String(submission.status || 'submitted').replaceAll('_', ' ')}</p>
+                        <p className="text-xs text-ink-300">{submission.uploadedAtMs ? new Date(submission.uploadedAtMs).toLocaleString() : 'Date unavailable'}</p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={!submission.canView || Boolean(openingClearanceSubmissionId)}
+                        onClick={() => openPoliceClearanceSubmission(submission.id)}
+                        className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-bold text-white disabled:opacity-50"
+                      >
+                        {openingClearanceSubmissionId === submission.id ? 'Opening…' : 'Open file'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
               <div className="mt-4 flex flex-wrap gap-2">
                 <button
                   type="button"
                   disabled={isMutating || isClearanceLoading || !clearanceReview?.submission?.canView}
-                  onClick={openPoliceClearance}
+                  onClick={() => openPoliceClearanceSubmission(clearanceReview?.submission?.id || '')}
                   className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-bold text-white disabled:opacity-50"
                 >
                   Open document

@@ -2,7 +2,10 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { selectUniqueVerifiedWhatsAppAccount } = require('./accountResolution');
+const {
+  selectUniqueVerifiedWhatsAppAccount,
+  selectUniqueWhatsAppAccountCandidate,
+} = require('./accountResolution');
 
 test('only uniquely matched, server-verified customer/helper phone records auto-resolve', () => {
   assert.deepEqual(selectUniqueVerifiedWhatsAppAccount([{
@@ -33,4 +36,22 @@ test('verified Firestore phone fields are accepted only with a protected verific
       phoneNumberVerified: true, phoneNumberVerifiedAt: 1730000000000,
     },
   }], '+27600000001'), { uid: 'helper-1', role: 'helper' });
+});
+
+test('an unverified signup phone can identify one account for a possession-link challenge without auto-linking', () => {
+  const records = [{ uid: 'customer-2', profile: { role: 'customer', phoneNumber: '+27 60 000 0002' } }];
+  assert.deepEqual(selectUniqueWhatsAppAccountCandidate(records, '+27600000002'), { uid: 'customer-2', role: 'customer' });
+  assert.equal(selectUniqueVerifiedWhatsAppAccount(records, '+27600000002'), null);
+});
+
+test('multiple profile matches, mixed roles, and conflicting Auth phone claims are never link candidates', () => {
+  const a = { uid: 'one', profile: { role: 'customer', phoneNumber: '+27600000003' } };
+  const b = { uid: 'two', profile: { role: 'helper', phoneNumber: '+27600000003' } };
+  assert.equal(selectUniqueWhatsAppAccountCandidate([a, b], '+27600000003'), null);
+  assert.equal(selectUniqueWhatsAppAccountCandidate([{
+    uid: 'mixed', profile: { role: 'customer', roles: ['customer', 'helper'], phoneNumber: '+27600000003' },
+  }], '+27600000003'), null);
+  assert.equal(selectUniqueWhatsAppAccountCandidate([{
+    uid: 'conflict', authPhone: '+27600000004', profile: { role: 'customer', phoneNumber: '+27600000003' },
+  }], '+27600000003'), null);
 });

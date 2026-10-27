@@ -22,6 +22,24 @@ function hasHelperRole(profile = {}) {
   return roles.some((role) => ['helper', 'provider', 'tutor'].includes(role));
 }
 
+function requireE164PhoneNumber(value) {
+  const phoneNumber = String(value || '').replace(/[\s().-]/g, '');
+  if (!/^\+[1-9]\d{7,14}$/.test(phoneNumber)) {
+    throw new Error('Enter your WhatsApp number with its international country code, for example +27 71 234 5678.');
+  }
+  return phoneNumber;
+}
+
+async function saveCustomerContactNumber(phoneNumber) {
+  const safePhone = requireE164PhoneNumber(phoneNumber);
+  const { getFunctions, httpsCallable } = await import('firebase/functions');
+  const result = await httpsCallable(getFunctions(auth.app, 'us-central1'), 'setWhatsAppContactNumber')({
+    role: 'customer',
+    phoneNumber: safePhone,
+  });
+  return result.data || {};
+}
+
 export async function ensureCustomerProfile(firebaseUser) {
   requireFirebase();
   const userRef = doc(db, 'users', firebaseUser.uid);
@@ -79,19 +97,24 @@ export async function signInWithEmail({ email, password }) {
   return { firebaseUser: credential.user, profile };
 }
 
-export async function signUpWithEmail({ name, email, password }) {
+export async function signUpWithEmail({ name, email, password, phoneNumber }) {
   requireFirebase();
+  const safePhone = requireE164PhoneNumber(phoneNumber);
   const credential = await createUserWithEmailAndPassword(auth, email.trim(), password);
   await updateProfile(credential.user, { displayName: name.trim() });
+  await ensureCustomerProfile(credential.user);
+  await saveCustomerContactNumber(safePhone);
   const profile = await ensureCustomerProfile(credential.user);
   return { firebaseUser: credential.user, profile };
 }
 
-export async function signInWithGoogle() {
+export async function signInWithGoogle({ phoneNumber = '' } = {}) {
   requireFirebase();
   const provider = new GoogleAuthProvider();
   provider.setCustomParameters({ prompt: 'select_account' });
   const credential = await signInWithPopup(auth, provider);
+  await ensureCustomerProfile(credential.user);
+  if (String(phoneNumber || '').trim()) await saveCustomerContactNumber(phoneNumber);
   const profile = await ensureCustomerProfile(credential.user);
   return { firebaseUser: credential.user, profile };
 }
@@ -130,10 +153,27 @@ export async function completeWhatsAppSignupLink({ token }) {
   return result.data || {};
 }
 
+export async function completeWhatsAppAccountLink({ token }) {
+  requireFirebase();
+  const safeToken = String(token || '').trim();
+  if (!/^[A-Za-z0-9_-]{40,60}$/.test(safeToken)) {
+    throw new Error('This WhatsApp account link is invalid or expired. Return to the Uncedo chat and request a fresh link.');
+  }
+  const { getFunctions, httpsCallable } = await import('firebase/functions');
+  const callable = httpsCallable(getFunctions(auth.app, 'us-central1'), 'completeWhatsAppAccountLink');
+  const result = await callable({ token: safeToken });
+  return result.data || {};
+}
+
 export async function updateCustomerProfile(uid, updates) {
   requireFirebase();
+  const safeUpdates = { ...updates };
+  if (Object.hasOwn(safeUpdates, 'phoneNumber')) {
+    await saveCustomerContactNumber(safeUpdates.phoneNumber);
+    delete safeUpdates.phoneNumber;
+  }
   const userRef = doc(db, 'users', uid);
-  await setDoc(userRef, { ...updates, updatedAt: serverTimestamp() }, { merge: true });
+  if (Object.keys(safeUpdates).length) await setDoc(userRef, { ...safeUpdates, updatedAt: serverTimestamp() }, { merge: true });
   const saved = await getDoc(userRef);
   return { uid, ...saved.data() };
 }

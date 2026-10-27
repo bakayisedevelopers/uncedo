@@ -8,6 +8,7 @@ import { groupCompletedJobsByWeek, HELPER_PAYOUT_RATE, PLATFORM_FEE_RATE, should
 import { acceptHelperAgreement as acceptHelperAgreementRequest } from '../services/legalAgreementService';
 import { subscribeToHelperWeeklyPayouts } from '../services/helperPayoutService';
 import { getHelperWalletSnapshot } from '../services/helperWalletService';
+import { getMyPoliceClearanceReview } from '../services/policeClearanceService';
 import {
   requestHelperLocationPermission,
   syncHelperCurrentLocation,
@@ -333,6 +334,20 @@ export function HelpersAppProvider({ children }) {
   useEffect(() => {
     setProfile((current) => normalizeProfile(user, current));
   }, [user]);;
+
+  useEffect(() => {
+    let active = true;
+    if (!user?.uid) return () => { active = false; };
+    getMyPoliceClearanceReview().then((result) => {
+      if (!active) return;
+      setProfile((current) => ({
+        ...current,
+        policeClearanceRequired: result.required === true,
+        policeClearanceStatus: String(result.status || current.policeClearanceStatus || 'missing'),
+      }));
+    }).catch((error) => logError('HelpersAppContext.policeClearanceReadiness', error));
+    return () => { active = false; };
+  }, [user?.uid]);
 
   useEffect(() => {
     if (!user?.uid) {

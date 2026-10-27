@@ -5,6 +5,7 @@ import TermsPage from './pages/TermsPage';
 import AuthPage from './pages/AuthPage';
 import CustomerAccountPage from './pages/CustomerAccountPage';
 import PaymentPage from './pages/PaymentPage';
+import WhatsAppAccountLinkPage from './pages/WhatsAppAccountLinkPage';
 import { AuthProvider } from './context/AuthContext';
 
 export default function App() {
@@ -17,6 +18,7 @@ export default function App() {
           <Route path="/sign-up" element={<AuthPage mode="signup" />} />
           <Route path="/account" element={<CustomerAccountPage />} />
           <Route path="/payment" element={<PaymentPage />} />
+          <Route path="/whatsapp-link" element={<WhatsAppAccountLinkPage />} />
           <Route path="/privacy-policy" element={<PrivacyPolicyPage />} />
           <Route path="/terms" element={<TermsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />

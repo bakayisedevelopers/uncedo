@@ -48,6 +48,7 @@ export default function AuthPage({ mode = 'login' }) {
       : fromNavigation;
     if (token) window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}`);
     setSignupLink(link);
+    if (phone) setPhoneNumber(phone);
     setSignupLinkLoaded(true);
   }, [location.key, location.state]);
 
@@ -105,7 +106,7 @@ export default function AuthPage({ mode = 'login' }) {
   async function submitEmail(event) {
     event.preventDefault();
     if (isSignup) {
-      await run(() => signUpWithEmail({ name, email, password }));
+      await run(() => signUpWithEmail({ name, email, password, phoneNumber }));
     } else {
       await run(() => signInWithEmail({ email, password }));
     }
@@ -179,6 +180,7 @@ export default function AuthPage({ mode = 'login' }) {
           {method === 'email' ? (
             <form onSubmit={submitEmail} className="space-y-4">
               {isSignup ? <Field label="Full name" value={name} onChange={setName} autoComplete="name" required /> : null}
+              {isSignup && !signupLink?.phone ? <Field label="WhatsApp number" value={phoneNumber} onChange={setPhoneNumber} type="tel" autoComplete="tel" placeholder="+27 71 234 5678" required /> : null}
               {signupLink?.phone ? <Field label="WhatsApp number to link" value={signupLink.phone} onChange={() => {}} type="tel" autoComplete="tel" disabled /> : null}
               <Field label="Email address" value={email} onChange={setEmail} type="email" autoComplete="email" required />
               <Field label="Password" value={password} onChange={setPassword} type="password" autoComplete={isSignup ? 'new-password' : 'current-password'} required minLength={6} />
@@ -201,7 +203,7 @@ export default function AuthPage({ mode = 'login' }) {
           )}
 
           <div className="my-6 flex items-center gap-3 text-xs font-semibold uppercase tracking-wider text-zinc-400"><span className="h-px flex-1 bg-zinc-200" />or<span className="h-px flex-1 bg-zinc-200" /></div>
-          <button type="button" disabled={busy || !googleAuthEnabled} onClick={() => run(signInWithGoogle)} className="flex w-full items-center justify-center gap-3 rounded-2xl border border-zinc-200 bg-white px-5 py-3 font-bold text-zinc-800 transition hover:bg-zinc-50 disabled:opacity-60">
+          <button type="button" disabled={busy || !googleAuthEnabled || (isSignup && !phoneNumber.trim())} onClick={() => run(() => signInWithGoogle(isSignup ? { phoneNumber } : {}))} className="flex w-full items-center justify-center gap-3 rounded-2xl border border-zinc-200 bg-white px-5 py-3 font-bold text-zinc-800 transition hover:bg-zinc-50 disabled:opacity-60">
             <GoogleMark /> Continue with Google
           </button>
           {!googleAuthEnabled ? <p className="text-center text-xs text-zinc-500">Google sign-in is awaiting Firebase OAuth provider setup.</p> : null}

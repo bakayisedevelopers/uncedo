@@ -72,6 +72,12 @@ service cloud.firestore {
         && (!('acceptedCurrentVersion' in data.agreement) || data.agreement.acceptedCurrentVersion == false));
     }
 
+    function safeInitialContactNumber(data) {
+      // Contact numbers are reserved through the trusted callable so two
+      // profiles cannot claim the same WhatsApp number through client writes.
+      return !('phoneNumber' in data) || data.phoneNumber == '';
+    }
+
     function safeSelfEmail(data) {
       return !('email' in data) || data.email == request.auth.token.get('email', '');
     }
@@ -84,7 +90,7 @@ service cloud.firestore {
 
     function hasOnlySafeUserFieldChanges() {
       return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-        'fullName', 'displayName', 'firstName', 'lastName', 'phoneNumber', 'providerType',
+        'fullName', 'displayName', 'firstName', 'lastName', 'providerType',
         'email', 'businessName', 'homeAddress', 'city', 'profilePhoto', 'profilePhotoObjectPath',
         'selfieUrl', 'selfieCapturedAt', 'selfieCaptureSource', 'onlineStatus',
         'locationSharingEnabled', 'liveLocation',
@@ -121,6 +127,7 @@ service cloud.firestore {
         && hasSafeSelfAssignedRoles(request.resource.data)
         && hasSafeSelfAssignedVerification(request.resource.data)
         && safeInitialAgreement(request.resource.data)
+        && safeInitialContactNumber(request.resource.data)
         && !request.resource.data.keys().hasAny(['admin', 'isAdmin', 'isStaff', 'staffRole', 'supportRole', 'adminNotes']));
       allow update: if isAdmin() || (isOwner(userId) && hasOnlySafeUserFieldChanges());
       allow delete: if isOwner(userId) || isAdmin();

@@ -177,7 +177,7 @@ test('referrals, referral milestones, and normalized ratings stay endpoint-only 
   }, { merge: true }));
 });
 
-test('users allow safe profile updates but reject protected fields and privilege changes', async () => {
+test('users allow safe profile updates but require the trusted callable to set unique phone numbers', async () => {
   await seedDocument('users/customer-1', {
     uid: 'customer-1',
     role: 'customer',
@@ -201,8 +201,8 @@ test('users allow safe profile updates but reject protected fields and privilege
 
   await assertSucceeds(customerDb.doc('users/customer-1').update({
     fullName: 'Customer One Updated',
-    phoneNumber: '+27 71 000 0000',
   }));
+  await assertFails(customerDb.doc('users/customer-1').update({ phoneNumber: '+27710000000' }));
   await assertFails(customerDb.doc('users/customer-1').update({ email: 'another-person@example.com' }));
   await assertFails(customerDb.doc('users/customer-1').update({
     role: 'admin',
@@ -225,6 +225,19 @@ test('users allow safe profile updates but reject protected fields and privilege
     metrics: { completionRate: 1 },
   }));
   await assertFails(customerDb.doc('users/customer-1').update({ activeServiceRequestId: 'forged-request' }));
+});
+
+test('new profiles cannot claim a WhatsApp phone number directly', async () => {
+  const customerDb = authedDb('new-customer');
+  await assertSucceeds(customerDb.doc('users/new-customer').set({
+    uid: 'new-customer', role: 'customer', activeRole: 'customer', roles: ['customer'], phoneNumber: '',
+  }));
+  const helperDb = authedDb('new-helper');
+  await assertFails(helperDb.doc('users/new-helper').set({
+    uid: 'new-helper', role: 'helper', activeRole: 'helper', roles: ['helper'], phoneNumber: '+27600000001',
+  }));
+  await assertFails(customerDb.doc('whatsappContactPhoneClaims/fake-hash').set({ uid: 'new-customer' }));
+  await assertFails(customerDb.doc('whatsappAccountLinkChallenges/fake-hash').get());
 });
 
 test('helper agreement acceptance and required-version fields can only be changed by trusted backend code', async () => {

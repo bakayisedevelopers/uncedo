@@ -6,6 +6,7 @@ This folder contains the React + Vite customer website for Uncedo.
 
 - Public landing page
 - Customer email/password sign-in and sign-up
+- Required international WhatsApp contact number during account creation; an existing account with a matching number is linked from WhatsApp only after its one-time, 24-hour link is opened
 - Google sign-in and sign-up
 - WhatsApp authentication entry point, enabled only after the backend OTP flow and Meta configuration are active
 - Authenticated customer profile completion using the shared `users/{uid}` profile
@@ -43,4 +44,4 @@ npm run preview
 - Use `../docs/skills/agent-developer-workflow.md` when changes affect deployment or release flow.
 - Keep this README in sync with major route, service, or shell changes.
 - Customer profile details are saved in Firestore at `users/{uid}`. Payment-card setup stays in the existing customer app flow.
-- Routes: `/sign-in`, `/sign-up`, and `/account`, in addition to `/`, `/privacy-policy`, and `/terms`.
+- Routes: `/sign-in`, `/sign-up`, `/whatsapp-link`, and `/account`, in addition to `/`, `/privacy-policy`, and `/terms`. `/whatsapp-link` consumes a one-time link delivered to the same WhatsApp chat and returns the user to Uncedo without requiring an email sign-in.

@@ -15,6 +15,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { ProviderLoginScreen } from '../screens/auth/ProviderLoginScreen';
 import { HelperWebEntryScreen } from '../screens/auth/HelperWebLandingScreen';
+import { WhatsAppAccountLinkScreen } from '../screens/auth/WhatsAppAccountLinkScreen';
 import { ActiveJobScreen } from '../screens/provider/ActiveJobScreen';
 import { AgreementScreen } from '../screens/provider/AgreementScreen';
 import { CompletedJobsScreen } from '../screens/provider/CompletedJobsScreen';
@@ -306,6 +307,10 @@ export function RootNavigator() {
 
   if (initializing) {
     return <LoadingScreen />;
+  }
+
+  if (Platform.OS === 'web' && typeof window !== 'undefined' && window.location.pathname === '/whatsapp-link') {
+    return <WhatsAppAccountLinkScreen />;
   }
 
   if (!user?.uid) {

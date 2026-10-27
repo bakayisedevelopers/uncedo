@@ -25,6 +25,21 @@ function normalizeRole(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function requireE164PhoneNumber(value) {
+  const phoneNumber = String(value || '').replace(/[\s().-]/g, '');
+  if (!/^\+[1-9]\d{7,14}$/.test(phoneNumber)) {
+    throw new Error('Enter your WhatsApp number with its international country code, for example +27 71 234 5678.');
+  }
+  return phoneNumber;
+}
+
+async function saveHelperContactNumber(phoneNumber) {
+  const { functions, authProviders } = getFirebaseClients();
+  const call = authProviders.httpsCallable(functions, 'setWhatsAppContactNumber');
+  const result = await call({ role: 'helper', phoneNumber: requireE164PhoneNumber(phoneNumber) });
+  return result.data || {};
+}
+
 function collectRoles(profile = {}) {
   return new Set([
     normalizeRole(profile?.role),
@@ -144,22 +159,30 @@ export async function loginWithEmail({ email, password }) {
   return normalizeHelperUser(credential.user, syncedProfile || {});
 }
 
-export async function signupWithEmail({ name, email, password }) {
+export async function signupWithEmail({ name, email, password, phoneNumber }) {
   const { auth } = getFirebaseClients();
+  const safePhone = requireE164PhoneNumber(phoneNumber);
   const fullName = String(name || '').trim();
   const credential = await createUserWithEmailAndPassword(auth, email.trim(), password);
   await updateProfile(credential.user, { displayName: fullName });
-  const profile = await upsertHelperProfile({
+  await upsertHelperProfile({
     uid: credential.user.uid,
     email: credential.user.email,
     fullName,
     traceLabel: 'helpers:auth:signupWithEmail:createProfile',
   });
+  await saveHelperContactNumber(safePhone);
+  const profile = await upsertHelperProfile({
+    uid: credential.user.uid,
+    email: credential.user.email,
+    fullName,
+    traceLabel: 'helpers:auth:signupWithEmail:refreshProfile',
+  });
 
   return normalizeHelperUser(credential.user, profile || {});
 }
 
-export async function loginWithGoogle() {
+export async function loginWithGoogle({ phoneNumber = '' } = {}) {
   if (typeof window === 'undefined') {
     throw new Error('Google sign-in is available in the web version of Uncedo Helpers.');
   }
@@ -180,6 +203,10 @@ export async function loginWithGoogle() {
         fullName: credential.user.displayName || profile?.fullName || profile?.displayName || '',
         traceLabel: 'helpers:auth:loginWithGoogle:seedProfile',
       });
+  if (String(phoneNumber || '').trim()) {
+    await saveHelperContactNumber(phoneNumber);
+    return normalizeHelperUser(credential.user, await getUserProfile(credential.user.uid) || {});
+  }
   return normalizeHelperUser(credential.user, syncedProfile || {});
 }
 
@@ -225,6 +252,17 @@ export async function completeWhatsAppSignupLink(token) {
   }
   const { functions, authProviders } = getFirebaseClients();
   const call = authProviders.httpsCallable(functions, 'completeWhatsAppSignupLink');
+  const result = await call({ token: safeToken });
+  return result.data || {};
+}
+
+export async function completeWhatsAppAccountLink(token) {
+  const safeToken = String(token || '').trim();
+  if (!/^[A-Za-z0-9_-]{40,60}$/.test(safeToken)) {
+    throw new Error('This WhatsApp account link is invalid or expired. Return to the Uncedo chat and request a fresh link.');
+  }
+  const { functions, authProviders } = getFirebaseClients();
+  const call = authProviders.httpsCallable(functions, 'completeWhatsAppAccountLink');
   const result = await call({ token: safeToken });
   return result.data || {};
 }

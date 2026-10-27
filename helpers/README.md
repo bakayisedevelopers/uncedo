@@ -5,8 +5,9 @@ This folder contains the Expo React Native app for helpers.
 ## Purpose
 
 - Helper signup, login, and profile completion
+- Required international WhatsApp contact number during account creation; an existing account with a matching number is linked from WhatsApp only after its one-time, 24-hour link is opened
 - Versioned helper agreement review, signing, and profile-completion gating
-- Police-clearance review status and profile-completion gating. Helpers submit the document in their linked WhatsApp onboarding chat; the app never stores or downloads the clearance file.
+- Police-clearance review status and profile-completion gating. Helpers submit the document in their linked WhatsApp onboarding chat and can view their own retained submissions through short-lived owner-checked links; the app never stores the clearance file itself. A pending review expires after 90 days, while an approved helper stays approved unless an administrator changes that status.
 - Firestore-backed service browsing, skill setup, bundle-service enrollment, and service approval flow
 - Multi-image uploads for helper service submissions
 - Availability management and active job handling
@@ -46,7 +47,7 @@ npm run web:build
 
 `npm run web:build` exports the helper application into `helpers/dist/app.html` and prepares a separate static landing page as `helpers/dist/index.html`. The Firebase Hosting root serves the landing page; `/sign-in`, `/sign-up`, and `/sign-agreement` serve the Expo app. Agreement invitations use an opaque token in the URL fragment, require email sign-in, and use the same callable acceptance operation as the Helpers app. Native Google Navigation SDK guidance is unavailable in the browser; web builds use a no-op navigation adapter.
 
-Browser Google sign-in uses Firebase Authentication and stays disabled until the Google provider and OAuth client are configured in Firebase. WhatsApp OTP sign-in remains unavailable until the matching Cloud Functions and approved Meta authentication template are configured; the button reports this state while its feature flag is false.
+Browser Google sign-in uses Firebase Authentication and stays disabled until the Google provider and OAuth client are configured in Firebase. The `/whatsapp-link` route consumes a one-time link delivered to the matching WhatsApp chat, connects the uniquely matched account, and returns the user to Uncedo without asking for email credentials. WhatsApp OTP sign-in remains unavailable until the matching Cloud Functions and approved Meta authentication template are configured; the button reports this state while its feature flag is false.
 
 The helper Android app now requires React Native new architecture and Android core-library desugaring because the Google Navigation SDK depends on them.
 

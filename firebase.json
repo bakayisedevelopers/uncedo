@@ -28,6 +28,14 @@
           ]
         },
         {
+          "source": "/whatsapp-link",
+          "headers": [
+            { "key": "Cache-Control", "value": "no-store, max-age=0" },
+            { "key": "Referrer-Policy", "value": "no-referrer" },
+            { "key": "X-Content-Type-Options", "value": "nosniff" }
+          ]
+        },
+        {
           "source": "/index.html",
           "headers": [
             { "key": "Referrer-Policy", "value": "no-referrer" }
@@ -111,6 +119,23 @@
               "value": "nosniff"
             }
           ]
+        },
+        {
+          "source": "/whatsapp-link",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "no-store, max-age=0"
+            },
+            {
+              "key": "Referrer-Policy",
+              "value": "no-referrer"
+            },
+            {
+              "key": "X-Content-Type-Options",
+              "value": "nosniff"
+            }
+          ]
         }
       ],
       "rewrites": [
@@ -124,6 +149,10 @@
         },
         {
           "source": "/sign-agreement",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/whatsapp-link",
           "destination": "/app.html"
         },
         {

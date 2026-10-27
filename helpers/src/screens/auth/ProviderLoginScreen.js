@@ -57,7 +57,10 @@ export function ProviderLoginScreen({ initialMode = 'login', onRouteChange, onHo
     const phone = String(params.get('wa_phone') || '').trim();
     if (token) {
       window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}`);
-      if (/^[A-Za-z0-9_-]{40,60}$/.test(token)) setSignupLink({ token, role: ['customer', 'helper'].includes(role) ? role : '', phone });
+      if (/^[A-Za-z0-9_-]{40,60}$/.test(token)) {
+        setSignupLink({ token, role: ['customer', 'helper'].includes(role) ? role : '', phone });
+        if (phone) setPhoneNumber(phone);
+      }
     }
     setSignupLinkLoaded(true);
   }, []);
@@ -127,7 +130,7 @@ export function ProviderLoginScreen({ initialMode = 'login', onRouteChange, onHo
       } else if (mode === 'signup' && !trimmedName) {
         throw new Error('Full name is required for helper signup.');
       } else if (mode === 'signup') {
-        await signup({ name: trimmedName, email: trimmedEmail, password: trimmedPassword });
+        await signup({ name: trimmedName, email: trimmedEmail, password: trimmedPassword, phoneNumber });
       } else {
         await login({ email: trimmedEmail, password: trimmedPassword });
       }
@@ -145,7 +148,7 @@ export function ProviderLoginScreen({ initialMode = 'login', onRouteChange, onHo
     if (Platform.OS === 'web' && label === 'Google') {
       setSubmitting(true);
       try {
-        await loginWithGoogle();
+        await loginWithGoogle(mode === 'signup' ? { phoneNumber } : {});
       } catch (error) {
         setFormError(error.message || 'Unable to sign in with Google.');
       } finally {
@@ -212,11 +215,11 @@ export function ProviderLoginScreen({ initialMode = 'login', onRouteChange, onHo
       backLabel="Helper home"
       mode={isSignup ? 'signup' : 'login'}
       onPrimaryPress={submit}
-      primaryDisabled={submitting || (method === 'email' && (!email.trim() || !password.trim() || (isSignup && !name.trim()))) || (method === 'whatsapp' && (!phoneNumber.trim() || (isSignup && (!name.trim() || !email.trim())) || (Boolean(challengeId) && !verificationCode.trim())))}
+      primaryDisabled={submitting || (method === 'email' && (!email.trim() || !password.trim() || (isSignup && (!name.trim() || (!phoneNumber.trim() && !signupLink?.phone))))) || (method === 'whatsapp' && (!phoneNumber.trim() || (isSignup && (!name.trim() || !email.trim())) || (Boolean(challengeId) && !verificationCode.trim())))}
       primaryLabel={submitting ? 'Please wait...' : method === 'whatsapp' ? challengeId ? 'Verify WhatsApp code' : 'Send WhatsApp code' : isSignup ? 'Sign up' : 'Sign in'}
       socialButtons={emailOnly ? [] : socialButtons.map((button) => ({
         ...button,
-        disabled: (button.label === 'Google' && !googleEnabled) || (button.label === 'WhatsApp' && !whatsappEnabled),
+        disabled: (button.label === 'Google' && (!googleEnabled || (isSignup && !phoneNumber.trim()))) || (button.label === 'WhatsApp' && !whatsappEnabled),
         onPress: () => handleSocialPress(button.label),
       }))}
       subtitle={emailOnly
@@ -245,6 +248,7 @@ export function ProviderLoginScreen({ initialMode = 'login', onRouteChange, onHo
         {isSignup ? (
           <AuthField autoCapitalize="words" inverted label="Name" onChangeText={setName} placeholder="Your full name" value={name} />
         ) : null}
+        {isSignup && method === 'email' && !signupLink?.phone ? <AuthField autoCapitalize="none" inverted keyboardType="phone-pad" label="WhatsApp number" onChangeText={setPhoneNumber} placeholder="+27 71 234 5678" value={phoneNumber} /> : null}
         {signupLink?.phone ? <AuthField autoCapitalize="none" inverted={isSignup} label="WhatsApp number to link" onChangeText={() => {}} placeholder="" value={signupLink.phone} editable={false} /> : null}
         {method === 'email' ? (
           <>
