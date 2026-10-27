@@ -4116,7 +4116,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
               }
             } else {
               const items = readiness.missing.length ? readiness.missing.map((item) => `• ${item}`).join('\n') : '• Your existing helper profile meets the current app checks.';
-              await reply(`Your helper profile still needs:\n${items}\n\nPolice-clearance documents cannot currently be submitted or reviewed securely through WhatsApp. Please do not send one here. Use the Helpers app or contact Uncedo support. Going online and live request matching still happen in the Helpers app, which requests live location only when you choose to go online.`);
+              await reply(`Your helper profile still needs:\n${items}\n\nA secure police-clearance submission and review step is not available in WhatsApp or the Helpers app yet. Please do not send this sensitive document in chat. Contact Uncedo support to arrange its review before relying on helper activation. You can go online and manage live request matching in the Helpers app; it requests live location only when you choose to go online.`);
             }
           }
         } else if (transition.action === 'submit-helper-services') {
