@@ -8885,7 +8885,10 @@ exports.completeWhatsAppAccountLink = onCall({
   };
 });
 
-exports.ensureCustomerUserProfile = onCall({
+exports.ensureCustomerUserProfileV2 = onCall({
+  // Cloud Run must accept the browser's preflight/callable request; Firebase
+  // Auth authorization is still enforced below inside the callable handler.
+  invoker: 'public',
   maxInstances: 5,
   ...HALF_CPU_OPTIONS,
   memory: '256MiB',

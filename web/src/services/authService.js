@@ -60,7 +60,7 @@ export async function ensureCustomerProfile(firebaseUser) {
   const userRef = doc(db, 'users', firebaseUser.uid);
   try {
     const { getFunctions, httpsCallable } = await import('firebase/functions');
-    const bootstrap = httpsCallable(getFunctions(auth.app, 'us-central1'), 'ensureCustomerUserProfile');
+    const bootstrap = httpsCallable(getFunctions(auth.app, 'us-central1'), 'ensureCustomerUserProfileV2');
     await bootstrap({});
   } catch (error) {
     if (String(error?.code || '').endsWith('/permission-denied')) {
