@@ -42,6 +42,22 @@ test('intent prompt bounds history, includes approved tools, and marks messages 
   assert.match(prompt, /"allowedToolNames":\["","getMyWalletSummary"\]/);
 });
 
+test('questionnaire extraction prompt forbids tool selection and asks for current-message facts only', () => {
+  const prompt = buildPrompt({
+    message: { text: 'Wash my SUV at home.' },
+    services: [{ id: 'car_wash', label: 'Car wash' }],
+    questions: [{ id: 'vehicle_type', prompt: 'What kind of vehicle?', answerType: 'enum', options: [{ value: 'suv', label: 'SUV' }] }],
+    availableTools: [{ name: 'getMyWalletSummary', description: 'Private read.' }],
+    answerExtractionOnly: true,
+  });
+  assert.match(prompt, /answer-extraction-only/);
+  assert.match(prompt, /Do not select a tool/);
+  assert.match(prompt, /Do not use older conversation turns/);
+  assert.match(prompt, /vehicle_type/);
+  assert.match(prompt, /"allowedToolNames":\[""\]/);
+  assert.match(prompt, /"approvedTools":\[\]/);
+});
+
 test('model tool selection accepts only the fixed allowlist and strict JSON arguments', () => {
   const result = normalizeModelResult({
     intent: 'booking_status', serviceId: '', confidence: 0.9, extractedAnswers: {},

@@ -91,6 +91,7 @@ const {
 } = require('./serviceRequestPricing');
 const { createMarketplaceRequestOperations } = require('./marketplaceRequestOperations');
 const { createServiceRequestOfferOperations } = require('./serviceRequestOfferOperations');
+const { getHelperPayoutVerificationStatus, hasVerifiedHelperPayout } = require('./helperDispatchEligibility');
 const { calculateCustomerCancellationTerms, cancellationQuoteMatches } = require('./serviceRequestCancellation');
 const {
   getServerPaymentMethod,
@@ -100,6 +101,8 @@ const {
   updateSavedPaymentMethod,
 } = require('./paymentMethodStore');
 const { createOrAppendWhatsAppSupportMessage } = require('./whatsapp/supportTicketService');
+const { extractQuestionnaireAnswers, getFirstMissingRequiredQuestion, questionnaireNeedsExtractionPass } = require('./whatsapp/serviceBookingIntake');
+const { formatWhatsAppBookingConfirmation, renderWhatsAppQuestion } = require('./whatsapp/serviceBookingPresentation');
 const { createWhatsAppSupportMediaUrl } = require('./whatsapp/supportMedia');
 const {
   WHATSAPP_POLICY_ACCEPTANCE_VERSION,
@@ -1163,10 +1166,6 @@ function buildHelperDispatchServiceIds(helperOfferings = [], catalogIndex = buil
   };
 }
 
-function getHelperPayoutVerificationStatus(helper = {}) {
-  return String(helper?.payout?.verificationStatus || helper?.payoutVerificationStatus || '').trim().toLowerCase();
-}
-
 function helperPoliceClearanceRequired() {
   return isPoliceClearanceUploadConfigured(process.env);
 }
@@ -1385,13 +1384,12 @@ function isHelperDispatchEligible(helper = {}, categoryId = '', requestServiceId
       ?? helper.blocked
       ?? helper.isBlocked,
   );
-  const payoutVerificationStatus = String(helper?.payout?.verificationStatus || '').toLowerCase();
   const verificationStatus = String(helper?.verificationStatus || '').toLowerCase();
 
   return verificationStatus === 'verified'
     && isHelperLocationFresh(getLiveLocationSnapshot(helper))
     && meetsHelperPoliceClearanceRequirement(helperPoliceClearanceRequired(), helper?.policeClearanceStatus)
-    && payoutVerificationStatus === 'verified'
+    && hasVerifiedHelperPayout(helper)
     && isHelperAgreementCurrent(helper)
     && helperSupportsCategory(helper, categoryId, requestServiceIds, catalogIndex, helperOfferings)
     && !isDispatchPaused
@@ -3117,14 +3115,6 @@ function getWhatsAppQuestionnaireServices(service, catalog) {
 function getWhatsAppServiceIds(service) {
   const includedIds = Array.isArray(service?.includedServiceIds) ? service.includedServiceIds : [];
   return includedIds.length ? includedIds : [service.id];
-}
-
-function renderWhatsAppQuestion(question) {
-  const prompt = String(question?.prompt || 'Please provide this detail.').trim();
-  const options = (Array.isArray(question?.options) ? question.options : [])
-    .map((option) => String(option?.label || option?.value || '').trim())
-    .filter(Boolean);
-  return options.length ? `${prompt}\nOptions: ${options.join(', ')}` : prompt;
 }
 
 function renderWhatsAppCatalog(catalog, { includePricing = false } = {}) {
@@ -5848,9 +5838,10 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           await reply(`Your service request is confirmed${confirmation.requestId ? ` (reference ${confirmation.requestId})` : ''}. The matching system will look for an eligible helper.`);
         } else if (confirmation.code === 'quote-changed') {
           const quote = confirmation.quote || {};
-          await reply(`The service details or quote have changed. The current quote is R${Number(quote.total || 0).toFixed(2)} ${quote.currency || 'ZAR'}. Please confirm again.`, {
+          const currentQuoteText = `R${Number(quote.total || 0).toFixed(2)} ${quote.currency || 'ZAR'}`;
+          await reply(`The service details or quote have changed. The current quote is *${currentQuoteText}*. Please review it and confirm again.`, {
             type: 'button',
-            body: { text: `Current quote: R${Number(quote.total || 0).toFixed(2)} ${quote.currency || 'ZAR'}. Confirm to submit this request.` },
+            body: { text: `*Current quote: ${currentQuoteText}*\nConfirm to submit this request or edit the details.` },
             action: { buttons: [
               { type: 'reply', reply: { id: 'wa_draft_confirm', title: 'Confirm' } },
               { type: 'reply', reply: { id: 'wa_draft_edit', title: 'Edit details' } },
@@ -6242,8 +6233,51 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
 
     const selectedQuestionServices = getWhatsAppQuestionnaireServices(service, catalog);
     const serviceQuestions = getQuestionnaireForSelection({ services: selectedQuestionServices, selectedPackageId: service.id });
+    let answerExtraction = {
+      answers: intentResult.extractedAnswers || {},
+      attempted: false,
+      fallback: false,
+    };
+    if (questionnaireNeedsExtractionPass({
+      intent: intentResult.intent,
+      availableQuestions: questions,
+      questionnaire: serviceQuestions,
+    })) {
+      assistantPhase = 'questionnaire_extraction';
+      await jobRef.set({ phase: assistantPhase, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      answerExtraction = await runWhatsAppToolWithTimeout(() => extractQuestionnaireAnswers({
+        model,
+        message: inbound,
+        service,
+        questions: serviceQuestions,
+        existingAnswers: activeDraft?.serviceId === service.id ? activeDraft.structuredAnswers || {} : {},
+        fallbackAnswers: intentResult.extractedAnswers || {},
+      }), 18_000).catch((error) => ({
+        answers: intentResult.extractedAnswers || {},
+        attempted: true,
+        fallback: true,
+        errorCode: String(error?.code || 'questionnaire_extraction_timeout').slice(0, 100),
+      }));
+      await jobRef.set({
+        questionnaireExtraction: answerExtraction.fallback ? 'deterministic_fallback' : 'completed',
+        ...(answerExtraction.provider ? { questionnaireExtractionProvider: answerExtraction.provider } : {}),
+        ...(answerExtraction.model ? { questionnaireExtractionModel: answerExtraction.model } : {}),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      if (answerExtraction.fallback) {
+        logger.info('whatsapp_booking_questionnaire_extraction_fallback', {
+          eventId,
+          errorCode: String(answerExtraction.errorCode || 'questionnaire_extraction_failed').slice(0, 100),
+        });
+      }
+      const postExtractionConversation = await conversationRef.get();
+      if (!postExtractionConversation.exists || String(postExtractionConversation.data()?.lastInboundEventId || '') !== eventId) {
+        await jobRef.set({ status: 'superseded', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+    }
     const allowedQuestionIds = new Set(serviceQuestions.map((question) => question.id));
-    const incomingAnswers = Object.fromEntries(Object.entries(intentResult.extractedAnswers || {}).filter(([key]) => allowedQuestionIds.has(key)));
+    const incomingAnswers = Object.fromEntries(Object.entries(answerExtraction.answers || {}).filter(([key]) => allowedQuestionIds.has(key)));
     const baseAnswers = activeDraft?.serviceId === service.id && activeDraft?.structuredAnswers
       ? activeDraft.structuredAnswers
       : {};
@@ -6268,7 +6302,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     const currentMediaAssetRef = currentMediaAssetId ? db.collection('whatsappMediaAssets').doc(currentMediaAssetId) : null;
     const now = Date.now();
     if (validation.missingRequired.length) {
-      const missingQuestion = serviceQuestions.find((question) => question.id === validation.missingRequired[0]);
+      const missingQuestion = getFirstMissingRequiredQuestion(serviceQuestions, validation.missingRequired);
       let canonicalRequestId = String(activeDraft?.requestId || '').trim();
       if (intentResult.intent === 'service_booking') {
         const requestDraft = await syncWhatsAppCanonicalRequestDraft({
@@ -6338,7 +6372,10 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       strictUnknownAnswers: true,
     });
     const isBooking = intentResult.intent === 'service_booking';
-    const replyText = `${service.label}: ${isBooking ? 'quotation' : 'indicative estimate'} R${Number(quote.total || 0).toFixed(2)} ${quote.currency || 'ZAR'}. This amount comes from the current Uncedo pricing calculation.${isBooking ? ' Confirm to submit this request, or edit the details.' : ' To book this service, tell me you would like to book it.'}`;
+    const bookingConfirmation = isBooking
+      ? formatWhatsAppBookingConfirmation({ service, questions: serviceQuestions, answers: validation.answers, quote })
+      : null;
+    const replyText = bookingConfirmation?.text || `*${service.label}*\n\nIndicative estimate: *R${Number(quote.total || 0).toFixed(2)} ${quote.currency || 'ZAR'}*. This is based on the current Uncedo pricing calculation. To book this service, tell me you would like to book it.`;
     let canonicalRequestId = String(activeDraft?.requestId || '').trim();
     let quoteExpiresAtMs = now + (15 * 60 * 1000);
     if (isBooking) {
@@ -6410,7 +6447,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     if (isBooking) {
       await reply(replyText, {
         type: 'button',
-        body: { text: `${service.label}: R${Number(quote.total || 0).toFixed(2)} ${quote.currency || 'ZAR'}. Confirm to submit this request, or edit the details.` },
+        body: { text: bookingConfirmation.buttonBody },
         action: { buttons: [
           { type: 'reply', reply: { id: 'wa_draft_confirm', title: 'Confirm' } },
           { type: 'reply', reply: { id: 'wa_draft_edit', title: 'Edit details' } },
