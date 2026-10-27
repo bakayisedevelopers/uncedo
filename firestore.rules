@@ -78,6 +78,13 @@ service cloud.firestore {
       return !('phoneNumber' in data) || data.phoneNumber == '';
     }
 
+    function safeInitialPaymentMethods(data) {
+      // New customer profiles may start with an empty payment-method summary.
+      // Adding or changing methods remains restricted to trusted backend code.
+      return !('paymentMethods' in data)
+        || (data.paymentMethods is list && data.paymentMethods.size() == 0);
+    }
+
     function safeSelfEmail(data) {
       return !('email' in data) || data.email == request.auth.token.get('email', '');
     }
@@ -107,6 +114,7 @@ service cloud.firestore {
     function safeUserCreateKeys(data) {
       return data.keys().hasOnly([
         'uid', 'email', 'fullName', 'displayName', 'firstName', 'lastName', 'phoneNumber',
+        'paymentMethods',
         'providerType', 'businessName', 'homeAddress', 'city', 'profilePhoto',
         'profilePhotoObjectPath', 'selfieUrl', 'selfieCapturedAt', 'selfieCaptureSource',
         'role', 'activeRole', 'roles', 'onlineStatus', 'locationSharingEnabled', 'liveLocation',
@@ -128,6 +136,7 @@ service cloud.firestore {
         && hasSafeSelfAssignedVerification(request.resource.data)
         && safeInitialAgreement(request.resource.data)
         && safeInitialContactNumber(request.resource.data)
+        && safeInitialPaymentMethods(request.resource.data)
         && !request.resource.data.keys().hasAny(['admin', 'isAdmin', 'isStaff', 'staffRole', 'supportRole', 'adminNotes']));
       allow update: if isAdmin() || (isOwner(userId) && hasOnlySafeUserFieldChanges());
       allow delete: if isOwner(userId) || isAdmin();

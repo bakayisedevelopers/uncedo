@@ -1,6 +1,8 @@
 import {
+  EmailAuthProvider,
   GoogleAuthProvider,
   createUserWithEmailAndPassword,
+  reauthenticateWithCredential,
   signInWithEmailAndPassword,
   signInWithCustomToken,
   signInWithPopup,
@@ -100,12 +102,27 @@ export async function signInWithEmail({ email, password }) {
 export async function signUpWithEmail({ name, email, password, phoneNumber }) {
   requireFirebase();
   const safePhone = requireE164PhoneNumber(phoneNumber);
-  const credential = await createUserWithEmailAndPassword(auth, email.trim(), password);
-  await updateProfile(credential.user, { displayName: name.trim() });
-  await ensureCustomerProfile(credential.user);
+  const normalizedEmail = email.trim();
+  let firebaseUser;
+  try {
+    const credential = await createUserWithEmailAndPassword(auth, normalizedEmail, password);
+    firebaseUser = credential.user;
+  } catch (error) {
+    // Account creation and Firestore profile creation are separate operations.
+    // If Auth succeeded but profile setup failed, retrying signup must resume the
+    // signed-in account instead of leaving the user stuck at email-already-in-use.
+    const currentUser = auth.currentUser;
+    const sameAuthenticatedEmail = currentUser
+      && String(currentUser.email || '').trim().toLowerCase() === normalizedEmail.toLowerCase();
+    if (error?.code !== 'auth/email-already-in-use' || !sameAuthenticatedEmail) throw error;
+    await reauthenticateWithCredential(currentUser, EmailAuthProvider.credential(normalizedEmail, password));
+    firebaseUser = currentUser;
+  }
+  await updateProfile(firebaseUser, { displayName: name.trim() });
+  await ensureCustomerProfile(firebaseUser);
   await saveCustomerContactNumber(safePhone);
-  const profile = await ensureCustomerProfile(credential.user);
-  return { firebaseUser: credential.user, profile };
+  const profile = await ensureCustomerProfile(firebaseUser);
+  return { firebaseUser, profile };
 }
 
 export async function signInWithGoogle({ phoneNumber = '' } = {}) {

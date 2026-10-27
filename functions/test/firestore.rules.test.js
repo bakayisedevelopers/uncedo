@@ -240,6 +240,42 @@ test('new profiles cannot claim a WhatsApp phone number directly', async () => {
   await assertFails(customerDb.doc('whatsappAccountLinkChallenges/fake-hash').get());
 });
 
+test('new customer signup can initialize an empty payment-method summary only', async () => {
+  const email = 'new-customer@example.test';
+  const customerDb = authedDb('new-customer-with-payment-summary', { email });
+  const initialProfile = {
+    uid: 'new-customer-with-payment-summary',
+    email,
+    fullName: 'New Customer',
+    displayName: 'New Customer',
+    role: 'customer',
+    activeRole: 'customer',
+    roles: ['customer'],
+    phoneNumber: '',
+    paymentMethods: [],
+    customerProfile: {
+      accountType: '',
+      customerType: '',
+      serviceAddress: '',
+      discoverySource: '',
+      preferredServiceCategories: [],
+      businessName: '',
+      businessEmail: '',
+      businessCategory: '',
+    },
+  };
+
+  await assertSucceeds(customerDb.doc('users/new-customer-with-payment-summary').set(initialProfile));
+  await assertFails(customerDb.doc('users/customer-with-forged-payment-methods').set({
+    ...initialProfile,
+    uid: 'customer-with-forged-payment-methods',
+    paymentMethods: [{ id: 'forged-card' }],
+  }));
+  await assertFails(customerDb.doc('users/new-customer-with-payment-summary').update({
+    paymentMethods: [{ id: 'forged-card' }],
+  }));
+});
+
 test('helper agreement acceptance and required-version fields can only be changed by trusted backend code', async () => {
   await seedDocument('users/helper-1', {
     uid: 'helper-1',
