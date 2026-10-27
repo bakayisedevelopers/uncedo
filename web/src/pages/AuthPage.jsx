@@ -207,6 +207,19 @@ export default function AuthPage({ mode = 'login' }) {
             </form>
           )}
 
+          {signupLink?.token && signupLink.mode !== 'signin' ? (
+            <p className="mt-4 text-center text-sm text-zinc-600">
+              Already created an Uncedo account?{' '}
+              <Link
+                className="font-bold text-brand underline"
+                to="/sign-in"
+                state={{ whatsappSignupLink: { ...signupLink, mode: 'signin' } }}
+              >
+                Sign in to finish linking WhatsApp
+              </Link>
+            </p>
+          ) : null}
+
           <div className="my-6 flex items-center gap-3 text-xs font-semibold uppercase tracking-wider text-zinc-400"><span className="h-px flex-1 bg-zinc-200" />or<span className="h-px flex-1 bg-zinc-200" /></div>
           <button type="button" disabled={busy || !googleAuthEnabled || (isSignup && !phoneNumber.trim())} onClick={() => run(() => signInWithGoogle(isSignup ? { phoneNumber } : {}))} className="flex w-full items-center justify-center gap-3 rounded-2xl border border-zinc-200 bg-white px-5 py-3 font-bold text-zinc-800 transition hover:bg-zinc-50 disabled:opacity-60">
             <GoogleMark /> Continue with Google
