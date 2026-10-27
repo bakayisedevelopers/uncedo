@@ -9,7 +9,7 @@ test('reward adjustments reject profile-supplied administrator fields', async ()
     adminRewardAdjustment({
       db: {},
       admin: {},
-      adminUser: { uid: 'ordinary-user', isAdmin: true, role: 'admin', email: 'jabuobed1@gmail.com' },
+      adminUser: { uid: 'ordinary-user', isAdmin: true, role: 'admin', email: 'ordinary@example.com' },
       userId: 'customer-1',
       accountType: 'customer',
       direction: 'credit',

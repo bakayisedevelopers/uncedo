@@ -13,12 +13,12 @@ service firebase.storage {
     function isAdmin() {
       return signedIn()
         && (
-          request.auth.token.get('admin', false) == true
+          request.auth.token.get('role', '') == 'admin'
+          || (request.auth.token.get('roles', []) is list
+            && request.auth.token.get('roles', []).hasAny(['admin']))
+          // Keep existing trusted custom claims valid during the claim migration.
+          || request.auth.token.get('admin', false) == true
           || request.auth.token.get('isAdmin', false) == true
-          || (
-            request.auth.token.get('email', '') == 'jabuobed1@gmail.com'
-            && request.auth.token.get('email_verified', false) == true
-          )
         );
     }
 

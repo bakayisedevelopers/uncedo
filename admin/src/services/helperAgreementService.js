@@ -126,7 +126,8 @@ function makeHelperVersionDocId(version) {
 
 function isAdminUser(user = {}, claims = {}) {
   return Boolean(
-    (user?.emailVerified === true && String(user?.email || '').trim().toLowerCase() === 'jabuobed1@gmail.com')
+    claims?.role === 'admin'
+      || (Array.isArray(claims?.roles) && claims.roles.includes('admin'))
       || claims?.admin === true
       || claims?.isAdmin === true
   );

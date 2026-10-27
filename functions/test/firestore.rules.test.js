@@ -80,7 +80,7 @@ test('reward accounts and transactions are read-only to owners and private from 
 
   const customerDb = authedDb('customer-1');
   const helperDb = authedDb('helper-1');
-  const adminDb = authedDb('admin-user', { email: 'jabuobed1@gmail.com', email_verified: true });
+  const adminDb = authedDb('admin-user', { roles: ['admin'] });
 
   await assertSucceeds(customerDb.doc('rewardAccounts/customer-1').get());
   await assertFails(customerDb.doc('rewardAccounts/customer-1').set({ availablePoints: 999 }, { merge: true }));
@@ -103,7 +103,7 @@ test('helper wallet balances, transactions, and commission obligations are endpo
 
   const helperDb = authedDb('helper-1');
   const otherHelperDb = authedDb('helper-2');
-  const adminDb = authedDb('admin-user', { email: 'jabuobed1@gmail.com', email_verified: true });
+  const adminDb = authedDb('admin-user', { roles: ['admin'] });
   await assertFails(helperDb.doc('helperWallets/helper-1').get());
   await assertFails(helperDb.collection('helperWallets/helper-1/transactions').get());
   await assertFails(helperDb.doc('helperWallets/helper-1/transactions/fake').set({ amountMinor: 999999 }));
@@ -272,7 +272,7 @@ test('user profiles are private by document and cannot be enumerated by ordinary
   await seedDocument('users/customer-1', { uid: 'customer-1', role: 'customer' });
   await seedDocument('users/customer-2', { uid: 'customer-2', role: 'customer' });
   const customerDb = authedDb('customer-1');
-  const adminDb = authedDb('admin-user', { email: 'jabuobed1@gmail.com', email_verified: true });
+  const adminDb = authedDb('admin-user', { roles: ['admin'] });
   await assertSucceeds(customerDb.doc('users/customer-1').get());
   await assertFails(customerDb.doc('users/customer-2').get());
   await assertFails(customerDb.collection('users').get());
@@ -285,6 +285,17 @@ test('ordinary profile creation cannot self-assign administrator or verified hel
   await assertFails(db.doc('users/new-user').set({ uid: 'new-user', role: 'helper', verificationStatus: 'verified' }));
   await assertFails(db.doc('users/new-user').set({ uid: 'new-user', role: 'helper', helperVerified: true }));
   await assertSucceeds(db.doc('users/new-user').set({ uid: 'new-user', role: 'helper', activeRole: 'helper', roles: ['helper'], verificationStatus: 'pending' }));
+});
+
+test('email addresses alone do not grant administrator access; custom admin role claims do', async () => {
+  await seedDocument('supportTickets/role-protected', { status: 'open' });
+  const adminDb = authedDb('role-admin', { roles: ['admin'] });
+  const emailOnlyDb = authedDb('email-only', { email: 'bakayise.developers@gmail.com', email_verified: true });
+  const adminRoleDb = authedDb('singular-role-admin', { role: 'admin' });
+
+  await assertSucceeds(adminDb.doc('supportTickets/role-protected').get());
+  await assertSucceeds(adminRoleDb.doc('supportTickets/role-protected').get());
+  await assertFails(emailOnlyDb.doc('supportTickets/role-protected').get());
 });
 
 test('a forged admin profile cannot read support records; a trusted admin claim can', async () => {
@@ -305,7 +316,7 @@ test('saved Paystack authorizations are inaccessible to all Firebase clients', a
     reusable: true,
   });
   for (const uid of ['customer-1', 'helper-1', 'admin-user']) {
-    const clientDb = authedDb(uid, uid === 'admin-user' ? { email: 'jabuobed1@gmail.com', email_verified: true } : {});
+    const clientDb = authedDb(uid, uid === 'admin-user' ? { roles: ['admin'] } : {});
     const method = clientDb.doc('paymentAuthorizations/customer-1/methods/card-1');
     await assertFails(method.get());
     await assertFails(method.set({ authorizationCode: 'FORGED' }));
@@ -321,7 +332,7 @@ test('WhatsApp private media is not readable or writable by customer, helper, or
   });
 
   for (const uid of ['customer-1', 'helper-1', 'admin-user']) {
-    const storage = authedStorage(uid, uid === 'admin-user' ? { email: 'jabuobed1@gmail.com', email_verified: true } : {});
+    const storage = authedStorage(uid, uid === 'admin-user' ? { roles: ['admin'] } : {});
     await assertFails(getBytes(ref(storage, objectPath)));
     await assertFails(uploadStorageFile(storage, objectPath, 'image/jpeg'));
   }
@@ -339,7 +350,7 @@ test('WhatsApp identity, message, media, auth, and payment operation documents r
 
   const customerDb = authedDb('customer-1');
   const otherDb = authedDb('customer-2');
-  const adminDb = authedDb('admin-user', { email: 'jabuobed1@gmail.com', email_verified: true });
+  const adminDb = authedDb('admin-user', { roles: ['admin'] });
   for (const path of [
     'whatsappIdentities/identity-1', 'whatsappConversations/identity-1', 'whatsappMessages/message-1',
     'whatsappMediaAssets/asset-1', 'authChallenges/challenge-1', 'paymentSessions/session-1',
@@ -363,7 +374,7 @@ test('request payment attempts, opaque checkout sessions, references, and financ
     ['financialPolicyReviews/direct_cash_review', { requestId: 'request-1', status: 'open' }],
   ]) await seedDocument(path, data);
   for (const uid of ['customer-1', 'helper-1', 'admin-user']) {
-    const db = authedDb(uid, uid === 'admin-user' ? { email: 'jabuobed1@gmail.com', email_verified: true } : {});
+    const db = authedDb(uid, uid === 'admin-user' ? { roles: ['admin'] } : {});
     for (const [path] of [
       ['servicePaymentOperations/request-1'],
       ['servicePaymentOperations/request-1/attempts/attempt-1'],
@@ -637,7 +648,7 @@ test('service requests stay private to participants and admin', async () => {
   const customerDb = authedDb('customer-1');
   const helperDb = authedDb('helper-1');
   const strangerDb = authedDb('stranger-1');
-  const adminDb = authedDb('admin-user', { email: 'jabuobed1@gmail.com', email_verified: true });
+  const adminDb = authedDb('admin-user', { roles: ['admin'] });
 
   await assertSucceeds(customerDb.doc('serviceRequests/request-private').get());
   await assertSucceeds(helperDb.doc('serviceRequests/request-private').get());
@@ -661,7 +672,7 @@ test('helper weekly payouts are readable only by the owning helper and admin', a
 
   const helperDb = authedDb('helper-1');
   const strangerDb = authedDb('helper-2');
-  const adminDb = authedDb('admin-user', { email: 'jabuobed1@gmail.com', email_verified: true });
+  const adminDb = authedDb('admin-user', { roles: ['admin'] });
 
   await assertSucceeds(helperDb.doc('helperWeeklyPayouts/2026-W29_helper-1').get());
   await assertSucceeds(helperDb.collection('helperWeeklyPayouts').where('helperId', '==', 'helper-1').get());
@@ -679,7 +690,7 @@ test('Phase 3 operational records are owner-readable where appropriate and never
   const customerDb = authedDb('customer-1');
   const helperDb = authedDb('helper-1');
   const strangerDb = authedDb('stranger-1');
-  const adminDb = authedDb('admin-user', { email: 'jabuobed1@gmail.com', email_verified: true });
+  const adminDb = authedDb('admin-user', { roles: ['admin'] });
   await assertSucceeds(customerDb.doc('serviceCreditRedemptions/redemption-1').get());
   await assertFails(strangerDb.doc('serviceCreditRedemptions/redemption-1').get());
   await assertSucceeds(helperDb.doc('helperRewardRedemptions/benefit-1').get());
@@ -698,11 +709,13 @@ test('Storage permits public catalogue reads but only admins can change catalogu
 
   const anonymousStorage = testEnv.unauthenticatedContext().storage();
   const customerStorage = authedStorage('customer-1');
-  const adminStorage = authedStorage('admin-user', { email: 'jabuobed1@gmail.com', email_verified: true });
+  const adminStorage = authedStorage('admin-user', { roles: ['admin'] });
   const forgedStorage = authedStorage('forged-admin', { email: 'ordinary@example.com', email_verified: true });
+  const emailOnlyStorage = authedStorage('email-only-admin', { email: 'bakayise.developers@gmail.com', email_verified: true });
   await assertSucceeds(getDownloadURL(ref(anonymousStorage, cataloguePath)));
   await assertFails(uploadStorageFile(customerStorage, 'service-catalog/car-wash/unauthorized.jpg'));
   await assertFails(uploadStorageFile(forgedStorage, 'service-catalog/car-wash/forged.jpg'));
+  await assertFails(uploadStorageFile(emailOnlyStorage, 'service-catalog/car-wash/email-only.jpg'));
   await assertSucceeds(uploadStorageFile(adminStorage, 'service-catalog/car-wash/admin.jpg'));
 });
 

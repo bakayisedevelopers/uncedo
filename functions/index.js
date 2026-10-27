@@ -32,7 +32,7 @@ const {
 const { submitServiceRequestRating, serviceIdsFor } = require('./rewards/ratingService');
 const { incrementCompletedPaid, recalculateMastery, recalculateMembership } = require('./rewards/progressionService');
 const { getFunctions } = require('firebase-admin/functions');
-const { isTrustedAdminToken } = require('./security/adminAuthorization');
+const { applyTrustedAdminRole, isTrustedAdminToken } = require('./security/adminAuthorization');
 // A single-concurrency fractional-CPU profile for Functions that previously
 // failed deployment under the project's regional CPU quota.
 const HALF_CPU_OPTIONS = Object.freeze({ cpu: 0.5, concurrency: 1 });
@@ -7839,10 +7839,6 @@ function getBearerToken(req) {
   return authHeader.substring('Bearer '.length).trim();
 }
 
-function isAllowlistedAdminEmail(email = '') {
-  return isTrustedAdminToken({ email, email_verified: true });
-}
-
 function isAdminToken(decoded = {}) {
   return isTrustedAdminToken(decoded);
 }
@@ -10161,12 +10157,7 @@ exports.setTrustedAdminRole = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, mem
   }, { merge: true });
   try {
     const target = await admin.auth().getUser(targetUid);
-    const claims = { ...(target.customClaims || {}) };
-    if (enabled) claims.admin = true;
-    else {
-      delete claims.admin;
-      delete claims.isAdmin;
-    }
+    const claims = applyTrustedAdminRole(target.customClaims || {}, enabled);
     await admin.auth().setCustomUserClaims(targetUid, claims);
     await auditRef.set({
       action: enabled ? 'trusted_admin_role_granted' : 'trusted_admin_role_revoked',
