@@ -93,6 +93,29 @@ test('Meta template quick replies normalize top-level button payloads into the s
   ]);
 });
 
+test('WhatsApp policy consent buttons normalize from both interactive and top-level button callbacks', () => {
+  const events = normalizeWebhookPayload({
+    object: 'whatsapp_business_account',
+    entry: [{ changes: [{ value: {
+      metadata: { phone_number_id: '100200300' },
+      messages: [
+        {
+          id: 'wamid.consent-interactive', from: '27820001111', timestamp: '1792828810', type: 'interactive',
+          interactive: { type: 'button_reply', button_reply: { id: 'wa_ai_consent_yes', title: 'Agree' } },
+        },
+        {
+          id: 'wamid.consent-template', from: '27820001111', timestamp: '1792828811', type: 'button',
+          button: { text: 'No thanks' },
+        },
+      ],
+    } }] }],
+  });
+
+  assert.deepEqual(events.map((event) => event.interactive.buttonId), [
+    'wa_ai_consent_yes', 'wa_ai_consent_no',
+  ]);
+});
+
 test('24-hour window is based on the latest inbound customer timestamp', () => {
   const now = 1_800_000_000_000;
   assert.equal(getWhatsAppOutboundMode(now - (23 * 60 * 60 * 1000), now), 'free_form_allowed');

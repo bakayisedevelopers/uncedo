@@ -18,7 +18,7 @@ This folder contains the Expo React Native app for helpers.
 - Automatic Monday helper payout batching backed by Firestore payout records
 - New wallet-accounted earnings are kept out of the legacy request-based earnings summary so the same amount is not counted twice. Failed new wallet payouts return to available wallet funds after Paystack confirms failure; pending outcomes remain reserved.
 - Map-driven job and route views
-- Browser build served from a dedicated Firebase Hosting site. It uses the same helper identity, profile-completion steps, and pending/verified status checks as the mobile app.
+- Browser build served from a dedicated Firebase Hosting site. It uses the same helper identity, profile-completion steps, and pending/verified status checks as the mobile app. `/sign-agreement` is a sign-in-only route for short-lived WhatsApp-linked agreement invitations; the backend confirms that the signed-in UID matches the linked helper identity before recording a signature.
 - The Helpers website opens on a dedicated responsive landing page at `/`, with separate `/sign-in` and `/sign-up` routes. This marketing-style entry page is web-only; native apps continue to open the existing authentication flow.
 
 ## Stack
@@ -43,7 +43,7 @@ npm run web:build
 
 `npm run start`, `npm run android`, `npm run ios`, and `npm run web` now auto-run the Google Maps key preparation script before Expo starts so local map builds do not keep the native placeholder key.
 
-`npm run web:build` exports the helper application into `helpers/dist/app.html` and prepares a separate static landing page as `helpers/dist/index.html`. The Firebase Hosting root serves the landing page; `/sign-in` and `/sign-up` serve the Expo auth app. Native Google Navigation SDK guidance is unavailable in the browser; web builds use a no-op navigation adapter.
+`npm run web:build` exports the helper application into `helpers/dist/app.html` and prepares a separate static landing page as `helpers/dist/index.html`. The Firebase Hosting root serves the landing page; `/sign-in`, `/sign-up`, and `/sign-agreement` serve the Expo app. Agreement invitations use an opaque token in the URL fragment, require email sign-in, and use the same callable acceptance operation as the Helpers app. Native Google Navigation SDK guidance is unavailable in the browser; web builds use a no-op navigation adapter.
 
 Browser Google sign-in uses Firebase Authentication and stays disabled until the Google provider and OAuth client are configured in Firebase. WhatsApp OTP sign-in remains unavailable until the matching Cloud Functions and approved Meta authentication template are configured; the button reports this state while its feature flag is false.
 
@@ -102,7 +102,7 @@ C:\Users\Jabu Babb\AppData\Local\Android\Sdk\platform-tools\adb.exe connect 192.
 - Keep this README in sync with helper workflow, screen, or service changes.
 - The helper service catalog is loaded from the shared `serviceCatalog` collection, including admin-created bundle services, and helper submissions stay pending until the admin approves them.
 - Navigation is implemented in `src/navigation/RootNavigator.js`, including the custom route history used for Android hardware back behavior and mobile system-bar insets.
-- The helper agreement flow now reads and writes the live contract records directly in Firebase client-side, including signed acceptance records and the stored acceptance PDF, and blocks profile completion until the latest published version is signed.
+- The helper agreement UI reads published contract information and requires explicit checkbox plus typed-name acceptance. Acceptance is recorded through a callable backend operation shared by the app and WhatsApp agreement page; the backend writes the signed acceptance and PDF and blocks profile completion until the latest published version is signed.
 
 ## Helper rewards experience
 

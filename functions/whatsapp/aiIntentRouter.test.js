@@ -38,6 +38,8 @@ test('intent prompt bounds history, includes approved tools, and marks messages 
   assert.doesNotMatch(prompt, /"text":"3"/);
   assert.match(prompt, /"text":"11"/);
   assert.match(prompt, /getMyWalletSummary/);
+  assert.match(prompt, /"allowedIntents":\[/);
+  assert.match(prompt, /"allowedToolNames":\["","getMyWalletSummary"\]/);
 });
 
 test('model tool selection accepts only the fixed allowlist and strict JSON arguments', () => {
@@ -52,27 +54,35 @@ test('model tool selection accepts only the fixed allowlist and strict JSON argu
   }), /unsupported tool/);
 });
 
-test('Gemini adapter sends key in a header, constrains output and validates the response', async () => {
+test('Gemini fallback uses the project Vertex client, constrained output, and validated response', async () => {
+  let clientConfig;
   let request;
   const router = createGeminiIntentRouter({
-    apiKey: 'test-private-key',
-    fetchImpl: async (url, options) => {
-      request = { url, options };
-      return {
-        ok: true,
-        json: async () => ({
-          candidates: [{ content: { parts: [{ text: JSON.stringify({
-            intent: 'service_discovery', serviceId: '', confidence: 0.98, extractedAnswers: {},
-          }) }] } }],
-        }),
-      };
+    projectId: 'test-project-123',
+    location: 'global',
+    clientFactory: (config) => {
+      clientConfig = config;
+      return { models: { generateContent: async (parameters) => {
+        request = parameters;
+        return { text: JSON.stringify({
+          intent: 'service_discovery', serviceId: '', confidence: 0.98, extractedAnswersJson: '{}',
+          toolName: '', toolArgumentsJson: '{}',
+        }) };
+      } } };
     },
   });
   const result = await router.classify({ message: { text: 'What services are available?' }, services: [] });
   assert.equal(result.intent, 'service_discovery');
-  assert.equal(request.options.headers['x-goog-api-key'], 'test-private-key');
-  assert.doesNotMatch(request.url, /test-private-key/);
-  assert.equal(JSON.parse(request.options.body).generationConfig.temperature, 0);
+  assert.deepEqual(clientConfig, { projectId: 'test-project-123', location: 'global', timeoutMs: 15_000 });
+  assert.equal(request.model, 'gemini-3.5-flash-lite');
+  assert.equal(request.config.temperature, 0);
+  assert.equal(request.config.maxOutputTokens, 800);
+  assert.equal(request.config.responseMimeType, 'application/json');
+  assert.equal(request.config.responseSchema.properties.extractedAnswersJson.type, 'STRING');
+  assert.equal(request.config.responseSchema.properties.extractedAnswers, undefined);
+  assert.equal(request.config.responseSchema.properties.intent.enum, undefined);
+  assert.equal(request.config.responseSchema.properties.toolName.enum, undefined);
+  assert.ok(request.config.responseSchema.required.includes('toolArgumentsJson'));
 });
 
 test('OpenAI adapter uses the Responses API with strict structured output', async () => {
@@ -119,15 +129,16 @@ test('image input is sent as bounded multimodal data through OpenAI and Gemini a
 
   let geminiBody;
   const gemini = createGeminiIntentRouter({
-    apiKey: 'test-key',
-    fetchImpl: async (_url, options) => {
-      geminiBody = JSON.parse(options.body);
-      return { ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify({ intent: 'service_booking', serviceId: '', confidence: 0.7, extractedAnswers: {} }) }] } }] }) };
-    },
+    projectId: 'test-project-123',
+    clientFactory: () => ({ models: { generateContent: async (parameters) => {
+      geminiBody = parameters;
+      return { text: JSON.stringify({ intent: 'service_booking', serviceId: '', confidence: 0.7, extractedAnswersJson: '{"vehicle_type":"suv"}', toolName: '', toolArgumentsJson: '{}' }) };
+    } } }),
   });
-  await gemini.classify({ message: { text: 'Please clean this', mediaBuffer: image, mediaMimeType: 'image/jpeg' }, services: [] });
+  const geminiResult = await gemini.classify({ message: { text: 'Please clean this', mediaBuffer: image, mediaMimeType: 'image/jpeg' }, services: [] });
   assert.equal(geminiBody.contents[0].parts[1].inlineData.mimeType, 'image/jpeg');
   assert.equal(Buffer.from(geminiBody.contents[0].parts[1].inlineData.data, 'base64').equals(image), true);
+  assert.deepEqual(geminiResult.extractedAnswers, { vehicle_type: 'suv' });
 });
 
 test('image classifier rejects unsupported MIME types and oversized buffers before provider calls', async () => {
@@ -143,22 +154,17 @@ test('intent router falls back to Gemini only after the OpenAI primary call fail
   let geminiCalls = 0;
   const router = createWhatsAppIntentRouter({
     openAiApiKey: 'openai-test-key',
-    geminiApiKey: 'gemini-test-key',
+    geminiProjectId: 'test-project-123',
     openAiFetchImpl: async () => {
       openAiCalls += 1;
       return { ok: false, status: 503, json: async () => ({}) };
     },
-    geminiFetchImpl: async () => {
+    geminiClientFactory: () => ({ models: { generateContent: async () => {
       geminiCalls += 1;
-      return {
-        ok: true,
-        json: async () => ({
-          candidates: [{ content: { parts: [{ text: JSON.stringify({
+      return { text: JSON.stringify({
             intent: 'service_discovery', serviceId: '', confidence: 0.92, extractedAnswers: {},
-          }) }] } }],
-        }),
-      };
-    },
+          }) };
+    } } }),
   });
   const result = await router.classify({ message: { text: 'What do you offer?' }, services: [] });
   assert.equal(openAiCalls, 1);
@@ -183,7 +189,7 @@ test('OpenAI remains usable when the optional Gemini fallback is not configured'
   assert.equal(result.intent, 'greeting');
 });
 
-test('a failed OpenAI primary call does not require an unconfigured Gemini key to initialize', async () => {
+test('OpenAI remains usable without a configured Vertex project for the optional Gemini fallback', async () => {
   const router = createWhatsAppIntentRouter({
     openAiApiKey: 'openai-test-key',
     openAiFetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }),
@@ -192,4 +198,50 @@ test('a failed OpenAI primary call does not require an unconfigured Gemini key t
     router.classify({ message: { text: 'Hi' }, services: [] }),
     { code: 'openai_failed_no_fallback:openai_http_503' },
   );
+});
+
+test('provider failure retains safe OpenAI and Gemini classifications for operations logs', async () => {
+  const router = createWhatsAppIntentRouter({
+    openAiApiKey: 'openai-test-key',
+    openAiModel: 'gpt-6-luna',
+    geminiProjectId: 'test-project-123',
+    geminiModel: 'gemini-3.5-flash-lite',
+    openAiFetchImpl: async () => ({
+      ok: false, status: 401,
+      json: async () => ({ error: { code: 'invalid_api_key', message: 'private request data must not be logged' } }),
+    }),
+    geminiClientFactory: () => ({ models: { generateContent: async () => {
+      const error = new Error('private user data and responseSchema details');
+      error.status = 400;
+      throw error;
+    } } }),
+  });
+  await assert.rejects(router.classify({ message: { text: 'private user message' }, services: [] }), (error) => {
+    assert.equal(error.code, 'ai_providers_failed:openai_http_401:gemini_vertex_http_400');
+    assert.deepEqual(error.providerFailures, [
+      { provider: 'openai', httpStatus: 401, model: 'gpt-6-luna', failureClass: 'authentication', providerCode: 'INVALID_API_KEY' },
+      { provider: 'gemini', httpStatus: 400, model: 'gemini-3.5-flash-lite', failureClass: 'invalid_request_schema' },
+    ]);
+    assert.doesNotMatch(JSON.stringify(error.providerFailures), /private request|private user|responseSchema/i);
+    return true;
+  });
+});
+
+test('Vertex service-disabled diagnostics remain specific without exposing provider error text', async () => {
+  const router = createWhatsAppIntentRouter({
+    openAiApiKey: 'openai-test-key',
+    geminiProjectId: 'test-project-123',
+    openAiFetchImpl: async () => ({ ok: false, status: 401, json: async () => ({}) }),
+    geminiClientFactory: () => ({ models: { generateContent: async () => {
+      throw new Error('Vertex API has not been used in private-project-id before or it is disabled');
+    } } }),
+  });
+  await assert.rejects(router.classify({ message: { text: 'private message' }, services: [] }), (error) => {
+    assert.equal(error.code, 'ai_providers_failed:openai_http_401:gemini_vertex_service_disabled');
+    assert.deepEqual(error.providerFailures[1], {
+      provider: 'gemini', model: 'gemini-3.5-flash-lite', failureClass: 'service_not_enabled',
+    });
+    assert.doesNotMatch(`${error.message} ${JSON.stringify(error.providerFailures)}`, /private-project-id|private message/);
+    return true;
+  });
 });

@@ -24,6 +24,10 @@ Firebase CLI loads `functions/.env` for local emulators and uploads configured v
 | `WHATSAPP_AUTH_ENABLED` | Feature flag for WhatsApp OTP login; defaults to `false`. |
 | `WHATSAPP_AUTH_TEMPLATE_NAME` | Approved Meta authentication template name; it must also be in `APPROVED_TEMPLATE_NAMES` and accept one body text code parameter. |
 | `WHATSAPP_AUTH_TEMPLATE_LANGUAGE` | Locale code configured for the approved authentication template. |
+| `WHATSAPP_ONBOARDING_ENABLED` | Enables deterministic WhatsApp guest/account onboarding and helper agreement-link creation. Keep `false` until the onboarding routes and linked-account flow are deployed and reviewed. |
+| `WHATSAPP_CUSTOMER_SIGNUP_URL` | HTTPS customer email-signup route used for short-lived WhatsApp account-link challenges. |
+| `WHATSAPP_HELPER_SIGNUP_URL` | HTTPS Helpers email-signup route used for short-lived WhatsApp account-link challenges. |
+| `WHATSAPP_HELPER_AGREEMENT_URL` | HTTPS Helpers route for reviewing and signing the current agreement through a WhatsApp-bound challenge. |
 | `WHATSAPP_AI_ENABLED` | Feature flag for the WhatsApp AI turn processor. It defaults to `false`. |
 | `WHATSAPP_MEDIA_ENABLED` | Feature flag for private WhatsApp media download/storage. It is effective only while messaging is enabled and defaults to `false`. |
 | `WHATSAPP_IMAGE_INTERPRETATION_ENABLED` | Optional image input to the configured structured AI router; requires AI, messaging, media and retention controls, and defaults to `false`. |
@@ -33,8 +37,10 @@ Firebase CLI loads `functions/.env` for local emulators and uploads configured v
 | `WHATSAPP_TRANSCRIPTION_MODEL` | Explicitly reviewed OpenAI audio transcription model identifier; no implicit model default is used. |
 | `OPENAI_API_KEY` | Server-only OpenAI API credential for primary structured intent and answer extraction. |
 | `OPENAI_MODEL` | Primary model identifier; defaults to `gpt-6-luna`. |
-| `GEMINI_API_KEY` | Server-only Gemini credential used only when the primary OpenAI call fails. Both provider keys are required for the configured fallback chain. |
-| `GEMINI_MODEL` | Fallback model identifier; defaults to `gemini-3.5-flash-lite`. |
+| `GEMINI_MODEL` | Vertex AI/Agent Platform fallback model identifier; defaults to `gemini-3.5-flash-lite`. It is called only when the primary OpenAI call fails. |
+| `GEMINI_LOCATION` | Vertex AI/Agent Platform model location; defaults to `global`. |
+
+The Gemini fallback uses the Cloud Functions runtime identity (Application Default Credentials) and the Firebase project's Google Cloud billing. It does not read `GEMINI_API_KEY` and does not use Secret Manager. The runtime project is resolved from `GCLOUD_PROJECT`, `GOOGLE_CLOUD_PROJECT`, or the initialized Firebase Admin app. The project must have the Agent Platform API enabled, billing active, and the runtime identity authorized to invoke models. |
 
 The WhatsApp values are placeholders only until Meta credentials and templates are available. Keep WhatsApp automation disabled operationally until the webhook is configured and tested. Request payment options also remain unavailable unless `REQUEST_PAYMENTS_ENABLED=true` is deliberately configured after staging validation.
 

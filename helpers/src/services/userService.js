@@ -101,13 +101,6 @@ export async function upsertHelperProfile({ uid, email, fullName, traceLabel = '
   const ref = doc(db, 'users', uid);
   const existing = await getDoc(ref);
   const base = existing.exists() ? existing.data() : buildDefaultHelperProfile({ uid, email, fullName });
-  const agreementDocumentSnap = await getDoc(doc(db, 'legalDocuments', 'helper_agreement')).catch(() => null);
-  const agreementDocument = agreementDocumentSnap?.exists?.() ? agreementDocumentSnap.data() : null;
-  const currentAgreementVersion = String(agreementDocument?.currentVersion || base?.agreement?.requiredVersion || '1.0.1').trim() || '1.0.1';
-  const currentAgreementVersionId = String(
-    agreementDocument?.currentVersionId
-    || `helper_agreement_${currentAgreementVersion}`,
-  ).trim();
 
   const safeProfile = {
     uid,
@@ -128,7 +121,6 @@ export async function upsertHelperProfile({ uid, email, fullName, traceLabel = '
     profilePhotoObjectPath: String(base.profilePhotoObjectPath || ''),
     onlineStatus: String(base.onlineStatus || 'offline'),
     locationSharingEnabled: base.locationSharingEnabled === true,
-    agreement: base.agreement || {},
     updatedAt: serverTimestamp(),
     ...(existing.exists() ? {} : { createdAt: serverTimestamp() }),
   };
@@ -137,20 +129,7 @@ export async function upsertHelperProfile({ uid, email, fullName, traceLabel = '
 
   await setDoc(
     ref,
-    { ...safeProfile,
-      agreement: {
-        ...(base.agreement || {}),
-        documentId: 'helper_agreement',
-        title: agreementDocument?.title || base?.agreement?.title || 'Helper Agreement',
-        legalEntityName: agreementDocument?.legalEntityName || base?.agreement?.legalEntityName || 'Parakleo, operated by Jabu Msiza',
-        requiredVersion: currentAgreementVersion,
-        requiredVersionId: currentAgreementVersionId,
-        currentVersion: currentAgreementVersion,
-        currentVersionId: currentAgreementVersionId,
-        currentVersionAccepted: base?.agreement?.acceptedVersion === currentAgreementVersion,
-        acceptedCurrentVersion: base?.agreement?.acceptedVersion === currentAgreementVersion,
-      },
-    },
+    safeProfile,
     { merge: true },
   );
 

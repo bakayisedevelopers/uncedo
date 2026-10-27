@@ -28,6 +28,18 @@ function stableEventId(seed) {
   return `wa_${createHash('sha256').update(String(seed || '')).digest('hex')}`;
 }
 
+function normalizeButtonId(buttonId, buttonTitle) {
+  const id = String(buttonId || '').trim().slice(0, 512);
+  if (id) return id;
+  // Some Meta button callback payloads may omit the developer payload while
+  // retaining the exact button title. Only map these two unambiguous policy
+  // consent labels; all other actions still require their opaque server ID.
+  const title = String(buttonTitle || '').trim().toLowerCase();
+  if (title === 'agree') return 'wa_ai_consent_yes';
+  if (title === 'no thanks') return 'wa_ai_consent_no';
+  return '';
+}
+
 function normalizeMessage(message = {}, metadata = {}, contact = {}) {
   const messageId = String(message.id || '').trim();
   const from = String(message.from || contact.wa_id || '').trim();
@@ -50,10 +62,11 @@ function normalizeMessage(message = {}, metadata = {}, contact = {}) {
   if (type === 'text') payload.text = String(message.text?.body || '').slice(0, 10_000);
   if (type === 'interactive') {
     const interactive = message.interactive || {};
+    const buttonTitle = String(interactive.button_reply?.title || '').trim().slice(0, 200);
     payload.interactive = {
       type: String(interactive.type || '').trim(),
-      buttonId: String(interactive.button_reply?.id || '').trim(),
-      buttonTitle: String(interactive.button_reply?.title || '').trim().slice(0, 200),
+      buttonId: normalizeButtonId(interactive.button_reply?.id, buttonTitle),
+      buttonTitle,
       listId: String(interactive.list_reply?.id || '').trim(),
       listTitle: String(interactive.list_reply?.title || '').trim().slice(0, 200),
       listDescription: String(interactive.list_reply?.description || '').trim().slice(0, 500),
@@ -64,10 +77,11 @@ function normalizeMessage(message = {}, metadata = {}, contact = {}) {
   // Normalize both wire formats to the same internal `buttonId` contract so
   // the existing canonical action handlers remain authoritative.
   if (type === 'button') {
+    const buttonTitle = String(message.button?.text || '').trim().slice(0, 200);
     payload.interactive = {
       type: 'button_reply',
-      buttonId: String(message.button?.payload || '').trim().slice(0, 512),
-      buttonTitle: String(message.button?.text || '').trim().slice(0, 200),
+      buttonId: normalizeButtonId(message.button?.payload, buttonTitle),
+      buttonTitle,
       listId: '',
       listTitle: '',
       listDescription: '',
@@ -157,6 +171,7 @@ function getWhatsAppOutboundMode(lastInboundAtMs, now = Date.now()) {
 module.exports = {
   getWhatsAppOutboundMode,
   isWithinCustomerServiceWindow,
+  normalizeButtonId,
   normalizeWebhookPayload,
   stableEventId,
   verifyWebhookChallenge,

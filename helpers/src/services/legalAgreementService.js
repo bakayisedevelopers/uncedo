@@ -360,159 +360,49 @@ export async function getHelperAgreementBundle() {
 }
 
 export async function acceptHelperAgreement({ typedSignatureName, checkboxAccepted = true } = {}) {
-  const { auth, db, storage } = getFirebaseClients();
+  const { auth, db, functions, authProviders } = getFirebaseClients();
   const currentUser = auth.currentUser;
   const uid = String(currentUser?.uid || '').trim();
   if (!uid) {
     throw new Error('You must be signed in before accessing the Helper Agreement.');
   }
-
-  const userRef = doc(db, 'users', uid);
-  const userSnap = await getDoc(userRef);
-  const userData = userSnap.exists() ? { uid: userSnap.id, ...userSnap.data() } : {};
-  const isHelper = String(userData.activeRole || userData.role || '').trim().toLowerCase() === 'helper';
-  if (!isHelper) {
-    throw new Error('Only helpers can accept the Helper Agreement.');
-  }
-
   if (!checkboxAccepted) {
     throw new Error('You must confirm that you accept the Helper Agreement.');
   }
-
   const signatureName = String(typedSignatureName || '').trim();
   if (!signatureName) {
     throw new Error('Please type your full legal name to sign the Helper Agreement.');
   }
-
   const bundle = await getHelperAgreementBundle();
   const activeVersion = bundle?.activeVersion || null;
   if (!activeVersion) {
     throw new Error('The active Helper Agreement is not available right now.');
   }
-
-  const requiredVersion = normalizeVersionInput(userData?.agreement?.requiredVersion || activeVersion.version);
-  const acceptanceId = `${uid}_${activeVersion.version}`;
-  const acceptanceRef = doc(db, 'userAgreementAcceptances', acceptanceId);
-  const existingAcceptanceSnap = await getDoc(acceptanceRef);
-  const existingAcceptance = existingAcceptanceSnap.exists() ? existingAcceptanceSnap.data() || {} : null;
-
-  if (existingAcceptance?.pdfUrl) {
-    await setDoc(userRef, {
-      ...buildAgreementSnapshot({
-        userData,
-        activeVersion,
-        acceptanceId,
-        acceptedAt: existingAcceptance.acceptedAt || new Date().toISOString(),
-        pdfUrl: existingAcceptance.pdfUrl,
-      }),
-      updatedAt: serverTimestamp(),
-    }, { merge: true });
-
-    return {
-      success: true,
-      message: 'Helper Agreement accepted successfully.',
-      acceptanceId,
-      acceptance: {
-        id: acceptanceId,
-        ...existingAcceptance,
-      },
-      pdfUrl: existingAcceptance.pdfUrl,
-      activeVersion,
-      agreement: {
-        ...(userData?.agreement || {}),
-        ...buildAgreementSnapshot({
-          userData,
-          activeVersion,
-          acceptanceId,
-          acceptedAt: existingAcceptance.acceptedAt || new Date().toISOString(),
-          pdfUrl: existingAcceptance.pdfUrl,
-        }).agreement,
-      },
-      verificationStatus: userData?.verificationStatus || 'pending',
-    };
-  }
-
-  const acceptedAt = new Date().toISOString();
-  const acceptance = {
-    userId: uid,
-    documentId: HELPER_AGREEMENT_DOCUMENT_ID,
-    version: activeVersion.version,
-    acceptedAt,
-    acceptedByFullName: String(userData.fullName || userData.displayName || '').trim() || signatureName,
-    acceptedByEmail: String(userData.email || currentUser.email || '').trim(),
-    ipAddress: '',
-    userAgent: String(globalThis?.navigator?.userAgent || 'helper-client').trim(),
-    signatureType: 'checkbox_and_typed_name',
-    typedSignatureName: signatureName,
-    checkboxAccepted: true,
-    requiredVersionAtAcceptance: requiredVersion,
-    requiredVersionMismatchAtAcceptance: normalizeVersionInput(activeVersion.version) !== requiredVersion,
-    legalEntityName: LEGAL_ENTITY_NAME,
-    documentTitle: activeVersion.title || HELPER_AGREEMENT_TITLE,
-    documentEffectiveDate: activeVersion.effectiveDate || '',
-    contentHash: String(activeVersion.contentHash || '').trim(),
-    immutableContentSnapshot: activeVersion.contentMarkdown || '',
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  };
-
-  const uploaded = await tryUploadAgreementPdf({
-    storage,
-    acceptanceId,
-    userId: uid,
-    version: activeVersion.version,
-    activeVersion,
-    acceptance,
-  });
-
-  await runTransaction(db, async (transaction) => {
-    const txnUserSnap = await transaction.get(userRef);
-    const txnUserData = txnUserSnap.exists() ? { uid: txnUserSnap.id, ...txnUserSnap.data() } : userData;
-
-    transaction.set(acceptanceRef, {
-      ...acceptance,
-      pdfUrl: uploaded.pdfUrl,
-      pdfStoragePath: uploaded.pdfStoragePath,
-      pdfUploadFailed: !uploaded.pdfUrl,
-      pdfUploadErrorMessage: uploaded.uploadError ? String(uploaded.uploadError?.message || 'PDF upload failed.') : '',
-    }, { merge: true });
-
-    transaction.set(userRef, {
-      ...buildAgreementSnapshot({
-        userData: txnUserData,
-        activeVersion,
-        acceptanceId,
-        acceptedAt,
-        pdfUrl: uploaded.pdfUrl,
-      }),
-      updatedAt: serverTimestamp(),
-    }, { merge: true });
-  });
-
-  const refreshedSnap = await getDoc(userRef);
-  const refreshedUser = refreshedSnap.exists() ? refreshedSnap.data() || {} : {};
-
+  const call = authProviders.httpsCallable(functions, 'acceptHelperAgreement');
+  const response = await call({ typedSignatureName: signatureName, checkboxAccepted: true, expectedVersion: activeVersion.version });
+  const userSnapshot = await getDoc(doc(db, 'users', uid));
   return {
+    ...(response.data || {}),
     success: true,
-    message: uploaded.pdfUrl
-      ? 'Helper Agreement accepted successfully.'
-      : 'Helper Agreement accepted successfully. The signed PDF could not be uploaded on this device.',
-    acceptanceId,
-    acceptance: {
-      id: acceptanceId,
-      ...acceptance,
-      createdAt: acceptedAt,
-      updatedAt: acceptedAt,
-      pdfUrl: uploaded.pdfUrl,
-      pdfStoragePath: uploaded.pdfStoragePath,
-      pdfUploadFailed: !uploaded.pdfUrl,
-      pdfUploadErrorMessage: uploaded.uploadError ? String(uploaded.uploadError?.message || 'PDF upload failed.') : '',
-    },
-    pdfUrl: uploaded.pdfUrl,
-    activeVersion,
-    agreement: refreshedUser.agreement || {},
-    verificationStatus: refreshedUser.verificationStatus || 'pending',
+    agreement: userSnapshot.exists() ? userSnapshot.data()?.agreement || {} : {},
   };
+}
+
+export async function getWhatsAppHelperAgreementSession(token) {
+  const { auth, functions, authProviders } = getFirebaseClients();
+  if (!auth.currentUser?.uid) throw new Error('Sign in with the helper email account linked to WhatsApp.');
+  const call = authProviders.httpsCallable(functions, 'getWhatsAppHelperAgreementSession');
+  const result = await call({ token });
+  return result.data || {};
+}
+
+export async function acceptWhatsAppHelperAgreement({ token, typedSignatureName, checkboxAccepted = true, expectedVersion } = {}) {
+  const { auth, functions, authProviders } = getFirebaseClients();
+  if (!auth.currentUser?.uid) throw new Error('Sign in with the helper email account linked to WhatsApp.');
+  if (checkboxAccepted !== true) throw new Error('Confirm that you accept the Helper Agreement.');
+  const call = authProviders.httpsCallable(functions, 'acceptWhatsAppHelperAgreement');
+  const result = await call({ token, typedSignatureName, checkboxAccepted: true, expectedVersion });
+  return result.data || {};
 }
 
 export function getHelperAgreementPdfUrl({ acceptance = null, versionRecord = null } = {}) {

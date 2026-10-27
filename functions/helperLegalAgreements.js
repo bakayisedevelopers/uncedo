@@ -498,6 +498,7 @@ async function acceptHelperAgreement({
   user,
   typedSignatureName,
   checkboxAccepted,
+  expectedVersion = '',
   ipAddress = '',
   userAgent = '',
 }) {
@@ -509,6 +510,11 @@ async function acceptHelperAgreement({
   const activeVersion = activeBundle.activeVersion;
   if (!activeVersion) {
     throw new Error('The active Helper Agreement is not available right now.');
+  }
+  if (String(expectedVersion || '').trim() && String(expectedVersion).trim() !== String(activeVersion.version || '').trim()) {
+    const error = new Error('The Helper Agreement has changed. Reload and review the current version before signing.');
+    error.code = 'agreement-version-changed';
+    throw error;
   }
 
   const agreement = user?.agreement || {};

@@ -118,6 +118,18 @@ export async function verifyWhatsAppAuthCode({ challengeId, code }) {
   return { firebaseUser: credential.user, profile: linkedProfile || profile };
 }
 
+export async function completeWhatsAppSignupLink({ token }) {
+  requireFirebase();
+  const safeToken = String(token || '').trim();
+  if (!/^[A-Za-z0-9_-]{40,60}$/.test(safeToken)) {
+    throw new Error('This WhatsApp account link is invalid or expired. Return to the Uncedo chat and request a fresh link.');
+  }
+  const { getFunctions, httpsCallable } = await import('firebase/functions');
+  const callable = httpsCallable(getFunctions(auth.app, 'us-central1'), 'completeWhatsAppSignupLink');
+  const result = await callable({ token: safeToken });
+  return result.data || {};
+}
+
 export async function updateCustomerProfile(uid, updates) {
   requireFirebase();
   const userRef = doc(db, 'users', uid);

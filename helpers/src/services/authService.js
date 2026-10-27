@@ -218,6 +218,17 @@ export async function completeWhatsAppAuthChallenge({ challengeId, code }) {
   );
 }
 
+export async function completeWhatsAppSignupLink(token) {
+  const safeToken = String(token || '').trim();
+  if (!/^[A-Za-z0-9_-]{40,60}$/.test(safeToken)) {
+    throw new Error('This WhatsApp account link is invalid or expired. Return to the Uncedo chat and request a fresh link.');
+  }
+  const { functions, authProviders } = getFirebaseClients();
+  const call = authProviders.httpsCallable(functions, 'completeWhatsAppSignupLink');
+  const result = await call({ token: safeToken });
+  return result.data || {};
+}
+
 export async function logoutUser() {
   await stopActiveJobTrackingForSignOut().catch(() => null);
   const { auth } = getFirebaseClients();

@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { ActionButton, Card, SectionHeading, StatusBadge } from '../../components/app/HelperUi';
+import { useAuth } from '../../context/AuthContext';
 import { useHelpersApp } from '../../context/HelpersAppContext';
 import {
+  acceptWhatsAppHelperAgreement,
   formatAgreementDate,
   getHelperAgreementBundle,
   getHelperAgreementPdfUrl,
+  getWhatsAppHelperAgreementSession,
 } from '../../services/legalAgreementService';
 import { colors } from '../../theme/colors';
 
@@ -59,10 +62,15 @@ function renderAgreementMarkdown(markdown = '') {
     });
 }
 
-export function AgreementScreen({ goBack }) {
+export function AgreementScreen({ goBack, route }) {
+  const { logout } = useAuth();
   const { profile, actions, saving, saveError } = useHelpersApp();
+  const isWhatsAppAgreementFlow = Boolean(route?.params?.whatsappAgreementFlow);
+  const whatsappAgreementToken = String(route?.params?.whatsappAgreementToken || '').trim();
   const [bundle, setBundle] = useState({ activeVersion: null, document: null, versions: [], acceptances: [] });
+  const [whatsappSession, setWhatsAppSession] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [message, setMessage] = useState('');
   const [checkboxAccepted, setCheckboxAccepted] = useState(false);
   const [typedSignatureName, setTypedSignatureName] = useState(profile.fullName || profile.displayName || profile.email || '');
@@ -79,20 +87,22 @@ export function AgreementScreen({ goBack }) {
   ), [activeVersion, currentAcceptance, profile?.agreement?.latestAcceptancePdfUrl]);
   const hasSignedPdf = Boolean(latestPdfUrl);
   const hasSignedActiveVersion = Boolean(
-    activeVersion?.version
-      && (
+    activeVersion?.version && (isWhatsAppAgreementFlow
+      ? whatsappSession?.accepted === true
+      : (
         profile?.agreement?.acceptedVersion === activeVersion.version
         || currentAcceptance?.version === activeVersion.version
-      ),
+      )),
   );
   const isCurrent = Boolean(
-    activeVersion?.version
-      && profile?.agreement?.acceptedVersion === activeVersion.version
-      && (
+    activeVersion?.version && (isWhatsAppAgreementFlow
+      ? whatsappSession?.accepted === true
+      : profile?.agreement?.acceptedVersion === activeVersion.version
+        && (
         profile?.agreement?.currentVersionAccepted === true
         || profile?.agreement?.acceptedCurrentVersion === true
         || hasSignedActiveVersion
-      ),
+        )),
   );
   const canSubmit = Boolean(activeVersion && checkboxAccepted && String(typedSignatureName || '').trim() && !hasSignedActiveVersion);
 
@@ -132,6 +142,26 @@ export function AgreementScreen({ goBack }) {
     const load = async () => {
       setIsLoading(true);
       try {
+        if (isWhatsAppAgreementFlow) {
+          if (!whatsappAgreementToken) {
+            throw new Error('This WhatsApp agreement link is missing or invalid. Request a new link in your WhatsApp chat.');
+          }
+          const session = await getWhatsAppHelperAgreementSession(whatsappAgreementToken);
+          if (!cancelled) {
+            setWhatsAppSession(session);
+            setBundle({
+              activeVersion: session?.activeVersion || null,
+              document: null,
+              versions: [],
+              acceptances: [],
+            });
+            setTypedSignatureName(profile.fullName || profile.displayName || profile.email || '');
+            setCheckboxAccepted(session?.accepted === true);
+            setMessage('');
+          }
+          return;
+        }
+
         const result = await getHelperAgreementBundle();
         if (!cancelled) {
           setBundle({
@@ -158,7 +188,7 @@ export function AgreementScreen({ goBack }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isWhatsAppAgreementFlow, profile.displayName, profile.email, profile.fullName, whatsappAgreementToken]);
 
   const openUrl = async (url) => {
     const normalizedUrl = String(url || '').trim();
@@ -171,44 +201,94 @@ export function AgreementScreen({ goBack }) {
   const handleAccept = async () => {
     if (!canSubmit) return;
 
-    const result = await actions.acceptAgreement({
-      typedSignatureName,
-      checkboxAccepted,
-    });
-
-    if (!result?.success) {
-      return;
-    }
-
-    setMessage(result?.message || 'Helper Agreement accepted successfully.');
+    setIsSubmitting(true);
     try {
-      const refreshed = await getHelperAgreementBundle();
-      setBundle({
-        activeVersion: refreshed?.activeVersion || null,
-        document: refreshed?.document || null,
-        versions: Array.isArray(refreshed?.versions) ? refreshed.versions : [],
-        acceptances: Array.isArray(refreshed?.acceptances) ? refreshed.acceptances : [],
-      });
-    } catch (_error) {
-      // The profile subscription still updates agreement state if the refresh fails.
+      if (isWhatsAppAgreementFlow) {
+        const result = await acceptWhatsAppHelperAgreement({
+          token: whatsappAgreementToken,
+          typedSignatureName,
+          checkboxAccepted,
+          expectedVersion: activeVersion?.version,
+        });
+        setWhatsAppSession((current) => ({
+          ...(current || {}),
+          accepted: true,
+          acceptedVersion: result?.acceptedVersion || activeVersion?.version || '',
+          acceptedAt: new Date().toISOString(),
+        }));
+        setMessage('Your Helper Agreement was signed and saved to the helper account linked to this WhatsApp number. Return to WhatsApp to continue your profile setup.');
+        const returnUrl = /^https:\/\/wa\.me\/\d{8,15}$/.test(String(result?.returnUrl || ''))
+          ? String(result.returnUrl)
+          : 'https://wa.me/27605239926';
+        setTimeout(() => {
+          if (Platform.OS === 'web' && typeof window !== 'undefined') {
+            window.location.assign(returnUrl);
+          } else {
+            Linking.openURL(returnUrl).catch(() => null);
+          }
+        }, 900);
+      } else {
+        const result = await actions.acceptAgreement({ typedSignatureName, checkboxAccepted });
+        if (!result?.success) {
+          setMessage(result?.message || 'Unable to accept the Helper Agreement. Please try again.');
+          return;
+        }
+        setMessage(result?.message || 'Helper Agreement accepted successfully.');
+      }
+
+      if (Platform.OS === 'web' && typeof window !== 'undefined' && window.location.hash) {
+        window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}`);
+      }
+
+      if (!isWhatsAppAgreementFlow) {
+        try {
+          const refreshed = await getHelperAgreementBundle();
+          setBundle({
+            activeVersion: refreshed?.activeVersion || null,
+            document: refreshed?.document || null,
+            versions: Array.isArray(refreshed?.versions) ? refreshed.versions : [],
+            acceptances: Array.isArray(refreshed?.acceptances) ? refreshed.acceptances : [],
+          });
+        } catch (_error) {
+          // The profile subscription still updates agreement state if the refresh fails.
+        }
+      }
+    } catch (error) {
+      setMessage(error?.message || 'Unable to sign the Helper Agreement. Request a fresh link or sign in with the matching helper account.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   return (
     <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false}>
-      <Pressable accessibilityRole="button" onPress={() => goBack('Profile')} style={styles.backRow}>
+      {!isWhatsAppAgreementFlow ? <Pressable accessibilityRole="button" onPress={() => goBack('Profile')} style={styles.backRow}>
         <Ionicons color={colors.brandDark} name="chevron-back" size={18} />
         <Text style={styles.backText}>Back to profile</Text>
-      </Pressable>
+      </Pressable> : null}
 
       <View style={styles.header}>
-        <Text style={styles.title}>Helper Agreement</Text>
-        <Text style={styles.copy}>Read the latest contract version in full before you acknowledge it. Publishing a new version will block profile completion until you accept it.</Text>
+        <Text style={styles.title}>{isWhatsAppAgreementFlow ? 'Sign your Helper Agreement' : 'Helper Agreement'}</Text>
+        <Text style={styles.copy}>{isWhatsAppAgreementFlow
+          ? 'Review the current agreement. Sign in with the helper email account linked to the WhatsApp number that received this link. Acceptance is recorded against that verified helper account.'
+          : 'Read the latest contract version in full before you acknowledge it. Publishing a new version will block profile completion until you accept it.'}</Text>
       </View>
 
       {message ? (
         <View style={styles.messageBanner}>
           <Text style={styles.messageText}>{message}</Text>
+          {isWhatsAppAgreementFlow && /linked helper account|sign in with the matching helper account|not valid for the signed-in helper account/i.test(message) ? (
+            <Pressable accessibilityRole="button" onPress={() => logout?.().catch?.(() => null)}>
+              <Text style={styles.switchAccount}>Sign out and use another helper account</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
+
+      {isWhatsAppAgreementFlow && whatsappSession?.maskedWhatsAppNumber ? (
+        <View style={styles.linkedNumberNotice}>
+          <Text style={styles.linkedNumberLabel}>Linked WhatsApp</Text>
+          <Text style={styles.linkedNumberValue}>{whatsappSession.maskedWhatsAppNumber}</Text>
         </View>
       ) : null}
 
@@ -230,15 +310,15 @@ export function AgreementScreen({ goBack }) {
           </View>
           <View style={styles.metaCard}>
             <Text style={styles.metaLabel}>Accepted version</Text>
-            <Text style={styles.metaValue}>{profile?.agreement?.acceptedVersion || 'Not accepted yet'}</Text>
+            <Text style={styles.metaValue}>{(isWhatsAppAgreementFlow ? whatsappSession?.acceptedVersion : profile?.agreement?.acceptedVersion) || 'Not accepted yet'}</Text>
           </View>
           <View style={styles.metaCard}>
             <Text style={styles.metaLabel}>Accepted at</Text>
-            <Text style={styles.metaValue}>{formatTimestamp(profile?.agreement?.acceptedAt)}</Text>
+            <Text style={styles.metaValue}>{formatTimestamp(isWhatsAppAgreementFlow ? whatsappSession?.acceptedAt : profile?.agreement?.acceptedAt)}</Text>
           </View>
         </View>
 
-        {hasSignedPdf ? (
+        {!isWhatsAppAgreementFlow && hasSignedPdf ? (
           <ActionButton
             label="Open signed PDF"
             tone="secondary"
@@ -292,16 +372,16 @@ export function AgreementScreen({ goBack }) {
           style={[styles.input, hasSignedActiveVersion && styles.inputDisabled]}
         />
 
-        {saveError ? <Text style={styles.error}>{saveError}</Text> : null}
+        {!isWhatsAppAgreementFlow && saveError ? <Text style={styles.error}>{saveError}</Text> : null}
 
         <ActionButton
-          label={hasSignedActiveVersion ? 'Agreement accepted' : saving ? 'Submitting...' : 'Accept and sign'}
+          label={hasSignedActiveVersion ? 'Agreement accepted' : isSubmitting || saving ? 'Submitting...' : 'Accept and sign'}
           onPress={handleAccept}
-          disabled={!canSubmit || saving || isLoading}
+          disabled={!canSubmit || isSubmitting || saving || isLoading}
         />
       </Card>
 
-      <Card>
+      {!isWhatsAppAgreementFlow ? <Card>
         <SectionHeading
           title="Signed versions"
           subtitle="Your previous acceptance records remain available for review."
@@ -324,7 +404,7 @@ export function AgreementScreen({ goBack }) {
         )) : (
           <Text style={styles.emptyText}>No signed versions yet.</Text>
         )}
-      </Card>
+      </Card> : null}
     </ScrollView>
   );
 }
@@ -370,6 +450,32 @@ const styles = StyleSheet.create({
     color: colors.brandDark,
     fontSize: 13,
     fontWeight: '700',
+  },
+  switchAccount: {
+    color: colors.brandDark,
+    fontSize: 13,
+    fontWeight: '900',
+    marginTop: 10,
+    textDecorationLine: 'underline',
+  },
+  linkedNumberNotice: {
+    backgroundColor: '#eef7ff',
+    borderColor: '#b7d8f4',
+    borderRadius: 16,
+    borderWidth: 1,
+    gap: 4,
+    padding: 14,
+  },
+  linkedNumberLabel: {
+    color: colors.muted,
+    fontSize: 11,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
+  linkedNumberValue: {
+    color: colors.text,
+    fontSize: 15,
+    fontWeight: '900',
   },
   metaGrid: {
     flexDirection: 'row',

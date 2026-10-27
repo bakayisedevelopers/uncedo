@@ -19,6 +19,7 @@ function getPageFromPath() {
   if (typeof window === 'undefined') return 'home';
   if (window.location.pathname === '/sign-in') return 'login';
   if (window.location.pathname === '/sign-up') return 'signup';
+  if (window.location.pathname === '/sign-agreement') return 'agreement';
   return 'home';
 }
 
@@ -38,11 +39,13 @@ export function HelperWebEntryScreen() {
     setPage(getPageFromPath());
   };
 
-  if (page === 'login' || page === 'signup') {
+  if (page === 'login' || page === 'signup' || page === 'agreement') {
     return (
       <ProviderLoginScreen
-        initialMode={page}
-        onHome={() => navigate('/')}
+        initialMode={page === 'signup' ? 'signup' : 'login'}
+        disableSignupMode={page === 'agreement'}
+        emailOnly={page === 'agreement'}
+        onHome={page === 'agreement' ? undefined : () => navigate('/')}
         onRouteChange={navigate}
       />
     );

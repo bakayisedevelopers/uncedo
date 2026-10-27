@@ -97,6 +97,26 @@ const HIDE_BOTTOM_NAV_ROUTES = ['ActiveJob'];
 const BOTTOM_NAV_HEIGHT = 84;
 const DEFAULT_ROUTE = { key: 'Home', params: {} };
 
+function getWhatsAppAgreementRoute() {
+  if (Platform.OS !== 'web' || typeof window === 'undefined' || window.location.pathname !== '/sign-agreement') {
+    return null;
+  }
+
+  const params = new URLSearchParams(String(window.location.hash || '').replace(/^#/, ''));
+  const token = String(params.get('wa_agreement_token') || '').trim();
+  return {
+    key: 'Agreement',
+    params: {
+      whatsappAgreementFlow: true,
+      whatsappAgreementToken: /^[A-Za-z0-9_-]{40,60}$/.test(token) ? token : '',
+    },
+  };
+}
+
+function getInitialRoute() {
+  return getWhatsAppAgreementRoute() || DEFAULT_ROUTE;
+}
+
 function normalizeRoute(target) {
   if (typeof target === 'string') {
     return { key: target, params: {} };
@@ -166,13 +186,13 @@ export function RootNavigator() {
     [androidTopInset, bottomSystemInset],
   );
 
-  const [activeRoute, setActiveRoute] = useState(DEFAULT_ROUTE);
+  const [activeRoute, setActiveRoute] = useState(getInitialRoute);
   const [routeHistory, setRouteHistory] = useState([]);
   const [bottomNavVisible, setBottomNavVisible] = useState(true);
   const [bottomNavHeight, setBottomNavHeight] = useState(BOTTOM_NAV_HEIGHT + bottomSystemInset);
   const [lastActiveJobId, setLastActiveJobId] = useState(null);
   const [notifications, setNotifications] = useState([]);
-  const activeRouteRef = useRef(DEFAULT_ROUTE);
+  const activeRouteRef = useRef(activeRoute);
   const routeHistoryRef = useRef([]);
 
   useEffect(() => {
@@ -274,10 +294,11 @@ export function RootNavigator() {
       return;
     }
 
+    const unauthenticatedRoute = getWhatsAppAgreementRoute() || DEFAULT_ROUTE;
     routeHistoryRef.current = [];
-    activeRouteRef.current = DEFAULT_ROUTE;
+    activeRouteRef.current = unauthenticatedRoute;
     setRouteHistory([]);
-    setActiveRoute(DEFAULT_ROUTE);
+    setActiveRoute(unauthenticatedRoute);
     setBottomNavVisible(true);
     setBottomNavHeight(BOTTOM_NAV_HEIGHT + bottomSystemInset);
     setLastActiveJobId(null);

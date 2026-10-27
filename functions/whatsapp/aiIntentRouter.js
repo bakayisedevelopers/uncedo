@@ -1,5 +1,8 @@
 'use strict';
 
+const { attachProviderFailures, createProviderHttpError } = require('./aiProviderDiagnostics');
+const { createVertexGeminiClient, generateVertexGeminiContent, geminiResponseText } = require('./vertexGemini');
+
 const ALLOWED_INTENTS = new Set([
   'greeting',
   'service_discovery',
@@ -29,17 +32,23 @@ const ALLOWED_TOOL_NAMES = new Set([
   'listMyAvailableOffers', 'getMyEarningsSummary',
 ]);
 
-const INTENT_SCHEMA = {
+const GEMINI_INTENT_SCHEMA = {
   type: 'OBJECT',
   properties: {
-    intent: { type: 'STRING', enum: [...ALLOWED_INTENTS] },
+    // Keep Gemini's constrained schema deliberately small. The backend still
+    // validates both values against its allowlists after parsing. Large enum
+    // combinations can exceed Gemini's structured-output constraint budget.
+    intent: { type: 'STRING' },
     serviceId: { type: 'STRING' },
     confidence: { type: 'NUMBER' },
-    extractedAnswers: { type: 'OBJECT' },
-    toolName: { type: 'STRING', enum: [...ALLOWED_TOOL_NAMES] },
+    // Gemini's structured-output schema does not describe arbitrary object
+    // keys here. Encode the bounded answer map as JSON text and parse it in the
+    // trusted backend before normalizing question IDs and answer values.
+    extractedAnswersJson: { type: 'STRING' },
+    toolName: { type: 'STRING' },
     toolArgumentsJson: { type: 'STRING' },
   },
-  required: ['intent', 'serviceId', 'confidence', 'extractedAnswers'],
+  required: ['intent', 'serviceId', 'confidence', 'extractedAnswersJson', 'toolName', 'toolArgumentsJson'],
 };
 
 const OPENAI_INTENT_SCHEMA = {
@@ -117,11 +126,15 @@ function normalizeModelResult(value, knownServiceIds = []) {
   const proposedServiceId = boundedString(value.serviceId, 160).toLowerCase();
   const knownIds = new Set(knownServiceIds.map((id) => boundedString(id, 160).toLowerCase()).filter(Boolean));
   const confidence = Number(value.confidence);
-  const answerSource = Array.isArray(value.extractedAnswers)
+  let answerSource = Array.isArray(value.extractedAnswers)
     ? Object.fromEntries(value.extractedAnswers
       .filter((item) => item && typeof item === 'object' && !Array.isArray(item))
       .map((item) => [item.questionId, item.answer]))
     : value.extractedAnswers;
+  if (typeof value.extractedAnswersJson === 'string') {
+    if (value.extractedAnswersJson.length > 4000) throw new Error('AI returned oversized extracted answers.');
+    answerSource = value.extractedAnswersJson.trim() ? parseJsonObject(value.extractedAnswersJson) : {};
+  }
   const normalized = {
     intent,
     serviceId: knownIds.has(proposedServiceId) ? proposedServiceId : '',
@@ -223,6 +236,13 @@ function buildPrompt({ message, recentHistory = [], conversationState = {}, conv
           : [],
         answers: normalizeExtractedAnswers(conversationState.answers),
       },
+      allowedIntents: [...ALLOWED_INTENTS],
+      allowedToolNames: [...new Set([
+        '',
+        ...(Array.isArray(availableTools) ? availableTools : [])
+          .map((tool) => boundedString(tool?.name, 80))
+          .filter(Boolean),
+      ])],
       activeServices: safeServices,
       questionnaire: safeQuestions,
       approvedTools: (Array.isArray(availableTools) ? availableTools : []).slice(0, 20).map((tool) => ({
@@ -232,48 +252,38 @@ function buildPrompt({ message, recentHistory = [], conversationState = {}, conv
   ].join('\n');
 }
 
-function createGeminiIntentRouter({ apiKey, model = 'gemini-3.5-flash-lite', fetchImpl = fetch } = {}) {
-  const key = String(apiKey || '').trim();
+function createGeminiIntentRouter({
+  projectId,
+  location = 'global',
+  model = 'gemini-3.5-flash-lite',
+  timeoutMs = 15_000,
+  clientFactory = createVertexGeminiClient,
+  client,
+} = {}) {
   const modelId = String(model || '').trim();
-  if (!key || !/^[a-zA-Z0-9._-]{1,100}$/.test(modelId)) {
+  if (!/^[a-zA-Z0-9._-]{1,100}$/.test(modelId)) {
     throw new Error('Gemini AI configuration is incomplete.');
   }
+  const geminiClient = client || clientFactory({ projectId, location, timeoutMs });
 
   return {
     async classify(input = {}) {
       const image = imageInputPart(input.message || {});
-      const response = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': key,
+      const response = await generateVertexGeminiContent({
+        client: geminiClient,
+        model: modelId,
+        contents: [{ role: 'user', parts: [
+          { text: buildPrompt(input) },
+          ...(image ? [{ inlineData: { mimeType: image.mimeType, data: image.base64 } }] : []),
+        ] }],
+        config: {
+          temperature: 0,
+          maxOutputTokens: 800,
+          responseMimeType: 'application/json',
+          responseSchema: GEMINI_INTENT_SCHEMA,
         },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [
-            { text: buildPrompt(input) },
-            ...(image ? [{ inlineData: { mimeType: image.mimeType, data: image.base64 } }] : []),
-          ] }],
-          generationConfig: {
-            temperature: 0,
-            maxOutputTokens: 800,
-            responseMimeType: 'application/json',
-            responseSchema: INTENT_SCHEMA,
-          },
-        }),
-        signal: AbortSignal.timeout(15_000),
       });
-      const payload = await response.json().catch(() => null);
-      if (!response.ok) {
-        const error = new Error('AI intent request failed.');
-        error.code = `gemini_http_${response.status}`;
-        throw error;
-      }
-      const text = (Array.isArray(payload?.candidates?.[0]?.content?.parts)
-        ? payload.candidates[0].content.parts
-        : [])
-        .map((part) => String(part?.text || ''))
-        .join('');
-      const parsed = parseJsonObject(text);
+      const parsed = parseJsonObject(geminiResponseText(response));
       return normalizeModelResult(parsed, (input.services || []).map((service) => service.id));
     },
   };
@@ -315,9 +325,7 @@ function createOpenAIIntentRouter({ apiKey, model = 'gpt-6-luna', fetchImpl = fe
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        const error = new Error('OpenAI intent request failed.');
-        error.code = `openai_http_${response.status}`;
-        throw error;
+        throw createProviderHttpError({ provider: 'openai', response, payload, model: modelId });
       }
       const text = String(payload?.output_text || '').trim()
         || (Array.isArray(payload?.output) ? payload.output : [])
@@ -334,16 +342,17 @@ function createOpenAIIntentRouter({ apiKey, model = 'gpt-6-luna', fetchImpl = fe
 function createWhatsAppIntentRouter({
   openAiApiKey,
   openAiModel = 'gpt-6-luna',
-  geminiApiKey,
+  geminiProjectId,
+  geminiLocation = 'global',
   geminiModel = 'gemini-3.5-flash-lite',
   openAiFetchImpl = fetch,
-  geminiFetchImpl = fetch,
+  geminiClientFactory = createVertexGeminiClient,
 } = {}) {
   const openAi = String(openAiApiKey || '').trim()
     ? createOpenAIIntentRouter({ apiKey: openAiApiKey, model: openAiModel, fetchImpl: openAiFetchImpl })
     : null;
-  const gemini = String(geminiApiKey || '').trim()
-    ? createGeminiIntentRouter({ apiKey: geminiApiKey, model: geminiModel, fetchImpl: geminiFetchImpl })
+  const gemini = String(geminiProjectId || '').trim()
+    ? createGeminiIntentRouter({ projectId: geminiProjectId, location: geminiLocation, model: geminiModel, clientFactory: geminiClientFactory })
     : null;
   if (!openAi) throw new Error('The primary OpenAI provider must be configured.');
 
@@ -362,7 +371,7 @@ function createWhatsAppIntentRouter({
         } catch (fallbackError) {
           const error = new Error('Both configured AI providers failed.');
           error.code = `ai_providers_failed:${String(primaryError?.code || 'openai_failed')}:${String(fallbackError?.code || 'gemini_failed')}`;
-          throw error;
+          throw attachProviderFailures(error, [primaryError, fallbackError]);
         }
       }
     },

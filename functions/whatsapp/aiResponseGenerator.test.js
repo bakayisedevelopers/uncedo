@@ -30,18 +30,28 @@ test('OpenAI response generator uses strict JSON output and caps response text',
   assert.equal(result.provider, 'openai');
 });
 
-test('response generator uses configured Gemini fallback and no fallback is required at initialization', async () => {
+test('response generator uses the Vertex-backed Gemini fallback after OpenAI fails', async () => {
   let fallbackCalls = 0;
+  let clientConfig;
+  let modelRequest;
   const generator = createWhatsAppResponseGenerator({
-    openAiApiKey: 'primary', geminiApiKey: 'fallback',
+    openAiApiKey: 'primary', geminiProjectId: 'test-project-123', geminiLocation: 'global',
     openAiFetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }),
-    geminiFetchImpl: async () => {
-      fallbackCalls += 1;
-      return { ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify({ response: 'Your available amount is R1.00.' }) }] } }] }) };
+    geminiClientFactory: (config) => {
+      clientConfig = config;
+      return { models: { generateContent: async (parameters) => {
+        fallbackCalls += 1;
+        modelRequest = parameters;
+        return { text: JSON.stringify({ response: 'Your available amount is R1.00.' }) };
+      } } };
     },
   });
   const result = await generator.generate({ toolName: 'getMyWalletSummary', toolResult: { availableMinor: 100 } });
   assert.equal(fallbackCalls, 1);
+  assert.deepEqual(clientConfig, { projectId: 'test-project-123', location: 'global', timeoutMs: 4000 });
+  assert.equal(modelRequest.model, 'gemini-3.5-flash-lite');
+  assert.equal(modelRequest.config.maxOutputTokens, 300);
+  assert.equal(modelRequest.config.responseMimeType, 'application/json');
   assert.equal(result.provider, 'gemini');
 
   const openAiOnly = createWhatsAppResponseGenerator({ openAiApiKey: 'primary', openAiFetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });

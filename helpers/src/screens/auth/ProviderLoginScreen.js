@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Linking, Platform, StyleSheet, Text, View } from 'react-native';
 import { AuthField, AuthMessage, AuthScaffold } from '../../components/auth/AuthScaffold';
 import { useAuth } from '../../context/AuthContext';
 import { colors } from '../../theme/colors';
+import { completeWhatsAppSignupLink } from '../../services/authService';
 
 const LEGAL_URLS = {
   terms: 'https://uncedo.com/terms',
@@ -20,9 +21,10 @@ const webSocialButtons = [
   { label: 'WhatsApp', icon: 'logo-whatsapp' },
 ];
 
-export function ProviderLoginScreen({ initialMode = 'login', onRouteChange, onHome }) {
+export function ProviderLoginScreen({ initialMode = 'login', onRouteChange, onHome, disableSignupMode = false, emailOnly = false }) {
   const {
     authError,
+    user,
     login,
     loginWithGoogle,
     signup,
@@ -40,7 +42,57 @@ export function ProviderLoginScreen({ initialMode = 'login', onRouteChange, onHo
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
   const [notice, setNotice] = useState('');
+  const [signupLink, setSignupLink] = useState(null);
+  const [signupLinkLoaded, setSignupLinkLoaded] = useState(Platform.OS !== 'web');
+  const [linking, setLinking] = useState(false);
+  const linkPromiseRef = useRef(null);
+  const autoLinkAttemptedTokenRef = useRef('');
   const openLegalUrl = (url) => Linking.openURL(url).catch(() => null);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const params = new URLSearchParams(String(window.location.hash || '').replace(/^#/, ''));
+    const token = String(params.get('wa_signup_token') || '').trim();
+    const role = String(params.get('wa_role') || '').trim().toLowerCase();
+    const phone = String(params.get('wa_phone') || '').trim();
+    if (token) {
+      window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}`);
+      if (/^[A-Za-z0-9_-]{40,60}$/.test(token)) setSignupLink({ token, role: ['customer', 'helper'].includes(role) ? role : '', phone });
+    }
+    setSignupLinkLoaded(true);
+  }, []);
+
+  async function finishWhatsAppLink() {
+    if (!signupLink?.token) return null;
+    if (linkPromiseRef.current) return linkPromiseRef.current;
+    setLinking(true);
+    const promise = completeWhatsAppSignupLink(signupLink.token);
+    linkPromiseRef.current = promise;
+    try {
+      const result = await promise;
+      setSignupLink(null);
+      setNotice('Your Uncedo helper account is linked to this WhatsApp number. Returning to your chat…');
+      const returnUrl = String(result.returnUrl || '');
+      if (/^https:\/\/wa\.me\/\d{8,15}$/.test(returnUrl)) {
+        if (Platform.OS === 'web') window.location.assign(returnUrl);
+        else await Linking.openURL(returnUrl).catch(() => null);
+      }
+      return result;
+    } catch (error) {
+      setFormError(`You are signed in, but WhatsApp was not linked. ${error?.message || 'Please retry or contact Uncedo support.'}`);
+      throw error;
+    } finally {
+      linkPromiseRef.current = null;
+      setLinking(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!signupLinkLoaded || !user?.uid || !signupLink?.token || linking) return;
+    if (autoLinkAttemptedTokenRef.current === signupLink.token) return;
+    autoLinkAttemptedTokenRef.current = signupLink.token;
+    finishWhatsAppLink().catch(() => null);
+  }, [signupLinkLoaded, user?.uid, signupLink?.token, linking]);
 
   useEffect(() => {
     setMode(initialMode);
@@ -79,6 +131,7 @@ export function ProviderLoginScreen({ initialMode = 'login', onRouteChange, onHo
       } else {
         await login({ email: trimmedEmail, password: trimmedPassword });
       }
+      if (method === 'email' && signupLink?.token) await finishWhatsAppLink();
     } catch (error) {
       setFormError(error.message || 'Unable to continue.');
     } finally {
@@ -122,17 +175,21 @@ export function ProviderLoginScreen({ initialMode = 'login', onRouteChange, onHo
     <AuthScaffold
       brandName="Uncedo Helpers"
       footerLinks={[
-        {
+        ...(!disableSignupMode ? [{
           label: isSignup ? 'Sign in' : 'Sign up',
           onPress: () => {
             const nextMode = isSignup ? 'login' : 'signup';
             setFormError('');
             setNotice('');
             setMode(nextMode);
-            onRouteChange?.(nextMode === 'signup' ? '/sign-up' : '/sign-in');
+            const route = nextMode === 'signup' ? '/sign-up' : '/sign-in';
+            const fragment = Platform.OS === 'web' && signupLink?.token
+              ? `#${new URLSearchParams({ wa_signup_token: signupLink.token, wa_role: signupLink.role || 'helper', wa_phone: signupLink.phone || '' }).toString()}`
+              : '';
+            onRouteChange?.(`${route}${fragment}`);
           },
-        },
-        {
+        }] : []),
+        ...(!emailOnly ? [{
           label: isSignup ? 'Helper terms' : 'Forgot password?',
           onPress: () => {
             if (isSignup) {
@@ -141,7 +198,7 @@ export function ProviderLoginScreen({ initialMode = 'login', onRouteChange, onHo
             }
             setNotice('Password recovery is coming soon for Helpers.');
           },
-        },
+        }] : []),
       ]}
       legalContent={(
         <Text style={[styles.legalText, Platform.OS === 'web' && styles.webLegalText, isSignup && styles.legalTextSignup]}>
@@ -157,23 +214,38 @@ export function ProviderLoginScreen({ initialMode = 'login', onRouteChange, onHo
       onPrimaryPress={submit}
       primaryDisabled={submitting || (method === 'email' && (!email.trim() || !password.trim() || (isSignup && !name.trim()))) || (method === 'whatsapp' && (!phoneNumber.trim() || (isSignup && (!name.trim() || !email.trim())) || (Boolean(challengeId) && !verificationCode.trim())))}
       primaryLabel={submitting ? 'Please wait...' : method === 'whatsapp' ? challengeId ? 'Verify WhatsApp code' : 'Send WhatsApp code' : isSignup ? 'Sign up' : 'Sign in'}
-      socialButtons={socialButtons.map((button) => ({
+      socialButtons={emailOnly ? [] : socialButtons.map((button) => ({
         ...button,
         disabled: (button.label === 'Google' && !googleEnabled) || (button.label === 'WhatsApp' && !whatsappEnabled),
         onPress: () => handleSocialPress(button.label),
       }))}
-      subtitle={isSignup
+      subtitle={emailOnly
+        ? 'Sign in with the helper email account linked to the WhatsApp number that received this agreement link.'
+        : isSignup
         ? 'Welcome to Helpers. Create your account, complete your profile, and finish verification before accepting work.'
         : 'Welcome back to Helpers. Sign in to manage availability, offers, and active work.'}
-      title={isSignup ? 'Create\nAccount' : 'Welcome\nBack'}
+      title={emailOnly ? 'Sign in to review\nyour agreement' : isSignup ? 'Create\nAccount' : 'Welcome\nBack'}
     >
       <View style={styles.formBlock}>
         <AuthMessage inverted={isSignup} text={formError || authError || ''} />
         <AuthMessage inverted={isSignup} text={notice} tone="info" />
+        {signupLink?.token ? (
+          <View style={styles.signupLinkNotice}>
+            <Text style={styles.signupLinkTitle}>Connect your WhatsApp chat</Text>
+            <Text style={styles.signupLinkText}>{signupLink.role === 'helper' ? 'Helper' : 'Customer'} account · WhatsApp number {signupLink.phone || 'will be verified by the secure link'}.</Text>
+            <Text style={styles.signupLinkText}>Your email remains your sign-in method. The number is linked only after you sign in or create the matching account.</Text>
+          </View>
+        ) : null}
+        {formError && signupLink?.token && user?.uid ? (
+          <Text accessibilityRole="button" onPress={() => finishWhatsAppLink().catch(() => null)} style={styles.switchMethod}>
+            {linking ? 'Linking WhatsApp…' : 'Retry WhatsApp link'}
+          </Text>
+        ) : null}
         {Platform.OS === 'web' && !googleEnabled ? <Text style={[styles.whatsappNotice, styles.webNotice]}>Google sign-in is awaiting Firebase OAuth provider setup.</Text> : null}
         {isSignup ? (
           <AuthField autoCapitalize="words" inverted label="Name" onChangeText={setName} placeholder="Your full name" value={name} />
         ) : null}
+        {signupLink?.phone ? <AuthField autoCapitalize="none" inverted={isSignup} label="WhatsApp number to link" onChangeText={() => {}} placeholder="" value={signupLink.phone} editable={false} /> : null}
         {method === 'email' ? (
           <>
             <AuthField autoCapitalize="none" inverted={isSignup} keyboardType="email-address" label="Email" onChangeText={setEmail} placeholder="name@example.com" value={email} />
@@ -205,4 +277,7 @@ const styles = StyleSheet.create({
   webLegalLink: { color: '#c8f169' },
   webNotice: { color: '#ffb178' },
   webSwitchMethod: { color: '#c8f169' },
+  signupLinkNotice: { backgroundColor: '#e8f6ec', borderColor: '#a6d8b3', borderRadius: 14, borderWidth: 1, gap: 5, padding: 14 },
+  signupLinkTitle: { color: '#164d2b', fontSize: 14, fontWeight: '800' },
+  signupLinkText: { color: '#164d2b', fontSize: 12, lineHeight: 17 },
 });

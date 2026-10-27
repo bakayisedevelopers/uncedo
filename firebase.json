@@ -94,6 +94,23 @@
               "value": "no-cache, max-age=0, must-revalidate"
             }
           ]
+        },
+        {
+          "source": "/sign-agreement",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "no-store, max-age=0"
+            },
+            {
+              "key": "Referrer-Policy",
+              "value": "no-referrer"
+            },
+            {
+              "key": "X-Content-Type-Options",
+              "value": "nosniff"
+            }
+          ]
         }
       ],
       "rewrites": [
@@ -103,6 +120,10 @@
         },
         {
           "source": "/sign-up",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/sign-agreement",
           "destination": "/app.html"
         },
         {

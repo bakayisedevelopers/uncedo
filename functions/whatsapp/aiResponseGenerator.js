@@ -1,5 +1,8 @@
 'use strict';
 
+const { attachProviderFailures, createProviderHttpError } = require('./aiProviderDiagnostics');
+const { createVertexGeminiClient, generateVertexGeminiContent, geminiResponseText } = require('./vertexGemini');
+
 const MAX_QUESTION_CHARS = 700;
 const MAX_RESULT_CHARS = 2400;
 const MAX_RESPONSE_CHARS = 900;
@@ -180,33 +183,42 @@ async function requestOpenAI({ apiKey, model, prompt, fetchImpl }) {
     signal: AbortSignal.timeout(MAX_PROVIDER_TIMEOUT_MS),
   });
   const payload = await response.json().catch(() => null);
-  if (!response.ok) throw Object.assign(new Error('Primary response generation failed.'), { code: `openai_http_${response.status}` });
+  if (!response.ok) throw createProviderHttpError({ provider: 'openai', response, payload, model });
   return parseResponse(openAiText(payload));
 }
 
-async function requestGemini({ apiKey, model, prompt, fetchImpl }) {
-  const response = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 300, responseMimeType: 'application/json', responseSchema: { type: 'OBJECT', properties: { response: { type: 'STRING' } }, required: ['response'] } },
-    }),
-    signal: AbortSignal.timeout(MAX_PROVIDER_TIMEOUT_MS),
+async function requestGemini({ client, model, prompt }) {
+  const response = await generateVertexGeminiContent({
+    client,
+    model,
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    config: {
+      temperature: 0.2,
+      maxOutputTokens: 300,
+      responseMimeType: 'application/json',
+      responseSchema: { type: 'OBJECT', properties: { response: { type: 'STRING' } }, required: ['response'] },
+    },
   });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) throw Object.assign(new Error('Fallback response generation failed.'), { code: `gemini_http_${response.status}` });
-  const text = (Array.isArray(payload?.candidates?.[0]?.content?.parts) ? payload.candidates[0].content.parts : []).map((part) => String(part?.text || '')).join('');
-  return parseResponse(text);
+  return parseResponse(geminiResponseText(response));
 }
 
-function createWhatsAppResponseGenerator({ openAiApiKey, openAiModel = 'gpt-6-luna', geminiApiKey = '', geminiModel = 'gemini-3.5-flash-lite', openAiFetchImpl = fetch, geminiFetchImpl = fetch } = {}) {
+function createWhatsAppResponseGenerator({
+  openAiApiKey,
+  openAiModel = 'gpt-6-luna',
+  geminiProjectId = '',
+  geminiLocation = 'global',
+  geminiModel = 'gemini-3.5-flash-lite',
+  openAiFetchImpl = fetch,
+  geminiClientFactory = createVertexGeminiClient,
+} = {}) {
   const primaryKey = String(openAiApiKey || '').trim();
   const primaryModel = String(openAiModel || '').trim();
-  const fallbackKey = String(geminiApiKey || '').trim();
   const fallbackModel = String(geminiModel || '').trim();
   if (!primaryKey || !/^[A-Za-z0-9._-]{1,100}$/.test(primaryModel)) throw new Error('Primary response model configuration is incomplete.');
-  if (fallbackKey && !/^[A-Za-z0-9._-]{1,100}$/.test(fallbackModel)) throw new Error('Fallback response model configuration is invalid.');
+  if (geminiProjectId && !/^[A-Za-z0-9._-]{1,100}$/.test(fallbackModel)) throw new Error('Fallback response model configuration is invalid.');
+  const geminiClient = String(geminiProjectId || '').trim()
+    ? geminiClientFactory({ projectId: geminiProjectId, location: geminiLocation, timeoutMs: MAX_PROVIDER_TIMEOUT_MS })
+    : null;
   return {
     async generate(input = {}) {
       if (!supportsNaturalResponse(input.toolName)) throw new Error('Natural response is not enabled for this tool.');
@@ -217,13 +229,14 @@ function createWhatsAppResponseGenerator({ openAiApiKey, openAiModel = 'gpt-6-lu
         assertNoUnsupportedMoney(response, projectedResult);
         return { response, provider: 'openai', model: primaryModel };
       } catch (primaryError) {
-        if (!fallbackKey) throw Object.assign(new Error('Primary response generation failed and no fallback is configured.'), { code: `openai_failed_no_fallback:${String(primaryError?.code || 'failed')}` });
+        if (!geminiClient) throw Object.assign(new Error('Primary response generation failed and no fallback is configured.'), { code: `openai_failed_no_fallback:${String(primaryError?.code || 'failed')}` });
         try {
-          const response = await requestGemini({ apiKey: fallbackKey, model: fallbackModel, prompt, fetchImpl: geminiFetchImpl });
+          const response = await requestGemini({ client: geminiClient, model: fallbackModel, prompt });
           assertNoUnsupportedMoney(response, projectedResult);
           return { response, provider: 'gemini', model: fallbackModel };
         } catch (fallbackError) {
-          throw Object.assign(new Error('Both response generators failed.'), { code: `response_providers_failed:${String(primaryError?.code || 'primary_failed')}:${String(fallbackError?.code || 'fallback_failed')}` });
+          const error = Object.assign(new Error('Both response generators failed.'), { code: `response_providers_failed:${String(primaryError?.code || 'primary_failed')}:${String(fallbackError?.code || 'fallback_failed')}` });
+          throw attachProviderFailures(error, [primaryError, fallbackError]);
         }
       }
     },

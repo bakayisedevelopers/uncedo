@@ -1,12 +1,14 @@
-import { useState } from 'react';
-import { Link, Navigate, useNavigate } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { AuthMessage } from '../components/AuthMessage';
 import MainLayout from '../layouts/MainLayout';
 import { useAuth } from '../context/AuthContext';
 import { googleAuthEnabled, whatsappAuthEnabled } from '../firebase/config';
+import { completeWhatsAppSignupLink } from '../services/authService';
 
 export default function AuthPage({ mode = 'login' }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const {
     authError,
     clearAuthError,
@@ -29,8 +31,57 @@ export default function AuthPage({ mode = 'login' }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [signupLink, setSignupLink] = useState(null);
+  const [signupLinkLoaded, setSignupLinkLoaded] = useState(false);
+  const [linking, setLinking] = useState(false);
+  const linkPromiseRef = useRef(null);
+  const autoLinkAttemptedTokenRef = useRef('');
 
-  if (!initializing && user) return <Navigate to="/account" replace />;
+  useEffect(() => {
+    const params = new URLSearchParams(String(window.location.hash || '').replace(/^#/, ''));
+    const token = String(params.get('wa_signup_token') || '').trim();
+    const role = String(params.get('wa_role') || '').trim().toLowerCase();
+    const phone = String(params.get('wa_phone') || '').trim();
+    const fromNavigation = location.state?.whatsappSignupLink || null;
+    const link = /^[A-Za-z0-9_-]{40,60}$/.test(token)
+      ? { token, role: ['customer', 'helper'].includes(role) ? role : '', phone }
+      : fromNavigation;
+    if (token) window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}`);
+    setSignupLink(link);
+    setSignupLinkLoaded(true);
+  }, [location.key, location.state]);
+
+  async function finishWhatsAppLink() {
+    if (!signupLink?.token) return null;
+    if (linkPromiseRef.current) return linkPromiseRef.current;
+    setLinking(true);
+    const promise = completeWhatsAppSignupLink({ token: signupLink.token });
+    linkPromiseRef.current = promise;
+    try {
+      const result = await promise;
+      setSignupLink(null);
+      setMessage('Your Uncedo account is linked to this WhatsApp number. Returning to your chat…');
+      const returnUrl = String(result.returnUrl || '');
+      if (/^https:\/\/wa\.me\/\d{8,15}$/.test(returnUrl)) window.location.assign(returnUrl);
+      else navigate('/account', { replace: true });
+      return result;
+    } catch (nextError) {
+      setError(`You are signed in, but this WhatsApp number was not linked. ${nextError?.message || 'Please retry or contact Uncedo support.'}`);
+      throw nextError;
+    } finally {
+      linkPromiseRef.current = null;
+      setLinking(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!signupLinkLoaded || !user || !signupLink?.token || linking) return;
+    if (autoLinkAttemptedTokenRef.current === signupLink.token) return;
+    autoLinkAttemptedTokenRef.current = signupLink.token;
+    finishWhatsAppLink().catch(() => null);
+  }, [signupLinkLoaded, user?.uid, signupLink?.token, linking]);
+
+  if (!initializing && user && signupLinkLoaded && !signupLink?.token) return <Navigate to="/account" replace />;
 
   async function run(action) {
     setBusy(true);
@@ -39,7 +90,11 @@ export default function AuthPage({ mode = 'login' }) {
     clearAuthError();
     try {
       await action();
-      navigate('/account', { replace: true });
+      if (signupLink?.token) {
+        await finishWhatsAppLink();
+      } else {
+        navigate('/account', { replace: true });
+      }
     } catch (nextError) {
       setError(nextError?.message || 'Unable to continue. Please try again.');
     } finally {
@@ -91,7 +146,7 @@ export default function AuthPage({ mode = 'login' }) {
           <p className="text-xs font-bold uppercase tracking-[0.25em] text-brand">Customer account</p>
           <h1 className="mt-3 text-4xl font-black tracking-tight text-zinc-900">{title}</h1>
           <p className="mt-4 max-w-xl text-zinc-600">
-            Use your email, Google account, or WhatsApp number. We’ll keep your customer profile connected to the same Uncedo records used by the mobile app.
+            Sign in with your Uncedo account. If you opened a WhatsApp setup link, authenticate with your email account to connect that chat to your profile.
           </p>
           <ul className="mt-7 space-y-3 text-sm text-zinc-700">
             <li>• Your account and profile are saved under your Firebase identity.</li>
@@ -108,10 +163,23 @@ export default function AuthPage({ mode = 'login' }) {
 
           <AuthMessage text={error || authError} />
           <AuthMessage text={message} tone="info" />
+          {signupLink?.token ? (
+            <div className="mb-5 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950">
+              <p className="font-bold">Connect your WhatsApp chat</p>
+              <p className="mt-1">{signupLink.role === 'helper' ? 'Helper' : 'Customer'} account · WhatsApp number {signupLink.phone || 'will be verified by the secure link'}.</p>
+              <p className="mt-1">Your email remains your sign-in method. The number is attached only after you sign in or create the matching account.</p>
+            </div>
+          ) : null}
+          {error && signupLink?.token && user ? (
+            <button type="button" disabled={linking} onClick={() => finishWhatsAppLink().catch(() => null)} className="mb-5 w-full rounded-xl border border-zinc-300 px-4 py-2 text-sm font-bold text-zinc-800 disabled:opacity-60">
+              {linking ? 'Linking WhatsApp…' : 'Retry WhatsApp link'}
+            </button>
+          ) : null}
 
           {method === 'email' ? (
             <form onSubmit={submitEmail} className="space-y-4">
               {isSignup ? <Field label="Full name" value={name} onChange={setName} autoComplete="name" required /> : null}
+              {signupLink?.phone ? <Field label="WhatsApp number to link" value={signupLink.phone} onChange={() => {}} type="tel" autoComplete="tel" disabled /> : null}
               <Field label="Email address" value={email} onChange={setEmail} type="email" autoComplete="email" required />
               <Field label="Password" value={password} onChange={setPassword} type="password" autoComplete={isSignup ? 'new-password' : 'current-password'} required minLength={6} />
               <button disabled={busy} className="w-full rounded-2xl bg-brand px-5 py-3 font-bold text-white transition hover:bg-brand-dark disabled:opacity-60">
@@ -142,7 +210,11 @@ export default function AuthPage({ mode = 'login' }) {
           </p>
           <p className="mt-6 text-center text-sm text-zinc-600">
             {isSignup ? 'Already registered?' : 'New to Uncedo?'}{' '}
-            <Link className="font-bold text-brand underline" to={isSignup ? '/sign-in' : '/sign-up'}>{isSignup ? 'Sign in' : 'Create an account'}</Link>
+            <Link
+              className="font-bold text-brand underline"
+              to={isSignup ? '/sign-in' : '/sign-up'}
+              state={signupLink?.token ? { whatsappSignupLink: signupLink } : undefined}
+            >{isSignup ? 'Sign in' : 'Create an account'}</Link>
           </p>
         </section>
       </main>

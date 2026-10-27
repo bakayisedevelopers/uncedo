@@ -88,7 +88,7 @@ service cloud.firestore {
         'email', 'businessName', 'homeAddress', 'city', 'profilePhoto', 'profilePhotoObjectPath',
         'selfieUrl', 'selfieCapturedAt', 'selfieCaptureSource', 'onlineStatus',
         'locationSharingEnabled', 'liveLocation',
-        'customerProfile', 'studentProfile', 'subjects', 'agreement', 'payout',
+        'customerProfile', 'studentProfile', 'subjects', 'payout',
         'updatedAt'
       ])
         && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['email']) || safeSelfEmail(request.resource.data))

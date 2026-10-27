@@ -195,6 +195,34 @@ test('users allow safe profile updates but reject protected fields and privilege
   await assertFails(customerDb.doc('users/customer-1').update({ activeServiceRequestId: 'forged-request' }));
 });
 
+test('helper agreement acceptance and required-version fields can only be changed by trusted backend code', async () => {
+  await seedDocument('users/helper-1', {
+    uid: 'helper-1',
+    role: 'helper',
+    activeRole: 'helper',
+    roles: ['helper'],
+    fullName: 'Helper One',
+    agreement: {
+      documentId: 'helper_agreement',
+      requiredVersion: '1.0.1',
+      acceptedVersion: '',
+      currentVersionAccepted: false,
+      acceptedCurrentVersion: false,
+    },
+  });
+
+  const helperDb = authedDb('helper-1');
+  await assertSucceeds(helperDb.doc('users/helper-1').update({ fullName: 'Helper Updated' }));
+  await assertFails(helperDb.doc('users/helper-1').update({
+    agreement: {
+      requiredVersion: '1.0.1',
+      acceptedVersion: '1.0.1',
+      currentVersionAccepted: true,
+      acceptedCurrentVersion: true,
+    },
+  }));
+});
+
 test('user profiles are private by document and cannot be enumerated by ordinary users', async () => {
   await seedDocument('users/customer-1', { uid: 'customer-1', role: 'customer' });
   await seedDocument('users/customer-2', { uid: 'customer-2', role: 'customer' });
