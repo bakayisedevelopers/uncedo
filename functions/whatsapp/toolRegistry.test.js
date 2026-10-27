@@ -21,8 +21,30 @@ test('public catalogue tools expose only active approved services and no interna
   const registry = createWhatsAppToolRegistry({ getCatalogEntries: async () => services });
   const result = await registry.execute('listAvailableServices', {}, { kind: 'guest' });
   assert.deepEqual(result.services.map((service) => service.id), ['wash']);
-  assert.equal(result.services[0].pricing.basePrice, 100);
+  assert.equal(result.services[0].priceRange, null);
+  assert.equal('pricing' in result.services[0], false);
   assert.equal('createdBy' in result.services[0], false);
+  assert.equal('pricing' in TOOL_DEFINITIONS.listAvailableServices.outputSchema.properties.services.items.properties, false);
+  assert.equal('priceRange' in TOOL_DEFINITIONS.listAvailableServices.outputSchema.properties.services.items.properties, true);
+});
+
+test('explicit service price lookup returns only a configured min-max total range', async () => {
+  const pricedServices = [{
+    ...services[0],
+    pricing: { currency: 'ZAR', basePrice: 100, materialFee: 30, minimumTotal: 250, maximumTotal: 900 },
+  }];
+  const registry = createWhatsAppToolRegistry({ getCatalogEntries: async () => pricedServices });
+  const result = await registry.execute('getServicePricingInformation', { serviceId: 'wash' }, { kind: 'guest' });
+  assert.deepEqual(result.priceRange, { currency: 'ZAR', minimum: 250, maximum: 900 });
+  assert.equal('basePrice' in result, false);
+  assert.equal('materialFee' in result, false);
+
+  const noRangeRegistry = createWhatsAppToolRegistry({ getCatalogEntries: async () => services });
+  const noRange = await noRangeRegistry.execute('getServicePricingInformation', { serviceId: 'wash' }, { kind: 'guest' });
+  assert.equal(noRange.priceRange, null);
+
+  const listed = await registry.execute('listAvailableServices', {}, { kind: 'guest' });
+  assert.deepEqual(listed.services[0].priceRange, { currency: 'ZAR', minimum: 250, maximum: 900 });
 });
 
 test('tool input rejects unknown fields, unknown services and unsupported tools', async () => {

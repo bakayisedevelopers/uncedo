@@ -13,12 +13,13 @@ function hasCurrentWhatsAppPolicyAcceptance(conversation = {}) {
     && String(conversation.whatsappPolicyAcceptedVersion || '') === WHATSAPP_POLICY_ACCEPTANCE_VERSION;
 }
 
-function buildWhatsAppPolicyConsent() {
+function buildWhatsAppPolicyConsent(preferredName = '') {
+  const name = String(preferredName || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 50);
   const text = [
-    'Before continuing on WhatsApp, please review Uncedo’s policies:',
-    `Terms and Conditions: ${WHATSAPP_POLICY_URLS.terms}`,
-    `Privacy Policy: ${WHATSAPP_POLICY_URLS.privacy}`,
-    'Choose Agree to accept these policies and continue, or No thanks to stop here.',
+    `Hi ${name ? `*${name}*` : 'there'}, welcome to *Uncedo*! Before we get started, please take a moment to review our policies:`,
+    `*Terms and Conditions:* ${WHATSAPP_POLICY_URLS.terms}`,
+    `*Privacy Policy:* ${WHATSAPP_POLICY_URLS.privacy}`,
+    'Tap *Agree* to accept these policies and continue, or *No thanks* to stop here.',
   ].join('\n');
 
   return {

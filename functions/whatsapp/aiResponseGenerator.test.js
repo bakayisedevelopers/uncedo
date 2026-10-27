@@ -97,3 +97,39 @@ test('questionnaire and booking projections use the current tool result contract
     bookings: [{ status: 'accepted', statusLabel: 'Helper assigned', summary: 'House cleaning', helperName: 'Alex' }],
   });
 });
+
+test('service response projections hide prices unless the current question asks for them', () => {
+  const serviceResult = {
+    services: [{
+      label: 'Home Cleaning', description: 'Cleaning for your home.', categoryName: 'Home care',
+      priceRange: { currency: 'ZAR', minimum: 300, maximum: 900 },
+      basePrice: 250, materialFee: 45,
+    }],
+  };
+  const defaultProjection = compactToolResult('listAvailableServices', serviceResult);
+  assert.doesNotMatch(defaultProjection, /300|900|250|45|ZAR/);
+  const priceProjection = compactToolResult('listAvailableServices', serviceResult, { includePricing: true });
+  assert.match(priceProjection, /ZAR 300\.00/);
+  assert.match(priceProjection, /ZAR 900\.00/);
+  assert.doesNotMatch(priceProjection, /250|45|basePrice|materialFee/);
+
+  const servicePrompt = buildResponsePrompt({
+    question: 'What services do you offer?',
+    toolName: 'getServiceDetails',
+    toolResult: { label: 'Home Cleaning', priceRange: serviceResult.services[0].priceRange },
+  });
+  assert.match(servicePrompt, /never include prices/);
+  const promptPayload = JSON.parse(servicePrompt.slice(servicePrompt.lastIndexOf('\n') + 1));
+  assert.doesNotMatch(promptPayload.verifiedResult, /300|900/);
+
+  const pricePrompt = buildResponsePrompt({
+    question: 'What is the price range for home cleaning?',
+    toolName: 'getServiceDetails',
+    toolResult: { label: 'Home Cleaning', priceRange: serviceResult.services[0].priceRange },
+    includePricing: true,
+  });
+  assert.match(pricePrompt, /"priceQuestion":true/);
+  const pricePayload = JSON.parse(pricePrompt.slice(pricePrompt.lastIndexOf('\n') + 1));
+  assert.match(pricePayload.verifiedResult, /ZAR 300\.00/);
+  assert.match(pricePayload.verifiedResult, /ZAR 900\.00/);
+});

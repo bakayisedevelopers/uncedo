@@ -16,8 +16,14 @@ test('WhatsApp consent message links to the public terms and privacy pages witho
   assert.match(consent.text, new RegExp(WHATSAPP_POLICY_URLS.terms.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(consent.text, /Privacy Policy/);
   assert.match(consent.text, new RegExp(WHATSAPP_POLICY_URLS.privacy.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-  assert.match(consent.text, /Choose Agree to accept these policies/);
+  assert.match(consent.text, /welcome to \*Uncedo\*/);
+  assert.match(consent.text, /Tap \*Agree\* to accept these policies/);
   assert.doesNotMatch(consent.text, /AI|OpenAI|Gemini|model/i);
+});
+
+test('policy consent greets the person by their preferred name when available', () => {
+  const consent = buildWhatsAppPolicyConsent('Jabu');
+  assert.match(consent.text, /^Hi \*Jabu\*, welcome to \*Uncedo\*/);
 });
 
 test('policy consent retains the existing deterministic Agree and No thanks button actions', () => {

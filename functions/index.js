@@ -106,6 +106,13 @@ const {
   buildWhatsAppPolicyConsent,
   hasCurrentWhatsAppPolicyAcceptance,
 } = require('./whatsapp/policyConsent');
+const { formatWhatsAppText, getWhatsAppDisplayName } = require('./whatsapp/messageFormatting');
+const {
+  formatWhatsAppPriceGuidance,
+  formatWhatsAppServiceList,
+  getConfiguredServicePriceRange,
+  isPriceQuestion,
+} = require('./whatsapp/servicePresentation');
 const { attemptAiUnavailableReply } = require('./whatsapp/assistantFailure');
 const { appendBoundedConversationTurn } = require('./whatsapp/conversationMemory');
 const { getWhatsAppConversationHistory: queryWhatsAppConversationHistory } = require('./whatsapp/conversationHistory');
@@ -3120,18 +3127,18 @@ function renderWhatsAppQuestion(question) {
   return options.length ? `${prompt}\nOptions: ${options.join(', ')}` : prompt;
 }
 
-function renderWhatsAppCatalog(catalog) {
-  const rows = catalog.slice(0, 18).map((service) => {
-    const category = String(service.categoryName || service.categoryId || '').trim();
-    return `• ${service.label}${category ? ` (${category})` : ''}`;
-  });
-  const suffix = catalog.length > rows.length ? '\nSend the service name you want to ask about or book.' : '';
-  return `Available services:\n${rows.join('\n')}${suffix}\n\nTell me which service you need.`.slice(0, 3800);
+function renderWhatsAppCatalog(catalog, { includePricing = false } = {}) {
+  return formatWhatsAppServiceList(catalog, { includePricing });
 }
 
 async function persistWhatsAppAssistantReply({ sourceEventId, identityId, identity, conversationRef, text, interactive = null, requireCurrentInbound = true, purpose = 'assistant_reply' }) {
   const recipient = String(identity?.waId || '').trim();
   const phoneNumberId = String(identity?.phoneNumberId || '').trim();
+  const formattedText = formatWhatsAppText(text);
+  const formattedInteractive = interactive ? {
+    ...interactive,
+    ...(interactive.body ? { body: { ...interactive.body, text: formatWhatsAppText(interactive.body.text || '') } } : {}),
+  } : null;
   const stage = async (failureStage, operation) => {
     try {
       return await operation();
@@ -3157,8 +3164,8 @@ async function persistWhatsAppAssistantReply({ sourceEventId, identityId, identi
       phoneNumberId,
       to: recipient,
       direction: 'outbound',
-      type: interactive ? 'interactive' : 'text',
-      text: String(text || '').slice(0, 4096),
+      type: formattedInteractive ? 'interactive' : 'text',
+      text: formattedText,
       status: 'sending',
       createdAtMs: Date.now(),
       retentionExpiresAtMs: Date.now() + whatsappRetentionDays('WHATSAPP_MESSAGE_RETENTION_DAYS', 180) * 24 * 60 * 60 * 1000,
@@ -3178,9 +3185,9 @@ async function persistWhatsAppAssistantReply({ sourceEventId, identityId, identi
       throw error;
     }
     failureStage = 'meta_send_request';
-    const delivery = interactive
-      ? await client.sendInteractive({ to: recipient, interactive, lastInboundAtMs })
-      : await client.sendText({ to: recipient, text, lastInboundAtMs });
+    const delivery = formattedInteractive
+      ? await client.sendInteractive({ to: recipient, interactive: formattedInteractive, lastInboundAtMs })
+      : await client.sendText({ to: recipient, text: formattedText, lastInboundAtMs });
     failureStage = 'record_meta_acceptance';
     await outboundRef.set({
       status: 'sent',
@@ -3197,7 +3204,7 @@ async function persistWhatsAppAssistantReply({ sourceEventId, identityId, identi
       const memory = appendBoundedConversationTurn({
         recentHistory: conversation.recentHistory,
         conversationSummary: conversation.conversationSummary || {},
-        turn: { role: 'assistant', text: String(text || '').slice(0, 4096), timestampMs: Date.now() },
+        turn: { role: 'assistant', text: formattedText, timestampMs: Date.now() },
       });
       transaction.set(conversationRef, {
         recentHistory: memory.recentHistory,
@@ -4330,11 +4337,23 @@ async function resolveWhatsAppToolAuthorization(identityId, eventIdentity) {
 
   const linkedRole = String(identity.role || link.role || '').trim().toLowerCase();
   if (linkedRole === 'customer' && profileAllowsRole(profile, 'customer')) {
-    return { identity, authorization: { uid, role: 'customer', verified: true, linked: true } };
+    return {
+      identity: {
+        ...identity,
+        preferredName: identity.preferredName || profile.whatsappPreferredName || profile.firstName || profile.fullName || profile.displayName || '',
+      },
+      authorization: { uid, role: 'customer', verified: true, linked: true },
+    };
   }
   if (linkedRole === 'helper' && profileAllowsRole(profile, 'helper')
     && String(profile.verificationStatus || '').toLowerCase() === 'verified') {
-    return { identity, authorization: { uid, role: 'helper', verified: true, linked: true, helperVerified: true } };
+    return {
+      identity: {
+        ...identity,
+        preferredName: identity.preferredName || profile.whatsappPreferredName || profile.firstName || profile.fullName || profile.displayName || '',
+      },
+      authorization: { uid, role: 'helper', verified: true, linked: true, helperVerified: true },
+    };
   }
   return { identity, authorization: { uid, role: 'guest', verified: false, linked: false } };
 }
@@ -4529,16 +4548,22 @@ function buildWhatsAppAssistantToolRegistry({ identity, authorization, conversat
   });
 }
 
-function formatWhatsAppToolResult(toolName, result = {}) {
+function formatWhatsAppToolResult(toolName, result = {}, { includePricing = false } = {}) {
   if (toolName === 'listAvailableServices') {
-    const list = (result.services || []).map((item) => `• ${item.label}${item.description ? ` — ${item.description}` : ''}`).slice(0, 30);
-    return list.length ? `Available Uncedo services:\n${list.join('\n')}` : 'I could not find any currently published services.';
+    return formatWhatsAppServiceList(result.services || [], { includePricing });
   }
-  if (toolName === 'getServiceDetails') return `${result.label || 'Service'}${result.description ? `: ${result.description}` : '.'} I can read the current questionnaire or prepare a quote using the validated booking flow.`;
+  if (toolName === 'getServiceDetails') {
+    const details = `*${result.label || 'Service'}*${result.description ? `\n${result.description}` : ''}`;
+    return includePricing && result.priceRange
+      ? `${details}\n\n${formatWhatsAppPriceGuidance(result.label, result.priceRange)}`
+      : `${details}\n\nWould you like to know more or start a service enquiry?`;
+  }
   if (toolName === 'getServiceQuestionnaire') return (result.questions || []).length
     ? `This service asks:\n${result.questions.map((question) => `• ${question.prompt || question.id}${question.required ? ' (required)' : ''}`).join('\n')}`
     : 'There are no questionnaire fields currently published for that service.';
-  if (toolName === 'getServicePricingInformation') return `The current catalogue lists ${result.pricing?.currency || 'ZAR'} ${Number(result.pricing?.basePrice || 0).toFixed(2)} as the base price. ${result.note || 'A final quote requires validated answers.'}`;
+  if (toolName === 'getServicePricingInformation') return includePricing
+    ? formatWhatsAppPriceGuidance(result.serviceName, result.priceRange)
+    : `*${result.serviceName || 'This service'}* is available through Uncedo. Ask me for a price range if you’d like to know about pricing.`;
   if (toolName === 'getSupportKnowledge') return result.found
     ? result.articles.map((article) => `${article.title}\n${article.content}`).join('\n\n').slice(0, 3000)
     : 'I could not find an approved Uncedo support article with that information. I can refer this to a support person if you would like.';
@@ -4808,7 +4833,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       return;
     }
     if (!hasCurrentWhatsAppPolicyAcceptance(conversation)) {
-      const policyConsent = buildWhatsAppPolicyConsent();
+      const policyConsent = buildWhatsAppPolicyConsent(getWhatsAppDisplayName(identity));
       await reply(policyConsent.text, policyConsent.interactive);
       await jobRef.set({ status: 'completed', intent: 'policy_acceptance_required', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
@@ -5842,7 +5867,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     }
 
     if (!hasCurrentWhatsAppPolicyAcceptance(conversation)) {
-      const policyConsent = buildWhatsAppPolicyConsent();
+      const policyConsent = buildWhatsAppPolicyConsent(getWhatsAppDisplayName(identity));
       await reply(policyConsent.text, policyConsent.interactive);
       await jobRef.set({ status: 'completed', intent: 'ai_consent_required', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
@@ -5992,6 +6017,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       questions,
       availableTools,
     });
+    const explicitlyAsksPricing = intentResult.intent === 'price_enquiry' || isPriceQuestion(originalUserText);
     assistantPhase = 'workflow';
     await jobRef.set({ phase: assistantPhase, retrySafe: false, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
 
@@ -6081,7 +6107,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         await jobRef.set({ status: 'superseded', intent: intentResult.intent, toolName: selectedTool, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         return;
       }
-      const toolText = formatWhatsAppToolResult(selectedTool, toolResult);
+      const toolText = formatWhatsAppToolResult(selectedTool, toolResult, { includePricing: explicitlyAsksPricing });
       let responseText = toolText;
       if (whatsappNaturalResponsesEnabled() && toolRegistry.isReadOnly(selectedTool) && supportsNaturalResponse(selectedTool)
         && !(selectedTool === 'getSupportKnowledge' && toolResult.found !== true)) {
@@ -6097,6 +6123,8 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
             recentHistory: Array.isArray(conversation.recentHistory) ? conversation.recentHistory : [],
             toolName: selectedTool,
             toolResult,
+            customerName: getWhatsAppDisplayName(toolIdentity),
+            includePricing: explicitlyAsksPricing,
           }), 9000);
           responseText = generated.response;
           await jobRef.set({ responseProvider: generated.provider, responseModel: generated.model, responseGeneration: 'natural', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
@@ -6135,18 +6163,26 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     }
 
     if (intentResult.intent === 'greeting') {
-      await reply('Hi! I can help you explore Uncedo services or start a service enquiry. What do you need help with?');
+      const name = getWhatsAppDisplayName(toolIdentity);
+      await reply(name
+        ? `Hi *${name}*! Welcome back to *Uncedo*. I can help you explore services or start a service enquiry. What can I help with?`
+        : 'Hi there! Welcome to *Uncedo*. I can help you explore services or start a service enquiry. What can I help with?');
       await jobRef.set({ status: 'completed', intent: intentResult.intent, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
     }
     if (intentResult.intent === 'service_discovery') {
-      await reply(renderWhatsAppCatalog(catalog));
+      await reply(renderWhatsAppCatalog(catalog, { includePricing: explicitlyAsksPricing }));
       await jobRef.set({ status: 'completed', intent: intentResult.intent, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
     }
     if (intentResult.intent === 'service_information' && intentResult.serviceId) {
       const info = catalog.find((service) => service.id === intentResult.serviceId);
-      await reply(info ? `${info.label}${info.description ? `: ${info.description}` : '.'} Ask me for a price or say you would like to book it.` : renderWhatsAppCatalog(catalog));
+      const response = info
+        ? explicitlyAsksPricing
+          ? `${formatWhatsAppPriceGuidance(info.label, getConfiguredServicePriceRange(info))}\n\nWould you like to start a service enquiry?`
+          : `*${info.label}*${info.description ? `\n${info.description}` : ''}\n\nWould you like to know more or start a service enquiry?`
+        : renderWhatsAppCatalog(catalog, { includePricing: explicitlyAsksPricing });
+      await reply(response);
       await jobRef.set({ status: 'completed', intent: intentResult.intent, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
     }
@@ -6189,7 +6225,12 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     const serviceId = selectedService?.id || intentResult.serviceId;
     const service = catalog.find((item) => item.id === serviceId);
     if (!service || intentResult.confidence < 0.45) {
-      await reply(renderWhatsAppCatalog(catalog));
+      await reply(renderWhatsAppCatalog(catalog, { includePricing: explicitlyAsksPricing }));
+      await jobRef.set({ status: 'completed', intent: intentResult.intent, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (intentResult.intent === 'price_enquiry') {
+      await reply(`${formatWhatsAppPriceGuidance(service.label, getConfiguredServicePriceRange(service))}\n\nWould you like to start a service enquiry?`);
       await jobRef.set({ status: 'completed', intent: intentResult.intent, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
     }
@@ -6279,7 +6320,11 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         }, { merge: true });
       });
-      await reply(missingQuestion ? renderWhatsAppQuestion(missingQuestion) : 'Please provide the remaining required service details.');
+      const nextQuestion = missingQuestion ? renderWhatsAppQuestion(missingQuestion) : 'Please provide the remaining required service details.';
+      const priceContext = intentResult.intent === 'service_booking' && explicitlyAsksPricing
+        ? `${formatWhatsAppPriceGuidance(service.label, getConfiguredServicePriceRange(service))}\n\n`
+        : '';
+      await reply(`${priceContext}${nextQuestion}`);
       await jobRef.set({ status: 'completed', intent: intentResult.intent, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
     }

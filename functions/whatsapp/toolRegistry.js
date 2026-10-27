@@ -1,6 +1,7 @@
 'use strict';
 
 const { getQuestionnaireForSelection, normalizeAndValidateAnswers } = require('../serviceRequestPricing');
+const { getConfiguredServicePriceRange } = require('./servicePresentation');
 
 const MAX_CATALOG_RESULTS = 100;
 const MAX_ARTICLE_RESULTS = 5;
@@ -13,13 +14,11 @@ const stringSchema = Object.freeze({ type: 'string' });
 const numberSchema = Object.freeze({ type: 'number' });
 const booleanSchema = Object.freeze({ type: 'boolean' });
 const nullableNumberSchema = Object.freeze({ type: ['number', 'null'] });
-const PUBLIC_PRICING_SCHEMA = resultSchema({
-  pricingMode: stringSchema,
+const PUBLIC_PRICE_RANGE_SCHEMA = resultSchema({
   currency: stringSchema,
-  basePrice: nullableNumberSchema,
-  materialFee: numberSchema,
-  minimumTotal: nullableNumberSchema,
-});
+  minimum: nullableNumberSchema,
+  maximum: nullableNumberSchema,
+}, ['currency', 'minimum', 'maximum']);
 const PUBLIC_QUESTION_OPTION_SCHEMA = resultSchema({ value: stringSchema, label: stringSchema }, ['value', 'label']);
 const PUBLIC_QUESTION_SCHEMA = resultSchema({
   id: stringSchema,
@@ -43,7 +42,7 @@ const BOOKING_SUMMARY_SCHEMA = resultSchema({
 const PUBLIC_SERVICE_SCHEMA = resultSchema({
   id: stringSchema, categoryId: stringSchema, categoryName: stringSchema, label: stringSchema,
   description: stringSchema, type: stringSchema, includedServiceIds: { type: 'array', items: stringSchema },
-  pricing: { ...PUBLIC_PRICING_SCHEMA, type: ['object', 'null'] },
+  priceRange: { ...PUBLIC_PRICE_RANGE_SCHEMA, type: ['object', 'null'] },
 }, ['id', 'label']);
 
 const TOOL_DEFINITIONS = Object.freeze({
@@ -63,9 +62,15 @@ const TOOL_DEFINITIONS = Object.freeze({
     outputSchema: resultSchema({ serviceId: stringSchema, categoryId: stringSchema, questions: { type: 'array', items: PUBLIC_QUESTION_SCHEMA } }, ['serviceId', 'questions']),
   },
   getServicePricingInformation: {
-    description: 'Read public pricing inputs and requirements for a real active service. Do not calculate a final quote.', roles: ['guest', 'customer', 'helper'], auth: 'public',
+    description: 'For an explicit customer price question, return only a configured minimum-to-maximum total range. Do not provide base prices, fees, estimates, or calculate a quote.', roles: ['guest', 'customer', 'helper'], auth: 'public',
     fields: { serviceId: 'service-id' }, required: ['serviceId'], handler: 'getServicePricingInformation', canonicalBackend: 'liveServiceCatalogReader',
-    outputSchema: resultSchema({ serviceId: stringSchema, pricing: { ...PUBLIC_PRICING_SCHEMA, type: ['object', 'null'] }, requiredQuestionIds: { type: 'array', items: stringSchema }, note: stringSchema }, ['serviceId', 'requiredQuestionIds', 'note']),
+    outputSchema: resultSchema({
+      serviceId: stringSchema,
+      serviceName: stringSchema,
+      priceRange: { ...PUBLIC_PRICE_RANGE_SCHEMA, type: ['object', 'null'] },
+      requiredQuestionIds: { type: 'array', items: stringSchema },
+      note: stringSchema,
+    }, ['serviceId', 'serviceName', 'priceRange', 'requiredQuestionIds', 'note']),
   },
   getSupportKnowledge: {
     description: 'Search administrator-approved, published public support articles.', roles: ['guest', 'customer', 'helper'], auth: 'public',
@@ -236,13 +241,7 @@ function publicService(service = {}) {
     description: String(service.description || '').slice(0, 1500),
     type: String(service.type || 'service'),
     includedServiceIds: (Array.isArray(service.includedServiceIds) ? service.includedServiceIds : []).slice(0, 50).map(String),
-    pricing: service.pricing && typeof service.pricing === 'object' ? {
-      pricingMode: String(service.pricing.pricingMode || ''),
-      currency: String(service.pricing.currency || 'ZAR'),
-      basePrice: Number.isFinite(Number(service.pricing.basePrice)) ? Number(service.pricing.basePrice) : null,
-      materialFee: Number.isFinite(Number(service.pricing.materialFee)) ? Number(service.pricing.materialFee) : 0,
-      minimumTotal: Number.isFinite(Number(service.pricing.minimumTotal)) ? Number(service.pricing.minimumTotal) : null,
-    } : null,
+    priceRange: getConfiguredServicePriceRange(service),
   };
 }
 
@@ -293,11 +292,11 @@ function createWhatsAppToolRegistry({ getCatalogEntries = async () => [], getSup
     async getServicePricingInformation({ serviceId }) {
       const service = (await activeCatalog()).find((item) => String(item.id) === serviceId);
       if (!service) throw Object.assign(new Error('Service not found.'), { code: 'service-not-found' });
-      const publicEntry = publicService(service);
       const questionnaire = service.questionnaire || {};
       return {
         serviceId: service.id,
-        pricing: publicEntry.pricing,
+        serviceName: String(service.label || service.id).slice(0, 160),
+        priceRange: getConfiguredServicePriceRange(service),
         requiredQuestionIds: (questionnaire.required || []).map((question) => String(question.id || '')).filter(Boolean),
         note: 'The final quote requires validated questionnaire answers and must come from the authoritative pricing engine.',
       };
