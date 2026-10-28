@@ -121,7 +121,8 @@ const { attemptAiUnavailableReply } = require('./whatsapp/assistantFailure');
 const { appendBoundedConversationTurn } = require('./whatsapp/conversationMemory');
 const { getWhatsAppConversationHistory: queryWhatsAppConversationHistory } = require('./whatsapp/conversationHistory');
 const { createWhatsAppIntentRouter } = require('./whatsapp/aiIntentRouter');
-const { createWhatsAppResponseGenerator, supportsNaturalResponse } = require('./whatsapp/aiResponseGenerator');
+const { assertNoUnsupportedMoney, createWhatsAppResponseGenerator, parseResponse, supportsNaturalResponse } = require('./whatsapp/aiResponseGenerator');
+const { runWhatsAppAgentLoop } = require('./whatsapp/agentLoop');
 const { isManuallyRetryableAssistantJob, sanitizeAssistantFailure } = require('./whatsapp/assistantJobRecovery');
 const { buildNearbyHelperMapResults, validOrigin: validMapOrigin } = require('./nearbyHelperMapService');
 const { buildPublicTutorSummary } = require('./publicProfileSummary');
@@ -4398,19 +4399,105 @@ function buildWhatsAppAssistantToolRegistry({ identity, authorization, conversat
         if (!savedProposal.exists || String(savedProposal.data()?.uid || '') !== context.authorization.uid) return { code: 'stale' };
         return { code: 'confirmation-required', proposalId, field: args.field, value };
       },
-      async listMyBookings(_args, context) {
-        const requestIdentity = { ...identity, linkedFirebaseUid: context.authorization.uid, role: context.authorization.role };
-        const requests = await listWhatsAppRequests({ db, identity: requestIdentity, perPrincipalLimit: 25, resultLimit: 5 });
+      async listMyBookings(args = {}, context) {
+        const requestRole = context.authorization.role === 'guest' && identity.guestPrincipalId
+          ? 'customer'
+          : context.authorization.role;
+        const requestIdentity = {
+          ...identity,
+          linkedFirebaseUid: context.authorization.uid || identity.linkedFirebaseUid || '',
+          role: requestRole,
+        };
+        let requests = await listWhatsAppRequests({
+          db, identity: requestIdentity, perPrincipalLimit: 25, resultLimit: args.limit || 5,
+        });
+        const scope = String(args.scope || 'recent').toLowerCase();
+        if (scope === 'active') {
+          requests = requests.filter((request) => !['completed', 'canceled', 'cancelled'].includes(String(request.status || '').toLowerCase()));
+        } else if (scope === 'cancelable') {
+          requests = requestRole === 'customer'
+            ? requests.filter((request) => [...PRE_ASSIGNMENT_SERVICE_REQUEST_STATUSES, ...POST_ASSIGNMENT_SERVICE_REQUEST_STATUSES]
+              .includes(String(request.status || '').toLowerCase()))
+            : [];
+        }
         return { bookings: requests.map((request) => ({
           ...buildWhatsAppRequestSummary(request),
           createdAtMs: normalizeTimestamp(request.createdAtMs || request.createdAt) || null,
         })) };
       },
       async getBookingStatus(args, context) {
-        const requestIdentity = { ...identity, linkedFirebaseUid: context.authorization.uid, role: context.authorization.role };
+        const requestIdentity = {
+          ...identity,
+          linkedFirebaseUid: context.authorization.uid || identity.linkedFirebaseUid || '',
+          role: context.authorization.role === 'guest' && identity.guestPrincipalId ? 'customer' : context.authorization.role,
+        };
         const access = await getWhatsAppRequestForIdentity({ db, identity: requestIdentity, requestId: args.requestId });
-        if (access.code !== 'found') return { code: 'not-found' };
+        if (access.code !== 'found') return { code: access.code === 'forbidden' ? 'not-found' : access.code };
         return { code: 'found', booking: buildWhatsAppRequestSummary(access.request) };
+      },
+      async previewRequestCancellation(args, context) {
+        const role = String(identity.role || (identity.guestPrincipalId ? 'customer' : context.authorization.role) || '').toLowerCase();
+        if (role !== 'customer') return { code: 'customer-role-required', eligible: false, requestId: '', status: '', cancellationAmount: 0, currency: 'ZAR' };
+        if (!whatsappCancellationEnabled()) return { code: 'disabled', eligible: false, requestId: '', status: '', cancellationAmount: 0, currency: 'ZAR' };
+        const currentConversation = await conversationRef.get();
+        if (!currentConversation.exists || String(currentConversation.data()?.lastInboundEventId || '') !== eventId) {
+          return { code: 'stale', eligible: false, requestId: '', status: '', cancellationAmount: 0, currency: 'ZAR' };
+        }
+        const activeRequestId = String(currentConversation.data()?.activeServiceRequestId || '').trim();
+        if (String(originalUserText || '').indexOf(args.requestId) < 0 && activeRequestId !== args.requestId) {
+          const requestIdentity = {
+            ...identity,
+            linkedFirebaseUid: context.authorization.uid || identity.linkedFirebaseUid || '',
+            role: identity.guestPrincipalId && context.authorization.role === 'guest' ? 'customer' : context.authorization.role,
+          };
+          const recent = await listWhatsAppRequests({ db, identity: requestIdentity, perPrincipalLimit: 25, resultLimit: 10 });
+          const eligible = recent.filter((request) => [...PRE_ASSIGNMENT_SERVICE_REQUEST_STATUSES, ...POST_ASSIGNMENT_SERVICE_REQUEST_STATUSES]
+            .includes(String(request.status || '').toLowerCase()));
+          if (eligible.length > 1 || (eligible.length === 1 && String(eligible[0].id || '') !== args.requestId)) {
+            return { code: 'selection-required', eligible: false, requestId: '', status: '', cancellationAmount: 0, currency: 'ZAR' };
+          }
+        }
+        const preview = await getWhatsAppCustomerCancellationPreview({ identityId, identity, requestId: args.requestId });
+        if (preview.code !== 'eligible') {
+          return {
+            code: String(preview.code || 'not-cancellable'), eligible: false,
+            requestId: String(preview.requestId || args.requestId || ''),
+            status: String(preview.status || ''),
+            cancellationAmount: Number(preview.cancellationAmount || 0), currency: 'ZAR',
+          };
+        }
+        const pendingCancellation = {
+          identityId,
+          requestId: preview.requestId,
+          status: preview.status,
+          cancellationAmount: preview.cancellationAmount,
+          billingRule: preview.billingRule,
+          expiresAtMs: Date.now() + 5 * 60 * 1000,
+        };
+        await conversationRef.set({ pendingCancellation, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return {
+          code: 'eligible', eligible: true, requestId: preview.requestId,
+          status: String(preview.status || ''), cancellationAmount: Number(preview.cancellationAmount || 0), currency: 'ZAR',
+        };
+      },
+      async relayToAssignedParticipant(_args, context) {
+        if (!whatsappRelayEnabled()) return { code: 'disabled', sent: false };
+        const currentConversationSnapshot = await conversationRef.get();
+        if (!currentConversationSnapshot.exists || String(currentConversationSnapshot.data()?.lastInboundEventId || '') !== eventId) {
+          return { code: 'stale', sent: false };
+        }
+        const currentConversation = currentConversationSnapshot.data() || {};
+        const relayResult = await relayWhatsAppText({
+          eventId, identityId,
+          identity: context.identity || identity,
+          conversation: currentConversation,
+          inbound,
+          conversationRef,
+        });
+        return {
+          code: relayResult.sent ? 'sent' : String(relayResult.code || (relayResult.handled ? 'not-sent' : 'request-not-authorized')),
+          sent: relayResult.sent === true,
+        };
       },
       async getMyPaymentSummary(args, context) {
         const requestIdentity = { ...identity, linkedFirebaseUid: context.authorization.uid, role: 'customer' };
@@ -4566,6 +4653,22 @@ function formatWhatsAppToolResult(toolName, result = {}, { includePricing = fals
   if (toolName === 'proposeProfileChange') return `I can change your ${result.field === 'firstName' ? 'first name' : 'surname'} to “${result.value}”. Please confirm this change.`;
   if (toolName === 'listMyBookings') return formatWhatsAppRequestHistory(result.bookings || []);
   if (toolName === 'getBookingStatus') return result.code === 'found' ? formatWhatsAppRequestSummary(result.booking) : 'I could not find a booking you are authorized to view.';
+  if (toolName === 'previewRequestCancellation') {
+    if (!result.eligible) {
+      if (result.code === 'disabled') return 'WhatsApp cancellation is not enabled yet. Please use the Uncedo app or contact support.';
+      if (result.code === 'already-cancelled') return 'This request is already canceled.';
+      if (result.code === 'already-completed') return 'This request is already completed and cannot be canceled.';
+      if (result.code === 'not-cancellable') return 'This request cannot be canceled from its current state.';
+      return 'I could not find a request that can be canceled from this WhatsApp conversation.';
+    }
+    const fee = Number(result.cancellationAmount || 0) > 0
+      ? `The current cancellation fee is *R${Number(result.cancellationAmount).toFixed(2)} ${result.currency || 'ZAR'}*.`
+      : 'There is no cancellation fee under the current request state.';
+    return `${fee}\n\nNothing will change until you confirm.`;
+  }
+  if (toolName === 'relayToAssignedParticipant') return result.sent
+    ? 'I’ve passed your message to the other participant in this request.'
+    : 'I could not deliver that message to the other participant. Please use the Uncedo app chat or try again later.';
   if (toolName === 'getMyPaymentSummary') return result.code === 'available'
     ? `Request ${result.requestId} payment is ${result.state}${result.amount === null ? '' : ` for R${Number(result.amount).toFixed(2)} ${result.currency || 'ZAR'}`}.`
     : 'I could not verify payment information for that booking.';
@@ -4603,7 +4706,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
   maxInstances: 2,
   ...HALF_CPU_OPTIONS,
   memory: '256MiB',
-  timeoutSeconds: 60,
+  timeoutSeconds: 180,
   retry: false,
 }, async (event) => {
   const jobRef = event.data?.ref;
@@ -5590,112 +5693,6 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       return;
     }
     const command = parseWhatsAppCommand(commandText);
-    if (command?.type === 'booking_history') {
-      const requests = await listWhatsAppRequests({ db, identity, perPrincipalLimit: 25, resultLimit: 5 });
-      await reply(formatWhatsAppRequestHistory(requests));
-      await jobRef.set({ status: 'completed', intent: 'booking_history', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-      return;
-    }
-    if (command?.type === 'booking_status' || command?.type === 'booking_details') {
-      const requestId = String(command.requestId || conversation.activeServiceRequestId || '').trim();
-      const result = requestId ? await getWhatsAppRequestForIdentity({ db, identity, requestId }) : { code: 'not-found' };
-      if (result.code === 'forbidden') {
-        await reply('I could not verify access to that service request. Please sign in to the Uncedo app or contact support.');
-      } else if (result.code !== 'found') {
-        await reply('I could not find a request linked to this WhatsApp conversation. Ask “booking history” to see your recent requests, or use the Uncedo app.');
-      } else {
-        await reply(formatWhatsAppRequestSummary(buildWhatsAppRequestSummary(result.request)));
-      }
-      await jobRef.set({ status: 'completed', intent: command.type, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-      return;
-    }
-    if (command?.type === 'payment_status') {
-      let requestId = String(command.requestId || conversation.activeServiceRequestId || '').trim();
-      if (!requestId && !command.requestId) {
-        const history = await listWhatsAppRequests({ db, identity, perPrincipalLimit: 25, resultLimit: 5 });
-        const finalized = history.filter((request) => ['completed', 'canceled', 'cancelled'].includes(String(request.status || '').toLowerCase()));
-        if (finalized.length === 1) requestId = String(finalized[0].id || '');
-      }
-      const result = requestId ? await getWhatsAppRequestForIdentity({ db, identity, requestId }) : { code: 'not-found' };
-      if (result.code === 'forbidden') {
-        await reply('I could not verify access to that payment record. Please sign in to the Uncedo app or contact support.');
-      } else if (result.code !== 'found') {
-        await reply('I could not identify one of your completed requests. Ask “booking history”, then send “payment status request <reference>”.');
-      } else {
-        const request = result.request;
-        const [operationSnap, paymentSnap] = await Promise.all([
-          db.collection(FINANCIAL_OPERATIONS_COLLECTION).doc(serviceFinancialOperationId(request.id)).get(),
-          db.collection(PAYMENT_OPERATIONS).doc(request.id).get(),
-        ]);
-        const operation = paymentSnap.exists ? paymentSnap.data() || {} : operationSnap.exists ? operationSnap.data() || {} : null;
-        const summary = buildWhatsAppPaymentSummary({ request, operation });
-        await reply(formatWhatsAppPaymentSummary(summary));
-      }
-      await jobRef.set({ status: 'completed', intent: 'payment_status', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-      return;
-    }
-    if (command?.type === 'cancellation_request') {
-      if (!whatsappCancellationEnabled()) {
-        await reply('WhatsApp cancellation is not enabled yet. Please use the Uncedo app, or reply “support” for help.');
-        await jobRef.set({ status: 'completed', intent: 'cancellation', reason: 'whatsapp_cancellation_disabled', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-        return;
-      }
-      const role = String(identity.role || (identity.guestPrincipalId ? 'customer' : '')).toLowerCase();
-      if (role !== 'customer') {
-        await reply('Only the customer who created a request can cancel it through WhatsApp.');
-        await jobRef.set({ status: 'completed', intent: 'cancellation', reason: 'customer_role_required', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-        return;
-      }
-      let targetRequestId = String(command.requestId || conversation.activeServiceRequestId || '').trim();
-      if (!targetRequestId && !command.requestId) {
-        const recent = await listWhatsAppRequests({ db, identity, perPrincipalLimit: 25, resultLimit: 10 });
-        const eligible = recent.filter((item) => [...PRE_ASSIGNMENT_SERVICE_REQUEST_STATUSES, ...POST_ASSIGNMENT_SERVICE_REQUEST_STATUSES]
-          .includes(String(item.status || '').toLowerCase()));
-        if (eligible.length === 1) targetRequestId = String(eligible[0].id || '');
-        else if (eligible.length > 1) {
-          await reply('You have more than one request that may be canceled. Send “cancel request <reference>” using the reference from “booking history”.');
-          await jobRef.set({ status: 'completed', intent: 'cancellation', reason: 'request_selection_required', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-          return;
-        }
-      }
-      const preview = targetRequestId
-        ? await getWhatsAppCustomerCancellationPreview({ identityId, identity, requestId: targetRequestId })
-        : { code: 'not-found' };
-      if (preview.code !== 'eligible') {
-        await reply(preview.code === 'forbidden'
-          ? 'I could not verify that you own this request.'
-          : preview.code === 'already-cancelled'
-            ? 'This request is already canceled.'
-            : preview.code === 'already-completed'
-              ? 'This request is already completed and cannot be canceled.'
-              : preview.code === 'not-cancellable'
-                ? 'This request cannot be canceled from its current state.'
-                : 'I could not identify a request to cancel. Ask “booking history” or include the request reference.');
-        await jobRef.set({ status: 'completed', intent: 'cancellation', reason: preview.code, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-        return;
-      }
-      const pendingCancellation = {
-        identityId,
-        requestId: preview.requestId,
-        status: preview.status,
-        cancellationAmount: preview.cancellationAmount,
-        billingRule: preview.billingRule,
-        expiresAtMs: Date.now() + 5 * 60 * 1000,
-      };
-      await conversationRef.set({ pendingCancellation, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-      const feeText = Number(preview.cancellationAmount || 0) > 0
-        ? `The current cancellation fee is R${Number(preview.cancellationAmount).toFixed(2)} ZAR.`
-        : 'There is no cancellation fee under the current request state.';
-      await reply(`${feeText} Cancel request ${preview.requestId}? Nothing will change until you confirm.`, {
-        type: 'button', body: { text: `${feeText} Confirm only if you want to cancel this service request.` }, action: { buttons: [
-          { type: 'reply', reply: { id: 'wa_cancel_confirm', title: 'Confirm cancel' } },
-          { type: 'reply', reply: { id: 'wa_cancel_abort', title: 'Keep booking' } },
-        ] },
-      });
-      await jobRef.set({ status: 'completed', intent: 'cancellation', requestId: preview.requestId, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-      return;
-    }
-
     if (command?.type === 'payment_initiation') {
       if (!whatsappPaymentsEnabled()) {
         await reply('WhatsApp payment options are not enabled yet. You can still ask “payment status” to check a recorded result.');
@@ -5761,7 +5758,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       await conversationRef.set({ currentMode: 'assistant', currentIntent: null, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       conversation = { ...conversation, currentMode: 'assistant' };
     } else if (['active_booking', 'provider_relay'].includes(String(conversation.currentMode || '').toLowerCase())
-      && whatsappRelayEnabled()) {
+      && whatsappRelayEnabled() && (inbound.type !== 'text' || !whatsappAiEnabled())) {
       const relayResult = String(inbound?.type || '').toLowerCase() === 'text'
         ? await relayWhatsAppText({ eventId, identityId, identity, conversation, inbound, conversationRef })
         : await relayWhatsAppAttachment({ eventId, identityId, identity, conversation, inbound, conversationRef });
@@ -5792,7 +5789,8 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         await jobRef.set({ status: 'completed', intent: 'provider_relay', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         return;
       }
-    } else if (['active_booking', 'provider_relay'].includes(String(conversation.currentMode || '').toLowerCase())) {
+    } else if (['active_booking', 'provider_relay'].includes(String(conversation.currentMode || '').toLowerCase())
+      && (inbound.type !== 'text' || !whatsappAiEnabled())) {
       await reply('WhatsApp messaging relay is not enabled yet. Please use the Uncedo app chat for this request.');
       await jobRef.set({ status: 'completed', intent: 'provider_relay', reason: 'whatsapp_relay_disabled', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
@@ -5806,7 +5804,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     const conversationDraftId = String(conversation.activeDraftId || '').trim();
     const activeDraftRef = conversationDraftId ? db.collection('serviceRequestDrafts').doc(conversationDraftId) : null;
     const draftSnap = activeDraftRef ? await activeDraftRef.get() : null;
-    const activeDraft = draftSnap?.exists ? draftSnap.data() || {} : null;
+    let activeDraft = draftSnap?.exists ? draftSnap.data() || {} : null;
 
     if (buttonId === 'wa_ai_consent_yes') {
       await conversationRef.set({
@@ -5949,8 +5947,24 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
 
     if (inbound.type !== 'text') {
       if (inbound.type === 'location') {
-        if (activeDraft && activeDraftRef && inbound.location) {
-          await activeDraftRef.set({ location: inbound.location, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        const serviceLocation = normalizeWhatsAppHelperLocation(inbound.location || {}, {
+          capturedAtMs: inbound.timestampMs,
+          receivedAtMs: Date.now(),
+          sourceEventId: eventId,
+        });
+        if (!serviceLocation || !isHelperLocationFresh(serviceLocation)) {
+          await reply('I could not use that location pin because its coordinates or timestamp are invalid or too old. Please share your current location again.');
+        } else if (activeDraft && activeDraftRef) {
+          await activeDraftRef.set({
+            location: serviceLocation,
+            locationPinRequired: false,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+          activeDraft = { ...activeDraft, location: serviceLocation, locationPinRequired: false };
+          await conversationRef.set({
+            pendingServiceLocation: admin.firestore.FieldValue.delete(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
           if (activeDraft.requestId) {
             await marketplaceRequestOperations.updateDraft({
               requestId: activeDraft.requestId,
@@ -5959,23 +5973,45 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
               serviceIds: activeDraft.serviceIds,
               selectedPackageId: activeDraft.selectedPackageId || '',
               structuredAnswers: activeDraft.structuredAnswers || {},
-              location: inbound.location,
+              location: serviceLocation,
             });
           }
-          await reply('Thanks, I saved that location for your current service enquiry. Send the remaining service details when you are ready.');
+          inbound = {
+            ...inbound,
+            type: 'text',
+            text: 'I shared the location pin for my current service enquiry. Please continue using the service details I already provided.',
+          };
         } else {
-          await reply('I received your location. Tell me what service you need so I can guide you.');
+          await conversationRef.set({
+            pendingServiceLocation: { location: serviceLocation, expiresAtMs: Date.now() + 60 * 60 * 1000 },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+          await reply('Thanks, I saved this one-time location pin for up to 60 minutes. Tell me which service you need, and I can use it for your request.');
+          await jobRef.set({ status: 'completed', intent: 'service_location', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          return;
         }
       } else {
         await reply('I can currently process text and location messages. Please describe the service details in text for now.');
       }
-      await jobRef.set({ status: 'completed', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-      return;
+      if (inbound.type !== 'text') {
+        await jobRef.set({ status: 'completed', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
     }
 
     const catalog = (await getLiveServiceCatalogEntries())
       .filter((service) => service.active === true && service.approved === true);
     const selectedService = activeDraft ? catalog.find((service) => service.id === activeDraft.serviceId) : null;
+    const locationNowMs = Date.now();
+    const activeDraftLocation = activeDraft?.location && isHelperLocationFresh(activeDraft.location, locationNowMs)
+      ? activeDraft.location
+      : null;
+    const pendingServiceLocation = conversation.pendingServiceLocation || {};
+    const pendingLocation = Number(pendingServiceLocation.expiresAtMs || 0) > locationNowMs
+      && pendingServiceLocation.location && isHelperLocationFresh(pendingServiceLocation.location, locationNowMs)
+      ? pendingServiceLocation.location
+      : null;
+    const explicitlyRequestsCurrentLocation = /\b(?:current location|my location|where i am|where i['’]?m|here)\b/i.test(originalUserText);
     const questionServices = selectedService ? getWhatsAppQuestionnaireServices(selectedService, catalog) : [];
     const questions = selectedService
       ? getQuestionnaireForSelection({ services: questionServices, selectedPackageId: selectedService.id })
@@ -5998,7 +6034,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     const availableTools = toolRegistry.definitions({ identity: toolIdentity, authorization: toolAuthorization });
     assistantPhase = 'classification';
     await jobRef.set({ phase: assistantPhase, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-    const intentResult = await model.classify({
+    const initialAgentInput = {
       message: inbound,
       recentHistory: Array.isArray(conversation.recentHistory) ? conversation.recentHistory : [],
       conversationSummary: conversation.conversationSummary || {},
@@ -6008,11 +6044,168 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         selectedServiceId: activeDraft?.serviceId || '',
         answers: activeDraft?.structuredAnswers || {},
         missingQuestionIds: activeDraft?.missingQuestionIds || [],
+        locationPinRequired: activeDraft?.locationPinRequired === true,
       },
-      services: catalog.slice(0, 50),
-      questions,
+      services: selectedService ? [selectedService] : [],
+      questions: activeDraft ? questions : [],
       availableTools,
+      knownServiceIds: catalog.map((service) => service.id),
+    };
+    const successfulToolResult = (toolResults, toolName) => [...toolResults].reverse()
+      .find((item) => item.toolName === toolName && item.result && !item.errorCode);
+    const agentOutcome = await runWhatsAppAgentLoop({
+      model,
+      input: initialAgentInput,
+      maxToolCalls: 3,
+      buildInput: ({ input, toolResults }) => {
+        const serviceList = successfulToolResult(toolResults, 'listAvailableServices')?.result?.services || [];
+        const selectedId = String(toolResults.at(-1)?.toolArguments?.serviceId || activeDraft?.serviceId || '').trim();
+        const questionnaireResult = [...toolResults].reverse().find((item) => item.toolName === 'getServiceQuestionnaire'
+          && item.result && String(item.result.serviceId || '') === selectedId);
+        return {
+          ...input,
+          services: serviceList.length ? serviceList.slice(0, 100) : input.services,
+          questions: questionnaireResult?.result?.questions || input.questions,
+          toolResults,
+        };
+      },
+      chooseTool: ({ plan, toolResults }) => {
+        const has = (name) => Boolean(successfulToolResult(toolResults, name));
+        const available = new Set(availableTools.map((tool) => tool.name));
+        const required = (toolName, toolArguments = {}) => available.has(toolName) ? { toolName, toolArguments } : null;
+        const serviceList = successfulToolResult(toolResults, 'listAvailableServices')?.result?.services || [];
+        const selectedId = String(plan?.serviceId || activeDraft?.serviceId || selectedService?.id || '').trim();
+        const currentRequestId = String(conversation.activeServiceRequestId || '').trim();
+
+        if (currentRequestId && ['active_booking', 'provider_relay'].includes(String(conversation.currentMode || '').toLowerCase())
+          && !has('getBookingStatus')) {
+          return required('getBookingStatus', { requestId: currentRequestId });
+        }
+        if (plan?.intent === 'provider_relay'
+          && currentRequestId
+          && ['active_booking', 'provider_relay'].includes(String(conversation.currentMode || '').toLowerCase())
+          && !has('relayToAssignedParticipant')) {
+          return required('relayToAssignedParticipant');
+        }
+
+        if (plan?.intent === 'service_booking') {
+          if (!activeDraft?.serviceId && !has('listAvailableServices')) return required('listAvailableServices');
+          const serviceIsListed = serviceList.some((service) => String(service.id || '') === selectedId);
+          const serviceIsCurrentDraft = Boolean(activeDraft?.serviceId && activeDraft.serviceId === selectedId && selectedService);
+          const hasQuestionnaire = toolResults.some((item) => item.toolName === 'getServiceQuestionnaire'
+            && item.result && String(item.result.serviceId || '') === selectedId);
+          if (selectedId && (serviceIsListed || serviceIsCurrentDraft) && !hasQuestionnaire
+            && !(serviceIsCurrentDraft && questions.length)) {
+            return required('getServiceQuestionnaire', { serviceId: selectedId });
+          }
+        }
+        if (plan?.intent === 'service_discovery' && !has('listAvailableServices')) return required('listAvailableServices');
+        if (['service_information', 'price_enquiry'].includes(plan?.intent)) {
+          if (!selectedService && !has('listAvailableServices')) return required('listAvailableServices');
+          if (selectedId && plan.intent === 'price_enquiry' && !has('getServicePricingInformation')) {
+            return required('getServicePricingInformation', { serviceId: selectedId });
+          }
+          if (selectedId && plan.intent === 'service_information' && !has('getServiceDetails')) {
+            return required('getServiceDetails', { serviceId: selectedId });
+          }
+        }
+        if (['customer_support', 'provider_support', 'platform_information'].includes(plan?.intent)
+          && !has('getSupportKnowledge')) {
+          const priorUserTurns = (Array.isArray(conversation.recentHistory) ? conversation.recentHistory : [])
+            .filter((turn) => turn?.role === 'user').slice(-2)
+            .map((turn) => String(turn.text || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 180));
+          return required('getSupportKnowledge', {
+            query: [String(inbound.text || '').slice(0, 300), ...priorUserTurns].filter(Boolean).join(' ').slice(0, 600),
+          });
+        }
+        if (plan?.intent === 'cancellation' && !has('listMyBookings')) {
+          return required('listMyBookings', { scope: 'cancelable', limit: 10 });
+        }
+        if (plan?.intent === 'cancellation' && has('listMyBookings') && !has('previewRequestCancellation')) {
+          const cancelable = successfulToolResult(toolResults, 'listMyBookings')?.result?.bookings || [];
+          const matches = cancelable.filter((booking) => {
+            const status = String(booking.status || '').toLowerCase();
+            return status && !['completed', 'cancelled', 'canceled'].includes(status);
+          });
+          const selectedRequest = matches.find((booking) => String(booking.requestId || '') === currentRequestId)
+            || matches.find((booking) => String(originalUserText || '').includes(String(booking.requestId || '')))
+            || (matches.length === 1 ? matches[0] : null);
+          if (selectedRequest?.requestId) return required('previewRequestCancellation', { requestId: selectedRequest.requestId });
+        }
+        if (['booking_status', 'booking_management'].includes(plan?.intent)) {
+          if (plan.intent === 'booking_status' && currentRequestId && !has('getBookingStatus')) {
+            return required('getBookingStatus', { requestId: currentRequestId });
+          }
+          if (!has('listMyBookings') && !has('getBookingStatus')) return required('listMyBookings', { scope: 'recent', limit: 10 });
+        }
+        if (plan?.intent === 'payment_question' && !has('getMyPaymentSummary')) {
+          if (currentRequestId) return required('getMyPaymentSummary', { requestId: currentRequestId });
+          if (!has('listMyBookings')) return required('listMyBookings', { scope: 'recent', limit: 10 });
+        }
+        return null;
+      },
+      beforeTool: async (call) => {
+        const currentConversation = await conversationRef.get();
+        if (!currentConversation.exists || String(currentConversation.data()?.lastInboundEventId || '') !== eventId) {
+          throw Object.assign(new Error('The inbound message was superseded.'), { code: 'stale' });
+        }
+        if (!(await consumeWhatsAppToolRateLimit(identityId))) {
+          throw Object.assign(new Error('The safe tool-call limit was reached.'), { code: 'tool-rate-limited' });
+        }
+        toolExecutionStarted = true;
+        assistantPhase = 'tool_execution';
+        await jobRef.set({
+          phase: assistantPhase,
+          toolExecutionStarted: true,
+          toolCallIndex: call.index,
+          activeToolName: call.toolName,
+          retrySafe: false,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+      },
+      executeTool: async (toolName, toolArguments) => runWhatsAppToolWithTimeout(() => toolRegistry.execute(
+        toolName,
+        toolArguments,
+        {
+          identity: toolIdentity,
+          authorization: toolAuthorization,
+          role: toolAuthorization.role,
+          eventId,
+          inbound,
+          originalUserText,
+          conversation,
+          escalationRequired: ['customer_support', 'provider_support', 'human_escalation'].includes(String(inbound.intent || '')),
+        },
+      )),
+      afterTool: async (observation) => {
+        const argumentHash = createHash('sha256').update(JSON.stringify(observation.toolArguments || {})).digest('hex');
+        const executionId = stableEventId(`whatsapp-tool:${eventId}:${observation.index}:${observation.toolName}`);
+        const executionCode = observation.errorCode || String(observation.result?.code || 'ok').slice(0, 80);
+        await db.collection('whatsappToolExecutions').doc(executionId).create({
+          executionId,
+          eventId,
+          identityId,
+          toolName: observation.toolName,
+          callIndex: observation.index,
+          role: toolAuthorization.role,
+          status: observation.errorCode ? 'failed' : 'completed',
+          resultCode: executionCode,
+          argumentHash,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          retentionExpiresAtMs: Date.now() + whatsappRetentionDays('WHATSAPP_JOB_RETENTION_DAYS', 30) * 24 * 60 * 60 * 1000,
+        }).catch((error) => {
+          if (error?.code !== 6 && error?.code !== 'already-exists') logger.warn('whatsapp_ai_tool_audit_write_failed', { eventId, toolName: observation.toolName });
+        });
+        await jobRef.set({
+          toolCallCount: observation.index,
+          lastToolName: observation.toolName,
+          lastToolResultCode: executionCode,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+      },
     });
+    const intentResult = agentOutcome.final || {};
+    const executedToolResults = agentOutcome.toolResults || [];
     const explicitlyAsksPricing = intentResult.intent === 'price_enquiry' || isPriceQuestion(originalUserText);
     assistantPhase = 'workflow';
     await jobRef.set({ phase: assistantPhase, retrySafe: false, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
@@ -6020,6 +6213,96 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     const latestConversationSnapshot = await conversationRef.get();
     if (!latestConversationSnapshot.exists || String(latestConversationSnapshot.data()?.lastInboundEventId || '') !== eventId) {
       await jobRef.set({ status: 'superseded', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    if (agentOutcome.status === 'superseded') {
+      await jobRef.set({ status: 'superseded', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (agentOutcome.status === 'handoff') {
+      const handoff = [...executedToolResults].reverse().find((item) => item.toolName === 'requestHumanSupport')?.result || {};
+      await reply(formatWhatsAppToolResult('requestHumanSupport', handoff));
+      await jobRef.set({
+        status: 'completed', intent: intentResult.intent, toolName: 'requestHumanSupport',
+        toolResultCode: handoff.code || 'handed_off', updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      return;
+    }
+    if (agentOutcome.status === 'rate-limited') {
+      await reply('I have reached the safe limit for account lookups in this conversation. Please wait a little and try again.');
+      await jobRef.set({
+        status: 'rate_limited', intent: intentResult.intent,
+        toolCallCount: agentOutcome.toolCallCount, updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      return;
+    }
+    if (['tool-limit', 'repeated-tool-call', 'tool-preflight-failed'].includes(agentOutcome.status)) {
+      await reply('I could not safely finish that request in one message. Please narrow it to one task, or ask for a support person.');
+      await jobRef.set({
+        status: 'completed', intent: intentResult.intent, reason: agentOutcome.status,
+        toolCallCount: agentOutcome.toolCallCount, updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      return;
+    }
+
+    const evidenceText = executedToolResults.map((item) => item.result
+      ? formatWhatsAppToolResult(item.toolName, item.result, { includePricing: explicitlyAsksPricing })
+      : '').filter(Boolean).join('\n');
+    const lastToolObservation = [...executedToolResults].reverse().find((item) => item.result);
+    let responseText = '';
+    try {
+      responseText = parseResponse(JSON.stringify({ response: intentResult.assistantResponse || '' }));
+      assertNoUnsupportedMoney(responseText, evidenceText);
+    } catch (error) {
+      responseText = lastToolObservation
+        ? formatWhatsAppToolResult(lastToolObservation.toolName, lastToolObservation.result, { includePricing: explicitlyAsksPricing })
+        : intentResult.intent === 'greeting'
+          ? 'Hi there! What can I help you with today?'
+          : 'I can help with Uncedo services, bookings, request updates, or support. What would you like to do?';
+      await jobRef.set({ responseGeneration: 'safe_fallback', responseFallbackCode: String(error?.code || 'invalid_response').slice(0, 80), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    }
+    const missingKnowledge = [...executedToolResults].reverse()
+      .find((item) => item.toolName === 'getSupportKnowledge')?.result;
+    if (missingKnowledge && missingKnowledge.found !== true) {
+      responseText = 'I could not find an approved Uncedo answer for that yet. Would you like me to connect you with a support person?';
+    }
+
+    if (intentResult.intent !== 'service_booking') {
+      const cancellationPreview = [...executedToolResults].reverse()
+        .find((item) => item.toolName === 'previewRequestCancellation')?.result;
+      if (cancellationPreview?.eligible === true) {
+        const feeText = Number(cancellationPreview.cancellationAmount || 0) > 0
+          ? `Current cancellation fee: *R${Number(cancellationPreview.cancellationAmount).toFixed(2)} ${cancellationPreview.currency || 'ZAR'}*.`
+          : 'There is no cancellation fee under the current request state.';
+        await reply(`${responseText}\n\n${feeText} Nothing will change until you confirm.`, {
+          type: 'button',
+          body: { text: `${feeText} Confirm only if you want to cancel this request.` },
+          action: { buttons: [
+            { type: 'reply', reply: { id: 'wa_cancel_confirm', title: 'Confirm cancel' } },
+            { type: 'reply', reply: { id: 'wa_cancel_abort', title: 'Keep booking' } },
+          ] },
+        });
+      } else {
+        const profileProposal = [...executedToolResults].reverse()
+          .find((item) => item.toolName === 'proposeProfileChange')?.result;
+        if (profileProposal?.code === 'confirmation-required') {
+          await reply(responseText, {
+            type: 'button', body: { text: 'Confirm this profile name change?' }, action: { buttons: [
+              { type: 'reply', reply: { id: `wa_profile_confirm_${profileProposal.proposalId}`, title: 'Confirm change' } },
+              { type: 'reply', reply: { id: `wa_profile_cancel_${profileProposal.proposalId}`, title: 'Cancel' } },
+            ] },
+          });
+        } else await reply(responseText);
+      }
+      await jobRef.set({
+        status: 'completed', intent: intentResult.intent,
+        lastToolName: lastToolObservation?.toolName || null,
+        toolResultCode: lastToolObservation?.result?.code || lastToolObservation?.errorCode || 'no-tool-required',
+        aiProvider: intentResult.provider || null, aiModel: intentResult.model || null,
+        toolCallCount: agentOutcome.toolCallCount,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
       return;
     }
 
@@ -6224,8 +6507,9 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       : '';
     const serviceId = selectedByClassifier || selectedService?.id || '';
     const service = catalog.find((item) => item.id === serviceId);
+    const serviceLocation = (activeDraft?.serviceId === service?.id ? activeDraftLocation : null) || pendingLocation;
     if (!service || (intentResult.confidence < 0.45 && !selectedService)) {
-      await reply(renderWhatsAppCatalog(catalog, { includePricing: explicitlyAsksPricing }));
+      await reply(responseText || renderWhatsAppCatalog(catalog, { includePricing: explicitlyAsksPricing }));
       await jobRef.set({ status: 'completed', intent: intentResult.intent, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
     }
@@ -6309,7 +6593,10 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     const currentMediaAssetId = String(inbound.media?.assetId || '').trim();
     const currentMediaAssetRef = currentMediaAssetId ? db.collection('whatsappMediaAssets').doc(currentMediaAssetId) : null;
     const now = Date.now();
-    if (validation.missingRequired.length) {
+    const locationPinRequired = intentResult.intent === 'service_booking'
+      && (activeDraft?.locationPinRequired === true || explicitlyRequestsCurrentLocation)
+      && !serviceLocation;
+    if (validation.missingRequired.length || locationPinRequired) {
       const canonicalRequestId = activeDraft?.serviceId === service.id
         ? String(activeDraft.requestId || '').trim()
         : '';
@@ -6327,8 +6614,9 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           structuredAnswers: validation.answers,
           ...(currentMediaAssetId ? { mediaAssetIds: admin.firestore.FieldValue.arrayUnion(currentMediaAssetId) } : {}),
           missingQuestionIds: validation.missingRequired,
+          locationPinRequired,
           questionnaireVersion: stableEventId(JSON.stringify(serviceQuestions)),
-          location: activeDraft?.serviceId === service.id ? activeDraft.location || null : null,
+          location: serviceLocation || null,
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           createdAt: activeDraft?.createdAt || admin.firestore.FieldValue.serverTimestamp(),
         }, { merge: true });
@@ -6341,15 +6629,47 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           currentMode: 'booking_intake',
           currentIntent: intentResult.intent,
           activeDraftId: draftId,
+          pendingServiceLocation: admin.firestore.FieldValue.delete(),
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         }, { merge: true });
       });
       const missingQuestions = getMissingRequiredQuestions(serviceQuestions, validation.missingRequired);
-      const nextQuestion = renderMissingWhatsAppQuestions({
-        serviceLabel: service.label,
-        questions: missingQuestions,
-        missingQuestionIds: missingQuestions.map((question) => question.id),
-      });
+      let nextQuestion = '';
+      try {
+        const responseOnlyResult = await runWhatsAppToolWithTimeout(() => model.classify({
+          ...initialAgentInput,
+          message: inbound,
+          conversationState: {
+            mode: 'booking_intake',
+            intent: 'service_booking',
+            selectedServiceId: service.id,
+            answers: validation.answers,
+            missingQuestionIds: validation.missingRequired,
+            locationPinRequired,
+          },
+          services: [{ id: service.id, categoryId: service.categoryId, label: service.label, description: service.description }],
+          questions: missingQuestions,
+          availableTools: [],
+          toolResults: [],
+          responseOnly: true,
+        }), 30_000);
+        nextQuestion = parseResponse(JSON.stringify({ response: responseOnlyResult.assistantResponse || '' }));
+        assertNoUnsupportedMoney(nextQuestion, '');
+      } catch (error) {
+        nextQuestion = missingQuestions.length
+          ? renderMissingWhatsAppQuestions({
+            serviceLabel: service.label,
+            questions: missingQuestions,
+            missingQuestionIds: missingQuestions.map((question) => question.id),
+          })
+          : '*To finish your service request*\n\nPlease share a WhatsApp location pin to continue.';
+        if (locationPinRequired && missingQuestions.length) nextQuestion = `${nextQuestion}\n\nPlease share a WhatsApp location pin to continue.`;
+        await jobRef.set({
+          bookingFollowup: 'deterministic_fallback',
+          bookingFollowupErrorCode: String(error?.code || 'response_generation_failed').slice(0, 80),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+      }
       const priceContext = intentResult.intent === 'service_booking' && explicitlyAsksPricing
         ? `${formatWhatsAppPriceGuidance(service.label, getConfiguredServicePriceRange(service))}\n\n`
         : '';
@@ -6382,7 +6702,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         serviceIds,
         selectedPackageId,
         answers: validation.answers,
-        location: activeDraft?.serviceId === service.id ? activeDraft.location || null : null,
+        location: serviceLocation || null,
       });
       if (requestDraft.code !== 'ready') {
         await reply(requestDraft.code === 'active-request'
@@ -6420,11 +6740,12 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         structuredAnswers: validation.answers,
         ...(currentMediaAssetId ? { mediaAssetIds: admin.firestore.FieldValue.arrayUnion(currentMediaAssetId) } : {}),
         missingQuestionIds: [],
+        locationPinRequired: false,
         questionnaireVersion: quote.questionnaireVersion,
         serviceCatalogVersion: quote.serviceCatalogVersion,
         quoteSnapshot: quote,
         quoteExpiresAtMs,
-        location: activeDraft?.serviceId === service.id ? activeDraft.location || null : null,
+        location: serviceLocation || null,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         createdAt: activeDraft?.createdAt || admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
@@ -6437,6 +6758,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         currentMode: isBooking ? 'quote_pending' : 'public_information',
         currentIntent: intentResult.intent,
         activeDraftId: draftId,
+        ...(isBooking ? { pendingServiceLocation: admin.firestore.FieldValue.delete() } : {}),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
     });

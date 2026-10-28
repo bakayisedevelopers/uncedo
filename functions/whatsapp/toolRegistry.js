@@ -89,14 +89,26 @@ const TOOL_DEFINITIONS = Object.freeze({
     outputSchema: resultSchema({ code: stringSchema, proposalId: stringSchema, field: stringSchema, value: stringSchema }),
   },
   listMyBookings: {
-    description: 'List a small page of bookings belonging to this customer or assigned to this helper.', roles: ['customer', 'helper'], auth: 'verified-linked',
-    fields: {}, handler: 'listMyBookings', canonicalBackend: 'listWhatsAppRequests',
+    description: 'Read recent requests owned by this customer or assigned to this helper. Use scope "cancelable" to find customer requests that may still be canceled, and inspect the returned current statuses before taking any next step.', roles: ['guest', 'customer', 'helper'], auth: 'conversation-owner',
+    fields: { scope: 'booking-scope', limit: 'small-limit' }, handler: 'listMyBookings', canonicalBackend: 'listWhatsAppRequests',
     outputSchema: resultSchema({ bookings: { type: 'array', items: BOOKING_SUMMARY_SCHEMA } }, ['bookings']),
   },
   getBookingStatus: {
-    description: 'Read the current authorized status and minimal details for a booking.', roles: ['customer', 'helper'], auth: 'verified-linked',
+    description: 'Read the current authorized status and minimal details for a booking. Use a request ID returned by listMyBookings or supplied by the customer.', roles: ['guest', 'customer', 'helper'], auth: 'conversation-owner',
     fields: { requestId: 'request-id' }, required: ['requestId'], handler: 'getBookingStatus', canonicalBackend: 'getWhatsAppRequestForIdentity',
     outputSchema: resultSchema({ code: stringSchema, booking: BOOKING_SUMMARY_SCHEMA }),
+  },
+  previewRequestCancellation: {
+    description: 'Check whether one of the customer’s requests can currently be canceled and return the authoritative fee. This only prepares an expiring confirmation; it never cancels the request. The customer must explicitly confirm through the separate confirmation flow.', roles: ['guest', 'customer'], auth: 'conversation-owner',
+    fields: { requestId: 'request-id' }, required: ['requestId'], handler: 'previewRequestCancellation', canonicalBackend: 'getWhatsAppCustomerCancellationPreview',
+    stateChanging: true, confirmation: 'required-before-cancellation', idempotency: 'inbound-event-id',
+    outputSchema: resultSchema({ code: stringSchema, requestId: stringSchema, status: stringSchema, cancellationAmount: numberSchema, currency: stringSchema, eligible: booleanSchema }, ['code', 'eligible']),
+  },
+  relayToAssignedParticipant: {
+    description: 'Forward the customer’s or assigned helper’s original message to the other participant on the current open, assigned request. Use only for practical coordination clearly directed to that participant. Do not use for cancellation, request status, payment, support, or Uncedo information. The backend verifies that the sender and recipient are the exact request participants.', roles: ['guest', 'customer', 'helper'], auth: 'conversation-owner',
+    fields: {}, handler: 'relayToAssignedParticipant', canonicalBackend: 'relayWhatsAppText',
+    stateChanging: true, confirmation: 'the-user-authored-message-is-the-authorization', idempotency: 'inbound-event-id',
+    outputSchema: resultSchema({ code: stringSchema, sent: booleanSchema }, ['code', 'sent']),
   },
   getMyPaymentSummary: {
     description: 'Read the canonical payment status and amount due for one owned booking. Never returns card or gateway credentials.', roles: ['customer'], auth: 'verified-linked',
@@ -198,6 +210,10 @@ function validateToolArguments(definition, args) {
     } else if (type === 'small-limit') {
       const item = Number(value);
       if (!Number.isInteger(item) || item < 1 || item > 20) throw new Error('The requested page size is invalid.');
+      normalized[key] = item;
+    } else if (type === 'booking-scope') {
+      const item = safeText(value, 20).toLowerCase();
+      if (!['recent', 'active', 'cancelable'].includes(item)) throw new Error('The requested booking filter is invalid.');
       normalized[key] = item;
     }
   }
@@ -335,6 +351,7 @@ function createWhatsAppToolRegistry({ getCatalogEntries = async () => [], getSup
           properties: Object.fromEntries(Object.entries(definition.fields || {}).map(([key, kind]) => [key,
             kind === 'small-limit' ? { type: 'integer', minimum: 1, maximum: 20 }
               : kind === 'profile-field' ? { type: 'string', enum: ['firstName', 'lastName'] }
+                : kind === 'booking-scope' ? { type: 'string', enum: ['recent', 'active', 'cancelable'] }
                 : { type: 'string', maxLength: kind === 'request-id' ? 128 : kind === 'service-id' ? 160 : 300 },
           ])),
           required: definition.required || [],
@@ -360,6 +377,13 @@ function createWhatsAppToolRegistry({ getCatalogEntries = async () => [], getSup
     const authorization = context.authorization || {};
     if (definition.auth === 'verified-linked' && (!authorization.uid || authorization.verified !== true || authorization.linked !== true)) {
       throw Object.assign(new Error('Verify and link your WhatsApp identity to access account information.'), { code: 'identity-verification-required' });
+    }
+    if (definition.auth === 'conversation-owner') {
+      const guestIsBoundToConversation = role === 'guest' && String(context.identity?.guestPrincipalId || '').trim();
+      const linkedAccountIsVerified = Boolean(authorization.uid && authorization.verified === true && authorization.linked === true);
+      if (!guestIsBoundToConversation && !linkedAccountIsVerified) {
+        throw Object.assign(new Error('Verify and link your WhatsApp identity before accessing this request.'), { code: 'identity-verification-required' });
+      }
     }
     if (definition.auth === 'verified-verified-helper' && (!authorization.uid || authorization.verified !== true || authorization.linked !== true || authorization.helperVerified !== true)) {
       throw Object.assign(new Error('A verified linked helper account is required for this information.'), { code: 'helper-verification-required' });

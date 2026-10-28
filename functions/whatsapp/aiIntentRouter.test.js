@@ -58,6 +58,24 @@ test('questionnaire extraction prompt forbids tool selection and asks for curren
   assert.match(prompt, /"approvedTools":\[\]/);
 });
 
+test('response-only prompt asks for personalized missing-question follow-up without exposing pin coordinates', () => {
+  const prompt = buildPrompt({
+    message: { text: 'SUV, please.', location: { latitude: -25.7, longitude: 28.2 } },
+    conversationState: {
+      mode: 'booking_intake', intent: 'service_booking', selectedServiceId: 'wash',
+      missingQuestionIds: ['vehicle_colour'], locationPinRequired: true,
+    },
+    questions: [{ id: 'vehicle_colour', prompt: 'What colour is the vehicle?', required: true }],
+    responseOnly: true,
+  });
+  assert.match(prompt, /ask only the supplied missing questions/);
+  assert.match(prompt, /WhatsApp location pin/);
+  assert.match(prompt, /"locationPinRequired":true/);
+  assert.match(prompt, /"pinProvided":true/);
+  assert.doesNotMatch(prompt, /-25\.7|28\.2/);
+  assert.match(prompt, /"allowedToolNames":\[""\]/);
+});
+
 test('model tool selection accepts only the fixed allowlist and strict JSON arguments', () => {
   const result = normalizeModelResult({
     intent: 'booking_status', serviceId: '', confidence: 0.9, extractedAnswers: {},
@@ -92,7 +110,7 @@ test('Gemini fallback uses the project Vertex client, constrained output, and va
   assert.deepEqual(clientConfig, { projectId: 'test-project-123', location: 'global', timeoutMs: 15_000 });
   assert.equal(request.model, 'gemini-3.5-flash-lite');
   assert.equal(request.config.temperature, 0);
-  assert.equal(request.config.maxOutputTokens, 800);
+  assert.equal(request.config.maxOutputTokens, 1100);
   assert.equal(request.config.responseMimeType, 'application/json');
   assert.equal(request.config.responseSchema.properties.extractedAnswersJson.type, 'STRING');
   assert.equal(request.config.responseSchema.properties.extractedAnswers, undefined);

@@ -146,6 +146,28 @@ test('read tools reject fields outside the minimized booking, wallet, and payout
   await assert.rejects(leakedPayout.execute('getMyPayoutStatus', {}, { role: 'helper', authorization }), { code: 'tool-output-invalid' });
 });
 
+test('booking-history filters are bounded and conversation-owned tools require the linked or bound WhatsApp identity', async () => {
+  let receivedArgs;
+  const registry = createWhatsAppToolRegistry({ handlers: {
+    listMyBookings: async (args) => { receivedArgs = args; return { bookings: [] }; },
+    getBookingStatus: async () => ({ code: 'not-found' }),
+  } });
+  await assert.rejects(registry.execute('listMyBookings', { scope: 'all' }, {
+    role: 'customer', authorization: { uid: 'uid', role: 'customer', linked: true, verified: true },
+  }), /booking filter/);
+  await assert.rejects(registry.execute('getBookingStatus', { requestId: 'request_123' }, {
+    role: 'guest', identity: {}, authorization: { role: 'guest', linked: false, verified: false },
+  }), { code: 'identity-verification-required' });
+  await registry.execute('listMyBookings', { scope: 'cancelable', limit: 8 }, {
+    role: 'customer', authorization: { uid: 'uid', role: 'customer', linked: true, verified: true },
+  });
+  assert.deepEqual(receivedArgs, { scope: 'cancelable', limit: 8 });
+  assert.equal(registry.definitions({ authorization: { role: 'customer' } })
+    .some((tool) => tool.name === 'previewRequestCancellation'), true);
+  assert.equal(registry.definitions({ authorization: { role: 'helper' } })
+    .some((tool) => tool.name === 'previewRequestCancellation'), false);
+});
+
 test('human escalation requires a user request, a recognized issue, or a backend knowledge miss', async () => {
   const registry = createWhatsAppToolRegistry({
     handlers: { requestHumanSupport: async () => ({ code: 'handed_off', ticketId: 'wa_support_123', duplicate: false }) },
@@ -178,12 +200,13 @@ test('helper offer and earnings tools are read-only, helper-only, and require a 
   assert.equal(registry.definitions({ authorization: { role: 'guest' } }).some((tool) => tool.name === 'listMyAvailableOffers'), false);
 });
 
-test('registry exposes the existing fourteen approved tools plus the two read-only helper tools', () => {
+test('registry exposes the approved command set to each role', () => {
   const registry = createWhatsAppToolRegistry();
   const tools = registry.definitions({ authorization: { role: 'helper' } });
-  assert.equal(Object.keys(TOOL_DEFINITIONS).length, 16);
-  assert.equal(tools.length, 15);
+  assert.equal(Object.keys(TOOL_DEFINITIONS).length, 18);
+  assert.equal(tools.length, 16);
   assert.ok(tools.some((tool) => tool.name === 'listMyAvailableOffers'));
   assert.ok(tools.some((tool) => tool.name === 'getMyEarningsSummary'));
-  assert.equal(tools.filter((tool) => tool.stateChanging).length, 2);
+  assert.ok(tools.some((tool) => tool.name === 'relayToAssignedParticipant'));
+  assert.equal(tools.filter((tool) => tool.stateChanging).length, 3);
 });
