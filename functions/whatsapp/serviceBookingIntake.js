@@ -1,20 +1,18 @@
 'use strict';
 
-function questionnaireNeedsExtractionPass({ intent = '', availableQuestions = [], questionnaire = [] } = {}) {
+function questionnaireNeedsExtractionPass({ intent = '', questionnaire = [] } = {}) {
   if (intent !== 'service_booking' || !Array.isArray(questionnaire) || questionnaire.length === 0) return false;
-  const availableIds = new Set((Array.isArray(availableQuestions) ? availableQuestions : [])
-    .map((question) => String(question?.id || '').trim())
-    .filter(Boolean));
-  return questionnaire.some((question) => {
-    const id = String(question?.id || '').trim();
-    return id && !availableIds.has(id);
-  });
+  // Re-run extraction with the authoritative questionnaire on every booking
+  // turn; the general intent pass can miss answers even when it saw the form.
+  return true;
 }
 
-function getFirstMissingRequiredQuestion(questions = [], missingQuestionIds = []) {
-  const missingId = String((Array.isArray(missingQuestionIds) ? missingQuestionIds : [])[0] || '').trim();
-  if (!missingId) return null;
-  return (Array.isArray(questions) ? questions : []).find((question) => String(question?.id || '').trim() === missingId) || null;
+function getMissingRequiredQuestions(questions = [], missingQuestionIds = []) {
+  const missingIds = new Set((Array.isArray(missingQuestionIds) ? missingQuestionIds : [])
+    .map((id) => String(id || '').trim())
+    .filter(Boolean));
+  return (Array.isArray(questions) ? questions : [])
+    .filter((question) => missingIds.has(String(question?.id || '').trim()));
 }
 
 async function extractQuestionnaireAnswers({
@@ -75,6 +73,6 @@ async function extractQuestionnaireAnswers({
 
 module.exports = {
   extractQuestionnaireAnswers,
-  getFirstMissingRequiredQuestion,
+  getMissingRequiredQuestions,
   questionnaireNeedsExtractionPass,
 };

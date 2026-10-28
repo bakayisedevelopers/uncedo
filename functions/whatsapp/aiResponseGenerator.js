@@ -143,6 +143,9 @@ function parseResponse(text) {
   }
   const response = bounded(parsed.response, MAX_RESPONSE_CHARS);
   if (!response) throw new Error('AI response was empty.');
+  if (/\b(?:AI|artificial intelligence|chatbot|language model)\b/i.test(response)) {
+    throw new Error('WhatsApp response may not mention AI or the underlying assistant.');
+  }
   return response;
 }
 
@@ -159,6 +162,7 @@ function buildResponsePrompt({ question, toolName, toolResult, recentHistory = [
     'Explain financial terms plainly while preserving every supplied amount and distinction. Amounts are already formatted in the stated currency; do not calculate, convert, round, or introduce any amount. Do not expose IDs, credentials or internal metadata.',
     'For general service questions or service lists, never include prices, fees, estimates, or currency amounts. Only mention a price range when the backend has explicitly marked the current question as price-related and the verified result contains a configured range. Never turn a base value or fee into a range.',
     'Format specifically for WhatsApp text: use *bold* for short headings or key labels, • for bullets, and numbered steps for sequences. Use short paragraphs. Do not use Markdown headings, tables, HTML, or code fences.',
+    'Do not mention AI, artificial intelligence, a chatbot, or a language model. Speak directly and naturally without describing how the reply was produced.',
     'Be warm, respectful, and conversational. If a name is supplied, use it naturally where helpful; otherwise use a friendly greeting such as “Hi there” only when a greeting fits. If the result does not answer the question, say what is known and what is unavailable. Keep the reply under 900 characters and use the user’s language where practical.',
     JSON.stringify({
       question: bounded(question, MAX_QUESTION_CHARS),

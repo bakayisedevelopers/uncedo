@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   extractQuestionnaireAnswers,
-  getFirstMissingRequiredQuestion,
+  getMissingRequiredQuestions,
   questionnaireNeedsExtractionPass,
 } = require('./serviceBookingIntake');
 
@@ -14,13 +14,13 @@ const questions = [
   { id: 'wash_addon', prompt: 'Would you like tyre cleaning?', required: true, answerType: 'enum', options: [{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }] },
 ];
 
-test('questionnaire extraction is requested only when a booking classifier lacked authoritative questions', () => {
+test('questionnaire extraction always runs against the authoritative questionnaire on booking turns', () => {
   assert.equal(questionnaireNeedsExtractionPass({
     intent: 'service_booking', availableQuestions: [], questionnaire: questions,
   }), true);
   assert.equal(questionnaireNeedsExtractionPass({
     intent: 'service_booking', availableQuestions: questions, questionnaire: questions,
-  }), false);
+  }), true);
   assert.equal(questionnaireNeedsExtractionPass({
     intent: 'price_enquiry', availableQuestions: [], questionnaire: questions,
   }), false);
@@ -78,7 +78,10 @@ test('failed extraction safely falls back to the first classification without re
   assert.equal(result.errorCode, 'provider-timeout');
 });
 
-test('the intake selects one missing question in authoritative questionnaire order', () => {
-  assert.deepEqual(getFirstMissingRequiredQuestion(questions, ['service_location', 'wash_addon']), questions[1]);
-  assert.equal(getFirstMissingRequiredQuestion(questions, []), null);
+test('the intake returns all unanswered required questions in questionnaire order', () => {
+  assert.deepEqual(
+    getMissingRequiredQuestions(questions, ['wash_addon', 'service_location']),
+    [questions[1], questions[2]],
+  );
+  assert.deepEqual(getMissingRequiredQuestions(questions, []), []);
 });

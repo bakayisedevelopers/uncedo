@@ -102,8 +102,8 @@ const {
   updateSavedPaymentMethod,
 } = require('./paymentMethodStore');
 const { createOrAppendWhatsAppSupportMessage } = require('./whatsapp/supportTicketService');
-const { extractQuestionnaireAnswers, getFirstMissingRequiredQuestion, questionnaireNeedsExtractionPass } = require('./whatsapp/serviceBookingIntake');
-const { formatWhatsAppBookingConfirmation, renderWhatsAppQuestion } = require('./whatsapp/serviceBookingPresentation');
+const { extractQuestionnaireAnswers, getMissingRequiredQuestions, questionnaireNeedsExtractionPass } = require('./whatsapp/serviceBookingIntake');
+const { formatWhatsAppBookingConfirmation, renderMissingWhatsAppQuestions } = require('./whatsapp/serviceBookingPresentation');
 const { createWhatsAppSupportMediaUrl } = require('./whatsapp/supportMedia');
 const {
   WHATSAPP_POLICY_ACCEPTANCE_VERSION,
@@ -6218,9 +6218,13 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       return;
     }
 
-    const serviceId = selectedService?.id || intentResult.serviceId;
+    const selectedByClassifier = intentResult.serviceId && intentResult.confidence >= 0.45
+      && catalog.some((item) => item.id === intentResult.serviceId)
+      ? intentResult.serviceId
+      : '';
+    const serviceId = selectedByClassifier || selectedService?.id || '';
     const service = catalog.find((item) => item.id === serviceId);
-    if (!service || intentResult.confidence < 0.45) {
+    if (!service || (intentResult.confidence < 0.45 && !selectedService)) {
       await reply(renderWhatsAppCatalog(catalog, { includePricing: explicitlyAsksPricing }));
       await jobRef.set({ status: 'completed', intent: intentResult.intent, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
@@ -6245,7 +6249,6 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     };
     if (questionnaireNeedsExtractionPass({
       intent: intentResult.intent,
-      availableQuestions: questions,
       questionnaire: serviceQuestions,
     })) {
       assistantPhase = 'questionnaire_extraction';
@@ -6307,31 +6310,13 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     const currentMediaAssetRef = currentMediaAssetId ? db.collection('whatsappMediaAssets').doc(currentMediaAssetId) : null;
     const now = Date.now();
     if (validation.missingRequired.length) {
-      const missingQuestion = getFirstMissingRequiredQuestion(serviceQuestions, validation.missingRequired);
-      let canonicalRequestId = String(activeDraft?.requestId || '').trim();
-      if (intentResult.intent === 'service_booking') {
-        const requestDraft = await syncWhatsAppCanonicalRequestDraft({
-          identityId,
-          identity,
-          draftRef,
-          service,
-          serviceIds,
-          selectedPackageId,
-          answers: validation.answers,
-          location: activeDraft?.location || null,
-        });
-        if (requestDraft.code !== 'ready') {
-          await reply(requestDraft.code === 'active-request'
-            ? `You already have an active Uncedo request (${requestDraft.activeRequestId}). I have not started another one.`
-            : 'I could not start this request yet. Please check your active requests or contact Uncedo support.');
-          await jobRef.set({ status: 'completed', intent: intentResult.intent, errorCode: requestDraft.code, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-          return;
-        }
-        canonicalRequestId = requestDraft.requestId;
-      }
+      const canonicalRequestId = activeDraft?.serviceId === service.id
+        ? String(activeDraft.requestId || '').trim()
+        : '';
       await db.runTransaction(async (transaction) => {
         transaction.set(draftRef, {
           identityId,
+          principalId: activeDraft?.principalId || identity.linkedFirebaseUid || identity.guestPrincipalId || '',
           status: 'collecting',
           intent: intentResult.intent,
           serviceId: service.id,
@@ -6359,7 +6344,12 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         }, { merge: true });
       });
-      const nextQuestion = missingQuestion ? renderWhatsAppQuestion(missingQuestion) : 'Please provide the remaining required service details.';
+      const missingQuestions = getMissingRequiredQuestions(serviceQuestions, validation.missingRequired);
+      const nextQuestion = renderMissingWhatsAppQuestions({
+        serviceLabel: service.label,
+        questions: missingQuestions,
+        missingQuestionIds: missingQuestions.map((question) => question.id),
+      });
       const priceContext = intentResult.intent === 'service_booking' && explicitlyAsksPricing
         ? `${formatWhatsAppPriceGuidance(service.label, getConfiguredServicePriceRange(service))}\n\n`
         : '';
@@ -6392,7 +6382,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         serviceIds,
         selectedPackageId,
         answers: validation.answers,
-        location: activeDraft?.location || null,
+        location: activeDraft?.serviceId === service.id ? activeDraft.location || null : null,
       });
       if (requestDraft.code !== 'ready') {
         await reply(requestDraft.code === 'active-request'
@@ -6419,6 +6409,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     await db.runTransaction(async (transaction) => {
       transaction.set(draftRef, {
         identityId,
+        principalId: activeDraft?.principalId || identity.linkedFirebaseUid || identity.guestPrincipalId || '',
         status: isBooking ? 'quoted' : 'estimate_ready',
         intent: intentResult.intent,
         serviceId: service.id,

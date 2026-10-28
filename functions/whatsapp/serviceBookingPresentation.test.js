@@ -2,14 +2,23 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { formatWhatsAppBookingConfirmation, renderWhatsAppQuestion } = require('./serviceBookingPresentation');
+const { formatWhatsAppBookingConfirmation, renderMissingWhatsAppQuestions } = require('./serviceBookingPresentation');
 
-test('booking asks one formatted questionnaire question and lists its options cleanly', () => {
-  assert.equal(renderWhatsAppQuestion({
-    prompt: 'What type of vehicle do you have?',
-    options: [{ value: 'sedan', label: 'Sedan' }, { value: 'suv', label: 'SUV' }],
-  }), '*What type of vehicle do you have?*\n\n• Sedan\n• SUV');
-  assert.equal(renderWhatsAppQuestion({ prompt: 'Where should we meet?' }), '*Where should we meet?*');
+test('booking intake asks all missing questions together with numbered prompts and formatted options', () => {
+  const message = renderMissingWhatsAppQuestions({
+    serviceLabel: 'Car wash',
+    questions: [
+      { id: 'vehicle_type', prompt: 'What type of vehicle?', options: [{ value: 'suv', label: 'SUV' }, { value: 'sedan', label: 'Sedan' }] },
+      { id: 'service_location', prompt: 'Where should we wash it?' },
+      { id: 'timing', prompt: 'When do you need the service?', options: [{ value: 'now', label: 'Now' }, { value: 'later', label: 'Later' }] },
+    ],
+    missingQuestionIds: ['service_location', 'timing'],
+  });
+  assert.match(message, /\*To finish your Car wash request\*/);
+  assert.match(message, /1\. \*Where should we wash it\?\*/);
+  assert.match(message, /2\. \*When do you need the service\?\*/);
+  assert.match(message, /• Now\n   • Later/);
+  assert.doesNotMatch(message, /What type of vehicle/);
 });
 
 test('booking confirmation shows validated answers and emphasises the authoritative quote in WhatsApp format', () => {

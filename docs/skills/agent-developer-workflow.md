@@ -2,6 +2,16 @@
 
 Use this guide to deploy functions, build release APKs, copy releases, prune git history, and push changes to GitHub.
 
+## 0. Default Delivery Preference
+
+The user has asked that future code changes be delivered end to end. After appropriate checks pass:
+
+1. Deploy every changed backend function and applicable Firebase rules.
+2. Build and deploy each changed frontend site.
+3. Commit the changes and push them to the GitHub `main` branch.
+
+Scope deployments to the changed targets where possible. Report any deployment or GitHub authentication failure instead of claiming the release completed.
+
 ## 1. Firebase Functions Deploy
 
 Whenever backend/cloud function code under `functions/` (or rules/configs) is modified, deploy them to Firebase:

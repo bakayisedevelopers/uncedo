@@ -6,14 +6,26 @@ function safeLabel(value, maxLength = 180) {
   return formatWhatsAppText(value).replace(/\n/g, ' ').trim().slice(0, maxLength);
 }
 
-function renderWhatsAppQuestion(question = {}) {
-  const prompt = safeLabel(question.prompt || 'Please provide this detail.', 300);
-  const options = (Array.isArray(question.options) ? question.options : [])
-    .map((option) => safeLabel(option?.label || option?.value || '', 140))
-    .filter(Boolean);
-  return options.length
-    ? `*${prompt}*\n\n${options.map((option) => `• ${option}`).join('\n')}`
-    : `*${prompt}*`;
+function renderMissingWhatsAppQuestions({ serviceLabel = '', questions = [], missingQuestionIds = [] } = {}) {
+  const missing = new Set((Array.isArray(missingQuestionIds) ? missingQuestionIds : [])
+    .map((id) => String(id || '').trim())
+    .filter(Boolean));
+  const pending = (Array.isArray(questions) ? questions : [])
+    .filter((question) => missing.has(String(question?.id || '').trim()));
+  if (!pending.length) return '*A few service details are still needed.*';
+
+  const label = safeLabel(serviceLabel, 120);
+  const heading = label ? `*To finish your ${label} request*` : '*To finish your service request*';
+  const intro = 'Please reply in one message with the numbered answers. I’ll keep the details you’ve already shared.';
+  const numbered = pending.map((question, index) => {
+    const prompt = safeLabel(question.prompt || question.label || question.id || 'Please provide this detail.', 220);
+    const options = (Array.isArray(question.options) ? question.options : [])
+      .map((option) => safeLabel(option?.label || option?.value || '', 80))
+      .filter(Boolean)
+      .slice(0, 10);
+    return `${index + 1}. *${prompt}*${options.length ? `\n${options.map((option) => `   • ${option}`).join('\n')}` : ''}`;
+  });
+  return formatWhatsAppText([heading, intro, ...numbered].join('\n\n'));
 }
 
 function formatWhatsAppBookingConfirmation({ service = {}, questions = [], answers = {}, quote = {} } = {}) {
@@ -57,4 +69,4 @@ function formatWhatsAppBookingConfirmation({ service = {}, questions = [], answe
   };
 }
 
-module.exports = { formatWhatsAppBookingConfirmation, renderWhatsAppQuestion };
+module.exports = { formatWhatsAppBookingConfirmation, renderMissingWhatsAppQuestions };
