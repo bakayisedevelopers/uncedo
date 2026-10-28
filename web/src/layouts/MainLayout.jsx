@@ -46,7 +46,7 @@ export default function MainLayout({ children }) {
               <img
                 src="/logo.png"
                 alt="Uncedo logo"
-                className="h-8 w-8 rounded-lg object-cover ring-1 ring-zinc-200"
+                className="h-8 w-8 object-contain"
               />
               <span className="font-bold text-zinc-900">Uncedo</span>
             </div>

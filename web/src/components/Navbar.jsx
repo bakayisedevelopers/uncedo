@@ -10,7 +10,7 @@ export default function Navbar() {
             <img
               src="/logo.png"
               alt="Uncedo logo"
-              className="h-10 w-10 rounded-xl object-cover transition-transform group-hover:scale-[1.02]"
+              className="h-10 w-10 object-contain transition-transform group-hover:scale-[1.02]"
             />
             <span className="bg-gradient-to-r from-brand via-emerald-500 to-brand-dark bg-clip-text text-xl font-black text-transparent">Uncedo</span>
           </Link>
