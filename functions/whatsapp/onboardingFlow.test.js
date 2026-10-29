@@ -79,6 +79,15 @@ test('account choice uses sign-in for an existing account and sign-up for a new 
   assert.equal(getWhatsAppAccountSetupMode('unexpected-action'), '');
 });
 
+test('matched guest account-link retries preserve their server-selected link mode', () => {
+  const retry = transitionWhatsAppOnboarding({
+    state: { stage: 'awaiting_account_signup', role: 'customer', accountMode: 'link-existing', accountMatchMode: 'auth-phone' },
+    text: 'resend account link',
+  });
+  assert.equal(retry.action, 'link-customer-account');
+  assert.equal(retry.state.accountMatchMode, 'auth-phone');
+});
+
 test('guest preferred name and home address are explicit and optional', () => {
   const named = transitionWhatsAppOnboarding({
     state: { stage: 'awaiting_preferred_name', role: 'customer', accountMode: 'guest' },

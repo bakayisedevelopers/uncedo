@@ -152,9 +152,11 @@ const {
   getWhatsAppHelperAgreementUrl,
 } = require('./whatsapp/signupLinks');
 const {
+  resolveUniqueWhatsAppCustomerAccount,
   selectUniqueVerifiedWhatsAppAccount,
   selectUniqueWhatsAppAccountCandidate,
 } = require('./whatsapp/accountResolution');
+const { GUEST_ACCOUNT_BUTTONS, buildGuestAccountPrompt } = require('./whatsapp/guestAccountPrompt');
 const {
   WHATSAPP_ACCOUNT_LINK_TTL_MS,
   buildWhatsAppAccountLinkUrl,
@@ -2293,7 +2295,7 @@ async function createWhatsAppExistingAccountLink({ identityId, sourceEventId, ca
   return { code: 'created', url, expiresAtMs: challenge.challenge.expiresAtMs, role };
 }
 
-async function createWhatsAppSignupLink({ identityId, role, sourceEventId, mode = 'signup' }) {
+async function createWhatsAppSignupLink({ identityId, role, sourceEventId, mode = 'signup', requireAuthPhoneMatch = false, bootstrapCustomerProfile = false }) {
   if (!whatsappOnboardingEnabled()) throw new HttpsError('failed-precondition', 'WhatsApp account onboarding is not enabled.');
   if (!['customer', 'helper'].includes(String(role || '').trim().toLowerCase())) {
     throw new HttpsError('invalid-argument', 'A customer or helper account type is required.');
@@ -2312,6 +2314,8 @@ async function createWhatsAppSignupLink({ identityId, role, sourceEventId, mode 
     identityId: String(identityId || ''),
     role: String(role).toLowerCase(),
     entryMode: String(mode).toLowerCase() === 'signin' ? 'signin' : 'signup',
+    requireAuthPhoneMatch: requireAuthPhoneMatch === true,
+    bootstrapCustomerProfile: bootstrapCustomerProfile === true,
     phoneHash: createHash('sha256').update(phone.phoneNumber).digest('hex'),
     sourceEventId: String(sourceEventId || ''),
     status: 'pending',
@@ -2331,6 +2335,38 @@ async function createWhatsAppSignupLink({ identityId, role, sourceEventId, mode 
     wa_mode: normalizedMode,
   }).toString();
   return { url: url.toString(), tokenHash, expiresAtMs };
+}
+
+async function createWhatsAppGuestAccountLink({ identityId, sourceEventId }) {
+  if (!whatsappOnboardingEnabled()) return { code: 'disabled' };
+  const identitySnapshot = await db.collection('whatsappIdentities').doc(String(identityId || '')).get();
+  if (!identitySnapshot.exists) return { code: 'identity-not-found' };
+  const identity = identitySnapshot.data() || {};
+  if (!identity.guestPrincipalId || identity.linkedFirebaseUid) return { code: 'identity-not-guest' };
+  let phone;
+  try { phone = normalizeWhatsAppIdentityPhone(`+${String(identity.waId || '')}`); } catch (_) { return { code: 'identity-invalid' }; }
+  if (String(identity.phoneNumberId || '') !== String(getWhatsAppSecrets().phoneNumberId || '')) return { code: 'identity-invalid' };
+
+  const match = await lookupWhatsAppCustomerAccount(phone.phoneNumber);
+  if (match.status !== 'found' || match.candidate?.role !== 'customer') return { code: match.status };
+  if (match.linkMode === 'account-link') {
+    return createWhatsAppExistingAccountLink({ identityId, sourceEventId, candidate: match.candidate });
+  }
+  if (match.linkMode === 'signin') {
+    try {
+      const signup = await createWhatsAppSignupLink({
+        identityId, role: 'customer', sourceEventId, mode: 'signin',
+        requireAuthPhoneMatch: true, bootstrapCustomerProfile: true,
+      });
+      return { code: 'signin-link-created', url: signup.url, tokenHash: signup.tokenHash, expiresAtMs: signup.expiresAtMs };
+    } catch (error) {
+      logger.warn('whatsapp_guest_account_signin_link_failed', {
+        identityId, errorCode: String(error?.code || 'signup_link_failed').slice(0, 80),
+      });
+      return { code: 'link-failed' };
+    }
+  }
+  return { code: 'unsupported' };
 }
 
 function getWhatsAppHelperAgreementBaseUrl() {
@@ -3683,11 +3719,13 @@ async function findWhatsAppAccountMatches(phoneNumber) {
   try {
     const authUser = await admin.auth().getUserByPhoneNumber(normalizedPhone);
     const profileSnapshot = await db.collection('users').doc(authUser.uid).get();
-    if (profileSnapshot.exists) records.push({
+    records.push({
       uid: authUser.uid,
       authPhone: authUser.phoneNumber || normalizedPhone,
       authPhoneVerified: true,
-      profile: profileSnapshot.data() || {},
+      authRole: String(authUser.customClaims?.role || '').trim().toLowerCase(),
+      profile: profileSnapshot.exists ? profileSnapshot.data() || {} : {},
+      profileExists: profileSnapshot.exists,
     });
   } catch (error) {
     if (error?.code !== 'auth/user-not-found') throw error;
@@ -3700,22 +3738,82 @@ async function findWhatsAppAccountMatches(phoneNumber) {
   const byUid = new Map(records.map((record) => [record.uid, record]));
   for (const snapshot of [whatsappProfiles, verifiedPhoneProfiles]) {
     for (const document of snapshot.docs) {
+      const existing = byUid.get(document.id) || {};
       byUid.set(document.id, {
+        ...existing,
         uid: document.id,
-        authPhone: '',
-        authPhoneVerified: false,
-        ...(byUid.get(document.id) || {}),
         profile: document.data() || {},
+        profileExists: true,
       });
     }
   }
   return [...byUid.values()];
 }
 
+async function lookupWhatsAppCustomerAccount(phoneNumber) {
+  try {
+    const normalizedPhone = normalizeWhatsAppIdentityPhone(phoneNumber).phoneNumber;
+    const records = await findWhatsAppAccountMatches(normalizedPhone);
+    return resolveUniqueWhatsAppCustomerAccount(records, normalizedPhone);
+  } catch (error) {
+    logger.warn('whatsapp_guest_account_lookup_failed', {
+      errorCode: String(error?.code || 'account_lookup_failed').slice(0, 80),
+    });
+    return { status: 'unavailable', candidate: null, linkMode: '' };
+  }
+}
+
 async function autoLinkVerifiedWhatsAppAccount(identityId, identity) {
   if (String(identity?.linkedFirebaseUid || '').trim()) return { identity, unverifiedCandidate: null };
   const identityRef = db.collection('whatsappIdentities').doc(identityId);
   const nowMs = Date.now();
+
+  // New WhatsApp identities begin as guests. For these, resolve and report a
+  // possible customer account but wait for an explicit Link Account choice.
+  if (String(identity?.guestPrincipalId || '').trim()) {
+    const shouldCheck = await db.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(identityRef);
+      if (!snapshot.exists) return false;
+      const current = snapshot.data() || {};
+      if (current.linkedFirebaseUid) return false;
+      if (nowMs - Number(current.accountResolutionCheckedAtMs || 0) < 5 * 60 * 1000) return false;
+      transaction.set(identityRef, {
+        accountResolutionCheckedAtMs: nowMs,
+        accountResolutionStatus: 'checking',
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      return true;
+    });
+    if (!shouldCheck) {
+      const latestSnapshot = await identityRef.get();
+      const latestIdentity = latestSnapshot.exists ? latestSnapshot.data() || identity : identity;
+      return {
+        identity: latestIdentity,
+        unverifiedCandidate: null,
+        guestAccountMatch: {
+          status: String(latestIdentity.accountMatchStatus || 'unavailable'),
+          checkedAtMs: Number(latestIdentity.accountResolutionCheckedAtMs || 0),
+        },
+      };
+    }
+
+    const resolution = await lookupWhatsAppCustomerAccount(`+${String(identity.waId || '')}`);
+    const accountResolutionStatus = resolution.status === 'found' ? 'account_link_required'
+      : resolution.status === 'not-found' ? 'no_verified_match'
+        : resolution.status === 'unavailable' ? 'lookup_failed' : 'ambiguous_match';
+    await identityRef.set({
+      accountResolutionStatus,
+      accountMatchStatus: resolution.status,
+      accountResolutionCheckedAtMs: nowMs,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    return {
+      identity: { ...identity, accountResolutionStatus, accountMatchStatus: resolution.status, accountResolutionCheckedAtMs: nowMs },
+      unverifiedCandidate: null,
+      guestAccountMatch: { status: resolution.status, checkedAtMs: nowMs },
+    };
+  }
+
   const shouldCheck = await db.runTransaction(async (transaction) => {
     const snapshot = await transaction.get(identityRef);
     if (!snapshot.exists) return false;
@@ -4350,7 +4448,7 @@ async function resolveWhatsAppToolAuthorization(identityId, eventIdentity) {
   return { identity, authorization: { uid, role: 'guest', verified: false, linked: false } };
 }
 
-function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, eventId }) {
+function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, eventId, guestAccountMatch = null }) {
   return createWhatsAppToolRegistry({
     handlers: {
       async getMyProfile(_args, context) {
@@ -4360,15 +4458,13 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
           if (!guestIdentity || !guestIdentity.guestPrincipalId || guestIdentity.linkedFirebaseUid
             || !conversationSnapshot.exists
             || String(conversationSnapshot.data()?.lastInboundEventId || '') !== eventId) return { code: 'stale' };
-          const whatsappDigits = String(guestIdentity.waId || '').replace(/\D/g, '');
-          const whatsappPhoneNumber = whatsappDigits.length >= 8 && whatsappDigits.length <= 15 ? `+${whatsappDigits}` : '';
           return {
             firstName: '',
             lastName: '',
             preferredName: String(guestIdentity.preferredName || guestIdentity.profileName || '').trim().slice(0, 100),
             email: '',
             phoneNumber: '',
-            whatsappPhoneNumber,
+            whatsappPhoneNumber: '',
             role: 'customer',
             accountType: 'guest',
             homeAddress: String(guestIdentity.homeAddress || '').trim().slice(0, 500),
@@ -4391,6 +4487,21 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
           homeAddress: String(profile.homeAddress || identity.homeAddress || '').trim().slice(0, 500),
           verificationStatus: context.authorization.role === 'helper' ? String(profile.verificationStatus || 'pending') : '',
         };
+      },
+      async checkMyAccountByWhatsAppNumber(_args, context) {
+        const guestIdentity = await getWhatsAppIdentityForCurrentSender(identityId, context.identity);
+        const conversationSnapshot = await conversationRef.get();
+        if (!guestIdentity || !guestIdentity.guestPrincipalId || guestIdentity.linkedFirebaseUid
+          || !conversationSnapshot.exists
+          || String(conversationSnapshot.data()?.lastInboundEventId || '') !== eventId) {
+          return { matchStatus: 'unavailable' };
+        }
+        let match = guestAccountMatch;
+        if (!match || match.status === 'unavailable' || Date.now() - Number(match.checkedAtMs || 0) > 30_000) {
+          match = await lookupWhatsAppCustomerAccount(`+${String(guestIdentity.waId || '')}`);
+        }
+        return { matchStatus: ['found', 'not-found', 'ambiguous', 'unsupported'].includes(match?.status)
+          ? match.status : 'unavailable' };
       },
       async proposeProfileChange(args, context) {
         const value = String(args.value || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 80);
@@ -4422,18 +4533,28 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
 }
 
 function formatWhatsAppToolResult(toolName, result = {}) {
+  if (toolName === 'checkMyAccountByWhatsAppNumber') {
+    const statements = {
+      found: 'One customer account matches this WhatsApp number.',
+      'not-found': 'No Uncedo customer account matches this WhatsApp number.',
+      ambiguous: 'More than one account may match this WhatsApp number; do not choose an account to link.',
+      unsupported: 'An account record matches, but it cannot be safely linked as a customer account.',
+      unavailable: 'The account lookup could not be completed.',
+    };
+    return statements[String(result.matchStatus || 'unavailable')] || statements.unavailable;
+  }
   if (toolName === 'getMyProfile') {
     if (result.code === 'profile-not-found') return 'I could not find a saved profile for this linked account.';
     const name = [result.firstName, result.lastName].filter(Boolean).join(' ') || result.preferredName || 'Not saved';
-    const lines = [
-      '*Your saved Uncedo profile*',
-      `• *Name:* ${name}`,
+    const isGuest = result.accountType === 'guest';
+    const lines = ['*Your saved Uncedo profile*', `• *Name:* ${name}`];
+    if (!isGuest) lines.push(
       `• *Email:* ${result.email || 'Not saved'}`,
       `• *Contact number:* ${result.phoneNumber || 'Not saved'}`,
       `• *WhatsApp number:* ${result.whatsappPhoneNumber || 'Not saved'}`,
-      `• *Role:* ${result.role || 'Not available'}`,
-      ...(result.accountType === 'guest' ? ['• *Account:* Guest'] : []),
-    ];
+    );
+    lines.push(`• *Role:* ${result.role || 'Not available'}`);
+    if (isGuest) lines.push('• *Account:* Guest');
     if (result.homeAddress) lines.push(`• *Saved home address:* ${result.homeAddress}`);
     if (result.role === 'helper' && result.verificationStatus) lines.push(`• *Verification:* ${result.verificationStatus}`);
     return lines.join('\n');
@@ -4584,7 +4705,8 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       return;
     }
 
-    if (whatsappOnboardingEnabled() && accountResolution.unverifiedCandidate && !identity.linkedFirebaseUid) {
+    if (whatsappOnboardingEnabled() && accountResolution.unverifiedCandidate && !identity.linkedFirebaseUid
+      && !String(identity.guestPrincipalId || '').trim()) {
       let accountLink;
       try {
         accountLink = await createWhatsAppExistingAccountLink({
@@ -4612,6 +4734,13 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     }
 
     const buttonId = String(inbound.interactive?.buttonId || '').trim();
+    if (!Object.values(GUEST_ACCOUNT_BUTTONS).includes(buttonId)
+      && String(conversation.whatsappGuestAccountPrompt?.status || '') === 'pending') {
+      await conversationRef.set({
+        whatsappGuestAccountPrompt: { ...conversation.whatsappGuestAccountPrompt, status: 'superseded' },
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+    }
 
     // Policy acknowledgement and account onboarding are deterministic backend
     // workflows. They must remain available when the optional AI router is off.
@@ -4688,6 +4817,134 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       await reply(policyConsent.text, policyConsent.interactive);
       await jobRef.set({ status: 'completed', intent: 'policy_acceptance_required', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
+    }
+
+    if (Object.values(GUEST_ACCOUNT_BUTTONS).includes(buttonId)) {
+      const currentIdentity = await getWhatsAppIdentityForCurrentSender(identityId, identity);
+      if (!currentIdentity?.guestPrincipalId || currentIdentity.linkedFirebaseUid) {
+        await reply('This guest account option is no longer available. Please ask for your profile details again to see the current account options.');
+        await jobRef.set({ status: 'completed', intent: 'guest_account_choice', reason: 'identity-not-guest', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+
+      const action = buttonId === GUEST_ACCOUNT_BUTTONS.CREATE_ACCOUNT ? 'create-account'
+        : buttonId === GUEST_ACCOUNT_BUTTONS.LINK_ACCOUNT ? 'link-account' : 'continue-as-guest';
+      const choiceClaim = await db.runTransaction(async (transaction) => {
+        const snapshot = await transaction.get(conversationRef);
+        if (!snapshot.exists) return { code: 'conversation-not-found' };
+        const current = snapshot.data() || {};
+        const prompt = current.whatsappGuestAccountPrompt || {};
+        const actionWasOffered = action === 'continue-as-guest'
+          || String(prompt.offeredAction || '') === action;
+        if (String(current.lastInboundEventId || '') !== eventId
+          || String(prompt.identityId || '') !== identityId
+          || String(prompt.status || '') !== 'pending'
+          || Number(prompt.expiresAtMs || 0) <= Date.now()
+          || !actionWasOffered) return { code: 'choice-not-current' };
+        transaction.set(conversationRef, {
+          whatsappGuestAccountPrompt: { ...prompt, status: 'processing', selectedAction: action, selectedAtMs: Date.now() },
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        return { code: 'claimed', prompt };
+      });
+      if (choiceClaim.code !== 'claimed') {
+        await reply('That account option has expired. Please ask for your profile details again to see the current options.');
+        await jobRef.set({ status: 'completed', intent: 'guest_account_choice', reason: choiceClaim.code, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+
+      if (action === 'continue-as-guest') {
+        await conversationRef.set({
+          whatsappGuestAccountPrompt: { ...choiceClaim.prompt, status: 'continued-as-guest', selectedAction: action, selectedAtMs: Date.now() },
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        await reply('Of course. You can continue using Uncedo as a guest and ask about services or make eligible service requests here.');
+        await jobRef.set({ status: 'completed', intent: 'guest_account_choice', reason: 'continued-as-guest', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+
+      try {
+        if (action === 'create-account') {
+          if (!whatsappOnboardingEnabled()) throw new Error('WhatsApp account setup is temporarily unavailable.');
+          const latestMatch = await lookupWhatsAppCustomerAccount(`+${String(currentIdentity.waId || '')}`);
+          if (latestMatch.status !== 'not-found') {
+            const message = latestMatch.status === 'found'
+              ? 'A matching customer account is now registered with this WhatsApp number. Please ask for your profile details again to get the current link option, or continue as a guest.'
+              : 'I could not confirm that creating another account is safe right now. Please continue as a guest or contact Uncedo support.';
+            await conversationRef.set({
+              whatsappGuestAccountPrompt: { ...choiceClaim.prompt, status: 'completed', selectedAction: action, selectedAtMs: Date.now() },
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            }, { merge: true });
+            await reply(message);
+            await jobRef.set({ status: 'completed', intent: 'guest_account_choice', reason: `create-recheck-${latestMatch.status}`, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            return;
+          }
+          const signup = await createWhatsAppSignupLink({ identityId, role: 'customer', sourceEventId: eventId, mode: 'signup' });
+          const onboarding = {
+            role: 'customer', accountMode: 'account', stage: 'awaiting_account_signup',
+            signupChallengeHash: signup.tokenHash, signupLinkExpiresAtMs: signup.expiresAtMs,
+            createdAtMs: Date.now(), updatedAtMs: Date.now(),
+          };
+          await conversationRef.set({
+            whatsappOnboarding: onboarding, currentMode: 'onboarding',
+            whatsappGuestAccountPrompt: { ...choiceClaim.prompt, status: 'completed', selectedAction: action, selectedAtMs: Date.now() },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+          await reply(`*Create your Uncedo account*\n\nUse this secure link to create a customer account: ${signup.url}\n\nAfter you finish, return to this chat to continue setup. The link expires in 30 minutes.`);
+          await jobRef.set({ status: 'completed', intent: 'guest_account_choice', reason: 'signup-link-created', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          return;
+        }
+
+        const accountLink = await createWhatsAppGuestAccountLink({ identityId, sourceEventId: eventId });
+        if (accountLink.code === 'created') {
+          await conversationRef.set({
+            whatsappOnboarding: { role: 'customer', accountMode: 'link-existing', accountMatchMode: 'profile-match', stage: 'awaiting_account_signup', createdAtMs: Date.now(), updatedAtMs: Date.now() },
+            currentMode: 'onboarding',
+            whatsappGuestAccountPrompt: { ...choiceClaim.prompt, status: 'completed', selectedAction: action, selectedAtMs: Date.now() },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+          await reply(`*Link your Uncedo account*\n\nOpen this secure link to connect the matching customer account to this WhatsApp chat: ${accountLink.url}\n\nThe link expires in 24 hours.`);
+        } else if (accountLink.code === 'signin-link-created') {
+          const onboarding = {
+            role: 'customer', accountMode: 'link-existing', accountMatchMode: 'auth-phone', stage: 'awaiting_account_signup',
+            signupChallengeHash: accountLink.tokenHash, signupLinkExpiresAtMs: accountLink.expiresAtMs,
+            createdAtMs: Date.now(), updatedAtMs: Date.now(),
+          };
+          await conversationRef.set({
+            whatsappOnboarding: onboarding, currentMode: 'onboarding',
+            whatsappGuestAccountPrompt: { ...choiceClaim.prompt, status: 'completed', selectedAction: action, selectedAtMs: Date.now() },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+          await reply(`*Link your Uncedo account*\n\nUse this secure link to sign in to the customer account registered with this number: ${accountLink.url}\n\nAfter you sign in, the account will be linked to this chat. The link expires in 30 minutes.`);
+        } else if (accountLink.code === 'recent-link-sent') {
+          await conversationRef.set({
+            whatsappOnboarding: { role: 'customer', accountMode: 'link-existing', accountMatchMode: 'profile-match', stage: 'awaiting_account_signup', createdAtMs: Date.now(), updatedAtMs: Date.now() },
+            currentMode: 'onboarding',
+          }, { merge: true });
+          await reply('A secure account link was sent recently. Please use the link in that earlier message; if it has expired, ask for your profile details again to request a new one.');
+        } else if (['not-found', 'ambiguous', 'unsupported'].includes(accountLink.code)) {
+          await reply('I could not safely match one customer account to this WhatsApp chat. You can continue as a guest or contact Uncedo support for help linking an account.');
+        } else {
+          await reply('I could not create a secure account link right now. Please try again shortly or contact Uncedo support.');
+        }
+        await conversationRef.set({
+          whatsappGuestAccountPrompt: { ...choiceClaim.prompt, status: 'completed', selectedAction: action, selectedAtMs: Date.now() },
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        await jobRef.set({ status: 'completed', intent: 'guest_account_choice', reason: accountLink.code, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      } catch (error) {
+        await conversationRef.set({
+          whatsappGuestAccountPrompt: { ...choiceClaim.prompt, status: 'pending', selectedAction: '', selectedAtMs: 0 },
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        logger.warn('whatsapp_guest_account_choice_failed', {
+          identityId, action, errorCode: String(error?.code || 'account-choice-failed').slice(0, 80),
+        });
+        await reply('I could not start that account step right now. Please try again shortly or continue as a guest.');
+        await jobRef.set({ status: 'completed', intent: 'guest_account_choice', reason: String(error?.code || 'account-choice-failed').slice(0, 80), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
     }
 
     let onboardingState = conversation.whatsappOnboarding || {};
@@ -4828,7 +5085,39 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         }, { merge: true });
 
-        if (transition.action === 'create-customer-signup-link' || transition.action === 'link-customer-account'
+        const matchedGuestLinkRetry = transition.action === 'link-customer-account'
+          && onboardingState.accountMode === 'link-existing'
+          && ['profile-match', 'auth-phone'].includes(String(onboardingState.accountMatchMode || ''));
+        if (matchedGuestLinkRetry) {
+          const accountLink = await createWhatsAppGuestAccountLink({ identityId, sourceEventId: eventId });
+          if (accountLink.code === 'created') {
+            const nextState = { ...transition.state, accountMatchMode: 'profile-match' };
+            await conversationRef.set({
+              whatsappOnboarding: nextState,
+              currentMode: 'onboarding',
+            }, { merge: true });
+            await reply(`*Link your Uncedo account*\n\nOpen this secure link to connect the matching customer account to this WhatsApp chat: ${accountLink.url}\n\nThe link expires in 24 hours.`);
+          } else if (accountLink.code === 'signin-link-created') {
+            const nextState = {
+              ...transition.state, accountMatchMode: 'auth-phone',
+              signupChallengeHash: accountLink.tokenHash,
+              signupLinkExpiresAtMs: accountLink.expiresAtMs,
+            };
+            await conversationRef.set({
+              whatsappOnboarding: nextState,
+              currentMode: 'onboarding',
+            }, { merge: true });
+            await reply(`*Link your Uncedo account*\n\nUse this secure link to sign in to the customer account registered with this number: ${accountLink.url}\n\nAfter you sign in, the account will be linked to this chat. The link expires in 30 minutes.`);
+          } else if (accountLink.code === 'recent-link-sent') {
+            await reply('A secure account link was sent recently. Please use the link in that earlier message; if it has expired, send “resend account link” again shortly.');
+          } else {
+            await conversationRef.set({
+              whatsappOnboarding: { ...transition.state, accountMode: 'guest', accountMatchMode: '', stage: 'complete' },
+              currentMode: 'assistant',
+            }, { merge: true });
+            await reply('I could not safely match one customer account to this WhatsApp chat. You can ask for your profile details again to check the current options, or continue as a guest.');
+          }
+        } else if (transition.action === 'create-customer-signup-link' || transition.action === 'link-customer-account'
           || transition.action === 'create-helper-signup-link' || transition.action === 'link-helper-account') {
           let signup = null;
           try {
@@ -5783,7 +6072,10 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     const toolPrincipal = await resolveWhatsAppToolAuthorization(identityId, identity);
     const toolIdentity = toolPrincipal.identity || identity;
     const toolAuthorization = toolPrincipal.authorization;
-    const toolRegistry = buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, eventId });
+    const toolRegistry = buildWhatsAppAssistantToolRegistry({
+      identityId, conversationRef, eventId,
+      guestAccountMatch: accountResolution.guestAccountMatch || null,
+    });
     const availableTools = toolRegistry.definitions({ identity: toolIdentity, authorization: toolAuthorization });
     assistantPhase = 'classification';
     await jobRef.set({ phase: assistantPhase, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
@@ -5906,10 +6198,12 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       : '').filter(Boolean).join('\n');
     const lastToolObservation = [...executedToolResults].reverse().find((item) => item.result);
     let responseText = '';
+    let responseGenerationFallback = false;
     try {
       responseText = parseResponse(JSON.stringify({ response: intentResult.assistantResponse || '' }));
       assertNoUnsupportedMoney(responseText, evidenceText);
     } catch (error) {
+      responseGenerationFallback = true;
       responseText = lastToolObservation
         ? formatWhatsAppToolResult(lastToolObservation.toolName, lastToolObservation.result)
         : intentResult.intent === 'greeting'
@@ -5939,6 +6233,54 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     }
 
     if (intentResult.intent !== 'service_booking') {
+      const guestProfileObservation = [...executedToolResults].reverse().find((item) => item.toolName === 'getMyProfile'
+        && item.result?.accountType === 'guest')?.result;
+      if (guestProfileObservation && identity.guestPrincipalId && !identity.linkedFirebaseUid
+        && whatsappOnboardingEnabled()) {
+        const accountMatchObservation = [...executedToolResults].reverse()
+          .find((item) => item.toolName === 'checkMyAccountByWhatsAppNumber' && item.result)?.result;
+        let matchStatus = accountMatchObservation?.matchStatus
+          || accountResolution.guestAccountMatch?.status || 'unavailable';
+        const preflightAgeMs = Date.now() - Number(accountResolution.guestAccountMatch?.checkedAtMs || 0);
+        if (matchStatus === 'unavailable' || (!accountMatchObservation && preflightAgeMs > 30_000)) {
+          matchStatus = (await lookupWhatsAppCustomerAccount(`+${String(identity.waId || '')}`)).status;
+        }
+        const accountPrompt = buildGuestAccountPrompt(matchStatus);
+        const guestProfileText = responseGenerationFallback || !String(responseText || '').trim()
+          ? formatWhatsAppToolResult('getMyProfile', guestProfileObservation)
+          : String(responseText || '').trim();
+        const guestTextLimit = Math.max(0, 1024 - accountPrompt.text.length - 2);
+        const boundedGuestProfileText = guestProfileText.length > guestTextLimit
+          ? formatWhatsAppToolResult('getMyProfile', guestProfileObservation).slice(0, guestTextLimit).trimEnd()
+          : guestProfileText;
+        const completeText = `${boundedGuestProfileText}\n\n${accountPrompt.text}`;
+        await conversationRef.set({
+          whatsappGuestAccountPrompt: {
+            identityId,
+            sourceEventId: eventId,
+            status: 'pending',
+            matchStatus: accountPrompt.status,
+            offeredAction: accountPrompt.action,
+            createdAtMs: Date.now(),
+            expiresAtMs: Date.now() + (15 * 60 * 1000),
+          },
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        await reply(completeText, {
+          ...accountPrompt.interactive,
+          body: { ...(accountPrompt.interactive.body || {}), text: completeText },
+        });
+        await jobRef.set({
+          status: 'completed', intent: intentResult.intent,
+          lastToolName: lastToolObservation?.toolName || null,
+          toolResultCode: lastToolObservation?.result?.code || lastToolObservation?.result?.matchStatus || lastToolObservation?.errorCode || 'no-tool-required',
+          aiProvider: intentResult.provider || null, aiModel: intentResult.model || null,
+          toolCallCount: agentOutcome.toolCallCount,
+          guestAccountMatchStatus: accountPrompt.status,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        return;
+      }
       const profileProposal = [...executedToolResults].reverse()
         .find((item) => item.toolName === 'proposeProfileChange')?.result;
       if (profileProposal?.code === 'confirmation-required') {
@@ -8397,17 +8739,7 @@ exports.completeWhatsAppSignupLink = onCall({
   }
 
   const profileRef = db.collection('users').doc(uid);
-  const [profileSnap, identitySnap] = await Promise.all([
-    profileRef.get(), db.collection('whatsappIdentities').doc(String(challenge.identityId || '')).get(),
-  ]);
-  if (!profileSnap.exists || !profileAllowsRole(profileSnap.data() || {}, challenge.role)) {
-    logger.warn('whatsapp_signup_link_rejected', {
-      actorHash,
-      identityHash: whatsappDiagnosticHash(challenge.identityId),
-      reason: profileSnap.exists ? 'profile_role_mismatch' : 'profile_missing',
-    });
-    throw new HttpsError('permission-denied', 'This Uncedo account does not match the account type selected in WhatsApp.');
-  }
+  const identitySnap = await db.collection('whatsappIdentities').doc(String(challenge.identityId || '')).get();
   if (!identitySnap.exists) {
     logger.warn('whatsapp_signup_link_rejected', { actorHash, reason: 'identity_missing' });
     throw new HttpsError('failed-precondition', 'The WhatsApp conversation could not be found. Start again from that chat.');
@@ -8419,6 +8751,43 @@ exports.completeWhatsAppSignupLink = onCall({
       actorHash, identityHash: whatsappDiagnosticHash(challenge.identityId), reason: 'phone_hash_mismatch',
     });
     throw new HttpsError('failed-precondition', 'The WhatsApp identity has changed. Start again from that chat.');
+  }
+
+  let authUser = null;
+  if (challenge.requireAuthPhoneMatch === true) {
+    try { authUser = await admin.auth().getUser(uid); } catch (_) {
+      throw new HttpsError('permission-denied', 'Sign in to the Uncedo account registered with this WhatsApp number.');
+    }
+    let authenticatedPhone = '';
+    try { authenticatedPhone = normalizeWhatsAppIdentityPhone(authUser.phoneNumber || '').phoneNumber; } catch (_) { authenticatedPhone = ''; }
+    if (authenticatedPhone !== phone.phoneNumber) {
+      throw new HttpsError('permission-denied', 'This account is not registered with the WhatsApp number that requested the link.');
+    }
+  }
+
+  let profileSnap = await profileRef.get();
+  if (challenge.bootstrapCustomerProfile === true && challenge.role === 'customer' && authUser
+    && (!profileSnap.exists || !profileAllowsRole(profileSnap.data() || {}, 'customer'))) {
+    try {
+      await ensureCustomerProfileRecord({
+        db,
+        uid,
+        email: authUser.email || '',
+        displayName: authUser.displayName || '',
+        serverTimestamp: () => admin.firestore.FieldValue.serverTimestamp(),
+      });
+    } catch (_) {
+      throw new HttpsError('permission-denied', 'This Uncedo account cannot be initialized as a customer account.');
+    }
+    profileSnap = await profileRef.get();
+  }
+  if (!profileSnap.exists || !profileAllowsRole(profileSnap.data() || {}, challenge.role)) {
+    logger.warn('whatsapp_signup_link_rejected', {
+      actorHash,
+      identityHash: whatsappDiagnosticHash(challenge.identityId),
+      reason: profileSnap.exists ? 'profile_role_mismatch' : 'profile_missing',
+    });
+    throw new HttpsError('permission-denied', 'This Uncedo account does not match the account type selected in WhatsApp.');
   }
 
   const claim = await db.runTransaction(async (transaction) => {

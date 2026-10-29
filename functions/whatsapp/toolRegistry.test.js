@@ -7,14 +7,14 @@ const { TOOL_DEFINITIONS, createWhatsAppToolRegistry } = require('./toolRegistry
 const linkedCustomer = { uid: 'customer-1', role: 'customer', linked: true, verified: true };
 const linkedHelper = { uid: 'helper-1', role: 'helper', linked: true, verified: true, helperVerified: true };
 
-test('only profile read is available to guests, while linked customers and helpers also get the confirmed name-change tool', () => {
+test('guests get profile/account lookup while linked customers and helpers also get confirmed name change', () => {
   const registry = createWhatsAppToolRegistry();
-  const expectedNames = ['getMyProfile', 'proposeProfileChange'];
-  assert.deepEqual(Object.keys(TOOL_DEFINITIONS), expectedNames);
+  const linkedNames = ['getMyProfile', 'proposeProfileChange'];
+  assert.deepEqual(Object.keys(TOOL_DEFINITIONS), ['getMyProfile', 'checkMyAccountByWhatsAppNumber', 'proposeProfileChange']);
   const guestTools = registry.definitions({ identity: { guestPrincipalId: 'guest-1' }, authorization: { role: 'guest' } });
-  assert.deepEqual(guestTools.map((tool) => tool.name), ['getMyProfile']);
-  assert.deepEqual(registry.definitions({ authorization: linkedCustomer }).map((tool) => tool.name), expectedNames);
-  assert.deepEqual(registry.definitions({ authorization: linkedHelper }).map((tool) => tool.name), expectedNames);
+  assert.deepEqual(guestTools.map((tool) => tool.name), ['getMyProfile', 'checkMyAccountByWhatsAppNumber']);
+  assert.deepEqual(registry.definitions({ authorization: linkedCustomer }).map((tool) => tool.name), linkedNames);
+  assert.deepEqual(registry.definitions({ authorization: linkedHelper }).map((tool) => tool.name), linkedNames);
 
   const tools = registry.definitions({ authorization: linkedCustomer });
   assert.equal(tools[0].stateChanging, false);
@@ -63,7 +63,7 @@ test('a guest profile lookup is bound to the current guest principal and exposes
       assert.equal(context.identity.guestPrincipalId, 'guest-1');
       return {
         firstName: '', lastName: '', preferredName: 'Avery', email: '', phoneNumber: '',
-        whatsappPhoneNumber: '+27111111111', role: 'customer', accountType: 'guest',
+        whatsappPhoneNumber: '', role: 'customer', accountType: 'guest',
         homeAddress: '12 Example Road', verificationStatus: '',
       };
     },
@@ -75,7 +75,7 @@ test('a guest profile lookup is bound to the current guest principal and exposes
   });
   assert.equal(result.preferredName, 'Avery');
   assert.equal(result.accountType, 'guest');
-  assert.equal(result.whatsappPhoneNumber, '+27111111111');
+  assert.equal(result.whatsappPhoneNumber, '');
   assert.equal(profileReads, 1);
 
   await assert.rejects(registry.execute('getMyProfile', {}, {
@@ -87,6 +87,37 @@ test('a guest profile lookup is bound to the current guest principal and exposes
   }), { code: 'identity-verification-required' });
   await assert.rejects(registry.execute('proposeProfileChange', { field: 'firstName', value: 'Avery' }, {
     identity: { guestPrincipalId: 'guest-1' }, authorization: { role: 'guest', verified: false, linked: false },
+  }), { code: 'tool-permission-denied' });
+});
+
+test('guest account matching tool is read-only, sender-bound, and returns only a match status', async () => {
+  let called = 0;
+  const registry = createWhatsAppToolRegistry({ handlers: {
+    checkMyAccountByWhatsAppNumber: async (_args, context) => {
+      called += 1;
+      assert.equal(context.identity.guestPrincipalId, 'guest-1');
+      return { matchStatus: 'found' };
+    },
+  } });
+  const result = await registry.execute('checkMyAccountByWhatsAppNumber', {}, {
+    identity: { guestPrincipalId: 'guest-1', waId: '27600000001' },
+    authorization: { role: 'guest', verified: false, linked: false },
+  });
+  assert.deepEqual(result, { matchStatus: 'found' });
+  assert.equal(called, 1);
+  assert.equal(registry.isReadOnly('checkMyAccountByWhatsAppNumber'), true);
+
+  await assert.rejects(registry.execute('checkMyAccountByWhatsAppNumber', {}, {
+    identity: { waId: '27600000001' },
+    authorization: { role: 'guest', verified: false, linked: false },
+  }), { code: 'identity-verification-required' });
+  await assert.rejects(registry.execute('checkMyAccountByWhatsAppNumber', { phoneNumber: '+27600000001' }, {
+    identity: { guestPrincipalId: 'guest-1', waId: '27600000001' },
+    authorization: { role: 'guest', verified: false, linked: false },
+  }), /unsupported fields/);
+  await assert.rejects(registry.execute('checkMyAccountByWhatsAppNumber', {}, {
+    identity: { guestPrincipalId: 'guest-1', waId: '27600000001' },
+    authorization: linkedCustomer,
   }), { code: 'tool-permission-denied' });
 });
 

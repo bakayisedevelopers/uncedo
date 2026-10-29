@@ -110,6 +110,8 @@ function transitionWhatsAppOnboarding({ state = {}, buttonId = '', text = '', in
       ? String(state.role).toLowerCase()
       : '',
     accountMode: String(state.accountMode || '').trim(),
+    accountMatchMode: ['profile-match', 'auth-phone'].includes(String(state.accountMatchMode || '').trim())
+      ? String(state.accountMatchMode).trim() : '',
     homeAddressExists: state.homeAddressExists === true,
     signupLinkExpiresAtMs: Number(state.signupLinkExpiresAtMs || 0),
     agreementLinkExpiresAtMs: Number(state.agreementLinkExpiresAtMs || 0),

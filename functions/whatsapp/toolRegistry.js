@@ -11,7 +11,7 @@ const stringSchema = Object.freeze({ type: 'string' });
 // need a backend tool.
 const TOOL_DEFINITIONS = Object.freeze({
   getMyProfile: {
-    description: 'Read only the sender’s own saved profile details. For linked customers and helpers, this includes their name, email, contact and WhatsApp numbers, role, and helper verification status when applicable. For a guest customer, return only the saved WhatsApp guest profile, preferred name, WhatsApp number, and saved home address. Never return another person’s data or imply a guest has linked-account details.',
+    description: 'Read only the sender’s own saved profile details. For linked customers and helpers, this includes their name, email, contact and WhatsApp numbers, role, and helper verification status when applicable. For a guest customer, return only the saved preferred name, customer role, guest account type, and saved home address. Never return another person’s data, include the guest WhatsApp number, or imply a guest has linked-account details.',
     roles: ['guest', 'customer', 'helper'], auth: 'self-profile', fields: {},
     handler: 'getMyProfile', canonicalBackend: 'selfIdentityOrVerifiedLinkedProfileReader',
     outputSchema: resultSchema({
@@ -26,6 +26,12 @@ const TOOL_DEFINITIONS = Object.freeze({
       homeAddress: stringSchema,
       verificationStatus: stringSchema,
     }),
+  },
+  checkMyAccountByWhatsAppNumber: {
+    description: 'Check whether the current guest customer’s own WhatsApp number matches one linkable Uncedo customer account. The backend derives the number from the verified current WhatsApp sender; never request or provide a phone number. Returns only a match status, never account identifiers or personal details.',
+    roles: ['guest'], auth: 'self-profile', fields: {},
+    handler: 'checkMyAccountByWhatsAppNumber', canonicalBackend: 'currentWhatsAppAccountMatcher',
+    outputSchema: resultSchema({ matchStatus: stringSchema }, ['matchStatus']),
   },
   proposeProfileChange: {
     description: 'Propose changing only the authenticated account owner’s first name or surname. This creates a one-time confirmation prompt and never applies the change without the user’s separate confirmation. Do not use for phone number, email, role, or verification changes.',

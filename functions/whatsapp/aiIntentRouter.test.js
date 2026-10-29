@@ -46,15 +46,24 @@ test('intent prompt bounds history, includes approved tools, and marks messages 
 test('profile instructions support a guest self-profile without suggesting a linked app account', () => {
   const prompt = buildPrompt({
     message: { text: 'What personal details are saved for me?' },
-    availableTools: [{
-      name: 'getMyProfile',
-      description: 'Read only this sender’s saved WhatsApp guest profile and WhatsApp number.',
-      inputSchema: { type: 'object', additionalProperties: false },
-    }],
+    availableTools: [
+      {
+        name: 'getMyProfile',
+        description: 'Read only this sender’s saved WhatsApp guest profile.',
+        inputSchema: { type: 'object', additionalProperties: false },
+      },
+      {
+        name: 'checkMyAccountByWhatsAppNumber',
+        description: 'Check only this sender’s current WhatsApp number.',
+        inputSchema: { type: 'object', additionalProperties: false },
+      },
+    ],
   });
   assert.match(prompt, /saved WhatsApp guest profile/);
   assert.match(prompt, /do not imply the sender has an app account/);
-  assert.match(prompt, /"allowedToolNames":\["","getMyProfile"\]/);
+  assert.match(prompt, /must not include the WhatsApp number/);
+  assert.match(prompt, /call both getMyProfile and checkMyAccountByWhatsAppNumber/);
+  assert.match(prompt, /"allowedToolNames":\["","getMyProfile","checkMyAccountByWhatsAppNumber"\]/);
 });
 
 test('questionnaire extraction prompt forbids tool selection and asks for current-message facts only', () => {
@@ -91,13 +100,16 @@ test('response-only prompt asks for personalized missing-question follow-up with
   assert.match(prompt, /"allowedToolNames":\[""\]/);
 });
 
-test('model tool selection accepts only the two profile tools and strict JSON arguments', () => {
+test('model tool selection accepts only approved profile/account tools and strict JSON arguments', () => {
   const result = normalizeModelResult({
     intent: 'unclear', serviceId: '', confidence: 0.9, extractedAnswers: {},
     toolName: 'proposeProfileChange', toolArgumentsJson: '{"field":"firstName","value":"Alex"}',
   });
   assert.equal(result.toolName, 'proposeProfileChange');
   assert.deepEqual(result.toolArguments, { field: 'firstName', value: 'Alex' });
+  assert.equal(normalizeModelResult({
+    intent: 'unclear', toolName: 'checkMyAccountByWhatsAppNumber', toolArgumentsJson: '{}',
+  }).toolName, 'checkMyAccountByWhatsAppNumber');
   assert.throws(() => normalizeModelResult({ intent: 'booking_status', toolName: 'getBookingStatus', toolArgumentsJson: '{"requestId":"request_123"}' }), /unsupported tool/);
   assert.throws(() => normalizeModelResult({
     intent: 'booking_status', toolName: 'runArbitraryCode', toolArgumentsJson: '{}',
