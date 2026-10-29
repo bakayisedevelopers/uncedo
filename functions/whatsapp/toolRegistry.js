@@ -11,16 +11,19 @@ const stringSchema = Object.freeze({ type: 'string' });
 // need a backend tool.
 const TOOL_DEFINITIONS = Object.freeze({
   getMyProfile: {
-    description: 'Read the authenticated WhatsApp account owner’s own saved personal profile details, including their name, email, contact phone number, WhatsApp number, role, and helper verification status when applicable. Use only to answer a question about the sender’s own profile. Never return another person’s data.',
-    roles: ['customer', 'helper'], auth: 'verified-linked', fields: {},
-    handler: 'getMyProfile', canonicalBackend: 'verifiedLinkedProfileReader',
+    description: 'Read only the sender’s own saved profile details. For linked customers and helpers, this includes their name, email, contact and WhatsApp numbers, role, and helper verification status when applicable. For a guest customer, return only the saved WhatsApp guest profile, preferred name, WhatsApp number, and saved home address. Never return another person’s data or imply a guest has linked-account details.',
+    roles: ['guest', 'customer', 'helper'], auth: 'self-profile', fields: {},
+    handler: 'getMyProfile', canonicalBackend: 'selfIdentityOrVerifiedLinkedProfileReader',
     outputSchema: resultSchema({
       firstName: stringSchema,
       lastName: stringSchema,
+      preferredName: stringSchema,
       email: stringSchema,
       phoneNumber: stringSchema,
       whatsappPhoneNumber: stringSchema,
       role: stringSchema,
+      accountType: stringSchema,
+      homeAddress: stringSchema,
       verificationStatus: stringSchema,
     }),
   },
@@ -121,7 +124,14 @@ function createWhatsAppToolRegistry({ handlers = {} } = {}) {
     const role = roleForContext(context);
     if (!definition.roles.includes(role)) throw Object.assign(new Error('This tool is not available for this account.'), { code: 'tool-permission-denied' });
     const authorization = context.authorization || {};
-    if (!authorization.uid || authorization.verified !== true || authorization.linked !== true) {
+    const isVerifiedLinkedAccount = Boolean(authorization.uid && authorization.verified === true && authorization.linked === true);
+    const isBoundGuest = role === 'guest'
+      && Boolean(String(context.identity?.guestPrincipalId || '').trim())
+      && !String(context.identity?.linkedFirebaseUid || '').trim();
+    if (definition.auth === 'self-profile' && !isVerifiedLinkedAccount && !isBoundGuest) {
+      throw Object.assign(new Error('A verified linked account or bound WhatsApp guest profile is required.'), { code: 'identity-verification-required' });
+    }
+    if (definition.auth === 'verified-linked' && !isVerifiedLinkedAccount) {
       throw Object.assign(new Error('Verify and link your WhatsApp identity to access account information.'), { code: 'identity-verification-required' });
     }
     const args = validateToolArguments(definition, rawArgs);

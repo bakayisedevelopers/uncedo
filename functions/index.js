@@ -4350,20 +4350,45 @@ async function resolveWhatsAppToolAuthorization(identityId, eventIdentity) {
   return { identity, authorization: { uid, role: 'guest', verified: false, linked: false } };
 }
 
-function buildWhatsAppAssistantToolRegistry({ conversationRef, eventId }) {
+function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, eventId }) {
   return createWhatsAppToolRegistry({
     handlers: {
       async getMyProfile(_args, context) {
+        if (context.authorization.role === 'guest') {
+          const guestIdentity = await getWhatsAppIdentityForCurrentSender(identityId, context.identity);
+          const conversationSnapshot = await conversationRef.get();
+          if (!guestIdentity || !guestIdentity.guestPrincipalId || guestIdentity.linkedFirebaseUid
+            || !conversationSnapshot.exists
+            || String(conversationSnapshot.data()?.lastInboundEventId || '') !== eventId) return { code: 'stale' };
+          const whatsappDigits = String(guestIdentity.waId || '').replace(/\D/g, '');
+          const whatsappPhoneNumber = whatsappDigits.length >= 8 && whatsappDigits.length <= 15 ? `+${whatsappDigits}` : '';
+          return {
+            firstName: '',
+            lastName: '',
+            preferredName: String(guestIdentity.preferredName || guestIdentity.profileName || '').trim().slice(0, 100),
+            email: '',
+            phoneNumber: '',
+            whatsappPhoneNumber,
+            role: 'customer',
+            accountType: 'guest',
+            homeAddress: String(guestIdentity.homeAddress || '').trim().slice(0, 500),
+            verificationStatus: '',
+          };
+        }
         const profileSnapshot = await db.collection('users').doc(context.authorization.uid).get();
         if (!profileSnapshot.exists) return { code: 'profile-not-found' };
         const profile = profileSnapshot.data() || {};
+        const identity = context.identity || {};
         return {
           firstName: String(profile.firstName || profile.givenName || String(profile.fullName || profile.displayName || '').trim().split(/\s+/)[0] || '').slice(0, 100),
           lastName: String(profile.lastName || profile.surname || String(profile.fullName || profile.displayName || '').trim().split(/\s+/).slice(1).join(' ') || '').slice(0, 100),
+          preferredName: String(profile.whatsappPreferredName || identity.preferredName || '').trim().slice(0, 100),
           email: String(profile.email || '').slice(0, 180),
           phoneNumber: String(profile.phoneNumber || '').slice(0, 40),
-          whatsappPhoneNumber: String(profile.whatsappPhoneNumber || '').slice(0, 40),
+          whatsappPhoneNumber: String(profile.whatsappPhoneNumber || identity.whatsappPhoneNumber || '').slice(0, 40),
           role: context.authorization.role,
+          accountType: 'linked',
+          homeAddress: String(profile.homeAddress || identity.homeAddress || '').trim().slice(0, 500),
           verificationStatus: context.authorization.role === 'helper' ? String(profile.verificationStatus || 'pending') : '',
         };
       },
@@ -4399,7 +4424,7 @@ function buildWhatsAppAssistantToolRegistry({ conversationRef, eventId }) {
 function formatWhatsAppToolResult(toolName, result = {}) {
   if (toolName === 'getMyProfile') {
     if (result.code === 'profile-not-found') return 'I could not find a saved profile for this linked account.';
-    const name = [result.firstName, result.lastName].filter(Boolean).join(' ') || 'Not saved';
+    const name = [result.firstName, result.lastName].filter(Boolean).join(' ') || result.preferredName || 'Not saved';
     const lines = [
       '*Your saved Uncedo profile*',
       `• *Name:* ${name}`,
@@ -4407,7 +4432,9 @@ function formatWhatsAppToolResult(toolName, result = {}) {
       `• *Contact number:* ${result.phoneNumber || 'Not saved'}`,
       `• *WhatsApp number:* ${result.whatsappPhoneNumber || 'Not saved'}`,
       `• *Role:* ${result.role || 'Not available'}`,
+      ...(result.accountType === 'guest' ? ['• *Account:* Guest'] : []),
     ];
+    if (result.homeAddress) lines.push(`• *Saved home address:* ${result.homeAddress}`);
     if (result.role === 'helper' && result.verificationStatus) lines.push(`• *Verification:* ${result.verificationStatus}`);
     return lines.join('\n');
   }
@@ -5754,9 +5781,10 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       ...whatsappGeminiVertexConfig(),
     });
     const toolPrincipal = await resolveWhatsAppToolAuthorization(identityId, identity);
+    const toolIdentity = toolPrincipal.identity || identity;
     const toolAuthorization = toolPrincipal.authorization;
-    const toolRegistry = buildWhatsAppAssistantToolRegistry({ conversationRef, eventId });
-    const availableTools = toolRegistry.definitions({ authorization: toolAuthorization });
+    const toolRegistry = buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, eventId });
+    const availableTools = toolRegistry.definitions({ identity: toolIdentity, authorization: toolAuthorization });
     assistantPhase = 'classification';
     await jobRef.set({ phase: assistantPhase, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     const initialAgentInput = {
@@ -5808,6 +5836,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         toolName,
         toolArguments,
         {
+          identity: toolIdentity,
           authorization: toolAuthorization,
           role: toolAuthorization.role,
         },

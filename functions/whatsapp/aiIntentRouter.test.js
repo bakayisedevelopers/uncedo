@@ -43,6 +43,20 @@ test('intent prompt bounds history, includes approved tools, and marks messages 
   assert.match(prompt, /"allowedToolNames":\["","getMyProfile"\]/);
 });
 
+test('profile instructions support a guest self-profile without suggesting a linked app account', () => {
+  const prompt = buildPrompt({
+    message: { text: 'What personal details are saved for me?' },
+    availableTools: [{
+      name: 'getMyProfile',
+      description: 'Read only this sender’s saved WhatsApp guest profile and WhatsApp number.',
+      inputSchema: { type: 'object', additionalProperties: false },
+    }],
+  });
+  assert.match(prompt, /saved WhatsApp guest profile/);
+  assert.match(prompt, /do not imply the sender has an app account/);
+  assert.match(prompt, /"allowedToolNames":\["","getMyProfile"\]/);
+});
+
 test('questionnaire extraction prompt forbids tool selection and asks for current-message facts only', () => {
   const prompt = buildPrompt({
     message: { text: 'Wash my SUV at home.' },

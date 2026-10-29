@@ -7,11 +7,12 @@ const { TOOL_DEFINITIONS, createWhatsAppToolRegistry } = require('./toolRegistry
 const linkedCustomer = { uid: 'customer-1', role: 'customer', linked: true, verified: true };
 const linkedHelper = { uid: 'helper-1', role: 'helper', linked: true, verified: true, helperVerified: true };
 
-test('only profile read and profile change tools are available to linked customers and helpers', () => {
+test('only profile read is available to guests, while linked customers and helpers also get the confirmed name-change tool', () => {
   const registry = createWhatsAppToolRegistry();
   const expectedNames = ['getMyProfile', 'proposeProfileChange'];
   assert.deepEqual(Object.keys(TOOL_DEFINITIONS), expectedNames);
-  assert.deepEqual(registry.definitions({ authorization: { role: 'guest' } }), []);
+  const guestTools = registry.definitions({ identity: { guestPrincipalId: 'guest-1' }, authorization: { role: 'guest' } });
+  assert.deepEqual(guestTools.map((tool) => tool.name), ['getMyProfile']);
   assert.deepEqual(registry.definitions({ authorization: linkedCustomer }).map((tool) => tool.name), expectedNames);
   assert.deepEqual(registry.definitions({ authorization: linkedHelper }).map((tool) => tool.name), expectedNames);
 
@@ -32,7 +33,7 @@ test('profile lookup requires a verified linked account and returns only its dec
       return {
         firstName: 'Avery', lastName: 'Customer', email: 'avery@example.test',
         phoneNumber: '+27111111111', whatsappPhoneNumber: '+27222222222',
-        role: 'customer', verificationStatus: '',
+        preferredName: 'Avery', role: 'customer', accountType: 'linked', homeAddress: '', verificationStatus: '',
       };
     },
   } });
@@ -52,6 +53,41 @@ test('profile lookup requires a verified linked account and returns only its dec
     getMyProfile: async () => ({ firstName: 'Avery', accessToken: 'private-token' }),
   } });
   await assert.rejects(leakingRegistry.execute('getMyProfile', {}, { role: 'customer', authorization: linkedCustomer }), { code: 'tool-output-invalid' });
+});
+
+test('a guest profile lookup is bound to the current guest principal and exposes no linked-account fields', async () => {
+  let profileReads = 0;
+  const registry = createWhatsAppToolRegistry({ handlers: {
+    getMyProfile: async (_args, context) => {
+      profileReads += 1;
+      assert.equal(context.identity.guestPrincipalId, 'guest-1');
+      return {
+        firstName: '', lastName: '', preferredName: 'Avery', email: '', phoneNumber: '',
+        whatsappPhoneNumber: '+27111111111', role: 'customer', accountType: 'guest',
+        homeAddress: '12 Example Road', verificationStatus: '',
+      };
+    },
+  } });
+
+  const result = await registry.execute('getMyProfile', {}, {
+    identity: { guestPrincipalId: 'guest-1', waId: '27111111111' },
+    authorization: { role: 'guest', verified: false, linked: false },
+  });
+  assert.equal(result.preferredName, 'Avery');
+  assert.equal(result.accountType, 'guest');
+  assert.equal(result.whatsappPhoneNumber, '+27111111111');
+  assert.equal(profileReads, 1);
+
+  await assert.rejects(registry.execute('getMyProfile', {}, {
+    authorization: { role: 'guest', verified: false, linked: false },
+  }), { code: 'identity-verification-required' });
+  await assert.rejects(registry.execute('getMyProfile', {}, {
+    identity: { guestPrincipalId: 'guest-1', linkedFirebaseUid: 'unexpected-linked-uid' },
+    authorization: { role: 'guest', verified: false, linked: false },
+  }), { code: 'identity-verification-required' });
+  await assert.rejects(registry.execute('proposeProfileChange', { field: 'firstName', value: 'Avery' }, {
+    identity: { guestPrincipalId: 'guest-1' }, authorization: { role: 'guest', verified: false, linked: false },
+  }), { code: 'tool-permission-denied' });
 });
 
 test('profile changes can only propose a first-name or surname change and require the existing confirmation flow', async () => {
