@@ -3532,12 +3532,15 @@ async function syncWhatsAppCanonicalRequestDraft({ identityId, identity, draftRe
   const previousDraft = previousDraftSnap.exists ? previousDraftSnap.data() || {} : {};
   const principalId = String(previousDraft.principalId || identity.linkedFirebaseUid || identity.guestPrincipalId || '').trim();
   if (!principalId) return { code: 'identity-unavailable' };
-  const requestId = `wa_req_${createHash('sha256').update(draftRef.id).digest('hex').slice(0, 32)}`;
+  let requestId = String(previousDraft.requestId || '').trim();
+  if (!requestId || previousDraft.status === 'confirmed') {
+    requestId = `wa_req_${createHash('sha256').update(`${draftRef.id}:${Date.now()}`).digest('hex').slice(0, 32)}`;
+  }
   const profile = {
     fullName: String(identity.preferredName || identity.profileName || '').trim() || 'WhatsApp customer',
     phoneNumber: String(identity.waId || '').trim(),
   };
-  const created = await marketplaceRequestOperations.createDraft({
+  let created = await marketplaceRequestOperations.createDraft({
     requestId,
     principalId,
     profile,
@@ -3551,6 +3554,23 @@ async function syncWhatsAppCanonicalRequestDraft({ identityId, identity, draftRe
     channel: 'whatsapp',
     identityId,
   });
+  if (created.code === 'request-id-conflict') {
+    requestId = `wa_req_${createHash('sha256').update(`${draftRef.id}:${Date.now()}`).digest('hex').slice(0, 32)}`;
+    created = await marketplaceRequestOperations.createDraft({
+      requestId,
+      principalId,
+      profile,
+      categoryId: service.categoryId,
+      serviceIds,
+      selectedPackageId,
+      structuredAnswers: answers,
+      location,
+      intakeMode: 'whatsapp',
+      source: 'whatsapp',
+      channel: 'whatsapp',
+      identityId,
+    });
+  }
   if (!['created', 'already-created'].includes(created.code)) return created;
   const updated = await marketplaceRequestOperations.updateDraft({
     requestId,
@@ -6372,7 +6392,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     const allowedQuestionIds = new Set(serviceQuestions.map((question) => question.id));
     const incomingAnswers = Object.fromEntries(Object.entries(answerExtraction.answers || {}).filter(([key]) => allowedQuestionIds.has(key)));
     const baseAnswers = activeDraft?.serviceId === service.id && activeDraft?.structuredAnswers
-      ? activeDraft.structuredAnswers
+      ? Object.fromEntries(Object.entries(activeDraft.structuredAnswers).filter(([key]) => allowedQuestionIds.has(key)))
       : {};
     let validation;
     try {
@@ -6394,8 +6414,10 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     const currentMediaAssetId = String(inbound.media?.assetId || '').trim();
     const currentMediaAssetRef = currentMediaAssetId ? db.collection('whatsappMediaAssets').doc(currentMediaAssetId) : null;
     const now = Date.now();
+    const targetRequiresSavedAddress = String(validation.answers?.service_address_target || '').toLowerCase() === 'saved_home_address';
+    const hasSavedHomeAddress = Boolean(identity?.homeAddress || identity?.savedAddress || toolIdentity?.homeAddress);
     const locationPinRequired = intentResult.intent === 'service_booking'
-      && (activeDraft?.locationPinRequired === true || explicitlyRequestsCurrentLocation)
+      && (activeDraft?.locationPinRequired === true || explicitlyRequestsCurrentLocation || (targetRequiresSavedAddress && !hasSavedHomeAddress))
       && !serviceLocation;
     if (validation.missingRequired.length || locationPinRequired) {
       const canonicalRequestId = activeDraft?.serviceId === service.id
@@ -6463,8 +6485,14 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
             questions: missingQuestions,
             missingQuestionIds: missingQuestions.map((question) => question.id),
           })
-          : '*To finish your service request*\n\nPlease share a WhatsApp location pin to continue.';
-        if (locationPinRequired && missingQuestions.length) nextQuestion = `${nextQuestion}\n\nPlease share a WhatsApp location pin to continue.`;
+          : (targetRequiresSavedAddress && !hasSavedHomeAddress
+            ? '*To finish your service request*\n\nI do not have a saved address on file for you yet. Please share a WhatsApp location pin or reply with your street address to continue.'
+            : '*To finish your service request*\n\nPlease share a WhatsApp location pin to continue.');
+        if (locationPinRequired && missingQuestions.length) {
+          nextQuestion = targetRequiresSavedAddress && !hasSavedHomeAddress
+            ? `${nextQuestion}\n\nNote: I do not have a saved address for you yet. Please share a WhatsApp location pin or street address as well.`
+            : `${nextQuestion}\n\nPlease share a WhatsApp location pin to continue.`;
+        }
         await jobRef.set({
           bookingFollowup: 'deterministic_fallback',
           bookingFollowupErrorCode: String(error?.code || 'response_generation_failed').slice(0, 80),
@@ -6506,9 +6534,17 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         location: serviceLocation || null,
       });
       if (requestDraft.code !== 'ready') {
-        await reply(requestDraft.code === 'active-request'
-          ? `You already have an active Uncedo request (${requestDraft.activeRequestId}). I have not started another one.`
-          : 'I could not start this request yet. Please check your active requests or contact Uncedo support.');
+        let failureReply = 'I could not start this request yet. Please check your active requests or contact Uncedo support.';
+        if (requestDraft.code === 'active-request') {
+          failureReply = `You already have an active Uncedo request (${requestDraft.activeRequestId}). Please complete or cancel it before starting another one.`;
+        } else if (requestDraft.code === 'invalid-service-answers') {
+          failureReply = 'I need a bit more information to set up this request. Please review your answers or let me know the service details.';
+        } else if (requestDraft.code === 'service-unavailable') {
+          failureReply = 'This service is currently unavailable. Please choose another service from our catalog.';
+        } else if (requestDraft.code === 'missing-location') {
+          failureReply = 'Please share a WhatsApp location pin or reply with your street address so we can find nearby helpers.';
+        }
+        await reply(failureReply);
         await jobRef.set({ status: 'completed', intent: intentResult.intent, errorCode: requestDraft.code, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         return;
       }
