@@ -6924,6 +6924,218 @@ exports.expireServiceRequestOffer = onTaskDispatched({
   });
 });
 
+async function sendWhatsAppCustomerRequestExpiredNotification({ requestId, request }) {
+  if (!whatsappMessagingEnabled()) {
+    logger.info('whatsapp_expiry_notification_skipped_disabled', { requestId });
+    return;
+  }
+  const secrets = getWhatsAppSecrets();
+  if (!secrets.accessToken || !secrets.phoneNumberId) {
+    logger.warn('whatsapp_expiry_notification_missing_secrets', { requestId });
+    return;
+  }
+
+  let recipientPhone = '';
+  let lastInboundAtMs = Date.now();
+
+  if (request.originIdentityId) {
+    const identSnap = await db.collection('whatsappIdentities').doc(request.originIdentityId).get().catch(() => null);
+    if (identSnap && identSnap.exists) {
+      const data = identSnap.data() || {};
+      recipientPhone = data.phoneNumber || data.waId || '';
+      if (data.lastInboundAtMs) lastInboundAtMs = Number(data.lastInboundAtMs);
+    }
+  }
+
+  if (!recipientPhone) {
+    recipientPhone = request.customerWhatsappNumber || request.customerPhone || request.requestPayload?.customerPhone || '';
+  }
+
+  if (!recipientPhone && request.customerId) {
+    const byUidSnap = await db.collection('whatsappIdentities').where('linkedFirebaseUid', '==', request.customerId).limit(1).get().catch(() => null);
+    if (byUidSnap && !byUidSnap.empty) {
+      const data = byUidSnap.docs[0].data() || {};
+      recipientPhone = data.phoneNumber || data.waId || '';
+      if (data.lastInboundAtMs) lastInboundAtMs = Number(data.lastInboundAtMs);
+    } else {
+      const byGuestSnap = await db.collection('whatsappIdentities').where('guestPrincipalId', '==', request.customerId).limit(1).get().catch(() => null);
+      if (byGuestSnap && !byGuestSnap.empty) {
+        const data = byGuestSnap.docs[0].data() || {};
+        recipientPhone = data.phoneNumber || data.waId || '';
+        if (data.lastInboundAtMs) lastInboundAtMs = Number(data.lastInboundAtMs);
+      }
+    }
+  }
+
+  if (!recipientPhone && request.customerId) {
+    const userSnap = await db.collection('users').doc(request.customerId).get().catch(() => null);
+    if (userSnap && userSnap.exists) {
+      const user = userSnap.data() || {};
+      recipientPhone = user.whatsappPhoneNumber || user.phoneNumber || '';
+    }
+  }
+
+  const cleanRecipient = String(recipientPhone || '').replace(/[^0-9]/g, '');
+  if (!cleanRecipient || cleanRecipient.length < 8 || cleanRecipient.length > 15) {
+    logger.warn('whatsapp_expiry_notification_no_recipient', { requestId, customerId: request.customerId });
+    return;
+  }
+
+  if (!isWhatsAppRecipientAllowed(cleanRecipient, process.env)) {
+    logger.info('whatsapp_expiry_notification_cohort_filtered', { requestId, recipient: cleanRecipient });
+    return;
+  }
+
+  try {
+    const client = createMetaWhatsAppClient({
+      accessToken: secrets.accessToken,
+      phoneNumberId: secrets.phoneNumberId,
+      graphApiVersion: secrets.graphApiVersion,
+      approvedTemplateNames: secrets.approvedTemplateNames,
+      requestTimeoutMs: process.env.WHATSAPP_META_SEND_TIMEOUT_MS,
+      isRecipientAllowed: (to) => isWhatsAppRecipientAllowed(to, process.env),
+    });
+
+    const summary = String(request.serviceSummary || request.subject || 'service').trim();
+    const message = `Hello, we could not find an available helper for your ${summary} request. Your request has expired. Please try again later or choose another time.`;
+
+    const delivery = await client.sendText({
+      to: cleanRecipient,
+      text: message,
+      lastInboundAtMs,
+      now: Date.now(),
+    });
+
+    logger.info('whatsapp_expiry_notification_sent', {
+      requestId,
+      recipient: cleanRecipient,
+      messageId: delivery?.messageId || null,
+    });
+  } catch (error) {
+    logger.warn('whatsapp_expiry_notification_failed', {
+      requestId,
+      recipient: cleanRecipient,
+      error: error?.message || 'unknown_error',
+    });
+  }
+}
+
+exports.scheduleServiceRequestExpiryOnNoHelperWrite = onDocumentWritten({
+  document: 'serviceRequests/{requestId}',
+  ...HALF_CPU_OPTIONS,
+}, async (event) => {
+  const before = event.data.before.exists ? event.data.before.data() : null;
+  const after = event.data.after.exists ? event.data.after.data() : null;
+  if (!after) return;
+
+  const beforeStatus = String(before?.status || '').trim().toLowerCase();
+  const afterStatus = String(after.status || '').trim().toLowerCase();
+
+  // ONLY schedule when status transitions to NO_HELPER_AVAILABLE from another status
+  if (afterStatus !== SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE || beforeStatus === SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE) {
+    return;
+  }
+
+  const requestId = String(event.params.requestId || '').trim();
+  if (!requestId) return;
+
+  const now = Date.now();
+  const delaySeconds = 300; // 5 minutes
+  const taskId = `no-helper-expiry_${createHash('sha256').update(`${requestId}:${now}`).digest('hex').slice(0, 32)}`;
+
+  try {
+    await getFunctions().taskQueue('expireServiceRequestOnNoHelperAvailable').enqueue({
+      requestId,
+      scheduledAtMs: now,
+    }, {
+      id: taskId,
+      scheduleDelaySeconds: delaySeconds,
+      dispatchDeadlineSeconds: 60,
+    });
+
+    logger.info('service_request_no_helper_expiry_task_scheduled', {
+      requestId,
+      delaySeconds,
+      taskId,
+    });
+  } catch (error) {
+    if (String(error?.code || '').includes('task-already-exists')) {
+      logger.info('service_request_no_helper_expiry_task_already_scheduled', { requestId });
+      return;
+    }
+    logger.error('service_request_no_helper_expiry_task_schedule_failed', {
+      requestId,
+      error: error?.message || 'unknown_error',
+    });
+  }
+});
+
+exports.expireServiceRequestOnNoHelperAvailable = onTaskDispatched({
+  retryConfig: { maxAttempts: 3, minBackoffSeconds: 5, maxBackoffSeconds: 60 },
+  rateLimits: { maxConcurrentDispatches: 50, maxDispatchesPerSecond: 20 },
+  ...HALF_CPU_OPTIONS,
+}, async (event) => {
+  const input = event.data || {};
+  const requestId = String(input.requestId || '').trim();
+  if (!requestId) {
+    logger.warn('service_request_no_helper_expiry_task_invalid_payload');
+    return;
+  }
+
+  const requestRef = db.collection('serviceRequests').doc(requestId);
+  let expiredRequestData = null;
+
+  await db.runTransaction(async (transaction) => {
+    const requestSnap = await transaction.get(requestRef);
+    if (!requestSnap.exists) {
+      logger.info('service_request_no_helper_expiry_not_found', { requestId });
+      return;
+    }
+    const request = requestSnap.data() || {};
+    const currentStatus = String(request.status || '').trim().toLowerCase();
+
+    // Guard: Only expire if the status is STILL 'no_helper_available'
+    if (currentStatus !== SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE) {
+      logger.info('service_request_no_helper_expiry_bypassed', {
+        requestId,
+        currentStatus,
+        reason: 'status-changed',
+      });
+      return;
+    }
+
+    const now = Date.now();
+    transaction.update(requestRef, {
+      status: SERVICE_REQUEST_STATUS.EXPIRED,
+      statusDetail: 'Service request expired. No helpers were available within 5 minutes.',
+      expiredAt: admin.firestore.FieldValue.serverTimestamp(),
+      expiredAtMs: now,
+      expiredReason: 'no_helper_available_5min_timeout',
+      currentOfferHelperId: null,
+      offerToken: null,
+      offerExpiresAt: null,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    expiredRequestData = { ...request, status: SERVICE_REQUEST_STATUS.EXPIRED, expiredAtMs: now };
+  });
+
+  if (expiredRequestData) {
+    logger.info('service_request_expired_due_to_no_helper', { requestId });
+    await sendWhatsAppCustomerRequestExpiredNotification({ requestId, request: expiredRequestData })
+      .catch((err) => logger.warn('whatsapp_expiry_notify_error', { requestId, error: err?.message }));
+
+    await createUserNotification({
+      userId: expiredRequestData.customerId || null,
+      title: 'Request expired',
+      message: 'No helper was available for your request. Please try again later.',
+      type: 'matching_update',
+      requestId,
+      targetPath: `/customer/requests/${requestId}`,
+    }).catch(() => null);
+  }
+});
+
 function whatsappNotificationsEnabled() {
   return String(process.env.WHATSAPP_NOTIFICATIONS_ENABLED || '').trim().toLowerCase() === 'true';
 }

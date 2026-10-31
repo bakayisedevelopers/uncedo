@@ -5,7 +5,10 @@ const functionsEmulatorTarget = 'http://localhost:5001/parakleo/us-central1'
 
 export default defineConfig({
   plugins: [react()],
+  envDir: '..',
   server: {
+    host: '0.0.0.0',
+    port: 3000,
     proxy: {
       '/ice-config': {
         target: functionsEmulatorTarget,

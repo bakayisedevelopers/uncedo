@@ -1,0 +1,8 @@
+{
+  "name": "Uncedo",
+  "description": "Tutoring and service platform providing everyday help, class support, and trusted services.",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

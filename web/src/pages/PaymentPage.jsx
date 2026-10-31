@@ -187,7 +187,7 @@ export default function PaymentPage() {
   return (
     <PaymentShell>
       <header className="mb-8 flex items-center justify-between gap-4">
-        <Link to="/" className="text-xl font-black tracking-tight text-zinc-950">uncedo<span className="text-emerald-600">.</span></Link>
+        <Link to="/" className="text-xl font-black tracking-tight text-zinc-950">Uncedo<span className="text-emerald-600">.</span></Link>
         <div className="flex items-center gap-2 text-xs font-bold text-zinc-500"><LockKeyhole size={15} className="text-emerald-700" /> Secure payment</div>
       </header>
       <main className="mx-auto max-w-2xl">
