@@ -91,8 +91,8 @@ export function EarningsScreen({ navigate, goBack }) {
           <MetricCard label="Legacy current week" value={formatCurrency(paymentSummary.currentWeekAmount)} />
         </View>
         <View style={styles.ruleCard}>
-          <Text style={styles.ruleText}>The platform gets 30% and you as a helper get 70%.</Text>
-          <Text style={styles.ruleText}>The 70% applies to the labor amount only. You also receive the full travel fee for the service.</Text>
+          <Text style={styles.ruleText}>The platform gets 25% and you as a helper get 75%.</Text>
+          <Text style={styles.ruleText}>The 75% applies to the labor amount only. You also receive the full travel fee for the service.</Text>
           <Text style={styles.ruleText}>The booking fee belongs to the platform. If a customer cancels before you start traveling, you receive R0 and the booking fee still stays with the platform.</Text>
         </View>
       </Card>

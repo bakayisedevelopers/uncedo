@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "npm run dev --workspace=web",
     "build": "npm run build --workspace=web",
+    "lint": "npm run build --workspace=web",
     "validate:rewards:shared": "node scripts/validate-reward-shared.cjs",
     "test:constants": "node scripts/validate-reward-constants.js",
     "test:rules": "firebase emulators:exec --project demo-uncedo-phase0 --only auth,firestore,storage \"node --test functions/test/firestore.rules.test.js\"",

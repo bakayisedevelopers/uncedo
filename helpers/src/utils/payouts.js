@@ -1,5 +1,5 @@
-export const PLATFORM_FEE_RATE = 0.3;
-export const HELPER_PAYOUT_RATE = 0.7;
+export const PLATFORM_FEE_RATE = 0.25;
+export const HELPER_PAYOUT_RATE = 0.75;
 
 const WEEK_IN_MS = 7 * 24 * 60 * 60 * 1000;
 

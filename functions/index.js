@@ -8333,8 +8333,8 @@ const SERVICE_BOOKING_FEE_RATE = 0.01;
 const SERVICE_BOOKING_FEE_CAP = 5;
 const SERVICE_TRAVEL_RATE_PER_KM = 4;
 const SERVICE_DEFAULT_TRAVEL_FEE = 35;
-const HELPER_LABOR_PAYOUT_RATE = 0.7;
-const PLATFORM_LABOR_SHARE_RATE = 0.3;
+const HELPER_LABOR_PAYOUT_RATE = 0.75;
+const PLATFORM_LABOR_SHARE_RATE = 0.25;
 
 function computeServiceBookingFee(baseAmount = 0) {
   return toRand(Math.min(SERVICE_BOOKING_FEE_CAP, Math.max(0, Number(baseAmount || 0)) * SERVICE_BOOKING_FEE_RATE));
@@ -12078,7 +12078,7 @@ async function isCustomerRequestPrincipalOwnedByUid(uid, customerId) {
   return Boolean(ownerSnap?.exists && String(ownerSnap.data()?.uid || '') === normalizedUid);
 }
 
-exports.finalizeServiceRequestBilling = onRequest({ cors: true }, async (req, res) => {
+exports.finalizeServiceRequestBilling = onRequest({ cors: true, cpu: 0.5, memory: '256MiB' }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
   const token = getBearerToken(req);
   const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
@@ -12673,7 +12673,7 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
   }
 }
 
-exports.billCustomerServiceCancellation = onRequest({ cors: true }, async (req, res) => (
+exports.billCustomerServiceCancellation = onRequest({ cors: true, cpu: 0.5, memory: '256MiB' }, async (req, res) => (
   handleCustomerServiceCancellation(req, res)
 ));
 
@@ -13184,6 +13184,8 @@ async function recordPayoutConfigurationFailure(payout, payoutRef, runKey) {
 exports.processWeeklyHelperPayouts = onSchedule({
   schedule: '0 0 * * 1',
   timeZone: 'Africa/Johannesburg',
+  cpu: 0.5,
+  memory: '256MiB',
 }, async () => {
   let paymentsSecrets;
   try {
