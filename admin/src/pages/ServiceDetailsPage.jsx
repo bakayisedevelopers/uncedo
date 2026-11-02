@@ -46,6 +46,9 @@ function createOptionDraft(option = {}, index = 0) {
     label: String(option.label || value).trim(),
     priceAdder: Number(option.priceAdder || 0),
     materialAdder: Number(option.materialAdder || 0),
+    pricingType: String(option.pricingType || (Number(option.multiplier || 1) !== 1 ? 'multiplier' : 'adder')).trim(),
+    factor: Number(option.factor || option.multiplier || 1),
+    imageUrl: String(option.imageUrl || '').trim(),
   };
 }
 
@@ -58,6 +61,7 @@ function createQuestionDraft(question = {}, index = 0, required = true) {
     answerHint: String(question.answerHint || '').trim(),
     required,
     enabled: question.enabled !== false,
+    dependencyRule: question.dependencyRule || { dependsOnQuestionId: '', dependsOnOptionValue: '' },
     options: (Array.isArray(question.options) ? question.options : []).map((option, optionIndex) => createOptionDraft(option, optionIndex)),
   };
 }
@@ -78,7 +82,10 @@ function normalizeQuestionDrafts(questions = [], required = true) {
           label: String(option.label || '').trim(),
           priceAdder: Number(option.priceAdder || 0),
           materialAdder: Number(option.materialAdder || 0),
-          multiplier: 1,
+          pricingType: option.pricingType === 'multiplier' ? 'multiplier' : 'adder',
+          factor: Number(option.factor || 1),
+          multiplier: option.pricingType === 'multiplier' ? Number(option.factor || 1) : 1,
+          imageUrl: String(option.imageUrl || '').trim(),
         }));
 
       return {
@@ -87,6 +94,12 @@ function normalizeQuestionDrafts(questions = [], required = true) {
         answerType: question.answerType === 'text' ? 'text' : 'enum',
         answerHint: String(question.answerHint || '').trim(),
         required,
+        dependencyRule: question.dependencyRule && question.dependencyRule.dependsOnQuestionId
+          ? {
+              dependsOnQuestionId: String(question.dependencyRule.dependsOnQuestionId).trim(),
+              dependsOnOptionValue: String(question.dependencyRule.dependsOnOptionValue).trim(),
+            }
+          : null,
         options,
       };
     });
@@ -179,27 +192,46 @@ function QuestionOptionEditor({ option, onChange, onRemove }) {
     onChange({ ...option, priceAdder: coerceSliderValue(rawValue, 0, 500, 5) });
   };
 
+  const handleFactorChange = (rawValue) => {
+    const parsed = Number(rawValue);
+    onChange({ ...option, factor: Number.isFinite(parsed) ? Math.max(0.1, Math.min(5.0, parsed)) : 1.0 });
+  };
+
+  const isMultiplier = option.pricingType === 'multiplier';
+
   return (
-    <div className="rounded-2xl border border-white/10 bg-ink-950/30 p-3">
-      <div className="grid gap-3 md:grid-cols-[1.2fr_0.8fr_auto]">
+    <div className="rounded-2xl border border-white/10 bg-ink-950/30 p-3 space-y-3">
+      <div className="grid gap-3 md:grid-cols-[1.2fr_0.8fr_0.8fr_auto]">
         <input
           value={option.label}
           onChange={(event) => onChange({ ...option, label: event.target.value })}
           placeholder="Option label"
           className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
         />
-        <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
-          <span className="text-sm font-bold text-ink-200">Adds</span>
-          <input
-            type="range"
-            min={0}
-            max={500}
-            step={5}
-            value={option.priceAdder}
-            onChange={(event) => handlePriceAdderChange(event.target.value)}
-            className="h-2 flex-1 cursor-pointer appearance-none rounded-full bg-white/10 accent-[#ff7a59]"
-          />
-          <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-ink-950/40 px-3 py-2 text-sm font-bold text-white">
+        <select
+          value={option.pricingType || 'adder'}
+          onChange={(event) => onChange({ ...option, pricingType: event.target.value })}
+          className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-3 py-3 text-sm text-white outline-none"
+        >
+          <option value="adder">Adder (R)</option>
+          <option value="multiplier">Multiplier (×)</option>
+        </select>
+        {isMultiplier ? (
+          <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+            <span className="text-sm font-bold text-ink-200">×</span>
+            <input
+              type="number"
+              min={0.1}
+              max={5.0}
+              step={0.05}
+              value={option.factor || 1.0}
+              onChange={(event) => handleFactorChange(event.target.value)}
+              className="w-full bg-transparent text-white outline-none text-sm font-bold"
+              placeholder="1.0"
+            />
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm font-bold text-white">
             <span>R</span>
             <input
               type="number"
@@ -208,10 +240,10 @@ function QuestionOptionEditor({ option, onChange, onRemove }) {
               step={5}
               value={option.priceAdder}
               onChange={(event) => handlePriceAdderChange(event.target.value)}
-              className="w-16 bg-transparent text-right text-white outline-none"
+              className="w-full bg-transparent text-right text-white outline-none"
             />
           </div>
-        </div>
+        )}
         <button
           type="button"
           onClick={onRemove}
@@ -219,6 +251,15 @@ function QuestionOptionEditor({ option, onChange, onRemove }) {
         >
           <Trash2 className="h-4 w-4" />
         </button>
+      </div>
+      <div className="flex items-center gap-3">
+        <ImageIcon className="h-4 w-4 text-ink-300" />
+        <input
+          value={option.imageUrl || ''}
+          onChange={(event) => onChange({ ...option, imageUrl: event.target.value })}
+          placeholder="Option Image URL (for WhatsApp Carousels, e.g. https://...)"
+          className="w-full rounded-xl border border-white/10 bg-ink-950/50 px-3 py-2 text-xs text-white outline-none"
+        />
       </div>
     </div>
   );

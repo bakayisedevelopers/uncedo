@@ -831,6 +831,36 @@ function createServicePricer(categoryId) {
   return (service) => createServiceResult(service, Number(service?.pricing?.basePrice || 0), [{ label: 'Base service rate', amount: Number(service?.pricing?.basePrice || 0) }]);
 }
 
+function computeQuestionnaireOptionAdjustments(service, answers = {}) {
+  const questionnaire = service?.questionnaire || {};
+  const allQuestions = [...(questionnaire.required || []), ...(questionnaire.optional || [])];
+  let totalAdder = 0;
+  let combinedMultiplier = 1.0;
+  const lines = [];
+
+  allQuestions.forEach((q) => {
+    const qId = q.id;
+    const answer = answers[qId];
+    if (!answer || !Array.isArray(q.options)) return;
+    const selectedValues = Array.isArray(answer) ? answer : [answer];
+    selectedValues.forEach((val) => {
+      const opt = q.options.find((o) => String(o.value || '').toLowerCase() === String(val || '').toLowerCase());
+      if (!opt) return;
+      if (opt.pricingType === 'multiplier' && Number(opt.factor || opt.multiplier || 1) !== 1) {
+        const factor = Number(opt.factor || opt.multiplier || 1);
+        combinedMultiplier *= factor;
+        lines.push({ label: `${opt.label || opt.value} (×${factor})`, amount: 0 });
+      } else if (Number(opt.priceAdder || 0) > 0) {
+        const adder = Number(opt.priceAdder || 0);
+        totalAdder += adder;
+        lines.push({ label: `${opt.label || opt.value}`, amount: adder });
+      }
+    });
+  });
+
+  return { totalAdder, combinedMultiplier, lines };
+}
+
 function createCategoryPricingEngine(categoryId, catalogue = {}) {
   const getCustomerServiceCategoryById = catalogue.getCategoryById;
   const getCustomerServiceById = catalogue.getServiceById;
@@ -853,12 +883,18 @@ function createCategoryPricingEngine(categoryId, catalogue = {}) {
       .filter((service) => service && service.categoryId === categoryId);
 
     const serviceBreakdown = selectedServices.map((service) => {
-      const result = priceService(service, structuredAnswers, serviceOverrides[service.id] || {});
+      const baseResult = priceService(service, structuredAnswers, serviceOverrides[service.id] || {});
+      const optionAdjustments = computeQuestionnaireOptionAdjustments(service, structuredAnswers);
+      const subtotal = roundCurrency((baseResult.subtotal + optionAdjustments.totalAdder) * optionAdjustments.combinedMultiplier);
+      const lines = [
+        ...baseResult.lines,
+        ...optionAdjustments.lines.map((l) => buildLine(`${service.label}: ${l.label}`, l.amount)),
+      ];
       return {
         serviceId: service.id,
         label: service.label,
-        subtotal: roundCurrency(result.subtotal),
-        lines: Array.isArray(result.lines) ? result.lines : [],
+        subtotal,
+        lines,
       };
     });
 

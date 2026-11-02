@@ -53,6 +53,16 @@ function getQuestionnaireForSelection({ services = [], selectedPackageId = '' })
   return [...selected.values()];
 }
 
+function isQuestionApplicable(question, normalizedAnswers) {
+  const rule = question?.dependencyRule;
+  if (!rule || !rule.dependsOnQuestionId) return true;
+  const parentValue = normalizedAnswers[rule.dependsOnQuestionId];
+  if (!parentValue) return false;
+  const expected = String(rule.dependsOnOptionValue || '').trim().toLowerCase();
+  const actualValues = Array.isArray(parentValue) ? parentValue.map((v) => String(v).toLowerCase()) : [String(parentValue).toLowerCase()];
+  return actualValues.includes(expected);
+}
+
 function normalizeAndValidateAnswers({ answers = {}, questions = [], strictUnknown = true } = {}) {
   if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
     throw new Error('Service answers must be an object.');
@@ -96,7 +106,8 @@ function normalizeAndValidateAnswers({ answers = {}, questions = [], strictUnkno
     normalized[questionId] = answer;
   });
 
-  const missingRequired = questions
+  const applicableQuestions = questions.filter((question) => isQuestionApplicable(question, normalized));
+  const missingRequired = applicableQuestions
     .filter((question) => question.required === true && !hasAnswer(normalized[question.id]))
     .map((question) => question.id);
   if (String(normalized.timing_preference || '').trim().toLowerCase() === 'later'
