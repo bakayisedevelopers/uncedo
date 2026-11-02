@@ -69,4 +69,153 @@ function formatWhatsAppBookingConfirmation({ service = {}, questions = [], answe
   };
 }
 
-module.exports = { formatWhatsAppBookingConfirmation, renderMissingWhatsAppQuestions };
+function formatWhatsAppNextQuestion({
+  service = {},
+  question = {},
+  index = 0,
+  total = 1,
+  answers = {},
+  hasSavedHomeAddress = false,
+} = {}) {
+  const serviceLabel = safeLabel(service.label || 'Service', 80);
+  const prompt = safeLabel(question.prompt || question.label || question.id || 'Please choose an option.', 200);
+  const stepHeader = `📋 *${serviceLabel}* (Step ${index + 1} of ${total})`;
+
+  // Address target question has 3 distinct button options
+  if (question.id === 'service_address_target') {
+    return {
+      text: formatWhatsAppText(`${stepHeader}\n\n📍 *${prompt}*\n\n1. Current Location (send your location pin)\n2. Saved Address${hasSavedHomeAddress ? ' (from your profile)' : ' (type address if not on file)'}\n3. Another Address (type custom street address)`),
+      interactive: {
+        type: 'button',
+        body: {
+          text: formatWhatsAppText(`${stepHeader}\n\n📍 *${prompt}*`),
+        },
+        action: {
+          buttons: [
+            { type: 'reply', reply: { id: 'wa_opt_sat_current_location', title: 'Current Location' } },
+            { type: 'reply', reply: { id: 'wa_opt_sat_saved_home_address', title: 'Saved Address' } },
+            { type: 'reply', reply: { id: 'wa_opt_sat_another_address', title: 'Another Address' } },
+          ],
+        },
+      },
+    };
+  }
+
+  const rawOptions = Array.isArray(question.options) ? question.options : [];
+  const options = rawOptions.map((opt) => {
+    if (typeof opt === 'string') {
+      return { value: opt, label: opt.replace(/_/g, ' '), imageUrl: '', priceAdder: 0, multiplier: 1 };
+    }
+    return {
+      value: String(opt.value || opt.id || '').trim(),
+      label: String(opt.label || opt.value || opt.id || '').trim().replace(/_/g, ' '),
+      imageUrl: String(opt.imageUrl || '').trim(),
+      priceAdder: Number(opt.priceAdder || 0),
+      multiplier: Number(opt.multiplier || 1),
+    };
+  }).filter((opt) => opt.value);
+
+  const hasImages = options.some((opt) => opt.imageUrl && opt.imageUrl.startsWith('http'));
+  if (hasImages && options.length <= 10) {
+    const cards = options.map((opt, index) => ({
+      card_index: index,
+      header: {
+        type: 'image',
+        image: {
+          link: opt.imageUrl,
+        },
+      },
+      body: {
+        text: safeLabel(`${opt.label}${opt.priceAdder ? ` (+R${opt.priceAdder})` : opt.multiplier && opt.multiplier !== 1 ? ` (×${opt.multiplier})` : ''}`, 160),
+      },
+      action: {
+        buttons: [
+          {
+            type: 'quick_reply',
+            quick_reply: {
+              id: `wa_ans_${question.id}_${opt.value}`.slice(0, 250),
+              title: safeLabel(opt.label, 20),
+            },
+          },
+        ],
+      },
+    }));
+
+    return {
+      text: formatWhatsAppText(`${stepHeader}\n\n*${prompt}*\n\nTap a card below to select your option:`),
+      interactive: {
+        type: 'carousel',
+        body: {
+          text: formatWhatsAppText(`${stepHeader}\n\n*${prompt}*`),
+        },
+        action: {
+          cards,
+        },
+      },
+    };
+  }
+
+  // 1 to 3 options: send WhatsApp interactive quick reply buttons
+  if (options.length > 0 && options.length <= 3) {
+    const buttons = options.map((opt) => ({
+      type: 'reply',
+      reply: {
+        id: `wa_ans_${question.id}_${opt.value}`.slice(0, 250),
+        title: safeLabel(opt.label, 20),
+      },
+    }));
+
+    return {
+      text: formatWhatsAppText(`${stepHeader}\n\n*${prompt}*\n\n${options.map((o, i) => `${i + 1}. ${o.label}`).join('\n')}`),
+      interactive: {
+        type: 'button',
+        body: {
+          text: formatWhatsAppText(`${stepHeader}\n\n*${prompt}*`),
+        },
+        action: {
+          buttons,
+        },
+      },
+    };
+  }
+
+  // More than 3 options: send interactive list rows (up to 10)
+  if (options.length > 3) {
+    const rows = options.slice(0, 10).map((opt) => ({
+      id: `wa_ans_${question.id}_${opt.value}`.slice(0, 200),
+      title: safeLabel(opt.label, 24),
+      description: '',
+    }));
+
+    return {
+      text: formatWhatsAppText(`${stepHeader}\n\n*${prompt}*\n\n${options.map((o, i) => `• ${o.label}`).join('\n')}`),
+      interactive: {
+        type: 'list',
+        body: {
+          text: formatWhatsAppText(`${stepHeader}\n\n*${prompt}*`),
+        },
+        action: {
+          button: 'Choose option',
+          sections: [
+            {
+              title: safeLabel(question.prompt || 'Options', 24),
+              rows,
+            },
+          ],
+        },
+      },
+    };
+  }
+
+  // Free-form question with no predetermined options (text, numbers, etc.)
+  return {
+    text: formatWhatsAppText(`${stepHeader}\n\n✏️ *${prompt}*\n\n_Please type your answer below._`),
+    interactive: null,
+  };
+}
+
+module.exports = {
+  formatWhatsAppBookingConfirmation,
+  formatWhatsAppNextQuestion,
+  renderMissingWhatsAppQuestions,
+};

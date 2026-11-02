@@ -104,9 +104,9 @@ test('computes normal quote near baseline for 10 minutes', () => {
   assert.equal(quote.durationMinutes, 10);
   assert.equal(quote.baseAmount, 7);
   assert.equal(quote.adjustedBaseAmount, 7);
-  assert.equal(quote.adjustedRatePerMinute, 3.6);
+  assert.equal(quote.adjustedRatePerMinute, 4);
   assert.equal(quote.durationDiscountApplied, false);
-  assert.equal(quote.totalAmount, 43);
+  assert.equal(quote.totalAmount, 47);
 });
 
 test('10 minutes has no duration discount in progressive billing', () => {
@@ -119,8 +119,8 @@ test('10 minutes has no duration discount in progressive billing', () => {
 
   assert.equal(quote.durationDiscountApplied, false);
   assert.equal(quote.durationDiscountAmount, 0);
-  assert.equal(quote.durationDiscountedMinuteAmount, 36);
-  assert.equal(quote.totalAmount, 43);
+  assert.equal(quote.durationDiscountedMinuteAmount, 40);
+  assert.equal(quote.totalAmount, 47);
   assert.equal(quote.durationDiscountBreakdown.tieredAmounts.length, 1);
   assert.deepEqual(
     quote.durationDiscountBreakdown.tieredAmounts[0],
@@ -130,8 +130,8 @@ test('10 minutes has no duration discount in progressive billing', () => {
       minutes: 10,
       discountPercent: 0,
       discountMultiplier: 1,
-      discountedRatePerMinute: 3.6,
-      segmentDiscountedAmount: 36,
+      discountedRatePerMinute: 4,
+      segmentDiscountedAmount: 40,
       segmentDiscountAmount: 0,
     },
   );
@@ -147,11 +147,11 @@ test('15 minutes discounts only minutes 11 through 15', () => {
 
   assert.equal(quote.baseAmount, 7);
   assert.equal(quote.adjustedBaseAmount, 7);
-  assert.equal(quote.adjustedRatePerMinute, 3.6);
+  assert.equal(quote.adjustedRatePerMinute, 4);
   assert.equal(quote.durationDiscountPercent, 5);
-  assert.equal(quote.durationDiscountAmount, 0.9);
-  assert.equal(quote.durationDiscountedMinuteAmount, 53.1);
-  assert.equal(quote.totalAmount, 60.1);
+  assert.equal(quote.durationDiscountAmount, 1);
+  assert.equal(quote.durationDiscountedMinuteAmount, 59);
+  assert.equal(quote.totalAmount, 66);
   assert.deepEqual(
     quote.durationDiscountBreakdown.tieredAmounts.map(({ minutes, discountPercent }) => ({ minutes, discountPercent })),
     [
@@ -170,9 +170,9 @@ test('20 minutes discounts only minutes 11 through 20', () => {
   });
 
   assert.equal(quote.durationDiscountPercent, 5);
-  assert.equal(quote.durationDiscountAmount, 1.8);
-  assert.equal(quote.durationDiscountedMinuteAmount, 70.2);
-  assert.equal(quote.totalAmount, 77.2);
+  assert.equal(quote.durationDiscountAmount, 2);
+  assert.equal(quote.durationDiscountedMinuteAmount, 78);
+  assert.equal(quote.totalAmount, 85);
   assert.deepEqual(
     quote.durationDiscountBreakdown.tieredAmounts.map(({ minutes, discountPercent }) => ({ minutes, discountPercent })),
     [
@@ -191,9 +191,9 @@ test('30 minutes applies 0, 5, and 10 percent brackets progressively', () => {
   });
 
   assert.equal(quote.durationDiscountPercent, 10);
-  assert.equal(quote.durationDiscountAmount, 5.4);
-  assert.equal(quote.durationDiscountedMinuteAmount, 102.6);
-  assert.equal(quote.totalAmount, 109.6);
+  assert.equal(quote.durationDiscountAmount, 6);
+  assert.equal(quote.durationDiscountedMinuteAmount, 114);
+  assert.equal(quote.totalAmount, 121);
   assert.deepEqual(
     quote.durationDiscountBreakdown.tieredAmounts.map(({ minutes, discountPercent }) => ({ minutes, discountPercent })),
     [
@@ -213,13 +213,13 @@ test('60 minutes applies all progressive brackets up to 25 percent', () => {
   });
 
   assert.equal(quote.durationDiscountPercent, 25);
-  assert.equal(quote.durationDiscountAmount, 27);
-  assert.equal(quote.durationDiscountedMinuteAmount, 189);
-  assert.equal(quote.effectiveRatePerMinute, 3.15);
-  assert.equal(quote.totalAmount, 196);
+  assert.equal(quote.durationDiscountAmount, 30);
+  assert.equal(quote.durationDiscountedMinuteAmount, 210);
+  assert.equal(quote.effectiveRatePerMinute, 4);
+  assert.equal(quote.totalAmount, 217);
   assert.equal(quote.baseAmount, 7);
   assert.equal(quote.adjustedBaseAmount, 7);
-  assert.equal(quote.adjustedRatePerMinute, 3.6);
+  assert.equal(quote.adjustedRatePerMinute, 4);
 });
 
 test('90 minutes applies all progressive brackets up to 35 percent', () => {
@@ -231,9 +231,9 @@ test('90 minutes applies all progressive brackets up to 35 percent', () => {
   });
 
   assert.equal(quote.durationDiscountPercent, 35);
-  assert.equal(quote.durationDiscountAmount, 62.1);
-  assert.equal(quote.durationDiscountedMinuteAmount, 261.9);
-  assert.equal(quote.totalAmount, 268.9);
+  assert.equal(quote.durationDiscountAmount, 69);
+  assert.equal(quote.durationDiscountedMinuteAmount, 291);
+  assert.equal(quote.totalAmount, 298);
   assert.equal(quote.durationDiscountBreakdown.tieredAmounts.at(-1).discountPercent, 35);
   assert.equal(quote.durationDiscountBreakdown.tieredAmounts.at(-1).minutes, 15);
 });
@@ -255,7 +255,7 @@ test('falls back to safe legacy pricing snapshot when pricing data is missing', 
 
   assert.equal(sanitized.durationMinutes, LEGACY_SAFE_PRICING_SNAPSHOT.durationMinutes);
   assert.equal(sanitized.adjustedBaseAmount, LEGACY_SAFE_PRICING_SNAPSHOT.adjustedBaseAmount);
-  assert.equal(sanitized.adjustedRatePerMinute, LEGACY_SAFE_PRICING_SNAPSHOT.adjustedRatePerMinute);
+  assert.equal(sanitized.adjustedRatePerMinute, 4);
   assert.equal(sanitized.totalAmount, LEGACY_SAFE_PRICING_SNAPSHOT.totalAmount);
 });
 
@@ -279,7 +279,7 @@ test('early cancellation bills booking fee only', () => {
   assert.equal(result.isEarlyCancellation, true);
   assert.equal(result.bookingFeeApplied, true);
   assert.equal(result.billingRule, 'booking_fee_only');
-  assert.equal(result.totalAmount, 9.9);
+  assert.equal(result.totalAmount, 10);
 });
 
 test('cancellation after 1 minute and before 20 percent bills base only', () => {
@@ -321,7 +321,7 @@ test('late cancellation with legacy snapshots bills base plus minute usage', () 
   });
 
   assert.equal(result.isEarlyCancellation, false);
-  assert.equal(result.totalAmount, 26.4);
+  assert.equal(result.totalAmount, 28);
   assert.equal(result.durationDiscountApplied, false);
   assert.equal(result.bookingFeeApplied, false);
 });
@@ -344,11 +344,11 @@ test('final billing uses actual billed minutes with the locked discount policy a
 
   assert.equal(result.isEarlyCancellation, false);
   assert.equal(result.baseAmount, 7);
-  assert.equal(result.perMinuteRate, 3.6);
+  assert.equal(result.perMinuteRate, 4);
   assert.equal(result.durationDiscountPercent, 30);
-  assert.equal(result.effectiveRatePerMinute, 3.02);
+  assert.equal(result.effectiveRatePerMinute, 3);
   assert.equal(result.bookingFeeApplied, true);
-  assert.equal(result.totalAmount, 245.3);
+  assert.equal(result.totalAmount, 271);
 });
 
 test('old snapshots without discount fields still bill using legacy behavior plus booking fee on completion', () => {
@@ -357,7 +357,7 @@ test('old snapshots without discount fields still bill using legacy behavior plu
       baseAmount: 7,
       adjustedBaseAmount: 7,
       ratePerMinute: 3.6,
-      adjustedRatePerMinute: 3.6,
+      adjustedRatePerMinute: 4,
       durationMinutes: 60,
       totalAmount: 223,
     },
@@ -369,7 +369,7 @@ test('old snapshots without discount fields still bill using legacy behavior plu
 
   assert.equal(result.isEarlyCancellation, false);
   assert.equal(result.durationDiscountApplied, false);
-  assert.equal(result.totalAmount, 285.25);
+  assert.equal(result.totalAmount, 315);
 });
 
 test('minimum discounted rate is respected', () => {
@@ -389,6 +389,6 @@ test('minimum discounted rate is respected', () => {
 
   assert.equal(quote.adjustedRatePerMinute, 2);
   assert.equal(quote.durationDiscountPercent, 35);
-  assert.equal(quote.effectiveRatePerMinute, 1.67);
-  assert.equal(quote.totalAmount, 157);
+  assert.equal(quote.effectiveRatePerMinute, 2);
+  assert.equal(quote.totalAmount, 158);
 });

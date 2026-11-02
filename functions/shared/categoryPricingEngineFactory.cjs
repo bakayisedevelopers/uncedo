@@ -12,7 +12,7 @@ const PRICING_CALIBRATION = {
 };
 
 function roundCurrency(value) {
-  return Math.round(Number(value || 0) * 100) / 100;
+  return Math.round(Number(value || 0));
 }
 
 function clamp(value, min, max) {
@@ -130,7 +130,9 @@ function buildTravelLine(distanceKm) {
 
 function buildBookingFeeLine(baseAmount) {
   const normalizedBase = Math.max(0, Number(baseAmount || 0));
-  const amount = roundCurrency(Math.min(BOOKING_FEE_CAP, normalizedBase * BOOKING_FEE_RATE));
+  if (normalizedBase <= 0) return { label: `Booking fee`, amount: 0 };
+  const calculated = normalizedBase * BOOKING_FEE_RATE;
+  const amount = Math.round(Math.min(BOOKING_FEE_CAP, Math.max(1, calculated)));
   return {
     label: `Booking fee (${Math.round(BOOKING_FEE_RATE * 100)}%, max R${BOOKING_FEE_CAP})`,
     amount,

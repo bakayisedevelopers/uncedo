@@ -103,7 +103,7 @@ const {
 } = require('./paymentMethodStore');
 const { createOrAppendWhatsAppSupportMessage } = require('./whatsapp/supportTicketService');
 const { extractQuestionnaireAnswers, getMissingRequiredQuestions, questionnaireNeedsExtractionPass } = require('./whatsapp/serviceBookingIntake');
-const { formatWhatsAppBookingConfirmation, renderMissingWhatsAppQuestions } = require('./whatsapp/serviceBookingPresentation');
+const { formatWhatsAppBookingConfirmation, formatWhatsAppNextQuestion, renderMissingWhatsAppQuestions } = require('./whatsapp/serviceBookingPresentation');
 const { createWhatsAppSupportMediaUrl } = require('./whatsapp/supportMedia');
 const {
   WHATSAPP_POLICY_ACCEPTANCE_VERSION,
@@ -112,6 +112,7 @@ const {
 } = require('./whatsapp/policyConsent');
 const { formatWhatsAppText, getWhatsAppDisplayName } = require('./whatsapp/messageFormatting');
 const {
+  buildWhatsAppServiceCarousel,
   formatWhatsAppPriceGuidance,
   formatWhatsAppServiceList,
   getConfiguredServicePriceRange,
@@ -3209,9 +3210,20 @@ async function persistWhatsAppAssistantReply({ sourceEventId, identityId, identi
       throw error;
     }
     failureStage = 'meta_send_request';
-    const delivery = formattedInteractive
-      ? await client.sendInteractive({ to: recipient, interactive: formattedInteractive, lastInboundAtMs })
-      : await client.sendText({ to: recipient, text: formattedText, lastInboundAtMs });
+    let delivery;
+    if (formattedInteractive) {
+      try {
+        delivery = await client.sendInteractive({ to: recipient, interactive: formattedInteractive, lastInboundAtMs });
+      } catch (interactiveError) {
+        logger.warn('whatsapp_interactive_send_failed_fallback_text', {
+          errorCode: interactiveError?.code,
+          message: interactiveError?.message,
+        });
+        delivery = await client.sendText({ to: recipient, text: formattedText, lastInboundAtMs });
+      }
+    } else {
+      delivery = await client.sendText({ to: recipient, text: formattedText, lastInboundAtMs });
+    }
     failureStage = 'record_meta_acceptance';
     await outboundRef.set({
       status: 'sent',
@@ -4548,11 +4560,71 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
         if (!savedProposal.exists || String(savedProposal.data()?.uid || '') !== context.authorization.uid) return { code: 'stale' };
         return { code: 'confirmation-required', proposalId, field: args.field, value };
       },
+      async getServiceDetails(args, _context) {
+        const query = String(args?.query || '').trim().toLowerCase();
+        if (!query) {
+          return { code: 'missing-query', error: 'Please provide a service name or keyword.' };
+        }
+        const entries = (await getLiveServiceCatalogEntries())
+          .filter((service) => service.active === true && service.approved === true);
+        let matched = entries.find((s) => s.id?.toLowerCase() === query || s.label?.toLowerCase() === query);
+        if (!matched) {
+          matched = entries.find((s) => s.label?.toLowerCase().includes(query) || s.id?.toLowerCase().includes(query) || s.description?.toLowerCase().includes(query) || s.categoryId?.toLowerCase().includes(query));
+        }
+        if (!matched) {
+          return {
+            code: 'not-found',
+            query,
+            availableServices: entries.slice(0, 8).map((s) => s.label || s.id),
+          };
+        }
+        const questionServices = getWhatsAppQuestionnaireServices(matched, entries);
+        const questions = getQuestionnaireForSelection({ services: questionServices, selectedPackageId: matched.id });
+        const priceRange = getConfiguredServicePriceRange(matched);
+        return {
+          code: 'found',
+          id: matched.id,
+          label: matched.label,
+          description: matched.description || '',
+          category: matched.categoryId || '',
+          priceRange: priceRange ? `R${Number(priceRange.minimum).toFixed(2)} - R${Number(priceRange.maximum).toFixed(2)} ZAR` : 'Custom quotation',
+          options: questions.map((q) => ({
+            id: q.id,
+            prompt: q.prompt || q.label,
+            options: (q.options || []).map((o) => (typeof o === 'string' ? o : o.label || o.value)),
+          })),
+        };
+      },
     },
   });
 }
 
 function formatWhatsAppToolResult(toolName, result = {}) {
+  if (toolName === 'getServiceDetails') {
+    if (result.code === 'not-found') {
+      const suggestions = Array.isArray(result.availableServices) && result.availableServices.length
+        ? `\n\nAvailable services include: ${result.availableServices.join(', ')}.`
+        : '';
+      return `🔍 I couldn't find a service matching "${result.query}".${suggestions}`;
+    }
+    if (result.code === 'found') {
+      const lines = [
+        `✨ *${result.label}*`,
+        result.description ? `📝 ${result.description}` : '',
+        result.priceRange ? `💰 *Price estimate:* ${result.priceRange}` : '',
+      ].filter(Boolean);
+      if (Array.isArray(result.options) && result.options.length) {
+        lines.push('\n📋 *Customisation options:*');
+        result.options.slice(0, 4).forEach((opt) => {
+          const optsStr = opt.options && opt.options.length ? ` (${opt.options.slice(0, 4).join(', ')})` : '';
+          lines.push(`• ${opt.prompt || opt.id}${optsStr}`);
+        });
+      }
+      lines.push(`\n💡 Reply with *"Book ${result.label}"* to start booking!`);
+      return lines.join('\n');
+    }
+    return 'I could not retrieve details for that service right now.';
+  }
   if (toolName === 'checkMyAccountByWhatsAppNumber') {
     const statements = {
       found: 'One customer account matches this WhatsApp number.',
@@ -4753,7 +4825,8 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       return;
     }
 
-    const buttonId = String(inbound.interactive?.buttonId || '').trim();
+    const buttonId = String(inbound.interactive?.buttonId || inbound.interactive?.listId || '').trim();
+    const buttonTitle = String(inbound.interactive?.buttonTitle || inbound.interactive?.listTitle || '').trim();
     if (!Object.values(GUEST_ACCOUNT_BUTTONS).includes(buttonId)
       && String(conversation.whatsappGuestAccountPrompt?.status || '') === 'pending') {
       await conversationRef.set({
@@ -6007,6 +6080,49 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       }
     }
 
+    if (inbound.type === 'interactive' || inbound.type === 'button') {
+      const interactiveBtnId = buttonId;
+      const interactiveTitle = buttonTitle;
+      if (interactiveBtnId.startsWith('wa_book_svc_')) {
+        const targetSvcId = interactiveBtnId.replace('wa_book_svc_', '').trim();
+        inbound = {
+          ...inbound,
+          type: 'text',
+          text: `I want to book ${targetSvcId}`,
+          actionChoice: { type: 'service_booking', serviceId: targetSvcId },
+        };
+      } else if (interactiveBtnId.startsWith('wa_learn_svc_')) {
+        const targetSvcId = interactiveBtnId.replace('wa_learn_svc_', '').trim();
+        inbound = {
+          ...inbound,
+          type: 'text',
+          text: `Tell me about ${targetSvcId}`,
+          actionChoice: { type: 'service_information', serviceId: targetSvcId },
+        };
+      } else if (interactiveBtnId.startsWith('wa_opt_sat_')) {
+        const satVal = interactiveBtnId.replace('wa_opt_sat_', '').trim();
+        inbound = {
+          ...inbound,
+          type: 'text',
+          text: satVal.replace(/_/g, ' '),
+          actionChoice: { type: 'service_address_target', value: satVal },
+        };
+      } else if (interactiveBtnId.startsWith('wa_ans_')) {
+        inbound = {
+          ...inbound,
+          type: 'text',
+          text: interactiveTitle || interactiveBtnId.replace('wa_ans_', '').replace(/_/g, ' '),
+          actionChoice: { type: 'questionnaire_option', buttonId: interactiveBtnId, title: interactiveTitle },
+        };
+      } else {
+        inbound = {
+          ...inbound,
+          type: 'text',
+          text: interactiveTitle || interactiveBtnId || 'Selected option',
+        };
+      }
+    }
+
     if (inbound.type !== 'text') {
       if (inbound.type === 'location') {
         const serviceLocation = normalizeWhatsAppHelperLocation(inbound.location || {}, {
@@ -6181,6 +6297,21 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       },
     });
     const intentResult = agentOutcome.final || {};
+    if (inbound.actionChoice?.type === 'service_booking') {
+      intentResult.intent = 'service_booking';
+      intentResult.serviceId = inbound.actionChoice.serviceId;
+      intentResult.confidence = 1.0;
+    } else if (inbound.actionChoice?.type === 'service_information') {
+      intentResult.intent = 'service_information';
+      intentResult.serviceId = inbound.actionChoice.serviceId;
+      intentResult.confidence = 1.0;
+    } else if (activeDraft && activeDraft.status === 'collecting' && conversation.currentMode === 'booking_intake') {
+      if (!['human_escalation', 'cancellation'].includes(intentResult.intent)) {
+        intentResult.intent = 'service_booking';
+        intentResult.serviceId = activeDraft.serviceId;
+        intentResult.confidence = 1.0;
+      }
+    }
     const executedToolResults = agentOutcome.toolResults || [];
     const explicitlyAsksPricing = intentResult.intent === 'price_enquiry' || isPriceQuestion(originalUserText);
     assistantPhase = 'workflow';
@@ -6235,18 +6366,40 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     // These service answers remain backend-owned workflows; the model no
     // longer calls catalogue, pricing, or questionnaire tools.
     if (intentResult.intent === 'service_discovery') {
-      await reply(renderWhatsAppCatalog(catalog, { includePricing: explicitlyAsksPricing }));
+      const carousel = buildWhatsAppServiceCarousel(catalog);
+      const textCatalog = renderWhatsAppCatalog(catalog, { includePricing: explicitlyAsksPricing });
+      await reply(textCatalog, carousel);
       await jobRef.set({ status: 'completed', intent: intentResult.intent, toolCallCount: agentOutcome.toolCallCount, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
     }
     if (['service_information', 'price_enquiry'].includes(intentResult.intent)) {
       const matchedService = catalog.find((service) => service.id === intentResult.serviceId);
       if (!matchedService) {
-        await reply(renderWhatsAppCatalog(catalog, { includePricing: explicitlyAsksPricing }));
+        const carousel = buildWhatsAppServiceCarousel(catalog);
+        await reply(renderWhatsAppCatalog(catalog, { includePricing: explicitlyAsksPricing }), carousel);
       } else if (intentResult.intent === 'price_enquiry' || explicitlyAsksPricing) {
-        await reply(`${formatWhatsAppPriceGuidance(matchedService.label, getConfiguredServicePriceRange(matchedService))}\n\nWould you like to start a service enquiry?`);
+        await reply(`${formatWhatsAppPriceGuidance(matchedService.label, getConfiguredServicePriceRange(matchedService))}\n\nWould you like to start a service enquiry?`, {
+          type: 'button',
+          body: { text: `Would you like to book ${matchedService.label}?` },
+          action: { buttons: [
+            { type: 'reply', reply: { id: `wa_book_svc_${matchedService.id}`.slice(0, 250), title: 'Book now' } },
+          ] },
+        });
       } else {
-        await reply(`*${matchedService.label}*${matchedService.description ? `\n${matchedService.description}` : ''}\n\nWould you like to know more or start a service enquiry?`);
+        const questionServices = getWhatsAppQuestionnaireServices(matchedService, catalog);
+        const questions = getQuestionnaireForSelection({ services: questionServices, selectedPackageId: matchedService.id });
+        const priceRange = getConfiguredServicePriceRange(matchedService);
+        const priceText = priceRange ? `\n💰 *Price estimate:* R${Number(priceRange.minimum).toFixed(2)} - R${Number(priceRange.maximum).toFixed(2)} ZAR` : '';
+        const descText = matchedService.description ? `\n📝 ${matchedService.description}` : '';
+        const optionsText = questions.length ? `\n\n📋 *Options available:* ${questions.map((q) => q.prompt || q.label || q.id).slice(0, 3).join(', ')}` : '';
+        const infoMessage = `✨ *${matchedService.label}*${descText}${priceText}${optionsText}\n\nReady to get started?`;
+        await reply(infoMessage, {
+          type: 'button',
+          body: { text: `Book ${matchedService.label} now or ask more questions.` },
+          action: { buttons: [
+            { type: 'reply', reply: { id: `wa_book_svc_${matchedService.id}`.slice(0, 250), title: 'Book now' } },
+          ] },
+        });
       }
       await jobRef.set({ status: 'completed', intent: intentResult.intent, toolCallCount: agentOutcome.toolCallCount, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
@@ -6390,6 +6543,18 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       }
     }
     const allowedQuestionIds = new Set(serviceQuestions.map((question) => question.id));
+    if (inbound.actionChoice?.type === 'questionnaire_option') {
+      const rawAnsId = inbound.actionChoice.buttonId.replace('wa_ans_', '');
+      for (const q of serviceQuestions) {
+        if (rawAnsId.startsWith(`${q.id}_`)) {
+          const val = rawAnsId.slice(q.id.length + 1);
+          answerExtraction.answers = { ...(answerExtraction.answers || {}), [q.id]: val };
+          break;
+        }
+      }
+    } else if (inbound.actionChoice?.type === 'service_address_target') {
+      answerExtraction.answers = { ...(answerExtraction.answers || {}), service_address_target: inbound.actionChoice.value };
+    }
     const incomingAnswers = Object.fromEntries(Object.entries(answerExtraction.answers || {}).filter(([key]) => allowedQuestionIds.has(key)));
     const baseAnswers = activeDraft?.serviceId === service.id && activeDraft?.structuredAnswers
       ? Object.fromEntries(Object.entries(activeDraft.structuredAnswers).filter(([key]) => allowedQuestionIds.has(key)))
@@ -6415,11 +6580,28 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     const currentMediaAssetRef = currentMediaAssetId ? db.collection('whatsappMediaAssets').doc(currentMediaAssetId) : null;
     const now = Date.now();
     const targetRequiresSavedAddress = String(validation.answers?.service_address_target || '').toLowerCase() === 'saved_home_address';
+    const targetIsCurrentLocation = String(validation.answers?.service_address_target || '').toLowerCase() === 'current_location';
+    const targetIsAnotherAddress = String(validation.answers?.service_address_target || '').toLowerCase() === 'another_address';
     const hasSavedHomeAddress = Boolean(identity?.homeAddress || identity?.savedAddress || toolIdentity?.homeAddress);
+
+    let effectiveLocation = serviceLocation;
+    if (targetRequiresSavedAddress && hasSavedHomeAddress && (!effectiveLocation || !effectiveLocation.address)) {
+      const saved = String(identity?.homeAddress || identity?.savedAddress || toolIdentity?.homeAddress).trim();
+      if (saved) {
+        effectiveLocation = { address: saved };
+      }
+    } else if (targetIsAnotherAddress && (activeDraft?.awaitingAnotherAddress || !activeDraftLocation) && originalUserText && !inbound.actionChoice && inbound.type === 'text') {
+      effectiveLocation = { address: originalUserText.trim() };
+    }
+
+    const needsAddressInput = (targetIsAnotherAddress && (!effectiveLocation || !effectiveLocation.address))
+      || (targetRequiresSavedAddress && !hasSavedHomeAddress && (!effectiveLocation || !effectiveLocation.address));
     const locationPinRequired = intentResult.intent === 'service_booking'
-      && (activeDraft?.locationPinRequired === true || explicitlyRequestsCurrentLocation || (targetRequiresSavedAddress && !hasSavedHomeAddress))
-      && !serviceLocation;
-    if (validation.missingRequired.length || locationPinRequired) {
+      && (targetIsCurrentLocation || activeDraft?.locationPinRequired === true || explicitlyRequestsCurrentLocation)
+      && (!effectiveLocation || !effectiveLocation.latitude);
+    const awaitingAddressOrPin = needsAddressInput || locationPinRequired;
+
+    if (validation.missingRequired.length || awaitingAddressOrPin) {
       const canonicalRequestId = activeDraft?.serviceId === service.id
         ? String(activeDraft.requestId || '').trim()
         : '';
@@ -6438,8 +6620,9 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           ...(currentMediaAssetId ? { mediaAssetIds: admin.firestore.FieldValue.arrayUnion(currentMediaAssetId) } : {}),
           missingQuestionIds: validation.missingRequired,
           locationPinRequired,
+          awaitingAnotherAddress: targetIsAnotherAddress && (!effectiveLocation || !effectiveLocation.address),
           questionnaireVersion: stableEventId(JSON.stringify(serviceQuestions)),
-          location: serviceLocation || null,
+          location: effectiveLocation || null,
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           createdAt: activeDraft?.createdAt || admin.firestore.FieldValue.serverTimestamp(),
         }, { merge: true });
@@ -6457,52 +6640,51 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         }, { merge: true });
       });
       const missingQuestions = getMissingRequiredQuestions(serviceQuestions, validation.missingRequired);
-      let nextQuestion = '';
-      try {
-        const responseOnlyResult = await runWhatsAppToolWithTimeout(() => model.classify({
-          ...initialAgentInput,
-          message: inbound,
-          conversationState: {
-            mode: 'booking_intake',
-            intent: 'service_booking',
-            selectedServiceId: service.id,
-            answers: validation.answers,
-            missingQuestionIds: validation.missingRequired,
-            locationPinRequired,
-          },
-          services: [{ id: service.id, categoryId: service.categoryId, label: service.label, description: service.description }],
-          questions: missingQuestions,
-          availableTools: [],
-          toolResults: [],
-          responseOnly: true,
-        }), 30_000);
-        nextQuestion = parseResponse(JSON.stringify({ response: responseOnlyResult.assistantResponse || '' }));
-        assertNoUnsupportedMoney(nextQuestion, '');
-      } catch (error) {
-        nextQuestion = missingQuestions.length
-          ? renderMissingWhatsAppQuestions({
-            serviceLabel: service.label,
-            questions: missingQuestions,
-            missingQuestionIds: missingQuestions.map((question) => question.id),
-          })
-          : (targetRequiresSavedAddress && !hasSavedHomeAddress
-            ? '*To finish your service request*\n\nI do not have a saved address on file for you yet. Please share a WhatsApp location pin or reply with your street address to continue.'
-            : '*To finish your service request*\n\nPlease share a WhatsApp location pin to continue.');
-        if (locationPinRequired && missingQuestions.length) {
-          nextQuestion = targetRequiresSavedAddress && !hasSavedHomeAddress
-            ? `${nextQuestion}\n\nNote: I do not have a saved address for you yet. Please share a WhatsApp location pin or street address as well.`
-            : `${nextQuestion}\n\nPlease share a WhatsApp location pin to continue.`;
-        }
-        await jobRef.set({
-          bookingFollowup: 'deterministic_fallback',
-          bookingFollowupErrorCode: String(error?.code || 'response_generation_failed').slice(0, 80),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        }, { merge: true });
+      let questionResult;
+      if (missingQuestions.length > 0) {
+        const nextQ = missingQuestions[0];
+        const nextQIndex = serviceQuestions.findIndex((q) => q.id === nextQ.id);
+        const totalRequired = serviceQuestions.filter((q) => q.required).length;
+        questionResult = formatWhatsAppNextQuestion({
+          service,
+          question: nextQ,
+          index: nextQIndex >= 0 ? nextQIndex : 0,
+          total: totalRequired || 1,
+          answers: validation.answers,
+          hasSavedHomeAddress,
+        });
+      } else if (targetIsAnotherAddress && (!effectiveLocation || !effectiveLocation.address)) {
+        questionResult = {
+          text: formatWhatsAppText(`📍 *${service.label}*\n\nPlease type the street address where you would like the helper to come.`),
+          interactive: null,
+        };
+      } else if (targetRequiresSavedAddress && !hasSavedHomeAddress && (!effectiveLocation || !effectiveLocation.address)) {
+        questionResult = {
+          text: formatWhatsAppText(`🏠 *${service.label}*\n\nI do not have a saved address on file for you. Please type your street address below, or share your WhatsApp location pin.`),
+          interactive: null,
+        };
+      } else if (locationPinRequired) {
+        questionResult = {
+          text: formatWhatsAppText(`📍 *${service.label}*\n\nPlease share your current WhatsApp location pin (📎 > Location) to continue.`),
+          interactive: null,
+        };
+      } else {
+        questionResult = {
+          text: formatWhatsAppText(`*${service.label}*\n\nPlease provide any additional details for this request.`),
+          interactive: null,
+        };
       }
+
       const priceContext = intentResult.intent === 'service_booking' && explicitlyAsksPricing
         ? `${formatWhatsAppPriceGuidance(service.label, getConfiguredServicePriceRange(service))}\n\n`
         : '';
-      await reply(`${priceContext}${nextQuestion}`);
+      const fullText = `${priceContext}${questionResult.text}`;
+      const interactiveToSend = questionResult.interactive ? {
+        ...questionResult.interactive,
+        body: { text: formatWhatsAppText(`${priceContext}${questionResult.interactive.body?.text || ''}`) },
+      } : null;
+
+      await reply(fullText, interactiveToSend);
       await jobRef.set({ status: 'completed', intent: intentResult.intent, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
     }
@@ -6531,7 +6713,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         serviceIds,
         selectedPackageId,
         answers: validation.answers,
-        location: serviceLocation || null,
+        location: effectiveLocation || serviceLocation || null,
       });
       if (requestDraft.code !== 'ready') {
         let failureReply = 'I could not start this request yet. Please check your active requests or contact Uncedo support.';

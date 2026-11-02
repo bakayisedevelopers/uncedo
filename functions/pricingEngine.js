@@ -85,7 +85,7 @@ const LEGACY_SAFE_PRICING_SNAPSHOT = {
 };
 
 function roundCurrency(value) {
-  return Number((Number(value || 0)).toFixed(2));
+  return Math.round(Number(value || 0));
 }
 
 function getTimeOfDayBucket(hour) {

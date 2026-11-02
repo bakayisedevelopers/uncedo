@@ -41,6 +41,22 @@ const TOOL_DEFINITIONS = Object.freeze({
     stateChanging: true, confirmation: 'user-confirmation', idempotency: 'inbound-event-id',
     outputSchema: resultSchema({ code: stringSchema, proposalId: stringSchema, field: stringSchema, value: stringSchema }),
   },
+  getServiceDetails: {
+    description: 'Search and read the full details of a specific Uncedo service or package by service name, keyword, or ID. Returns what is offered (derived from service questionnaire options), description, category, and price estimate from the live catalogue.',
+    roles: ['guest', 'customer', 'helper'], auth: 'public',
+    fields: { query: 'short-text' }, required: ['query'],
+    handler: 'getServiceDetails', canonicalBackend: 'liveServiceCatalogReader',
+    outputSchema: resultSchema({
+      found: Object.freeze({ type: 'boolean' }),
+      serviceId: stringSchema,
+      serviceName: stringSchema,
+      categoryName: stringSchema,
+      description: stringSchema,
+      whatIsOffered: stringSchema,
+      priceEstimate: stringSchema,
+      optionsAvailable: stringSchema,
+    }, ['found', 'serviceName']),
+  },
 });
 
 function safeText(value, max = 500) {

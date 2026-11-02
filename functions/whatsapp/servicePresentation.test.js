@@ -53,3 +53,22 @@ test('pricing is included only when the wording asks or implies a price question
   assert.match(pricing, /ZAR 300\.00–ZAR 900\.00/);
   assert.doesNotMatch(pricing, /250/);
 });
+
+test('buildWhatsAppServiceCarousel generates valid interactive carousel cards with Book and Learn More buttons', () => {
+  const { buildWhatsAppServiceCarousel } = require('./servicePresentation');
+  const services = [
+    { id: 'svc_barber', label: 'Barber Grooming', categoryName: 'Personal Care', description: 'Fresh haircut', images: [{ uri: 'https://example.com/barber.jpg' }] },
+    { id: 'svc_clean', label: 'House Cleaning', categoryName: 'Home Care', description: 'Deep home cleaning' },
+  ];
+  const carousel = buildWhatsAppServiceCarousel(services);
+  assert.equal(carousel.type, 'carousel');
+  assert.equal(carousel.action.cards.length, 2);
+  assert.equal(carousel.action.cards[0].header.image.link, 'https://example.com/barber.jpg');
+  assert.equal(carousel.action.cards[0].action.buttons[0].quick_reply.title, 'Book');
+  assert.equal(carousel.action.cards[0].action.buttons[0].quick_reply.id, 'wa_book_svc_svc_barber');
+  assert.equal(carousel.action.cards[0].action.buttons[1].quick_reply.title, 'Learn more');
+  assert.equal(carousel.action.cards[0].action.buttons[1].quick_reply.id, 'wa_learn_svc_svc_barber');
+
+  // Service without image falls back to placeholder image
+  assert.match(carousel.action.cards[1].header.image.link, /^https:\/\//);
+});

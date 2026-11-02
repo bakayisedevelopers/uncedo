@@ -51,3 +51,63 @@ test('booking confirmation omits unanswered questions and formats non-ZAR quotes
   assert.doesNotMatch(result.text, /Number of rooms/);
   assert.match(result.text, /\*Final quote: USD 120\.00\*/);
 });
+
+test('formatWhatsAppNextQuestion formats service_address_target with three location buttons', () => {
+  const { formatWhatsAppNextQuestion } = require('./serviceBookingPresentation');
+  const result = formatWhatsAppNextQuestion({
+    service: { label: 'Barber' },
+    question: { id: 'service_address_target', prompt: 'Where should the helper come?' },
+    index: 0,
+    total: 3,
+    hasSavedHomeAddress: true,
+  });
+  assert.equal(result.interactive.type, 'button');
+  const buttons = result.interactive.action.buttons;
+  assert.equal(buttons.length, 3);
+  assert.equal(buttons[0].reply.id, 'wa_opt_sat_current_location');
+  assert.equal(buttons[0].reply.title, 'Current Location');
+  assert.equal(buttons[1].reply.id, 'wa_opt_sat_saved_home_address');
+  assert.equal(buttons[1].reply.title, 'Saved Address');
+  assert.equal(buttons[2].reply.id, 'wa_opt_sat_another_address');
+  assert.equal(buttons[2].reply.title, 'Another Address');
+});
+
+test('formatWhatsAppNextQuestion formats options <= 3 with quick reply buttons', () => {
+  const { formatWhatsAppNextQuestion } = require('./serviceBookingPresentation');
+  const result = formatWhatsAppNextQuestion({
+    service: { label: 'Car Wash' },
+    question: {
+      id: 'vehicle_size',
+      prompt: 'What size is the car?',
+      options: [
+        { value: 'small', label: 'Small Hatchback' },
+        { value: 'sedan', label: 'Sedan' },
+        { value: 'suv', label: 'SUV or 4x4' },
+      ],
+    },
+    index: 1,
+    total: 3,
+  });
+  assert.equal(result.interactive.type, 'button');
+  const buttons = result.interactive.action.buttons;
+  assert.equal(buttons.length, 3);
+  assert.equal(buttons[0].reply.id, 'wa_ans_vehicle_size_small');
+  assert.equal(buttons[0].reply.title, 'Small Hatchback');
+  assert.equal(buttons[1].reply.id, 'wa_ans_vehicle_size_sedan');
+  assert.equal(buttons[1].reply.title, 'Sedan');
+  assert.equal(buttons[2].reply.id, 'wa_ans_vehicle_size_suv');
+  assert.equal(buttons[2].reply.title, 'SUV or 4x4');
+});
+
+test('formatWhatsAppNextQuestion presents free questions without interactive buttons', () => {
+  const { formatWhatsAppNextQuestion } = require('./serviceBookingPresentation');
+  const result = formatWhatsAppNextQuestion({
+    service: { label: 'Handyman' },
+    question: { id: 'problem_description', prompt: 'Describe the issue' },
+    index: 0,
+    total: 1,
+  });
+  assert.equal(result.interactive, null);
+  assert.match(result.text, /Describe the issue/);
+  assert.match(result.text, /Please type your answer below/);
+});

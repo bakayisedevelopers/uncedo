@@ -5,11 +5,14 @@ const BOOKING_FEE_CAP = 5;
 const DEFAULT_CURRENCY = 'ZAR';
 
 function roundCurrency(value) {
-  return Number(Number(value || 0).toFixed(2));
+  return Math.round(Number(value || 0));
 }
 
 function computeDynamicBookingFee(baseAmount = 0) {
-  return roundCurrency(Math.min(BOOKING_FEE_CAP, Math.max(0, Number(baseAmount || 0)) * BOOKING_FEE_RATE));
+  const numericBase = Number(baseAmount || 0);
+  if (numericBase <= 0) return 0;
+  const calculated = numericBase * BOOKING_FEE_RATE;
+  return Math.round(Math.min(BOOKING_FEE_CAP, Math.max(1, calculated)));
 }
 
 function clamp(value, min = Number.NEGATIVE_INFINITY, max = Number.POSITIVE_INFINITY) {
@@ -43,12 +46,19 @@ function normalizeOption(option = {}) {
   const value = String(option.value || option.id || '').trim();
   if (!value) return null;
 
+  const pricingType = String(option.pricingType || (option.multiplier && option.multiplier !== 1 ? 'multiplier' : 'adder')).trim().toLowerCase();
   return {
     value,
     label: String(option.label || value).trim(),
-    priceAdder: roundCurrency(normalizeNumber(option.priceAdder, 0)),
+    pricingType,
+    priceAdder: pricingType === 'adder' ? roundCurrency(normalizeNumber(option.priceAdder ?? option.priceValue, 0)) : 0,
     materialAdder: roundCurrency(normalizeNumber(option.materialAdder, 0)),
-    multiplier: Math.max(0, normalizeNumber(option.multiplier, 1)),
+    multiplier: pricingType === 'multiplier' ? Math.max(0, normalizeNumber(option.multiplier, 1)) : 1,
+    imageUrl: String(option.imageUrl || '').trim(),
+    dependsOn: option.dependsOn && typeof option.dependsOn === 'object' && option.dependsOn.questionId ? {
+      questionId: String(option.dependsOn.questionId).trim(),
+      optionValue: String(option.dependsOn.optionValue || '').trim(),
+    } : null,
   };
 }
 
@@ -62,6 +72,10 @@ function normalizeQuestion(question = {}) {
     answerType: String(question.answerType || 'text').trim().toLowerCase(),
     required: normalizeBoolean(question.required, false),
     answerHint: String(question.answerHint || '').trim(),
+    dependsOn: question.dependsOn && typeof question.dependsOn === 'object' && question.dependsOn.questionId ? {
+      questionId: String(question.dependsOn.questionId).trim(),
+      optionValue: String(question.dependsOn.optionValue || '').trim(),
+    } : null,
     options: (Array.isArray(question.options) ? question.options : [])
       .map(normalizeOption)
       .filter(Boolean),
@@ -222,6 +236,13 @@ function getQuestionAdjustments(service, structuredAnswers = {}) {
   const lines = [];
 
   [...(service.questionnaire?.required || []), ...(service.questionnaire?.optional || [])].forEach((question) => {
+    if (question.dependsOn && question.dependsOn.questionId) {
+      const parentAnswer = String(structuredAnswers?.[question.dependsOn.questionId] || '').trim().toLowerCase();
+      if (parentAnswer !== String(question.dependsOn.optionValue || '').trim().toLowerCase()) {
+        return;
+      }
+    }
+
     const answerValue = String(structuredAnswers?.[question.id] || '').trim().toLowerCase();
     if (!answerValue || !Array.isArray(question.options) || !question.options.length) {
       return;
@@ -230,20 +251,38 @@ function getQuestionAdjustments(service, structuredAnswers = {}) {
     const selectedOption = question.options.find((option) => String(option.value || '').trim().toLowerCase() === answerValue);
     if (!selectedOption) return;
 
-    subtotalAdder += Number(selectedOption.priceAdder || 0);
-    materialAdder += Number(selectedOption.materialAdder || 0);
-    multiplier *= Number(selectedOption.multiplier || 1);
+    if (selectedOption.dependsOn && selectedOption.dependsOn.questionId) {
+      const parentAnswer = String(structuredAnswers?.[selectedOption.dependsOn.questionId] || '').trim().toLowerCase();
+      if (parentAnswer !== String(selectedOption.dependsOn.optionValue || '').trim().toLowerCase()) {
+        return;
+      }
+    }
 
-    if (selectedOption.priceAdder) {
+    const optionPriceAdder = Number(selectedOption.priceAdder || 0);
+    const optionMultiplier = Number(selectedOption.multiplier || 1);
+
+    subtotalAdder += optionPriceAdder;
+    materialAdder += Number(selectedOption.materialAdder || 0);
+    if (optionMultiplier && optionMultiplier !== 1) {
+      multiplier *= optionMultiplier;
+    }
+
+    if (optionPriceAdder) {
       lines.push({
         label: `${service.label}: ${selectedOption.label}`,
-        amount: roundCurrency(selectedOption.priceAdder),
+        amount: roundCurrency(optionPriceAdder),
       });
     }
     if (selectedOption.materialAdder) {
       lines.push({
         label: `${service.label}: ${selectedOption.label} materials`,
         amount: roundCurrency(selectedOption.materialAdder),
+      });
+    }
+    if (optionMultiplier && optionMultiplier !== 1) {
+      lines.push({
+        label: `${service.label}: ${selectedOption.label} multiplier (×${optionMultiplier})`,
+        amount: roundCurrency(0),
       });
     }
   });
