@@ -41,21 +41,82 @@ const TOOL_DEFINITIONS = Object.freeze({
     stateChanging: true, confirmation: 'user-confirmation', idempotency: 'inbound-event-id',
     outputSchema: resultSchema({ code: stringSchema, proposalId: stringSchema, field: stringSchema, value: stringSchema }),
   },
+  getAvailableServices: {
+    description: 'Get a lightweight summary list of all active published Uncedo services (IDs, labels, categories, and descriptions) for internal AI reasoning and catalog inspection.',
+    roles: ['guest', 'customer', 'helper'], auth: 'public', fields: {},
+    handler: 'getAvailableServices', canonicalBackend: 'liveServiceCatalogSummaryReader',
+    outputSchema: resultSchema({
+      services: Object.freeze({
+        type: 'array',
+        items: resultSchema({
+          id: stringSchema,
+          label: stringSchema,
+          categoryName: stringSchema,
+          description: stringSchema,
+        }, ['id', 'label']),
+      }),
+    }, ['services']),
+  },
+  sendServicesToUser: {
+    description: 'Send an interactive WhatsApp carousel card message to the user showing available Uncedo services with primary images, descriptions, and Book/Details quick-reply buttons.',
+    roles: ['guest', 'customer', 'helper'], auth: 'public', fields: { category: 'short-text' }, required: [],
+    handler: 'sendServicesToUser', canonicalBackend: 'interactiveServiceCarouselSender',
+    stateChanging: true, confirmation: 'not-required', idempotency: 'inbound-event-id',
+    outputSchema: resultSchema({
+      code: stringSchema,
+      sentCount: Object.freeze({ type: 'integer' }),
+    }, ['code']),
+  },
   getServiceDetails: {
-    description: 'Search and read the full details of a specific Uncedo service or package by service name, keyword, or ID. Returns what is offered (derived from service questionnaire options), description, category, and price estimate from the live catalogue.',
+    description: 'Read full details of a specific Uncedo service by serviceId or keyword query. Returns questionnaire options, description, category, price estimate range, and active helper availability count.',
     roles: ['guest', 'customer', 'helper'], auth: 'public',
-    fields: { query: 'short-text' }, required: ['query'],
+    fields: { serviceId: 'short-text', query: 'short-text' }, required: [],
     handler: 'getServiceDetails', canonicalBackend: 'liveServiceCatalogReader',
     outputSchema: resultSchema({
-      found: Object.freeze({ type: 'boolean' }),
+      code: stringSchema,
+      id: stringSchema,
+      label: stringSchema,
+      description: stringSchema,
+      category: stringSchema,
+      priceRange: stringSchema,
+      helperCount: Object.freeze({ type: 'integer' }),
+      options: Object.freeze({
+        type: 'array',
+        items: resultSchema({
+          id: stringSchema,
+          prompt: stringSchema,
+          options: Object.freeze({
+            type: 'array',
+            items: stringSchema,
+          }),
+        }, ['id', 'prompt']),
+      }),
+    }, ['code']),
+  },
+  initiateServiceBooking: {
+    description: 'Initiate a service booking by serviceId or keyword. Loads the service questionnaire, required questions, and starts the booking intake flow.',
+    roles: ['guest', 'customer', 'helper'], auth: 'public',
+    fields: { serviceId: 'short-text', query: 'short-text' }, required: [],
+    handler: 'initiateServiceBooking', canonicalBackend: 'serviceBookingInitiator',
+    stateChanging: true, confirmation: 'not-required', idempotency: 'inbound-event-id',
+    outputSchema: resultSchema({
+      code: stringSchema,
       serviceId: stringSchema,
       serviceName: stringSchema,
       categoryName: stringSchema,
-      description: stringSchema,
-      whatIsOffered: stringSchema,
-      priceEstimate: stringSchema,
-      optionsAvailable: stringSchema,
-    }, ['found', 'serviceName']),
+      questions: Object.freeze({
+        type: 'array',
+        items: resultSchema({
+          id: stringSchema,
+          prompt: stringSchema,
+          required: Object.freeze({ type: 'boolean' }),
+          options: Object.freeze({
+            type: 'array',
+            items: stringSchema,
+          }),
+        }, ['id', 'prompt']),
+      }),
+    }, ['code', 'serviceId', 'serviceName']),
   },
 });
 

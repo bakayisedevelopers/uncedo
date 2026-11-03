@@ -4560,27 +4560,75 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
         if (!savedProposal.exists || String(savedProposal.data()?.uid || '') !== context.authorization.uid) return { code: 'stale' };
         return { code: 'confirmation-required', proposalId, field: args.field, value };
       },
-      async getServiceDetails(args, _context) {
+      async getAvailableServices(args, _context) {
+        const entries = (await getLiveServiceCatalogEntries())
+          .filter((service) => service.active === true && service.approved === true);
+        return {
+          services: entries.map((s) => ({
+            id: s.id,
+            label: s.label || s.id,
+            categoryName: s.categoryName || s.categoryId || '',
+            description: s.description || '',
+          })),
+        };
+      },
+      async sendServicesToUser(args, context) {
+        const entries = (await getLiveServiceCatalogEntries())
+          .filter((service) => service.active === true && service.approved === true);
+        const carousel = buildWhatsAppServiceCarousel(entries);
+        if (!carousel) {
+          return { code: 'no-services', sentCount: 0 };
+        }
+        const recipient = context.identity?.waId || context.recipient;
+        if (recipient && metaClient) {
+          await metaClient.sendInteractive({ to: recipient, interactive: carousel, lastInboundAtMs: context.lastInboundAtMs });
+        }
+        return { code: 'sent', sentCount: entries.length };
+      },
+      async getServiceDetails(args, context) {
+        const serviceId = String(args?.serviceId || '').trim().toLowerCase();
         const query = String(args?.query || '').trim().toLowerCase();
-        if (!query) {
-          return { code: 'missing-query', error: 'Please provide a service name or keyword.' };
+        if (!serviceId && !query) {
+          return { code: 'missing-query', error: 'Please provide a service ID or keyword.' };
         }
         const entries = (await getLiveServiceCatalogEntries())
           .filter((service) => service.active === true && service.approved === true);
-        let matched = entries.find((s) => s.id?.toLowerCase() === query || s.label?.toLowerCase() === query);
-        if (!matched) {
-          matched = entries.find((s) => s.label?.toLowerCase().includes(query) || s.id?.toLowerCase().includes(query) || s.description?.toLowerCase().includes(query) || s.categoryId?.toLowerCase().includes(query));
+        let matched = null;
+        if (serviceId) {
+          matched = entries.find((s) => s.id?.toLowerCase() === serviceId);
+        }
+        if (!matched && query) {
+          matched = entries.find((s) => s.id?.toLowerCase() === query || s.label?.toLowerCase() === query);
+          if (!matched) {
+            matched = entries.find((s) => s.label?.toLowerCase().includes(query) || s.id?.toLowerCase().includes(query) || s.description?.toLowerCase().includes(query));
+          }
         }
         if (!matched) {
           return {
             code: 'not-found',
-            query,
+            query: serviceId || query,
             availableServices: entries.slice(0, 8).map((s) => s.label || s.id),
           };
         }
         const questionServices = getWhatsAppQuestionnaireServices(matched, entries);
         const questions = getQuestionnaireForSelection({ services: questionServices, selectedPackageId: matched.id });
         const priceRange = getConfiguredServicePriceRange(matched);
+
+        let helperCount = 0;
+        try {
+          const helpersSnap = await db.collection('helpers').where('active', '==', true).get();
+          helperCount = helpersSnap.size;
+        } catch (e) {
+          helperCount = 0;
+        }
+
+        if (context.conversationRef) {
+          await context.conversationRef.set({
+            lastViewedServiceId: matched.id,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true }).catch(() => null);
+        }
+
         return {
           code: 'found',
           id: matched.id,
@@ -4588,9 +4636,64 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
           description: matched.description || '',
           category: matched.categoryId || '',
           priceRange: priceRange ? `R${Number(priceRange.minimum).toFixed(2)} - R${Number(priceRange.maximum).toFixed(2)} ZAR` : 'Custom quotation',
+          helperCount,
           options: questions.map((q) => ({
             id: q.id,
             prompt: q.prompt || q.label,
+            options: (q.options || []).map((o) => (typeof o === 'string' ? o : o.label || o.value)),
+          })),
+        };
+      },
+      async initiateServiceBooking(args, context) {
+        let serviceId = String(args?.serviceId || '').trim().toLowerCase();
+        const query = String(args?.query || '').trim().toLowerCase();
+        if (!serviceId && !query && context.conversationRef) {
+          const snap = await context.conversationRef.get();
+          if (snap.exists) {
+            serviceId = String(snap.data()?.lastViewedServiceId || '').trim().toLowerCase();
+          }
+        }
+        if (!serviceId && !query) {
+          return { code: 'missing-query', error: 'Please specify the service you wish to book.' };
+        }
+        const entries = (await getLiveServiceCatalogEntries())
+          .filter((service) => service.active === true && service.approved === true);
+        let matched = null;
+        if (serviceId) {
+          matched = entries.find((s) => s.id?.toLowerCase() === serviceId);
+        }
+        if (!matched && query) {
+          matched = entries.find((s) => s.id?.toLowerCase() === query || s.label?.toLowerCase() === query);
+          if (!matched) {
+            matched = entries.find((s) => s.label?.toLowerCase().includes(query) || s.id?.toLowerCase().includes(query) || s.description?.toLowerCase().includes(query));
+          }
+        }
+        if (!matched) {
+          return { code: 'not-found', query: serviceId || query };
+        }
+        const questionServices = getWhatsAppQuestionnaireServices(matched, entries);
+        const questions = getQuestionnaireForSelection({ services: questionServices, selectedPackageId: matched.id });
+
+        if (context.conversationRef) {
+          await context.conversationRef.set({
+            mode: 'booking_intake',
+            intent: 'service_booking',
+            selectedServiceId: matched.id,
+            answers: {},
+            lastViewedServiceId: matched.id,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true }).catch(() => null);
+        }
+
+        return {
+          code: 'booking_started',
+          serviceId: matched.id,
+          serviceName: matched.label,
+          categoryName: matched.categoryName || matched.categoryId || '',
+          questions: questions.map((q) => ({
+            id: q.id,
+            prompt: q.prompt || q.label,
+            required: q.required === true,
             options: (q.options || []).map((o) => (typeof o === 'string' ? o : o.label || o.value)),
           })),
         };
@@ -4600,7 +4703,28 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
 }
 
 function formatWhatsAppToolResult(toolName, result = {}) {
-  if (toolName === 'getServiceDetails') {
+  if (toolName === 'initiateServiceBooking') {
+    if (result.code === 'not-found') {
+      return `🔍 I couldn't find the service you requested to book. Please check the service name or select from our available services.`;
+    }
+    if (result.code === 'booking_started') {
+      const lines = [
+        `🚀 *Starting booking for ${result.serviceName}*`,
+        `\nTo complete your booking, please answer the following question:`,
+      ];
+      if (Array.isArray(result.questions) && result.questions.length) {
+        const firstQ = result.questions[0];
+        lines.push(`\n📋 *${firstQ.prompt}*`);
+        if (Array.isArray(firstQ.options) && firstQ.options.length) {
+          firstQ.options.slice(0, 6).forEach((opt) => {
+            lines.push(`• ${opt}`);
+          });
+        }
+      }
+      return lines.join('\n');
+    }
+    return 'Unable to start booking intake right now.';
+  }
     if (result.code === 'not-found') {
       const suggestions = Array.isArray(result.availableServices) && result.availableServices.length
         ? `\n\nAvailable services include: ${result.availableServices.join(', ')}.`
@@ -4612,6 +4736,7 @@ function formatWhatsAppToolResult(toolName, result = {}) {
         `✨ *${result.label}*`,
         result.description ? `📝 ${result.description}` : '',
         result.priceRange ? `💰 *Price estimate:* ${result.priceRange}` : '',
+        result.helperCount !== undefined ? `👥 *Available helpers:* ${result.helperCount} active helper${result.helperCount === 1 ? '' : 's'} ready` : '',
       ].filter(Boolean);
       if (Array.isArray(result.options) && result.options.length) {
         lines.push('\n📋 *Customisation options:*');
@@ -4620,10 +4745,19 @@ function formatWhatsAppToolResult(toolName, result = {}) {
           lines.push(`• ${opt.prompt || opt.id}${optsStr}`);
         });
       }
-      lines.push(`\n💡 Reply with *"Book ${result.label}"* to start booking!`);
+      lines.push(`\n💡 Reply with *"Book ${result.label}"* or tap below to book!`);
       return lines.join('\n');
     }
     return 'I could not retrieve details for that service right now.';
+  }
+  if (toolName === 'sendServicesToUser') {
+    if (result.code === 'sent') {
+      return '✨ I have sent the interactive list of available Uncedo services above. Tap *Book* to start booking or *Details* to learn more!';
+    }
+    return 'I could not load the services carousel right now.';
+  }
+  if (toolName === 'getAvailableServices') {
+    return '✨ Service catalog loaded successfully.';
   }
   if (toolName === 'checkMyAccountByWhatsAppNumber') {
     const statements = {

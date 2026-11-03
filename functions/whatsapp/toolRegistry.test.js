@@ -7,12 +7,12 @@ const { TOOL_DEFINITIONS, createWhatsAppToolRegistry } = require('./toolRegistry
 const linkedCustomer = { uid: 'customer-1', role: 'customer', linked: true, verified: true };
 const linkedHelper = { uid: 'helper-1', role: 'helper', linked: true, verified: true, helperVerified: true };
 
-test('guests get profile/account lookup and service details while linked customers and helpers also get confirmed name change', () => {
+test('guests get profile/account lookup and service tools while linked customers and helpers also get confirmed name change', () => {
   const registry = createWhatsAppToolRegistry();
-  const linkedNames = ['getMyProfile', 'proposeProfileChange', 'getServiceDetails'];
-  assert.deepEqual(Object.keys(TOOL_DEFINITIONS), ['getMyProfile', 'checkMyAccountByWhatsAppNumber', 'proposeProfileChange', 'getServiceDetails']);
+  const linkedNames = ['getMyProfile', 'proposeProfileChange', 'getAvailableServices', 'sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking'];
+  assert.deepEqual(Object.keys(TOOL_DEFINITIONS), ['getMyProfile', 'checkMyAccountByWhatsAppNumber', 'proposeProfileChange', 'getAvailableServices', 'sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking']);
   const guestTools = registry.definitions({ identity: { guestPrincipalId: 'guest-1' }, authorization: { role: 'guest' } });
-  assert.deepEqual(guestTools.map((tool) => tool.name), ['getMyProfile', 'checkMyAccountByWhatsAppNumber', 'getServiceDetails']);
+  assert.deepEqual(guestTools.map((tool) => tool.name), ['getMyProfile', 'checkMyAccountByWhatsAppNumber', 'getAvailableServices', 'sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking']);
   assert.deepEqual(registry.definitions({ authorization: linkedCustomer }).map((tool) => tool.name), linkedNames);
   assert.deepEqual(registry.definitions({ authorization: linkedHelper }).map((tool) => tool.name), linkedNames);
 
@@ -22,8 +22,10 @@ test('guests get profile/account lookup and service details while linked custome
   assert.deepEqual(tools[1].inputSchema.properties.field.enum, ['firstName', 'lastName']);
   assert.equal(tools[1].stateChanging, true);
   assert.equal(tools[1].confirmation, 'user-confirmation');
-  assert.equal(tools[2].name, 'getServiceDetails');
-  assert.equal(tools[2].stateChanging, false);
+  assert.equal(tools[4].name, 'getServiceDetails');
+  assert.equal(tools[4].stateChanging, false);
+  assert.equal(tools[5].name, 'initiateServiceBooking');
+  assert.equal(tools[5].stateChanging, true);
 });
 
 test('profile lookup requires a verified linked account and returns only its declared fields', async () => {
