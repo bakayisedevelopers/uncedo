@@ -4725,6 +4725,7 @@ function formatWhatsAppToolResult(toolName, result = {}) {
     }
     return 'Unable to start booking intake right now.';
   }
+  if (toolName === 'getServiceDetails') {
     if (result.code === 'not-found') {
       const suggestions = Array.isArray(result.availableServices) && result.availableServices.length
         ? `\n\nAvailable services include: ${result.availableServices.join(', ')}.`
