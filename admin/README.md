@@ -41,3 +41,4 @@ The app expects the usual `VITE_FIREBASE_*` environment variables that point at 
 - The services area includes both per-service image uploads and a bulk uploader that stages multiple pictures locally, then assigns each uploaded image to one or more services before saving.
 - Helper agreement publishing is handled through the dedicated helper agreement management screen with direct Firestore version publishing and helper re-acceptance invalidation.
 - Admin helper-approval and service-catalog saves now trigger client-side reconciliation nudges for active `serviceRequests`, replacing the removed scheduled backend reconciliation pass.
+- Approve, decline, pause, and remove actions for helper service offerings create admin-authenticated moderation events; the WhatsApp backend sends the helper a status notice and uses the configured service-status template outside the 24-hour messaging window.

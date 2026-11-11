@@ -145,6 +145,7 @@ export default function HelperDetailsPage() {
       await updateHelperServiceStatus({
         uid: row.providerUid,
         serviceId: row.serviceId,
+        serviceName: row.serviceName,
         offeringId: row.offeringId,
         updates,
       });
@@ -160,6 +161,7 @@ export default function HelperDetailsPage() {
       await removeHelperServiceOffering({
         uid: row.providerUid,
         serviceId: row.serviceId,
+        serviceName: row.serviceName,
         offeringId: row.offeringId,
       });
       await load();

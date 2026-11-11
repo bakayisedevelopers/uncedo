@@ -134,6 +134,14 @@
           ]
         },
         {
+          "source": "/service-photos",
+          "headers": [
+            { "key": "Cache-Control", "value": "no-store, max-age=0" },
+            { "key": "Referrer-Policy", "value": "no-referrer" },
+            { "key": "X-Content-Type-Options", "value": "nosniff" }
+          ]
+        },
+        {
           "source": "/whatsapp-link",
           "headers": [
             {
@@ -162,6 +170,10 @@
         },
         {
           "source": "/sign-agreement",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/service-photos",
           "destination": "/app.html"
         },
         {

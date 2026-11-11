@@ -21,6 +21,7 @@ function getPageFromPath() {
   if (window.location.pathname === '/sign-in') return 'login';
   if (window.location.pathname === '/sign-up') return 'signup';
   if (window.location.pathname === '/sign-agreement') return 'agreement';
+  if (window.location.pathname === '/service-photos') return 'service-photos';
   if (window.location.pathname === '/whatsapp-link') return 'whatsapp-link';
   return 'home';
 }
@@ -43,13 +44,13 @@ export function HelperWebEntryScreen() {
 
   if (page === 'whatsapp-link') return <WhatsAppAccountLinkScreen />;
 
-  if (page === 'login' || page === 'signup' || page === 'agreement') {
+  if (page === 'login' || page === 'signup' || page === 'agreement' || page === 'service-photos') {
     return (
       <ProviderLoginScreen
         initialMode={page === 'signup' ? 'signup' : 'login'}
-        disableSignupMode={page === 'agreement'}
-        emailOnly={page === 'agreement'}
-        onHome={page === 'agreement' ? undefined : () => navigate('/')}
+        disableSignupMode={page === 'agreement' || page === 'service-photos'}
+        emailOnly={page === 'agreement' || page === 'service-photos'}
+        onHome={page === 'agreement' || page === 'service-photos' ? undefined : () => navigate('/')}
         onRouteChange={navigate}
       />
     );

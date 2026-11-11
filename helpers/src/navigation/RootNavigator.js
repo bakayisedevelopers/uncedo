@@ -33,6 +33,7 @@ import { ServicesOfferedScreen } from '../screens/provider/ServicesOfferedScreen
 import { ServiceOfferingCatalogScreen } from '../screens/provider/SkillCatalogScreen';
 import { ServiceOfferingDetailsScreen } from '../screens/provider/SkillDetailsScreen';
 import { VerificationScreen } from '../screens/provider/VerificationScreen';
+import { WhatsAppServicePhotoOnboardingScreen } from '../screens/provider/WhatsAppServicePhotoOnboardingScreen';
 import { HelperHowToEarnScreen } from '../screens/provider/HelperHowToEarnScreen';
 import { HelperMembershipScreen } from '../screens/provider/HelperMembershipScreen';
 import { HelperNotificationsScreen } from '../screens/provider/HelperNotificationsScreen';
@@ -65,6 +66,7 @@ const rootScreens = {
 };
 
 const secondaryScreens = {
+  WhatsAppServicePhotos: WhatsAppServicePhotoOnboardingScreen,
   ProviderDetails: ProviderDetailsScreen,
   ProviderSecurity: ProviderSecurityScreen,
   ProviderLegal: ProviderLegalScreen,
@@ -115,7 +117,12 @@ function getWhatsAppAgreementRoute() {
 }
 
 function getInitialRoute() {
-  return getWhatsAppAgreementRoute() || DEFAULT_ROUTE;
+  return getWhatsAppAgreementRoute() || getWhatsAppServicePhotosRoute() || DEFAULT_ROUTE;
+}
+
+function getWhatsAppServicePhotosRoute() {
+  if (Platform.OS !== 'web' || typeof window === 'undefined' || window.location.pathname !== '/service-photos') return null;
+  return { key: 'WhatsAppServicePhotos', params: { whatsappOnboardingFlow: true } };
 }
 
 function normalizeRoute(target) {
@@ -295,7 +302,7 @@ export function RootNavigator() {
       return;
     }
 
-    const unauthenticatedRoute = getWhatsAppAgreementRoute() || DEFAULT_ROUTE;
+    const unauthenticatedRoute = getWhatsAppAgreementRoute() || getWhatsAppServicePhotosRoute() || DEFAULT_ROUTE;
     routeHistoryRef.current = [];
     activeRouteRef.current = unauthenticatedRoute;
     setRouteHistory([]);

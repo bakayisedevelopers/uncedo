@@ -829,6 +829,7 @@ export function HelpersAppProvider({ children }) {
 
     try {
       const catalogEntry = (Array.isArray(serviceCatalog) ? serviceCatalog : []).find((entry) => String(entry.id || '').trim().toLowerCase() === String(serviceId || '').trim().toLowerCase()) || null;
+      const existingOffering = (Array.isArray(helperServiceOfferings) ? helperServiceOfferings : []).find((entry) => String(entry.serviceId || '').trim().toLowerCase() === String(serviceId || '').trim().toLowerCase()) || null;
       const resolvedCategoryId = categoryId || catalogEntry?.categoryId || '';
       const allowsInheritedPortfolio = catalogEntry?.type === 'bundle' && catalogEntry?.inheritBundleImages !== false;
       if (!user?.uid || !serviceId || (!assets.length && !allowsInheritedPortfolio)) {
@@ -850,7 +851,7 @@ export function HelpersAppProvider({ children }) {
         serviceId,
         categoryId: resolvedCategoryId,
         serviceName: serviceName || catalogEntry?.label || catalogEntry?.name || serviceId,
-        photos,
+        photos: [...(existingOffering?.photos || []), ...photos].slice(0, 10),
       });
       return { success: true, message: `${serviceName || catalogEntry?.label || serviceId} submitted for approval.` };
     } catch (error) {

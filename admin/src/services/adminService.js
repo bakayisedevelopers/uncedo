@@ -304,7 +304,7 @@ function normalizeHelperServiceOfferingRow(docId = '', data = {}, helperProfiles
   };
 }
 
-export async function updateHelperServiceStatus({ uid, serviceId, offeringId, updates = {} }) {
+export async function updateHelperServiceStatus({ uid, serviceId, serviceName = '', offeringId, updates = {} }) {
   const clients = await getFirebaseClients();
   if (!clients) throw new Error('Firebase is not configured for the admin app.');
   const { db, firestoreModule } = clients;
@@ -318,6 +318,18 @@ export async function updateHelperServiceStatus({ uid, serviceId, offeringId, up
     updatedAt: serverTimestamp(),
   };
   await setDoc(doc(db, 'helperServices', offeringId || `${uid}_${serviceId}`), nextUpdates, { merge: true });
+  const action = normalizedStatus === 'approved' ? 'approved'
+    : normalizedStatus === 'rejected' ? 'declined'
+      : normalizedStatus === 'pending' && updates.active === false ? 'paused'
+        : updates.active === false ? 'paused' : '';
+  if (action) {
+    const eventRef = doc(collection(db, 'helperServiceModerationEvents'));
+    await setDoc(eventRef, {
+      helperUid: String(uid || ''), serviceId: String(serviceId || ''),
+      serviceName: String(serviceName || serviceId || '').trim(), action,
+      offeringId: String(offeringId || `${uid}_${serviceId}`), status: 'pending', createdAt: serverTimestamp(),
+    });
+  }
   await reconcileOpenServiceRequests({
     reason: 'admin_helper_service_status_updated',
     touchedServiceIds: [serviceId],
@@ -325,12 +337,18 @@ export async function updateHelperServiceStatus({ uid, serviceId, offeringId, up
   return getUserProfile(uid);
 }
 
-export async function removeHelperServiceOffering({ uid, serviceId, offeringId }) {
+export async function removeHelperServiceOffering({ uid, serviceId, serviceName = '', offeringId }) {
   const clients = await getFirebaseClients();
   if (!clients) throw new Error('Firebase is not configured for the admin app.');
   const { db, firestoreModule } = clients;
   const { deleteDoc, doc } = firestoreModule;
   await deleteDoc(doc(db, 'helperServices', offeringId || `${uid}_${serviceId}`));
+  const eventRef = doc(collection(db, 'helperServiceModerationEvents'));
+  await setDoc(eventRef, {
+    helperUid: String(uid || ''), serviceId: String(serviceId || ''),
+    serviceName: String(serviceName || serviceId || '').trim(), action: 'removed',
+    offeringId: String(offeringId || `${uid}_${serviceId}`), status: 'pending', createdAt: serverTimestamp(),
+  });
   await reconcileOpenServiceRequests({
     reason: 'admin_helper_service_removed',
     touchedServiceIds: [serviceId],

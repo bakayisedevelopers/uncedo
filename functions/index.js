@@ -2378,6 +2378,18 @@ function getWhatsAppHelperAgreementBaseUrl() {
   }
 }
 
+function getWhatsAppHelperServicePhotosUrl() {
+  try {
+    const helperUrl = new URL(getWhatsAppHelperAgreementBaseUrl());
+    helperUrl.pathname = '/service-photos';
+    helperUrl.search = '';
+    helperUrl.hash = '';
+    return helperUrl.toString();
+  } catch (_) {
+    throw new HttpsError('failed-precondition', 'The helper photo upload page is not configured with a valid HTTPS URL.');
+  }
+}
+
 function getWhatsAppBusinessReturnUrl() {
   return buildWhatsAppReturnUrl('27605239926');
 }
@@ -2434,12 +2446,16 @@ async function sendWhatsAppHelperAgreementSignedConfirmation({ uid, identityId, 
     || String(identity.role || '').toLowerCase() !== 'helper'
     || !normalizeTimestamp(identity.verifiedAt)) return false;
 
+  const onboardingStage = String(conversationSnapshot.data()?.whatsappOnboarding?.stage || '');
+  const confirmationText = onboardingStage === 'awaiting_helper_police_clearance'
+    ? 'Your current Uncedo Helper Agreement has been signed and saved to your helper account. Next, please upload your police-clearance document in this WhatsApp chat as a PDF or a clear JPG/PNG image. It will be stored privately for Uncedo administrator review. Do not send identity or banking documents in this step.'
+    : 'Your current Uncedo Helper Agreement has been signed and saved to the helper account linked to this WhatsApp number. I’ll continue your helper setup here.';
   const result = await persistWhatsAppAssistantReply({
     sourceEventId: `helper-agreement-accepted:${String(tokenHash || '')}`,
     identityId: String(identityId || ''),
     identity,
     conversationRef,
-    text: 'Your current Uncedo Helper Agreement has been signed and saved to the helper account linked to this WhatsApp number. Return to your helper setup here to continue.',
+    text: confirmationText,
     purpose: 'helper_agreement_confirmation',
     requireCurrentInbound: false,
   });
@@ -3978,22 +3994,59 @@ function normalizeWhatsAppHelperServiceName(value) {
   return String(value || '').normalize('NFKC').trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
-async function submitWhatsAppHelperServices({ identityId, identity, conversationRef, onboardingState, requestedServices }) {
-  const authorization = (await resolveWhatsAppToolAuthorization(identityId, identity)).authorization || {};
-  if (authorization.role !== 'helper' || authorization.verified !== true || authorization.linked !== true || !authorization.uid) {
-    return { code: 'helper-authentication-required' };
+function buildWhatsAppHelperServiceMenu(catalogue, onboardingState = {}) {
+  const selected = new Set(Array.isArray(onboardingState.selectedServiceIds) ? onboardingState.selectedServiceIds : []);
+  const remaining = catalogue.filter((entry) => !selected.has(String(entry.id || '')));
+  const pageSize = 9;
+  const page = Math.max(0, Number(onboardingState.servicePage || 0));
+  const pageEntries = remaining.slice(page * pageSize, (page + 1) * pageSize);
+  const rows = pageEntries.map((entry) => ({
+    id: `wa_helper_service_${String(entry.id || '').slice(0, 120)}`,
+    title: String(entry.label || entry.id).slice(0, 24),
+    description: String(entry.description || '').slice(0, 72),
+  }));
+  if (remaining.length > (page + 1) * pageSize) rows.push({ id: 'wa_helper_service_next', title: 'More services', description: 'Show the next services' });
+  const selectedNames = catalogue.filter((entry) => selected.has(String(entry.id || ''))).map((entry) => String(entry.label || entry.id));
+  const body = selectedNames.length
+    ? `Choose another service. Selected: ${selectedNames.join(', ')}`
+    : 'Choose one service to apply for. You can add more after each selection.';
+  return { text: `${body}${page > 0 ? ` (page ${page + 1})` : ''}`, interactive: rows.length ? {
+    type: 'list', body: { text: body }, action: { button: 'Choose service', sections: [{ title: 'Uncedo services', rows }] },
+  } : null };
+}
+
+function buildWhatsAppHelperServiceNextPrompt(names) {
+  const text = `You selected ${names.join(', ')}. Would you like to add another service or finish?`;
+  return { text, interactive: { type: 'button', body: { text }, action: { buttons: [
+    { type: 'reply', reply: { id: 'wa_helper_service_add', title: 'Add another' } },
+    { type: 'reply', reply: { id: 'wa_helper_service_done', title: 'Done' } },
+  ] } } };
+}
+
+async function submitWhatsAppHelperServices({ identityId, identity, conversationRef, onboardingState, requestedServiceIds }) {
+  const resolution = await resolveWhatsAppToolAuthorization(identityId, identity);
+  const authorization = resolution.authorization || {};
+  let helperUid = '';
+  if (authorization.role === 'helper' && authorization.verified === true
+    && authorization.linked === true && authorization.uid) {
+    helperUid = String(authorization.uid);
+  } else if (authorization.uid
+    && onboardingState?.role === 'helper'
+    && onboardingState?.onboardingPath === 'helper'
+    && String(resolution.identity?.role || '').toLowerCase() === 'helper') {
+    const profileSnapshot = await db.collection('users').doc(String(authorization.uid)).get();
+    if (profileSnapshot.exists && profileAllowsRole(profileSnapshot.data() || {}, 'helper')) {
+      helperUid = String(authorization.uid);
+    }
   }
+  if (!helperUid) return { code: 'helper-authentication-required' };
   const catalogue = (await getLiveServiceCatalogEntries()).filter((entry) => entry.active !== false && entry.approved !== false);
-  const requested = String(requestedServices || '').split(/[,;\n]+/).map((item) => item.trim()).filter(Boolean).slice(0, 5);
+  const requested = (Array.isArray(requestedServiceIds) ? requestedServiceIds : []).map((item) => String(item || '').trim()).filter(Boolean).slice(0, 10);
   if (!requested.length) return { code: 'no-services-selected' };
   const selected = [];
   const unmatched = [];
   for (const item of requested) {
-    const needle = normalizeWhatsAppHelperServiceName(item);
-    const match = catalogue.find((entry) => (
-      normalizeWhatsAppHelperServiceName(entry.label) === needle
-      || normalizeWhatsAppHelperServiceName(entry.id) === needle
-    ));
+    const match = catalogue.find((entry) => String(entry.id || '') === item);
     if (!match) unmatched.push(item.slice(0, 80));
     else if (!selected.some((entry) => entry.id === match.id)) selected.push(match);
   }
@@ -4001,7 +4054,7 @@ async function submitWhatsAppHelperServices({ identityId, identity, conversation
 
   const refs = selected.map((entry) => {
     const serviceSlug = normalizeServiceToken(entry.id);
-    return { entry, ref: db.collection('helperServices').doc(`${authorization.uid}_${serviceSlug}`) };
+    return { entry, ref: db.collection('helperServices').doc(`${helperUid}_${serviceSlug}`) };
   });
   await db.runTransaction(async (transaction) => {
     const snapshots = await Promise.all(refs.map(({ ref }) => transaction.get(ref)));
@@ -4009,7 +4062,7 @@ async function submitWhatsAppHelperServices({ identityId, identity, conversation
       if (snapshots[index].exists) return;
       transaction.create(ref, {
         offeringId: ref.id,
-        helperId: authorization.uid,
+        helperId: helperUid,
         serviceId: String(entry.id),
         categoryId: String(entry.categoryId || ''),
         serviceName: String(entry.label || entry.id),
@@ -4025,11 +4078,11 @@ async function submitWhatsAppHelperServices({ identityId, identity, conversation
       });
     });
     transaction.set(conversationRef, {
-      whatsappOnboarding: { ...onboardingState, stage: 'helper_readiness', updatedAtMs: Date.now() },
+      whatsappOnboarding: { ...onboardingState, selectedServiceIds: selected.map((entry) => String(entry.id)), selectedServiceNames: selected.map((entry) => String(entry.label || entry.id)), stage: 'awaiting_helper_service_photos', updatedAtMs: Date.now() },
       currentMode: 'onboarding', updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     }, { merge: true });
   });
-  return { code: 'submitted', names: selected.map((entry) => String(entry.label || entry.id)) };
+  return { code: 'submitted', names: selected.map((entry) => String(entry.label || entry.id)), uid: helperUid };
 }
 
 async function getWhatsAppHelperReadiness(uid) {
@@ -4083,12 +4136,100 @@ async function getWhatsAppHelperReadiness(uid) {
   if (String(profile.verificationStatus || '').toLowerCase() !== 'verified') missing.push('Uncedo helper verification');
   if (!profile.whatsappVerifiedAt || !profile.whatsappPhoneNumber) missing.push('a verified WhatsApp link');
   return {
-    profile, missing, hasOfferings: offerings.length > 0, approvedOffering, agreementCurrent, activeAgreementVersion,
+    profile, offerings, missing, hasOfferings: offerings.length > 0, approvedOffering, agreementCurrent, activeAgreementVersion,
     policeClearanceStatus,
     policeClearanceRequired,
     policeClearanceEligible: policeClearanceRequired && clearancePrerequisitesComplete && policeClearanceStatus !== 'approved',
     readyByCurrentAppRules: missing.length === 0,
   };
+}
+
+async function respondWithWhatsAppHelperReadiness({ identityId, eventId, identity, conversationRef, state, reply }) {
+  const authorization = (await resolveWhatsAppToolAuthorization(identityId, identity)).authorization || {};
+  const verifiedHelper = authorization.role === 'helper'
+    && authorization.verified === true && authorization.linked === true;
+  const helperOnboarding = state.role === 'helper' && state.onboardingPath === 'helper';
+  if (!authorization.uid || (!verifiedHelper && !helperOnboarding)) {
+    await reply('Please create or link your helper account first. A customer or guest identity cannot access helper setup.');
+    return;
+  }
+
+  const readiness = await getWhatsAppHelperReadiness(authorization.uid);
+  if (!profileAllowsRole(readiness.profile, 'helper')) {
+    await reply('Please create or link your helper account first. A customer or guest identity cannot access helper setup.');
+    return;
+  }
+  if (!String(readiness.profile.fullName || '').trim()
+    && !(String(readiness.profile.firstName || '').trim() && String(readiness.profile.lastName || '').trim())) {
+    const nextState = { ...state, stage: 'awaiting_helper_full_name' };
+    await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
+    await reply('Please send your first and last name for your helper profile.');
+  } else if (!['individual', 'business'].includes(String(readiness.profile.providerType || '').toLowerCase())) {
+    const prompt = helperProviderTypePrompt();
+    const nextState = { ...state, stage: 'awaiting_helper_provider_type' };
+    await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
+    await reply(prompt.text, prompt.interactive);
+  } else if (String(readiness.profile.providerType || '').toLowerCase() === 'business'
+    && !String(readiness.profile.businessName || '').trim()) {
+    const nextState = { ...state, stage: 'awaiting_helper_business_name' };
+    await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
+    await reply('Please send the registered or trading name of your business.');
+  } else if (!String(readiness.profile.homeAddress || '').trim()) {
+    const nextState = { ...state, stage: 'awaiting_home_address', accountMode: 'account' };
+    await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
+    await reply('Please send the home address you want saved to your helper profile.');
+  } else if (String(state.stage || '') === 'awaiting_helper_service_photos'
+    || readiness.offerings.some((offering) => String(offering.status || '').toLowerCase() === 'pending'
+      && (!Array.isArray(offering.photos) || !offering.photos.length))) {
+    const photoRequiredOfferings = readiness.offerings.filter((offering) => String(offering.status || '').toLowerCase() === 'pending');
+    const selectedServiceIds = Array.isArray(state.selectedServiceIds) && state.selectedServiceIds.length
+      ? state.selectedServiceIds
+      : photoRequiredOfferings.map((offering) => String(offering.serviceId || ''));
+    const nextState = { ...state, selectedServiceIds, selectedServiceNames: photoRequiredOfferings.map((offering) => offering.serviceName), stage: 'awaiting_helper_service_photos' };
+    await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
+    const uploadUrl = getWhatsAppHelperServicePhotosUrl();
+    await reply(`Your service selections are saved. Upload at least one work photo from your device for each selected service here: ${uploadUrl}\n\nSign in with the helper account linked to this WhatsApp number. Your progress is saved, so you can return and finish later.`);
+  } else if (!readiness.hasOfferings || String(state.stage || '') === 'awaiting_helper_services') {
+    const services = (await getLiveServiceCatalogEntries()).filter((entry) => entry.active !== false && entry.approved !== false);
+    const nextState = { ...state, selectedServiceIds: Array.isArray(state.selectedServiceIds) ? state.selectedServiceIds : [], servicePage: 0, stage: 'awaiting_helper_services' };
+    await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
+    const menu = buildWhatsAppHelperServiceMenu(services, nextState);
+    await reply(`To start your helper profile, choose at least one service from Uncedo’s catalogue. You can add more one at a time.`, menu.interactive);
+  } else if (String(state.stage || '') === 'awaiting_helper_services') {
+    const services = (await getLiveServiceCatalogEntries()).filter((entry) => entry.active !== false && entry.approved !== false);
+    const menu = buildWhatsAppHelperServiceMenu(services, state);
+    await reply(menu.text, menu.interactive);
+  } else if (!readiness.agreementCurrent) {
+    const agreement = await createWhatsAppHelperAgreementLink({ identityId, sourceEventId: eventId });
+    if (agreement.code === 'already-current') {
+      await conversationRef.set({ whatsappOnboarding: { ...state, stage: 'helper_readiness' } }, { merge: true });
+      await reply('Your current Helper Agreement is already signed. I’ll continue checking your helper profile requirements.');
+    } else {
+      const nextState = {
+        ...state,
+        stage: 'awaiting_helper_agreement',
+        agreementLinkChallengeHash: agreement.tokenHash,
+        agreementLinkExpiresAtMs: agreement.expiresAtMs,
+      };
+      await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
+      await reply(`Please read and sign the current Uncedo Helper Agreement (version ${agreement.version}) using this secure link: ${agreement.url}\n\nSign in with the email account linked to this WhatsApp number. We will verify the link belongs to your helper account before recording acceptance. It expires in 30 minutes; after signing, return to this chat to continue setup.`);
+    }
+  } else if (readiness.policeClearanceRequired && readiness.policeClearanceStatus !== 'approved') {
+    if (['pending', 'uploading'].includes(readiness.policeClearanceStatus)) {
+      const nextState = { ...state, stage: 'awaiting_helper_police_clearance_review' };
+      await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
+      await reply('Your police-clearance document is awaiting Uncedo review. I will update the helper setup status after an administrator reviews it.');
+    } else if (!helperPoliceClearanceUploadReady()) {
+      await reply('Police-clearance upload is required for helper setup, but this step is temporarily unavailable. Please do not send the document until Uncedo confirms it is ready.');
+    } else {
+      const nextState = { ...state, stage: 'awaiting_helper_police_clearance' };
+      await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
+      await reply('Please upload your police-clearance document here as a PDF or a clear JPG/PNG image. It will be stored privately for Uncedo administrator review. Do not send identity or banking documents in this step.');
+    }
+  } else {
+    const items = readiness.missing.length ? readiness.missing.map((item) => `• ${item}`).join('\n') : '• Your existing helper profile meets the current app checks.';
+    await reply(`Your helper profile still needs:\n${items}\n\nAfter each item is complete and approved, you can send “online” here and share a current WhatsApp location pin, or manage availability in the Helpers app.`);
+  }
 }
 
 function describeWhatsAppHelperReadiness(readiness = {}) {
@@ -5395,77 +5536,33 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           if (saved.code !== 'saved') throw new Error(`WhatsApp onboarding profile update failed: ${saved.code}`);
           const prompt = transition.interactive ? transition : null;
           if (prompt) await reply(prompt.text, prompt.interactive);
-          else await reply(transition.reply || `Thanks${transition.preferredName ? `, ${transition.preferredName}` : ''}. You can now ask about Uncedo services or start a service enquiry.`);
+          else if ((transition.action === 'save-helper-provider-type' && transition.state.stage === 'helper_readiness')
+            || transition.action === 'save-helper-business-name') {
+            await respondWithWhatsAppHelperReadiness({ identityId, eventId, identity, conversationRef, state: transition.state, reply });
+          } else await reply(transition.reply || `Thanks${transition.preferredName ? `, ${transition.preferredName}` : ''}. You can now ask about Uncedo services or start a service enquiry.`);
         } else if (transition.action === 'ask-home-address') {
           await reply(transition.reply);
         } else if (transition.action === 'check-helper-readiness') {
-          const authorization = (await resolveWhatsAppToolAuthorization(identityId, identity)).authorization || {};
-          if ((authorization.role !== 'helper' || !authorization.uid || authorization.verified !== true) && transition.state.onboardingPath !== 'helper') {
-            await reply('Please create or link your helper account first. A customer or guest identity cannot access helper setup.');
-          } else {
-            const readiness = await getWhatsAppHelperReadiness(authorization.uid);
-            if (!String(readiness.profile.fullName || '').trim()
-              && !(String(readiness.profile.firstName || '').trim() && String(readiness.profile.lastName || '').trim())) {
-              const nextState = { ...transition.state, stage: 'awaiting_helper_full_name' };
-              await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
-              await reply('Please send your first and last name for your helper profile.');
-            } else if (!['individual', 'business'].includes(String(readiness.profile.providerType || '').toLowerCase())) {
-              const prompt = helperProviderTypePrompt();
-              const nextState = { ...transition.state, stage: 'awaiting_helper_provider_type' };
-              await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
-              await reply(prompt.text, prompt.interactive);
-            } else if (String(readiness.profile.providerType || '').toLowerCase() === 'business' && !String(readiness.profile.businessName || '').trim()) {
-              const nextState = { ...transition.state, stage: 'awaiting_helper_business_name' };
-              await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
-              await reply('Please send the registered or trading name of your business.');
-            } else if (!String(readiness.profile.homeAddress || '').trim()) {
-              const nextState = { ...transition.state, stage: 'awaiting_home_address', accountMode: 'account' };
-              await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
-              await reply('Please send the home address you want saved to your helper profile.');
-            } else if (!readiness.hasOfferings) {
-              const services = (await getLiveServiceCatalogEntries())
-                .filter((entry) => entry.active !== false && entry.approved !== false)
-                .slice(0, 18);
-              const serviceText = services.map((entry) => `• ${entry.label || entry.id}`).join('\n');
-              const nextState = { ...transition.state, stage: 'awaiting_helper_services' };
-              await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
-              await reply(`To start your helper profile, choose at least one service from Uncedo’s catalogue. Reply with the exact service name; you may send up to five, separated by commas.\n\n${serviceText}\n\nYour selections will be submitted for review. Add portfolio photos in the Helpers app before an offering can be approved.`);
-            } else if (!readiness.agreementCurrent) {
-              const agreement = await createWhatsAppHelperAgreementLink({ identityId, sourceEventId: eventId });
-              if (agreement.code === 'already-current') {
-                await conversationRef.set({ whatsappOnboarding: { ...transition.state, stage: 'helper_readiness' } }, { merge: true });
-                await reply('Your current Helper Agreement is already signed. I’ll continue checking your helper profile requirements.');
-              } else {
-                const nextState = {
-                  ...transition.state,
-                  stage: 'awaiting_helper_agreement',
-                  agreementLinkChallengeHash: agreement.tokenHash,
-                  agreementLinkExpiresAtMs: agreement.expiresAtMs,
-                };
-                await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
-                await reply(`Please read and sign the current Uncedo Helper Agreement (version ${agreement.version}) using this secure link: ${agreement.url}\n\nSign in with the email account linked to this WhatsApp number. We will verify the link belongs to your helper account before recording acceptance. It expires in 30 minutes; after signing, return to this chat to continue setup.`);
-              }
-            } else if (readiness.policeClearanceRequired && readiness.policeClearanceStatus !== 'approved') {
-              if (['pending', 'uploading'].includes(readiness.policeClearanceStatus)) {
-                const nextState = { ...transition.state, stage: 'awaiting_helper_police_clearance_review' };
-                await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
-                await reply('Your police-clearance document is awaiting Uncedo review. I will update the helper setup status after an administrator reviews it.');
-              } else if (!helperPoliceClearanceUploadReady()) {
-                await reply('Police-clearance upload is required for helper setup, but this step is temporarily unavailable. Please do not send the document until Uncedo confirms it is ready.');
-              } else {
-                const nextState = { ...transition.state, stage: 'awaiting_helper_police_clearance' };
-                await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding' }, { merge: true });
-                await reply('Please upload your police-clearance document here as a PDF or a clear JPG/PNG image. It will be stored privately for Uncedo administrator review. Do not send identity or banking documents in this step.');
-              }
-            } else {
-              const items = readiness.missing.length ? readiness.missing.map((item) => `• ${item}`).join('\n') : '• Your existing helper profile meets the current app checks.';
-              await reply(`Your helper profile still needs:\n${items}\n\nAfter each item is complete and approved, you can send “online” here and share a current WhatsApp location pin, or manage availability in the Helpers app.`);
-            }
-          }
+          await respondWithWhatsAppHelperReadiness({ identityId, eventId, identity, conversationRef, state: transition.state, reply });
+        } else if (transition.action === 'show-helper-services') {
+          const services = (await getLiveServiceCatalogEntries()).filter((entry) => entry.active !== false && entry.approved !== false);
+          const menu = buildWhatsAppHelperServiceMenu(services, transition.state);
+          await reply(menu.text, menu.interactive);
+        } else if (transition.action === 'select-helper-service') {
+          const services = (await getLiveServiceCatalogEntries()).filter((entry) => entry.active !== false && entry.approved !== false);
+          const selected = services.filter((entry) => transition.state.selectedServiceIds.includes(String(entry.id || '')));
+          const prompt = buildWhatsAppHelperServiceNextPrompt(selected.map((entry) => String(entry.label || entry.id)));
+          await reply(prompt.text, prompt.interactive);
+        } else if (transition.action === 'ask-helper-service-more') {
+          const services = (await getLiveServiceCatalogEntries()).filter((entry) => entry.active !== false && entry.approved !== false);
+          const selected = services.filter((entry) => transition.state.selectedServiceIds.includes(String(entry.id || '')));
+          const prompt = buildWhatsAppHelperServiceNextPrompt(selected.map((entry) => String(entry.label || entry.id)));
+          await reply(prompt.text, prompt.interactive);
         } else if (transition.action === 'submit-helper-services') {
-          const submitted = await submitWhatsAppHelperServices({ identityId, identity, conversationRef, onboardingState: transition.state, requestedServices: transition.requestedServices });
+          const submitted = await submitWhatsAppHelperServices({ identityId, identity, conversationRef, onboardingState: transition.state, requestedServiceIds: transition.requestedServiceIds });
           if (submitted.code === 'submitted') {
-            await reply(`I submitted these service offerings as pending review: ${submitted.names.join(', ')}. They are not approved yet. Add portfolio photos in the Helpers app and wait for Uncedo’s review before going online.`);
+            const uploadUrl = getWhatsAppHelperServicePhotosUrl();
+            await reply(`I saved these service applications as pending review: ${submitted.names.join(', ')}. Next, upload at least one work photo from your device for each service here: ${uploadUrl}\n\nSign in with the helper account linked to this WhatsApp number. Your selections will be reviewed after the required onboarding steps are complete.`);
           } else {
             await reply(submitted.code === 'service-not-in-catalog'
               ? `I could not match these to active Uncedo services: ${(submitted.unmatched || []).join(', ')}. Please send exact service names from the catalogue I listed.`
@@ -5491,6 +5588,9 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           }
         } else if (transition.action === 'await-helper-agreement') {
           await reply('Please open the current Helper Agreement link I sent above. If it has expired, reply “new agreement link” to request another one.');
+        } else if (transition.action === 'await-helper-service-photos') {
+          const uploadUrl = getWhatsAppHelperServicePhotosUrl();
+          await reply(`Please finish uploading at least one work photo from your device for every selected service: ${uploadUrl}\n\nYour selections and upload progress are saved. Once every service has a photo, I will send your Helper Agreement link here.`);
         } else if (transition.action === 'complete-customer-onboarding') {
           await reply(`Thanks${String(identity.preferredName || '').trim() ? `, ${identity.preferredName}` : ''}. You can now ask about Uncedo services or start a service enquiry.`);
         } else {
@@ -8121,6 +8221,84 @@ exports.syncHelperDispatchIndexOnServiceOfferingWrite = onDocumentWritten({
   await syncHelperDispatchIndexById(helperId);
 });
 
+exports.notifyWhatsAppHelperServiceModeration = onDocumentCreated({
+  document: 'helperServiceModerationEvents/{eventId}',
+  retry: true,
+  ...HALF_CPU_OPTIONS,
+}, async (event) => {
+  const moderation = event.data?.data() || {};
+  const helperUid = String(moderation.helperUid || '').trim();
+  const action = String(moderation.action || '').trim().toLowerCase();
+  const actionLabels = { approved: 'approved', declined: 'declined', paused: 'paused', removed: 'removed' };
+  const actionLabel = actionLabels[action];
+  if (!helperUid || !actionLabel) return;
+  const linkSnapshot = await db.collection('whatsappUserLinks').doc(helperUid).get();
+  if (!linkSnapshot.exists) return;
+  const identityId = String(linkSnapshot.data()?.identityId || '').trim();
+  if (!identityId) return;
+  const [identitySnapshot, conversationSnapshot] = await Promise.all([
+    db.collection('whatsappIdentities').doc(identityId).get(),
+    db.collection('whatsappConversations').doc(identityId).get(),
+  ]);
+  if (!identitySnapshot.exists || !conversationSnapshot.exists) return;
+  const identity = identitySnapshot.data() || {};
+  if (String(identity.linkedFirebaseUid || '') !== helperUid
+    || String(identity.role || '').toLowerCase() !== 'helper'
+    || !normalizeTimestamp(identity.verifiedAt)) return;
+  const serviceName = String(moderation.serviceName || moderation.serviceId || 'your service').trim().slice(0, 120);
+  const eventId = String(event.params?.eventId || event.data?.id || '').trim();
+  const text = action === 'approved'
+    ? `Update on your ${serviceName} service application: Uncedo has approved it. You can view its status in the Helpers website or app.`
+    : action === 'declined'
+      ? `Update on your ${serviceName} service application: Uncedo has declined it. Please check the Helpers website or app for the current status and next steps.`
+      : action === 'paused'
+        ? `Update on your ${serviceName} service: Uncedo has paused it. It will not receive new service requests while paused.`
+        : `Update on your ${serviceName} service: Uncedo has removed this offering from your helper profile.`;
+  let delivered = false;
+  try {
+    const result = await persistWhatsAppAssistantReply({
+      sourceEventId: `helper-service-moderation:${eventId}`,
+      identityId, identity, conversationRef: db.collection('whatsappConversations').doc(identityId),
+      text, requireCurrentInbound: false, purpose: 'helper_service_moderation',
+    });
+    delivered = result.sent === true || result.duplicate === true;
+  } catch (error) {
+    logger.info('whatsapp_helper_service_status_freeform_unavailable', {
+      eventId, errorCode: String(error?.code || 'send_failed').slice(0, 80),
+    });
+  }
+  if (!delivered) {
+    const templateName = String(process.env.WHATSAPP_HELPER_SERVICE_STATUS_TEMPLATE_NAME || '').trim();
+    const languageCode = String(process.env.WHATSAPP_HELPER_SERVICE_STATUS_TEMPLATE_LANGUAGE || 'en').trim();
+    if (templateName) {
+      const { secrets, client } = getWhatsAppMetaClient();
+      if (secrets.approvedTemplateNames.includes(templateName)
+        && String(identity.phoneNumberId || '') === secrets.phoneNumberId) {
+        const outboundId = stableEventId(`helper-service-status-template:${eventId}`);
+        const outboundRef = db.collection('whatsappMessages').doc(outboundId);
+        const existing = await outboundRef.get();
+        if (!existing.exists) {
+          await outboundRef.create({
+            eventId: outboundId, identityId, phoneNumberId: secrets.phoneNumberId, to: identity.waId,
+            direction: 'outbound', type: 'template', templateName, status: 'sending', createdAtMs: Date.now(),
+            retentionExpiresAtMs: Date.now() + whatsappRetentionDays('WHATSAPP_MESSAGE_RETENTION_DAYS', 180) * 24 * 60 * 60 * 1000,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+          const delivery = await client.sendTemplate({
+            to: identity.waId, name: templateName, languageCode,
+            components: [{ type: 'body', parameters: [
+              { type: 'text', text: serviceName }, { type: 'text', text: actionLabel },
+            ] }],
+          });
+          await outboundRef.set({ status: 'sent', metaMessageId: delivery.messageId || null, sentAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          delivered = true;
+        } else delivered = ['sent', 'delivered', 'read'].includes(String(existing.data()?.status || ''));
+      }
+    }
+  }
+  await event.data.ref.set({ status: delivered ? 'sent' : 'undeliverable', deliveredAt: delivered ? admin.firestore.FieldValue.serverTimestamp() : null, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+});
+
 exports.syncHelperDispatchIndex = onDocumentWritten({
   document: 'users/{uid}',
   ...HALF_CPU_OPTIONS,
@@ -9256,7 +9434,10 @@ exports.acceptWhatsAppHelperAgreement = onCall({ maxInstances: 3, ...HALF_CPU_OP
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
       transaction.set(db.collection('whatsappConversations').doc(String(link.challenge.identityId)), {
-        whatsappOnboarding: { stage: 'helper_readiness', role: 'helper', accountMode: 'account', updatedAtMs: Date.now() },
+        whatsappOnboarding: {
+          stage: helperPoliceClearanceRequired() && helperPoliceClearanceUploadReady() ? 'awaiting_helper_police_clearance' : 'helper_readiness',
+          role: 'helper', onboardingPath: 'helper', accountMode: 'account', updatedAtMs: Date.now(),
+        },
         currentMode: 'onboarding', updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
     });
@@ -9278,6 +9459,58 @@ exports.acceptWhatsAppHelperAgreement = onCall({ maxInstances: 3, ...HALF_CPU_OP
     await challengeRef.set({ status: 'pending', lastFailureCode: String(error?.code || 'acceptance_failed').slice(0, 80), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }).catch(() => null);
     throw error;
   }
+});
+
+exports.completeWhatsAppHelperServicePhotos = onCall({ maxInstances: 5, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 60 }, async (request) => {
+  const uid = String(request.auth?.uid || '').trim();
+  if (!uid) throw new HttpsError('unauthenticated', 'Sign in with the helper account linked to WhatsApp.');
+  const userLinkSnapshot = await db.collection('whatsappUserLinks').doc(uid).get();
+  const identityId = String(userLinkSnapshot.data()?.identityId || '').trim();
+  if (!identityId) throw new HttpsError('permission-denied', 'A verified WhatsApp helper link is required.');
+  const linkedIdentity = await db.collection('whatsappIdentities').doc(identityId).get();
+  const identity = linkedIdentity.data() || {};
+  if (!linkedIdentity.exists || String(identity.linkedFirebaseUid || '') !== uid
+    || String(identity.role || '').toLowerCase() !== 'helper' || !normalizeTimestamp(identity.verifiedAt)) {
+    throw new HttpsError('permission-denied', 'A verified WhatsApp helper link is required.');
+  }
+  const conversationRef = db.collection('whatsappConversations').doc(identityId);
+  const conversationSnapshot = await conversationRef.get();
+  const onboarding = conversationSnapshot.data()?.whatsappOnboarding || {};
+  if (!conversationSnapshot.exists || onboarding.role !== 'helper' || onboarding.onboardingPath !== 'helper') {
+    throw new HttpsError('failed-precondition', 'No WhatsApp helper onboarding is active for this account.');
+  }
+  if (onboarding.stage === 'awaiting_helper_agreement') return { success: true, code: 'agreement-already-sent' };
+  if (onboarding.stage !== 'awaiting_helper_service_photos') {
+    throw new HttpsError('failed-precondition', 'Complete the service selection step before uploading photos.');
+  }
+  const selectedIds = Array.isArray(onboarding.selectedServiceIds) ? onboarding.selectedServiceIds.map(String).slice(0, 10) : [];
+  if (!selectedIds.length) throw new HttpsError('failed-precondition', 'No selected services were found for this onboarding.');
+  const offerings = await getHelperServiceOfferings(uid);
+  const byServiceId = new Map(offerings.map((offering) => [normalizeServiceToken(offering.serviceId), offering]));
+  const incomplete = selectedIds.filter((serviceId) => {
+    const offering = byServiceId.get(normalizeServiceToken(serviceId));
+    return !offering || !Array.isArray(offering.photos) || offering.photos.length < 1;
+  });
+  if (incomplete.length) throw new HttpsError('failed-precondition', 'Upload at least one photo for every selected service.');
+
+  const agreement = await createWhatsAppHelperAgreementLink({ identityId, sourceEventId: `service-photos-complete:${uid}:${selectedIds.join(',')}` });
+  if (agreement.code === 'already-current') {
+    const currentState = { ...onboarding, stage: 'helper_readiness', updatedAtMs: Date.now() };
+    await conversationRef.set({ whatsappOnboarding: currentState, currentMode: 'onboarding' }, { merge: true });
+    await respondWithWhatsAppHelperReadiness({ identityId, eventId: `service-photos-complete:${uid}`, identity, conversationRef, state: currentState, reply: async (text, interactive = null) => persistWhatsAppAssistantReply({ sourceEventId: `service-photos-complete:${uid}`, identityId, identity, conversationRef, text, interactive, requireCurrentInbound: false, purpose: 'helper_onboarding_progress' }) });
+    return { success: true, code: 'agreement-already-current' };
+  }
+  const nextState = { ...onboarding, stage: 'awaiting_helper_agreement', agreementLinkChallengeHash: agreement.tokenHash, agreementLinkExpiresAtMs: agreement.expiresAtMs, updatedAtMs: Date.now() };
+  await conversationRef.set({ whatsappOnboarding: nextState, currentMode: 'onboarding', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  const names = selectedIds.map((serviceId) => byServiceId.get(normalizeServiceToken(serviceId))?.serviceName || serviceId);
+  await persistWhatsAppAssistantReply({
+    sourceEventId: `service-photos-complete:${uid}:${selectedIds.join(',')}`,
+    identityId, identity, conversationRef,
+    text: `Thank you. I received the required photos for all your selected services: ${names.join(', ')}. Please read and sign the current Uncedo Helper Agreement (version ${agreement.version}) here: ${agreement.url}\n\nSign in with the helper email account linked to this WhatsApp number. After signing, I’ll send the police-clearance step here.`,
+    requireCurrentInbound: false,
+    purpose: 'helper_onboarding_service_photos_complete',
+  });
+  return { success: true, code: 'agreement-sent' };
 });
 
 exports.completeWhatsAppSignupLink = onCall({

@@ -236,6 +236,14 @@ service cloud.firestore {
       allow delete: if isAdmin() || isHelperServiceOwner(resource.data.helperId);
     }
 
+    match /helperServiceModerationEvents/{eventId} {
+      allow create: if isAdmin()
+        && request.resource.data.helperUid is string
+        && request.resource.data.action in ['approved', 'declined', 'paused', 'removed']
+        && request.resource.data.status == 'pending';
+      allow read, update, delete: if false;
+    }
+
     match /helperDispatchIndex/{helperId} {
       allow get: if isAdmin() || isOwner(helperId);
       allow list: if isAdmin();
