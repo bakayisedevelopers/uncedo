@@ -1,6 +1,0 @@
-{
-  "summary":  "Revised implementation plan for scheduling a 5-minute auto-expiration Cloud Task strictly when a request enters 'no_helper_available'. If no helper is found within 5 minutes and status has not changed, the request expires and sends an automated WhatsApp message to the customer. Targeted deployment covers only the newly created/affected Cloud Functions.",
-  "updatedAt":  "2026-10-30T17:33:49.728524017Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

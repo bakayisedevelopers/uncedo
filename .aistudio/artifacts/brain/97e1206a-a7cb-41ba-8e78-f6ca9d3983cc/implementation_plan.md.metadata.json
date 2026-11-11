@@ -1,6 +1,0 @@
-{
-  "summary": "Comprehensive revised implementation plan for WhatsApp service discovery, featuring dual tools (internal getAvailableServices and interactive WhatsApp carousel sendServicesToUser), service details with price estimation and helper availability, and chat history serviceId caching.",
-  "updatedAt": "2026-11-03T11:00:16.913426623Z",
-  "requestFeedback": true,
-  "userFacing": true
-}

@@ -112,6 +112,8 @@ function transitionWhatsAppOnboarding({ state = {}, buttonId = '', text = '', in
     accountMode: String(state.accountMode || '').trim(),
     accountMatchMode: ['profile-match', 'auth-phone'].includes(String(state.accountMatchMode || '').trim())
       ? String(state.accountMatchMode).trim() : '',
+    onboardingPath: ['customer', 'helper'].includes(String(state.onboardingPath || '').toLowerCase())
+      ? String(state.onboardingPath).toLowerCase() : '',
     homeAddressExists: state.homeAddressExists === true,
     signupLinkExpiresAtMs: Number(state.signupLinkExpiresAtMs || 0),
     agreementLinkExpiresAtMs: Number(state.agreementLinkExpiresAtMs || 0),
@@ -128,11 +130,15 @@ function transitionWhatsAppOnboarding({ state = {}, buttonId = '', text = '', in
         : '';
     if (!selectedRole) return { state: current, ...roleSelectionPrompt(), action: 'reask-role' };
     if (selectedRole === 'helper') return {
-      state: { ...current, role: 'helper', stage: 'awaiting_helper_account_choice' },
+      state: { ...current, role: 'helper', stage: 'awaiting_helper_account_choice', onboardingPath: 'helper' },
       ...helperAccountChoicePrompt(),
       action: 'choose-helper-account-mode',
     };
-    return { state: { ...current, role: 'customer', stage: 'awaiting_customer_choice' }, ...customerChoicePrompt(), action: 'choose-customer-mode' };
+    return {
+      state: { ...current, role: 'customer', stage: 'awaiting_customer_choice', onboardingPath: 'customer' },
+      ...customerChoicePrompt(),
+      action: 'choose-customer-mode',
+    };
   }
 
   if (current.stage === 'awaiting_customer_choice') {

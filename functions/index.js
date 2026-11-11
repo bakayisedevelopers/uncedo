@@ -5400,7 +5400,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           await reply(transition.reply);
         } else if (transition.action === 'check-helper-readiness') {
           const authorization = (await resolveWhatsAppToolAuthorization(identityId, identity)).authorization || {};
-          if (authorization.role !== 'helper' || !authorization.uid || authorization.verified !== true) {
+          if ((authorization.role !== 'helper' || !authorization.uid || authorization.verified !== true) && transition.state.onboardingPath !== 'helper') {
             await reply('Please create or link your helper account first. A customer or guest identity cannot access helper setup.');
           } else {
             const readiness = await getWhatsAppHelperReadiness(authorization.uid);
