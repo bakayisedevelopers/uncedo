@@ -2930,9 +2930,12 @@ async function receiveWhatsAppPoliceClearance({ uid, identityId, eventId, inboun
     } catch (_) {
       return { code: 'helper-identity-required' };
     }
+    const isPoliceClearanceOnboarding = String(conversation.whatsappOnboarding?.stage || '') === 'awaiting_helper_police_clearance';
     if (!identitySnapshot.exists || !profileSnapshot.exists || !isHelperUserRecord(profile)
-      || String(identity.linkedFirebaseUid || '') !== uid || String(identity.role || '').toLowerCase() !== 'helper'
-      || !normalizeTimestamp(identity.verifiedAt) || !normalizeTimestamp(profile.whatsappVerifiedAt)
+      || (String(identity.linkedFirebaseUid || '') !== uid)
+      || (String(identity.role || '').toLowerCase() !== 'helper' && !isPoliceClearanceOnboarding)
+      || (!normalizeTimestamp(identity.verifiedAt) && !isPoliceClearanceOnboarding)
+      || (!normalizeTimestamp(profile.whatsappVerifiedAt) && !isPoliceClearanceOnboarding)
       || String(userLink.uid || '') !== uid || String(userLink.identityId || '') !== identityId
       || String(userLink.phoneHash || '') !== senderPhoneHash || !profilePhoneMatches) {
       return { code: 'helper-identity-required' };
@@ -5401,9 +5404,19 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       && normalizeTimestamp(identity.verifiedAt)
       && ['awaiting_helper_police_clearance', 'awaiting_helper_police_clearance_review'].includes(String(onboardingState.stage || ''))) {
       const clearanceAuthorization = (await resolveWhatsAppToolAuthorization(identityId, identity)).authorization || {};
-      if (clearanceAuthorization.role !== 'helper' || clearanceAuthorization.uid !== linkedHelperUid
-        || clearanceAuthorization.verified !== true || clearanceAuthorization.linked !== true) {
-        await reply('I could not verify this WhatsApp number as the linked helper account. No police-clearance file was processed.');
+      const isPoliceClearanceOnboarding = ['awaiting_helper_police_clearance', 'awaiting_helper_police_clearance_review'].includes(String(onboardingState.stage || ''));
+      if ((clearanceAuthorization.role !== 'helper' || clearanceAuthorization.uid !== linkedHelperUid
+        || (clearanceAuthorization.verified !== true && !isPoliceClearanceOnboarding) || clearanceAuthorization.linked !== true)) {
+        const challenge = createWhatsAppAccountLinkChallenge({
+          uid: linkedHelperUid,
+          role: 'helper',
+          identityId: identityId,
+          phoneNumber: identity.whatsappPhoneNumber,
+          sourceEventId: `helper-link-retry:${eventId}`,
+        });
+        await db.collection('whatsappAccountLinkChallenges').doc(challenge.challenge.uid).set(challenge.challenge);
+        const linkUrl = buildWhatsAppAccountLinkUrl(process.env.WHATSAPP_HELPER_SIGNUP_URL, challenge.token);
+        await reply(`I could not verify your helper account link. Please use this secure link to link your existing Uncedo helper account again to continue setup: ${linkUrl}`);
       } else if (onboardingState.stage === 'awaiting_helper_police_clearance_review') {
         await reply('Your police-clearance document is awaiting Uncedo review. I will update the helper setup status after an administrator reviews it.');
       } else if (!helperPoliceClearanceUploadReady()) {
@@ -8320,6 +8333,28 @@ exports.syncHelperDispatchIndex = onDocumentWritten({
     available: result.available ?? null,
     traceLabel: 'functions:syncHelperDispatchIndex:synced',
   });
+
+  const before = event.data.before.exists ? event.data.before.data() : null;
+  const wasNotVerified = !before || String(before.verificationStatus || '').toLowerCase() !== 'verified';
+  const isNowVerified = String(after.verificationStatus || '').toLowerCase() === 'verified';
+  if (wasNotVerified && isNowVerified) {
+    const linkSnapshot = await db.collection('whatsappUserLinks').doc(helperId).get();
+    if (linkSnapshot.exists) {
+      const identityId = String(linkSnapshot.data()?.identityId || '').trim();
+      if (identityId) {
+        const identitySnapshot = await db.collection('whatsappIdentities').doc(identityId).get();
+        if (identitySnapshot.exists) {
+          const identity = identitySnapshot.data() || {};
+          await persistWhatsAppAssistantReply({
+            sourceEventId: `helper-verified:${event.params.uid}`,
+            identityId, identity, conversationRef: db.collection('whatsappConversations').doc(identityId),
+            text: '🎉 Congratulations! Your Uncedo helper profile is now fully verified. You can now go online and start accepting service requests! 🚀\n\nSend "online" here when you are ready to start.',
+            requireCurrentInbound: false, purpose: 'helper_verification_notification',
+          });
+        }
+      }
+    }
+  }
 });
 
 async function isAdminAuthorizationHeader(req) {
