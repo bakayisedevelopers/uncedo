@@ -14,6 +14,7 @@ import {
   X,
   Headphones,
   BookOpen,
+  Terminal,
 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
 import { logoutUser } from '../services/authService';
@@ -27,6 +28,7 @@ const NAV_ITEMS = [
   { to: '/rewards', label: 'Rewards', icon: Gift },
   { to: '/support', label: 'Support inbox', icon: Headphones },
   { to: '/support/knowledge', label: 'Support knowledge', icon: BookOpen },
+  { to: '/logs', label: 'System logs', icon: Terminal },
 ];
 
 function NavItem({ to, icon: Icon, label, onClick }) {
@@ -59,7 +61,9 @@ export default function AdminShell() {
     if (location.pathname.startsWith('/customers')) return 'Customer directory';
     if (location.pathname.startsWith('/helper-agreements')) return 'Helper agreements';
     if (location.pathname.startsWith('/rewards')) return 'Rewards operations';
+    if (location.pathname.startsWith('/support/knowledge')) return 'Support knowledge';
     if (location.pathname.startsWith('/support')) return 'Support inbox';
+    if (location.pathname.startsWith('/logs')) return 'System logs';
     return 'Operations overview';
   }, [location.pathname]);
 

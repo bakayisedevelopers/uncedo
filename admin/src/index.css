@@ -10,11 +10,13 @@
 
 html {
   scroll-behavior: smooth;
+  overflow-x: hidden;
 }
 
 body {
   @apply bg-ink-900 text-ink-50 antialiased;
   font-family: 'Space Grotesk', system-ui, sans-serif;
+  overflow-x: hidden;
 }
 
 #root {

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Image as ImageIcon, Plus, Sparkles, Trash2 } from 'lucide-react';
+import { ArrowLeft, Check, Image as ImageIcon, Pencil, Plus, Sparkles, Trash2 } from 'lucide-react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Badge, Card, EmptyState, LoadingState, SectionTitle } from '../components/ui';
 import { getAdminCatalogCategories } from '../constants/serviceCatalog';
@@ -61,7 +61,6 @@ function createOptionDraft(option = {}, index = 0) {
     materialAdder: Number(option.materialAdder || 0),
     pricingType: String(option.pricingType || (Number(option.multiplier || 1) !== 1 ? 'multiplier' : 'adder')).trim(),
     factor: Number(option.factor || option.multiplier || 1),
-    imageUrl: String(option.imageUrl || '').trim(),
   };
 }
 
@@ -100,7 +99,6 @@ function normalizeQuestionDrafts(questions = [], required = true) {
           pricingType: option.pricingType === 'multiplier' ? 'multiplier' : 'adder',
           factor: Number(option.factor || 1),
           multiplier: option.pricingType === 'multiplier' ? Number(option.factor || 1) : 1,
-          imageUrl: String(option.imageUrl || '').trim(),
         }));
 
       return {
@@ -137,8 +135,31 @@ function coerceSliderValue(rawValue, min, max, step) {
 }
 
 function ServiceOptionEditor({ option, allQuestions = [], onChange, onRemove }) {
+  const [isUploading, setIsUploading] = useState(false);
+
   const handlePriceChange = (rawValue) => {
     onChange({ ...option, price: coerceSliderValue(rawValue, 0, 2000, 5) });
+  };
+
+  const handleImageFileChange = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setIsUploading(true);
+    try {
+      const uploads = await uploadServiceCatalogImages({
+        serviceId: option.draftKey || 'service_option',
+        files: [file],
+      });
+      if (uploads && uploads[0]?.uri) {
+        onChange({ ...option, imageUrl: uploads[0].uri });
+      }
+    } catch (err) {
+      console.error('Failed to upload option image:', err);
+      alert('Failed to upload image: ' + err.message);
+    } finally {
+      setIsUploading(false);
+      event.target.value = '';
+    }
   };
 
   const toggleQuestionId = (questionId) => {
@@ -200,14 +221,49 @@ function ServiceOptionEditor({ option, allQuestions = [], onChange, onRemove }) 
         />
       </label>
 
-      <div className="flex items-center gap-3">
-        <ImageIcon className="h-4 w-4 text-ink-300" />
-        <input
-          value={option.imageUrl || ''}
-          onChange={(event) => onChange({ ...option, imageUrl: event.target.value })}
-          placeholder="Optional image URL (for WhatsApp or UI card display)"
-          className="w-full rounded-xl border border-white/10 bg-ink-950/50 px-3 py-2 text-xs text-white outline-none"
-        />
+      <div className="space-y-2">
+        <span className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Option picture (Firebase Storage)</span>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          {option.imageUrl ? (
+            <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-xl border border-white/10 bg-white/5">
+              <img src={option.imageUrl} alt="Option preview" className="h-full w-full object-cover" />
+            </div>
+          ) : (
+            <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-white/5 text-ink-400">
+              <ImageIcon className="h-6 w-6" />
+            </div>
+          )}
+          <div className="flex-1 space-y-2">
+            <div className="flex items-center gap-2">
+              <label className="cursor-pointer inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-bold text-white hover:bg-white/10 transition">
+                <ImageIcon className="h-3.5 w-3.5" />
+                <span>{isUploading ? 'Uploading to Firebase...' : 'Upload picture from device'}</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={handleImageFileChange}
+                  disabled={isUploading}
+                  className="hidden"
+                />
+              </label>
+              {option.imageUrl ? (
+                <button
+                  type="button"
+                  onClick={() => onChange({ ...option, imageUrl: '' })}
+                  className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs font-bold text-red-300 transition hover:bg-red-500/20"
+                >
+                  Remove image
+                </button>
+              ) : null}
+            </div>
+            <input
+              value={option.imageUrl || ''}
+              onChange={(event) => onChange({ ...option, imageUrl: event.target.value })}
+              placeholder="Or paste image URL directly..."
+              className="w-full rounded-xl border border-white/10 bg-ink-950/50 px-3 py-2 text-xs text-white outline-none"
+            />
+          </div>
+        </div>
       </div>
 
       <div className="rounded-[20px] border border-white/10 bg-white/5 p-3 space-y-3">
@@ -377,19 +433,10 @@ function QuestionOptionEditor({ option, onChange, onRemove }) {
         <button
           type="button"
           onClick={onRemove}
-          className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-bold text-white"
+          className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-bold text-white transition hover:bg-white/10"
         >
           <Trash2 className="h-4 w-4" />
         </button>
-      </div>
-      <div className="flex items-center gap-3">
-        <ImageIcon className="h-4 w-4 text-ink-300" />
-        <input
-          value={option.imageUrl || ''}
-          onChange={(event) => onChange({ ...option, imageUrl: event.target.value })}
-          placeholder="Option Image URL (for WhatsApp Carousels, e.g. https://...)"
-          className="w-full rounded-xl border border-white/10 bg-ink-950/50 px-3 py-2 text-xs text-white outline-none"
-        />
       </div>
     </div>
   );
@@ -611,6 +658,8 @@ export default function ServiceDetailsPage() {
   const [draftInheritBundleImages, setDraftInheritBundleImages] = useState(true);
   const [draftRequiredQuestions, setDraftRequiredQuestions] = useState([]);
   const [draftOptionalQuestions, setDraftOptionalQuestions] = useState([]);
+  const [draftOptions, setDraftOptions] = useState([]);
+  const [expandedOptionIndex, setExpandedOptionIndex] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -1220,7 +1269,13 @@ export default function ServiceDetailsPage() {
                   </div>
                   <button
                     type="button"
-                    onClick={() => setDraftOptions((current) => [...current, createServiceOptionDraft({}, current.length)])}
+                    onClick={() => {
+                      setDraftOptions((current) => {
+                        const next = [...current, createServiceOptionDraft({}, current.length)];
+                        setExpandedOptionIndex(next.length - 1);
+                        return next;
+                      });
+                    }}
                     className="inline-flex items-center gap-2 rounded-2xl bg-brand px-4 py-3 text-sm font-bold text-white"
                   >
                     <Plus className="h-4 w-4" />
@@ -1228,16 +1283,74 @@ export default function ServiceDetailsPage() {
                   </button>
                 </div>
 
-                <div className="mt-4 space-y-4">
-                  {draftOptions.length ? draftOptions.map((opt, optIndex) => (
-                    <ServiceOptionEditor
-                      key={opt.draftKey || `opt_${optIndex}`}
-                      option={opt}
-                      allQuestions={[...draftRequiredQuestions, ...draftOptionalQuestions]}
-                      onChange={(nextOpt) => setDraftOptions((current) => current.map((item, idx) => (idx === optIndex ? nextOpt : item)))}
-                      onRemove={() => setDraftOptions((current) => current.filter((_, idx) => idx !== optIndex))}
-                    />
-                  )) : (
+                <div className="mt-4 space-y-3">
+                  {draftOptions.length ? draftOptions.map((opt, optIndex) => {
+                    const isExpanded = expandedOptionIndex === optIndex;
+                    return (
+                      <div key={opt.draftKey || `opt_${optIndex}`} className="rounded-[22px] border border-white/10 bg-ink-950/40 p-4 transition">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand/25 text-brand-soft font-bold text-sm">
+                              #{optIndex + 1}
+                            </div>
+                            <div className="min-w-0">
+                              <p className="truncate font-bold text-white text-base">{opt.title || `Option ${optIndex + 1} (Untitled)`}</p>
+                              <p className="text-xs text-ink-300">Price: R{opt.price || 0} {opt.description ? `• ${opt.description}` : ''}</p>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            {isExpanded ? (
+                              <button
+                                type="button"
+                                onClick={() => setExpandedOptionIndex(-1)}
+                                title="Save & collapse option"
+                                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-500/20 px-3 py-2 text-xs font-bold text-emerald-300 transition hover:bg-emerald-500/30"
+                              >
+                                <Check className="h-4 w-4" />
+                                <span>Save</span>
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setExpandedOptionIndex(optIndex)}
+                                title="Edit option details"
+                                className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-bold text-white transition hover:bg-white/10"
+                              >
+                                <Pencil className="h-4 w-4 text-brand-soft" />
+                                <span>Edit</span>
+                              </button>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDraftOptions((current) => current.filter((_, idx) => idx !== optIndex));
+                                if (expandedOptionIndex === optIndex) setExpandedOptionIndex(-1);
+                              }}
+                              className="rounded-xl border border-red-500/20 bg-red-500/10 p-2 text-red-300 transition hover:bg-red-500/20"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {isExpanded ? (
+                          <div className="mt-4 pt-4 border-t border-white/10">
+                            <ServiceOptionEditor
+                              option={opt}
+                              allQuestions={[...draftRequiredQuestions, ...draftOptionalQuestions]}
+                              onChange={(nextOpt) => setDraftOptions((current) => current.map((item, idx) => (idx === optIndex ? nextOpt : item)))}
+                              onRemove={() => {
+                                setDraftOptions((current) => current.filter((_, idx) => idx !== optIndex));
+                                setExpandedOptionIndex(-1);
+                              }}
+                            />
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  }) : (
                     <EmptyState title="No service options configured" description="Add configurable service options (e.g., packages, cuts, styles) with their own prices and descriptions." />
                   )}
                 </div>
