@@ -38,6 +38,19 @@ function tone(status = '') {
   return 'neutral';
 }
 
+function createServiceOptionDraft(option = {}, index = 0) {
+  return {
+    draftKey: String(option.draftKey || option.id || '').trim() || createDraftKey('service_option'),
+    id: String(option.id || `option_${index + 1}`).trim(),
+    title: String(option.title || option.label || '').trim(),
+    description: String(option.description || '').trim(),
+    imageUrl: String(option.imageUrl || '').trim(),
+    price: Number(option.price ?? option.priceAdder ?? 0),
+    selectedQuestionIds: Array.isArray(option.selectedQuestionIds) ? option.selectedQuestionIds : [],
+    requiresNoOptionSpecificQuestions: Boolean(option.requiresNoOptionSpecificQuestions),
+  };
+}
+
 function createOptionDraft(option = {}, index = 0) {
   const value = String(option.value || '').trim() || `option_${index + 1}`;
   return {
@@ -57,6 +70,7 @@ function createQuestionDraft(question = {}, index = 0, required = true) {
     draftKey: String(question.draftKey || question.clientId || '').trim() || createDraftKey('question'),
     id: String(question.id || `question_${index + 1}`).trim(),
     prompt: String(question.prompt || question.label || '').trim(),
+    type: String(question.type || 'option-specific').trim().toLowerCase() === 'standard' ? 'standard' : 'option-specific',
     answerType: String(question.answerType || 'enum').trim().toLowerCase(),
     answerHint: String(question.answerHint || '').trim(),
     required,
@@ -75,6 +89,7 @@ function normalizeQuestionDrafts(questions = [], required = true) {
     .filter((question) => question.enabled !== false && String(question.prompt || '').trim())
     .map((question, index) => {
       const prompt = String(question.prompt || '').trim();
+      const type = question.type === 'standard' ? 'standard' : 'option-specific';
       const options = (Array.isArray(question.options) ? question.options : [])
         .filter((option) => String(option.label || '').trim())
         .map((option, optionIndex) => ({
@@ -91,6 +106,7 @@ function normalizeQuestionDrafts(questions = [], required = true) {
       return {
         id: String(question.id || slugify(prompt) || `question_${index + 1}`).trim(),
         prompt,
+        type,
         answerType: question.answerType === 'text' ? 'text' : 'enum',
         answerHint: String(question.answerHint || '').trim(),
         required,
@@ -119,6 +135,120 @@ function coerceSliderValue(rawValue, min, max, step) {
   if (!Number.isFinite(parsed)) return min;
   return clampNumber(snapToStep(parsed, min, step), min, max);
 }
+
+function ServiceOptionEditor({ option, allQuestions = [], onChange, onRemove }) {
+  const handlePriceChange = (rawValue) => {
+    onChange({ ...option, price: coerceSliderValue(rawValue, 0, 2000, 5) });
+  };
+
+  const toggleQuestionId = (questionId) => {
+    const currentIds = Array.isArray(option.selectedQuestionIds) ? option.selectedQuestionIds : [];
+    const exists = currentIds.includes(questionId);
+    const nextIds = exists ? currentIds.filter(id => id !== questionId) : [...currentIds, questionId];
+    onChange({ ...option, selectedQuestionIds: nextIds });
+  };
+
+  return (
+    <div className="rounded-[24px] border border-white/10 bg-ink-950/30 p-4 space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <span className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Service Option</span>
+        <button
+          type="button"
+          onClick={onRemove}
+          className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm font-bold text-white"
+        >
+          <Trash2 className="h-4 w-4" />
+          Remove option
+        </button>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <label className="space-y-2">
+          <span className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Option title</span>
+          <input
+            value={option.title}
+            onChange={(event) => onChange({ ...option, title: event.target.value })}
+            placeholder="e.g. Executive Fade & Beard Trim"
+            className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
+          />
+        </label>
+        <div className="space-y-2">
+          <span className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Price (R)</span>
+          <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-bold text-white">
+            <span>R</span>
+            <input
+              type="number"
+              min={0}
+              max={2000}
+              step={5}
+              value={option.price}
+              onChange={(event) => handlePriceChange(event.target.value)}
+              className="w-full bg-transparent text-right text-white outline-none"
+            />
+          </div>
+        </div>
+      </div>
+
+      <label className="block space-y-2">
+        <span className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Short description</span>
+        <textarea
+          value={option.description}
+          onChange={(event) => onChange({ ...option, description: event.target.value })}
+          rows={2}
+          placeholder="Briefly describe what this option includes..."
+          className="w-full rounded-[22px] border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
+        />
+      </label>
+
+      <div className="flex items-center gap-3">
+        <ImageIcon className="h-4 w-4 text-ink-300" />
+        <input
+          value={option.imageUrl || ''}
+          onChange={(event) => onChange({ ...option, imageUrl: event.target.value })}
+          placeholder="Optional image URL (for WhatsApp or UI card display)"
+          className="w-full rounded-xl border border-white/10 bg-ink-950/50 px-3 py-2 text-xs text-white outline-none"
+        />
+      </div>
+
+      <div className="rounded-[20px] border border-white/10 bg-white/5 p-3 space-y-3">
+        <label className="flex items-center gap-3">
+          <input
+            type="checkbox"
+            checked={Boolean(option.requiresNoOptionSpecificQuestions)}
+            onChange={(event) => onChange({ ...option, requiresNoOptionSpecificQuestions: event.target.checked })}
+          />
+          <div>
+            <p className="text-sm font-bold text-white">Requires no option-specific questions</p>
+            <p className="text-xs text-ink-300">When checked, this option skips option-specific questions and uses only standard questions.</p>
+          </div>
+        </label>
+
+        {!option.requiresNoOptionSpecificQuestions && allQuestions.length > 0 ? (
+          <div className="space-y-2 pt-2 border-t border-white/10">
+            <p className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Associated Option-Specific Questions</p>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {allQuestions.filter(q => q.type !== 'standard').map((q) => {
+                const isSelected = (option.selectedQuestionIds || []).includes(q.id);
+                return (
+                  <label key={q.id} className="flex items-center gap-2 rounded-xl border border-white/10 bg-ink-950/30 px-3 py-2 text-xs text-white">
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => toggleQuestionId(q.id)}
+                    />
+                    <span className="truncate">{q.prompt || q.id}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+
 
 function mergeQuestionDrafts(current = [], suggestions = [], required = true) {
   const currentQuestions = Array.isArray(current) ? current : [];
@@ -375,7 +505,7 @@ function QuestionEditor({
               </button>
             </div>
 
-            <div className="mt-4 grid gap-4 md:grid-cols-[1.4fr_0.6fr]">
+            <div className="mt-4 grid gap-4 md:grid-cols-[1.2fr_0.8fr_0.8fr]">
               <input
                 value={question.prompt}
                 onChange={(event) => updateQuestion(index, {
@@ -385,6 +515,14 @@ function QuestionEditor({
                 placeholder="Question prompt"
                 className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
               />
+              <select
+                value={question.type || 'option-specific'}
+                onChange={(event) => updateQuestion(index, { ...question, type: event.target.value })}
+                className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
+              >
+                <option value="option-specific">Option-specific</option>
+                <option value="standard">Standard (Always asked)</option>
+              </select>
               <select
                 value={question.answerType}
                 onChange={(event) => updateQuestion(index, { ...question, answerType: event.target.value })}
@@ -577,7 +715,6 @@ export default function ServiceDetailsPage() {
   useEffect(() => {
     if (!selectedService) return;
     const nextCategoryId = selectedService.categoryId || categoryOptions[0]?.id || '';
-    const preset = getAdminQuestionPreset({ serviceId: selectedService.id, categoryId: nextCategoryId });
 
     setDraftServiceId(selectedService.id === 'new' ? '' : selectedService.id);
     setDraftLabel(selectedService.label || '');
@@ -595,13 +732,18 @@ export default function ServiceDetailsPage() {
     setDraftRequiresPortfolioSelection(Boolean(selectedService.requiresPortfolioSelection));
     setDraftInheritBundleImages(selectedService.inheritBundleImages !== false);
     setDraftRequiredQuestions(mapQuestionDrafts(
-      (selectedService.questionnaire?.required?.length ? selectedService.questionnaire.required : preset.required),
+      selectedService.questionnaire?.required || [],
       true,
     ));
     setDraftOptionalQuestions(mapQuestionDrafts(
-      (selectedService.questionnaire?.optional?.length ? selectedService.questionnaire.optional : preset.optional),
+      selectedService.questionnaire?.optional || [],
       false,
     ));
+    setDraftOptions(
+      Array.isArray(selectedService.options) && selectedService.options.length
+        ? selectedService.options.map((opt, idx) => createServiceOptionDraft(opt, idx))
+        : []
+    );
     setMessage('');
   }, [categoryOptions, selectedService]);
 
@@ -863,16 +1005,6 @@ export default function ServiceDetailsPage() {
                     onChange={(event) => {
                       const nextCategoryId = event.target.value;
                       setDraftCategoryId(nextCategoryId);
-                      const preset = getAdminQuestionPreset({
-                        serviceId: slugify(draftServiceId || draftLabel || selectedService?.id || ''),
-                        categoryId: nextCategoryId,
-                      });
-                      if (!draftRequiredQuestions.length) {
-                        setDraftRequiredQuestions(mapQuestionDrafts(preset.required, true));
-                      }
-                      if (!draftOptionalQuestions.length) {
-                        setDraftOptionalQuestions(mapQuestionDrafts(preset.optional, false));
-                      }
                     }}
                     className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
                   >
@@ -1077,6 +1209,37 @@ export default function ServiceDetailsPage() {
                       </p>
                     </div>
                   </label>
+                </div>
+              </div>
+
+              <div className="mt-5 rounded-[24px] border border-white/10 bg-white/5 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="font-bold text-white">Service Options</p>
+                    <p className="mt-1 text-sm text-ink-200">Configure distinct options/packages for this service, each with title, description, image, price, and associated questions.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setDraftOptions((current) => [...current, createServiceOptionDraft({}, current.length)])}
+                    className="inline-flex items-center gap-2 rounded-2xl bg-brand px-4 py-3 text-sm font-bold text-white"
+                  >
+                    <Plus className="h-4 w-4" />
+                    Add service option
+                  </button>
+                </div>
+
+                <div className="mt-4 space-y-4">
+                  {draftOptions.length ? draftOptions.map((opt, optIndex) => (
+                    <ServiceOptionEditor
+                      key={opt.draftKey || `opt_${optIndex}`}
+                      option={opt}
+                      allQuestions={[...draftRequiredQuestions, ...draftOptionalQuestions]}
+                      onChange={(nextOpt) => setDraftOptions((current) => current.map((item, idx) => (idx === optIndex ? nextOpt : item)))}
+                      onRemove={() => setDraftOptions((current) => current.filter((_, idx) => idx !== optIndex))}
+                    />
+                  )) : (
+                    <EmptyState title="No service options configured" description="Add configurable service options (e.g., packages, cuts, styles) with their own prices and descriptions." />
+                  )}
                 </div>
               </div>
 

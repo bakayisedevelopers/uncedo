@@ -51,6 +51,20 @@ export function normalizeServiceCatalogEntry(entry = {}, fallback = null) {
     categoryId: String(entry.categoryId || fallbackItem?.categoryId || '').trim(),
   });
 
+  const normalizedRequired = (Array.isArray(entry.questionnaire?.required) ? entry.questionnaire.required : entry.requiredQuestions || presetQuestionnaire.required || [])
+    .map((q, idx) => ({
+      ...q,
+      id: String(q.id || `question_${idx + 1}`).trim(),
+      type: String(q.type || 'option-specific').trim().toLowerCase() === 'standard' ? 'standard' : 'option-specific',
+    }));
+
+  const normalizedOptional = (Array.isArray(entry.questionnaire?.optional) ? entry.questionnaire.optional : entry.optionalQuestions || presetQuestionnaire.optional || [])
+    .map((q, idx) => ({
+      ...q,
+      id: String(q.id || `question_${idx + 1}`).trim(),
+      type: String(q.type || 'option-specific').trim().toLowerCase() === 'standard' ? 'standard' : 'option-specific',
+    }));
+
   return {
     id: serviceId,
     categoryId: String(entry.categoryId || fallbackItem?.categoryId || '').trim(),
@@ -63,15 +77,23 @@ export function normalizeServiceCatalogEntry(entry = {}, fallback = null) {
     active: entry.active !== false,
     approved: entry.approved !== false,
     pricing: entry.pricing && typeof entry.pricing === 'object' ? { ...entry.pricing } : {},
+    options: (Array.isArray(entry.options) ? entry.options : (fallbackItem?.options || [])).map((opt, i) => ({
+      draftKey: String(opt.draftKey || opt.id || `option_${i + 1}`).trim(),
+      id: String(opt.id || slugify(opt.title || opt.label || `option_${i + 1}`)).trim(),
+      title: String(opt.title || opt.label || '').trim(),
+      description: String(opt.description || '').trim(),
+      imageUrl: String(opt.imageUrl || '').trim(),
+      price: Number(opt.price ?? opt.priceAdder ?? 0),
+      selectedQuestionIds: (Array.isArray(opt.selectedQuestionIds) ? opt.selectedQuestionIds : []).map(id => String(id).trim()).filter(Boolean),
+      requiresNoOptionSpecificQuestions: Boolean(opt.requiresNoOptionSpecificQuestions),
+    })),
     includedServiceIds: (Array.isArray(entry.includedServiceIds) ? entry.includedServiceIds : [])
       .map((item) => String(item || '').trim().toLowerCase())
       .filter(Boolean),
-    questionnaire: entry.questionnaire && typeof entry.questionnaire === 'object'
-      ? entry.questionnaire
-      : {
-          required: entry.requiredQuestions || presetQuestionnaire.required || [],
-          optional: entry.optionalQuestions || presetQuestionnaire.optional || [],
-        },
+    questionnaire: {
+      required: normalizedRequired,
+      optional: normalizedOptional,
+    },
     requiresPortfolioSelection: Boolean(entry.requiresPortfolioSelection ?? fallbackItem?.requiresPortfolioSelection),
     inheritBundleImages: entry.inheritBundleImages !== false,
     createdAt: entry.createdAt || null,
