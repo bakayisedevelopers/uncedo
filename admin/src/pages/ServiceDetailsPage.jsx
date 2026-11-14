@@ -664,11 +664,11 @@ export default function ServiceDetailsPage() {
   const [draftActive, setDraftActive] = useState(true);
   const [draftFiles, setDraftFiles] = useState([]);
   const [draftIncludedServiceIds, setDraftIncludedServiceIds] = useState([]);
-  const [draftBasePrice, setDraftBasePrice] = useState(120);
   const [draftTravelFee, setDraftTravelFee] = useState(35);
   const [draftMinimumTotal, setDraftMinimumTotal] = useState(80);
   const [draftMaximumTotal, setDraftMaximumTotal] = useState(500);
   const [draftRequiresPortfolioSelection, setDraftRequiresPortfolioSelection] = useState(false);
+  const [draftOptionApplicationMode, setDraftOptionApplicationMode] = useState('per_option');
   const [draftInheritBundleImages, setDraftInheritBundleImages] = useState(true);
   const [draftRequiredQuestions, setDraftRequiredQuestions] = useState([]);
   const [draftOptionalQuestions, setDraftOptionalQuestions] = useState([]);
@@ -739,6 +739,7 @@ export default function ServiceDetailsPage() {
         includedServiceIds: [],
         questionnaire: { required: [], optional: [] },
         requiresPortfolioSelection: false,
+        optionApplicationMode: 'per_option',
         inheritBundleImages: true,
       };
     }
@@ -791,11 +792,11 @@ export default function ServiceDetailsPage() {
     setDraftActive(selectedService.persisted ? selectedService.active !== false : true);
     setDraftFiles([]);
     setDraftIncludedServiceIds(Array.isArray(selectedService.includedServiceIds) ? selectedService.includedServiceIds : []);
-    setDraftBasePrice(Number(selectedService.pricing?.basePrice ?? 120));
     setDraftTravelFee(Number(selectedService.pricing?.travelFee ?? 35));
     setDraftMinimumTotal(Number(selectedService.pricing?.minimumTotal ?? 80));
     setDraftMaximumTotal(Number(selectedService.pricing?.maximumTotal ?? 500));
     setDraftRequiresPortfolioSelection(Boolean(selectedService.requiresPortfolioSelection));
+    setDraftOptionApplicationMode(selectedService.optionApplicationMode === 'unified' ? 'unified' : 'per_option');
     setDraftInheritBundleImages(selectedService.inheritBundleImages !== false);
     setDraftRequiredQuestions(mapQuestionDrafts(
       selectedService.questionnaire?.required || [],
@@ -865,7 +866,6 @@ export default function ServiceDetailsPage() {
     setDraftLabel(suggestion.label || '');
     setDraftPromptLabel(suggestion.promptLabel || suggestion.label || '');
     setDraftDescription(suggestion.description || '');
-    setDraftBasePrice(Number(suggestion.pricing?.basePrice ?? 120));
     setDraftTravelFee(Number(suggestion.pricing?.travelFee ?? 35));
     setDraftMinimumTotal(Number(suggestion.pricing?.minimumTotal ?? 80));
     setDraftMaximumTotal(Number(suggestion.pricing?.maximumTotal ?? 500));
@@ -893,9 +893,10 @@ export default function ServiceDetailsPage() {
     images,
     includedServiceIds: draftType === 'bundle' ? draftIncludedServiceIds : [],
     requiresPortfolioSelection: draftRequiresPortfolioSelection,
+    optionApplicationMode: draftOptionApplicationMode === 'unified' ? 'unified' : 'per_option',
     inheritBundleImages: draftInheritBundleImages,
     pricing: {
-      basePrice: Number(draftBasePrice || 0),
+      basePrice: draftOptions.length ? 0 : Number(selectedService?.pricing?.basePrice || 0),
       travelFee: Number(draftTravelFee || 35),
       bookingFee: 0,
       minimumTotal: Number(draftMinimumTotal || 0),
@@ -1229,11 +1230,7 @@ export default function ServiceDetailsPage() {
                 )}
 
                 {matchedSuggestion ? (
-                  <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
-                    <div className="rounded-[20px] border border-white/10 bg-ink-950/30 px-4 py-3">
-                      <p className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Base</p>
-                      <p className="mt-2 text-lg font-bold text-white">R{matchedSuggestion.pricing.basePrice}</p>
-                    </div>
+                  <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
                     <div className="rounded-[20px] border border-white/10 bg-ink-950/30 px-4 py-3">
                       <p className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Travel</p>
                       <p className="mt-2 text-lg font-bold text-white">R{matchedSuggestion.pricing.travelFee}</p>
@@ -1290,16 +1287,11 @@ export default function ServiceDetailsPage() {
                 </div>
               ) : null}
 
-              <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2">
-                <SliderField
-                  label="Base price"
-                  help="Starting labour price for this service before answer-based additions are applied."
-                  min={20}
-                  max={1500}
-                  step={5}
-                  value={draftBasePrice}
-                  onChange={setDraftBasePrice}
-                />
+              <div className="mt-5 rounded-[22px] border border-white/10 bg-white/5 px-4 py-3 text-xs leading-5 text-ink-200">
+                Base prices are configured individually on each <strong className="text-white">Service Option</strong> below rather than at the top-level service.
+              </div>
+
+              <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
                 <SliderField
                   label="Travel fee"
                   help="Standardized travel charge. This is fixed at the service level and currently defaults to R35."
@@ -1311,7 +1303,7 @@ export default function ServiceDetailsPage() {
                 />
                 <SliderField
                   label="Minimum total"
-                  help="The quote will not go below this amount after all calculations."
+                  help="Fallback minimum when using legacy service-level pricing without configured options."
                   min={0}
                   max={1500}
                   step={5}
@@ -1320,7 +1312,7 @@ export default function ServiceDetailsPage() {
                 />
                 <SliderField
                   label="Maximum total"
-                  help="The quote will not go above this amount. This is how you cap and effectively discount bundles."
+                  help="Fallback maximum cap for legacy pricing or bundle caps."
                   min={50}
                   max={3000}
                   step={5}
@@ -1357,6 +1349,47 @@ export default function ServiceDetailsPage() {
                       <p className="mt-1 text-sm leading-6 text-ink-200">
                         When published, the service is visible in the helper and customer apps. Turn it off to pause the service without deleting it.
                       </p>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
+              <div className="mt-4 rounded-[24px] border border-white/10 bg-white/5 p-4">
+                <p className="font-bold text-white">Helper option application mode</p>
+                <p className="mt-1 text-sm leading-6 text-ink-200">
+                  Control whether helpers must select and upload proof per option (e.g. Hairstyles, Barbering) or submit one service application that covers all options (e.g. Cleaning, Yard Maintenance).
+                </p>
+                <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <label className={`flex cursor-pointer items-start gap-3 rounded-2xl border p-3 transition ${
+                    draftOptionApplicationMode !== 'unified' ? 'border-brand bg-brand/15' : 'border-white/10 bg-ink-950/30'
+                  }`}>
+                    <input
+                      type="radio"
+                      name="optionApplicationMode"
+                      value="per_option"
+                      checked={draftOptionApplicationMode !== 'unified'}
+                      onChange={() => setDraftOptionApplicationMode('per_option')}
+                      className="mt-1"
+                    />
+                    <div>
+                      <p className="text-sm font-bold text-white">Per-option proof & approval</p>
+                      <p className="mt-1 text-xs text-ink-200">Helpers choose specific options, upload photos per option, and only match requests for approved options.</p>
+                    </div>
+                  </label>
+                  <label className={`flex cursor-pointer items-start gap-3 rounded-2xl border p-3 transition ${
+                    draftOptionApplicationMode === 'unified' ? 'border-brand bg-brand/15' : 'border-white/10 bg-ink-950/30'
+                  }`}>
+                    <input
+                      type="radio"
+                      name="optionApplicationMode"
+                      value="unified"
+                      checked={draftOptionApplicationMode === 'unified'}
+                      onChange={() => setDraftOptionApplicationMode('unified')}
+                      className="mt-1"
+                    />
+                    <div>
+                      <p className="text-sm font-bold text-white">Unified service approval (all options)</p>
+                      <p className="mt-1 text-xs text-ink-200">Helpers apply once for the whole service and are eligible for all options once approved.</p>
                     </div>
                   </label>
                 </div>

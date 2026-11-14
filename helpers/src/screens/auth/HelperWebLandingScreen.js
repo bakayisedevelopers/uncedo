@@ -22,9 +22,30 @@ function getPageFromPath() {
   if (window.location.pathname === '/sign-up') return 'signup';
   if (window.location.pathname === '/sign-agreement') return 'agreement';
   if (window.location.pathname === '/service-photos') return 'service-photos';
+  if (window.location.pathname === '/profile-photo') return 'profile-photo';
+  if (window.location.pathname === '/payout-details') return 'payout-details';
   if (window.location.pathname === '/whatsapp-link') return 'whatsapp-link';
   return 'home';
 }
+
+const ONBOARDING_LOGIN_COPY = {
+  agreement: {
+    title: 'Sign in to review\nyour agreement',
+    subtitle: 'Sign in with the helper email account linked to the WhatsApp number that received this agreement link.',
+  },
+  'service-photos': {
+    title: 'Sign in to upload\nservice photos',
+    subtitle: 'Sign in with the helper email account linked to your WhatsApp number to add work photos for your services.',
+  },
+  'profile-photo': {
+    title: 'Sign in to add your\nprofile photo',
+    subtitle: 'Sign in with the helper email account linked to your WhatsApp number to capture or upload your profile photo.',
+  },
+  'payout-details': {
+    title: 'Sign in to verify\npayout details',
+    subtitle: 'Sign in with the helper email account linked to your WhatsApp number to verify your bank payout account.',
+  },
+};
 
 export function HelperWebEntryScreen() {
   const [page, setPage] = useState(getPageFromPath);
@@ -44,13 +65,18 @@ export function HelperWebEntryScreen() {
 
   if (page === 'whatsapp-link') return <WhatsAppAccountLinkScreen />;
 
-  if (page === 'login' || page === 'signup' || page === 'agreement' || page === 'service-photos') {
+  const isWhatsAppAuthOnlyPage = ['agreement', 'service-photos', 'profile-photo', 'payout-details'].includes(page);
+
+  if (page === 'login' || page === 'signup' || isWhatsAppAuthOnlyPage) {
+    const onboardingCopy = ONBOARDING_LOGIN_COPY[page] || {};
     return (
       <ProviderLoginScreen
         initialMode={page === 'signup' ? 'signup' : 'login'}
-        disableSignupMode={page === 'agreement' || page === 'service-photos'}
-        emailOnly={page === 'agreement' || page === 'service-photos'}
-        onHome={page === 'agreement' || page === 'service-photos' ? undefined : () => navigate('/')}
+        disableSignupMode={isWhatsAppAuthOnlyPage}
+        emailOnly={isWhatsAppAuthOnlyPage}
+        emailOnlyTitle={onboardingCopy.title}
+        emailOnlySubtitle={onboardingCopy.subtitle}
+        onHome={isWhatsAppAuthOnlyPage ? undefined : () => navigate('/')}
         onRouteChange={navigate}
       />
     );

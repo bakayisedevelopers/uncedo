@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  Image,
   ImageBackground,
   Platform,
   Pressable,
@@ -17,8 +18,10 @@ import { ErrorState } from '../../components/ui/States';
 import {
   buildMissingRequiredFields,
   getQuestionDefinitionById,
+  getQuestionIdsForSelection,
   getRequiredQuestionDefinitions,
 } from '../../constants/customerIntakeQuestions';
+import { getCustomerServiceById } from '../../constants/serviceCatalog';
 import { useAuth } from '../../context/AuthContext';
 import {
   createCustomerServiceRequest,
@@ -107,16 +110,57 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
   const parentTab = route?.params?.parentTab || 'CustomerHome';
   const topInset = Platform.OS === 'ios' ? 54 : Math.max(24, Number(systemInsets?.top || 0) + 18);
   const [structuredAnswers, setStructuredAnswers] = useState(() => normalizeAnswerMap(route?.params?.initialStructuredAnswers) || {});
+  const [selectedOptionId, setSelectedOptionId] = useState(() => String(route?.params?.selectedOptionId || item?.selectedOptionId || '').trim());
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [pricePreview, setPricePreview] = useState(null);
   const [priceLoading, setPriceLoading] = useState(false);
 
   const categoryId = String(item?.categoryId || '').trim();
-  const serviceIds = Array.isArray(item?.serviceIds) ? item.serviceIds : [];
+  const serviceIds = useMemo(() => (Array.isArray(item?.serviceIds) ? item.serviceIds : []), [item?.serviceIds]);
   const selectedPackageId = ['package', 'bundle'].includes(String(item?.type || '').trim().toLowerCase())
     ? String(item?.packageId || item?.entityId || '').trim()
     : '';
+  const primaryServiceId = selectedPackageId || serviceIds[0] || item?.entityId || '';
+  const liveService = primaryServiceId ? getCustomerServiceById(primaryServiceId) : null;
+
+  const serviceOptions = useMemo(() => {
+    const itemOptions = Array.isArray(item?.options) ? item.options : [];
+    const catalogOptions = Array.isArray(liveService?.options) ? liveService.options : [];
+    const baseOptions = catalogOptions.length ? catalogOptions : itemOptions;
+    if (!baseOptions.length) return [];
+
+    const itemCountMap = new Map(
+      itemOptions.map((opt) => [String(opt?.id || '').trim().toLowerCase(), opt?.onlineHelperCount]),
+    );
+    return baseOptions.map((opt) => {
+      const normalizedId = String(opt?.id || '').trim().toLowerCase();
+      const onlineCount = itemCountMap.has(normalizedId) ? itemCountMap.get(normalizedId) : opt?.onlineHelperCount;
+      return {
+        ...opt,
+        onlineHelperCount: typeof onlineCount === 'number' ? onlineCount : undefined,
+      };
+    });
+  }, [item?.options, liveService?.options]);
+
+  const selectedOption = useMemo(
+    () => serviceOptions.find((opt) => String(opt?.id || '').trim().toLowerCase() === String(selectedOptionId || '').trim().toLowerCase()) || null,
+    [selectedOptionId, serviceOptions],
+  );
+
+  useEffect(() => {
+    if (!serviceOptions.length) {
+      if (selectedOptionId) setSelectedOptionId('');
+      return;
+    }
+    if (selectedOption) return;
+    const availableOptions = serviceOptions.filter((opt) => opt.onlineHelperCount === undefined || opt.onlineHelperCount > 0);
+    if (availableOptions.length === 1) {
+      setSelectedOptionId(availableOptions[0].id);
+    } else if (serviceOptions.length === 1) {
+      setSelectedOptionId(serviceOptions[0].id);
+    }
+  }, [selectedOption, selectedOptionId, serviceOptions]);
 
   useEffect(() => {
     if (!user?.uid || !categoryId) return;
@@ -156,8 +200,14 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
 
   const requiredQuestions = useMemo(() => {
     if (!categoryId || !serviceIds.length) return [];
-    return getRequiredQuestionDefinitions({ categoryId, serviceIds, selectedPackageId });
-  }, [categoryId, selectedPackageId, serviceIds]);
+    return getRequiredQuestionDefinitions({
+      categoryId,
+      serviceIds,
+      selectedPackageId,
+      selectedOptionId,
+      structuredAnswers,
+    });
+  }, [categoryId, selectedOptionId, selectedPackageId, serviceIds, structuredAnswers]);
 
   const renderQuestions = useMemo(() => {
     if (!requiredQuestions.length) return [];
@@ -167,18 +217,26 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
         categoryId,
         serviceIds,
         selectedPackageId,
+        selectedOptionId,
+        structuredAnswers,
         questionId: 'scheduled_for_text',
       });
-      if (scheduledQuestion) {
+      if (scheduledQuestion && !questions.some((q) => q.id === scheduledQuestion.id)) {
         questions.push(scheduledQuestion);
       }
     }
     return questions;
-  }, [categoryId, requiredQuestions, selectedPackageId, serviceIds, structuredAnswers?.timing_preference]);
+  }, [categoryId, requiredQuestions, selectedOptionId, selectedPackageId, serviceIds, structuredAnswers]);
 
   const missingRequired = useMemo(
-    () => buildMissingRequiredFields({ categoryId, serviceIds, selectedPackageId, structuredAnswers }),
-    [categoryId, selectedPackageId, serviceIds, structuredAnswers],
+    () => buildMissingRequiredFields({
+      categoryId,
+      serviceIds,
+      selectedPackageId,
+      selectedOptionId,
+      structuredAnswers,
+    }),
+    [categoryId, selectedOptionId, selectedPackageId, serviceIds, structuredAnswers],
   );
 
   useEffect(() => {
@@ -199,10 +257,12 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
           categoryId,
           serviceIds,
           selectedPackageId,
+          selectedOptionId,
           structuredAnswers,
         });
         if (!cancelled) {
           setPricePreview(quote);
+          setError('');
           setPriceLoading(false);
         }
       } catch (nextError) {
@@ -217,7 +277,31 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
     return () => {
       cancelled = true;
     };
-  }, [categoryId, missingRequired.length, serviceIds, structuredAnswers]);
+  }, [categoryId, missingRequired.length, selectedOptionId, selectedPackageId, serviceIds, structuredAnswers]);
+
+  const handleSelectOption = (option) => {
+    if (!option?.id) return;
+    if (option.onlineHelperCount === 0) return;
+
+    const nextOptionId = String(option.id || '').trim();
+    const allowedQuestionIds = new Set(
+      getQuestionIdsForSelection({
+        categoryId,
+        serviceIds,
+        selectedPackageId,
+        selectedOptionId: nextOptionId,
+      }),
+    );
+
+    setSelectedOptionId(nextOptionId);
+    setError('');
+    setStructuredAnswers((current) => Object.entries(current || {}).reduce((acc, [key, val]) => {
+      if (allowedQuestionIds.has(key) || key === 'scheduled_for_text') {
+        acc[key] = val;
+      }
+      return acc;
+    }, {}));
+  };
 
   const handleAnswerChange = (questionId, nextValue) => {
     setStructuredAnswers((current) => ({
@@ -228,6 +312,10 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
 
   const handleRequest = async () => {
     if (!item || !categoryId || !serviceIds.length || submitting) return;
+    if (serviceOptions.length > 0 && !selectedOption) {
+      setError('Choose a service option before continuing.');
+      return;
+    }
     if (missingRequired.length) {
       setError('Complete the required details before continuing.');
       return;
@@ -265,6 +353,8 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
           categoryId,
           serviceIds,
           selectedPackageId,
+          selectedOptionId: selectedOption?.id || selectedOptionId,
+          selectedOptionTitle: selectedOption?.title || '',
           structuredAnswers,
           serviceAddress: String(user?.customerProfile?.serviceAddress || '').trim(),
           serviceAddressTarget,
@@ -277,6 +367,7 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
         categoryId,
         serviceIds,
         selectedPackageId,
+        selectedOptionId: selectedOption?.id || selectedOptionId,
         approvedQuote: pricePreview,
         structuredAnswers,
       });
@@ -286,8 +377,8 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
           requestId,
           customerLocation: requestLocation,
           updatedAtMs: Date.now(),
-        }).catch((error) => {
-          console.warn('[uncedo:request-location]', error?.message || error);
+        }).catch((trackingError) => {
+          console.warn('[uncedo:request-location]', trackingError?.message || trackingError);
         });
       }
 
@@ -312,14 +403,26 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
     return <ErrorState message="Service details are missing." title="Unable to open service" />;
   }
 
+  const heroImageUri = selectedOption?.imageUrl || item.imageUri;
+  const heroPriceText = pricePreview
+    ? formatCurrency(pricePreview.total)
+    : selectedOption
+      ? formatCurrency(selectedOption.price)
+      : item.priceLabel;
+  const heroMetaSubtitle = selectedOption
+    ? `${item.categoryLabel} · ${selectedOption.title}`
+    : item.categoryLabel;
+
   const shouldWaitForPrice = !missingRequired.length;
   const buttonLabel = submitting
     ? 'Preparing request...'
-    : shouldWaitForPrice && priceLoading
-      ? 'Calculating price...'
-      : shouldWaitForPrice && pricePreview
-        ? `Request now - ${formatCurrency(pricePreview.total)}`
-        : 'Complete required details';
+    : serviceOptions.length > 0 && !selectedOption
+      ? 'Select an option'
+      : shouldWaitForPrice && priceLoading
+        ? 'Calculating price...'
+        : shouldWaitForPrice && pricePreview
+          ? `Request now - ${formatCurrency(pricePreview.total)}`
+          : 'Complete required details';
 
   const buttonDisabled = submitting || missingRequired.length > 0 || priceLoading || !pricePreview;
 
@@ -339,18 +442,18 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
         />
 
         <View style={styles.heroCard}>
-          {item.imageUri ? (
-            <ImageBackground imageStyle={styles.heroImage} source={{ uri: item.imageUri }} style={styles.heroMedia}>
+          {heroImageUri ? (
+            <ImageBackground imageStyle={styles.heroImage} source={{ uri: heroImageUri }} style={styles.heroMedia}>
               <View style={styles.heroTint} />
               <View style={styles.heroOverlay}>
                 <View style={styles.heroPill}>
                   <Text style={styles.heroPillText}>{item.type === 'bundle' || item.type === 'package' ? 'Bundle' : 'Service'}</Text>
                 </View>
                 <View style={styles.heroFooter}>
-                  <Text style={styles.heroTitle}>{item.title}</Text>
+                  <Text style={styles.heroTitle}>{selectedOption ? selectedOption.title : item.title}</Text>
                   <View style={styles.heroMetaRow}>
-                    <Text style={styles.heroMeta}>{item.categoryLabel}</Text>
-                    <Text style={styles.heroPrice}>{pricePreview ? formatCurrency(pricePreview.total) : item.priceLabel}</Text>
+                    <Text style={styles.heroMeta}>{heroMetaSubtitle}</Text>
+                    <Text style={styles.heroPrice}>{heroPriceText}</Text>
                   </View>
                 </View>
               </View>
@@ -358,25 +461,89 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
           ) : (
             <View style={[styles.heroMedia, styles.heroFallback]}>
               <Ionicons color={colors.brand} name="sparkles-outline" size={28} />
-              <Text style={styles.heroFallbackTitle}>{item.title}</Text>
-              <Text style={styles.heroFallbackPrice}>{item.priceLabel}</Text>
+              <Text style={styles.heroFallbackTitle}>{selectedOption ? selectedOption.title : item.title}</Text>
+              <Text style={styles.heroFallbackPrice}>{heroPriceText}</Text>
             </View>
           )}
 
           <View style={styles.heroBody}>
-            <Text style={styles.description}>{item.description}</Text>
+            <Text style={styles.description}>{selectedOption?.description || item.description}</Text>
             <View style={styles.quickMeta}>
               <View style={styles.quickMetaPill}>
                 <Ionicons color={colors.brand} name="people-outline" size={14} />
-                <Text style={styles.quickMetaText}>{item.helperCount} helpers</Text>
+                <Text style={styles.quickMetaText}>
+                  {selectedOption && typeof selectedOption.onlineHelperCount === 'number'
+                    ? `${selectedOption.onlineHelperCount} helper${selectedOption.onlineHelperCount === 1 ? '' : 's'} online`
+                    : `${item.helperCount} helpers`}
+                </Text>
               </View>
               <View style={styles.quickMetaPill}>
                 <Ionicons color={colors.brand} name="pricetag-outline" size={14} />
-                <Text style={styles.quickMetaText}>{item.priceLabel}</Text>
+                <Text style={styles.quickMetaText}>{heroPriceText}</Text>
               </View>
             </View>
           </View>
         </View>
+
+        {serviceOptions.length > 0 ? (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Choose an option</Text>
+            <Text style={styles.sectionCopy}>
+              Pick one option for this request. Its price sets your starting service rate and tailors the questions below.
+            </Text>
+            <View style={styles.serviceOptionsList}>
+              {serviceOptions.map((option) => {
+                const isSelected = selectedOption?.id === option.id;
+                const noHelperOnline = option.onlineHelperCount === 0;
+                return (
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={noHelperOnline}
+                    key={option.id}
+                    onPress={() => handleSelectOption(option)}
+                    style={({ pressed }) => [
+                      styles.serviceOptionCard,
+                      isSelected && styles.serviceOptionCardActive,
+                      noHelperOnline && styles.serviceOptionCardDisabled,
+                      pressed && !noHelperOnline && styles.optionChipPressed,
+                    ]}
+                  >
+                    {option.imageUrl ? (
+                      <Image source={{ uri: option.imageUrl }} style={styles.serviceOptionThumb} />
+                    ) : (
+                      <View style={[styles.serviceOptionThumb, styles.serviceOptionThumbFallback]}>
+                        <Ionicons color={isSelected ? colors.brandDark : colors.brand} name="sparkles-outline" size={18} />
+                      </View>
+                    )}
+                    <View style={styles.serviceOptionInfo}>
+                      <View style={styles.serviceOptionHeaderRow}>
+                        <Text numberOfLines={2} style={[styles.serviceOptionTitle, isSelected && styles.serviceOptionTitleActive]}>
+                          {option.title}
+                        </Text>
+                        <Text style={[styles.serviceOptionPrice, isSelected && styles.serviceOptionPriceActive]}>
+                          {formatCurrency(option.price)}
+                        </Text>
+                      </View>
+                      {option.description ? (
+                        <Text numberOfLines={2} style={styles.serviceOptionDescription}>{option.description}</Text>
+                      ) : null}
+                      {noHelperOnline ? (
+                        <Text style={styles.serviceOptionUnavailable}>No helpers online for this option right now</Text>
+                      ) : typeof option.onlineHelperCount === 'number' ? (
+                        <Text style={styles.serviceOptionAvailability}>
+                          {option.onlineHelperCount} {option.onlineHelperCount === 1 ? 'helper' : 'helpers'} online
+                        </Text>
+                      ) : null}
+                    </View>
+                    <View style={[styles.serviceOptionRadio, isSelected && styles.serviceOptionRadioActive]}>
+                      {isSelected ? <View style={styles.serviceOptionRadioDot} /> : null}
+                    </View>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+        ) : null}
 
         {item.includedLabels?.length ? (
           <View style={styles.section}>
@@ -391,23 +558,27 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
           </View>
         ) : null}
 
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Quick details</Text>
-          <Text style={styles.sectionCopy}>
-            Complete the essentials here. Once the price is ready, Uncedo will submit the request directly and start helper matching.
-          </Text>
-        </View>
+        {serviceOptions.length === 0 || selectedOption ? (
+          <>
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Quick details</Text>
+              <Text style={styles.sectionCopy}>
+                Complete the essentials here. Once the price is ready, Uncedo will submit the request directly and start helper matching.
+              </Text>
+            </View>
 
-        <View style={styles.formCard}>
-          {renderQuestions.map((question) => (
-            <QuestionField
-              key={question.id}
-              onChange={(value) => handleAnswerChange(question.id, value)}
-              question={question}
-              value={structuredAnswers?.[question.id]}
-            />
-          ))}
-        </View>
+            <View style={styles.formCard}>
+              {renderQuestions.map((question) => (
+                <QuestionField
+                  key={question.id}
+                  onChange={(value) => handleAnswerChange(question.id, value)}
+                  question={question}
+                  value={structuredAnswers?.[question.id]}
+                />
+              ))}
+            </View>
+          </>
+        ) : null}
 
         {error ? (
           <View style={styles.inlineError}>
@@ -693,5 +864,97 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     textAlign: 'center',
     textTransform: 'capitalize',
+  },
+  serviceOptionsList: {
+    gap: 10,
+    marginTop: 6,
+  },
+  serviceOptionCard: {
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    borderColor: 'rgba(217,70,239,0.16)',
+    borderRadius: 20,
+    borderWidth: 1.5,
+    flexDirection: 'row',
+    gap: 12,
+    padding: 12,
+  },
+  serviceOptionCardActive: {
+    backgroundColor: 'rgba(217,70,239,0.06)',
+    borderColor: colors.brandDark,
+  },
+  serviceOptionCardDisabled: {
+    opacity: 0.55,
+  },
+  serviceOptionThumb: {
+    borderRadius: 14,
+    height: 54,
+    width: 54,
+  },
+  serviceOptionThumbFallback: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(217,70,239,0.08)',
+    justifyContent: 'center',
+  },
+  serviceOptionInfo: {
+    flex: 1,
+    gap: 3,
+  },
+  serviceOptionHeaderRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'space-between',
+  },
+  serviceOptionTitle: {
+    color: colors.text,
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  serviceOptionTitleActive: {
+    color: colors.brandDark,
+  },
+  serviceOptionPrice: {
+    color: colors.text,
+    fontSize: 15,
+    fontWeight: '900',
+    fontVariant: ['tabular-nums'],
+  },
+  serviceOptionPriceActive: {
+    color: colors.brandDark,
+  },
+  serviceOptionDescription: {
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  serviceOptionAvailability: {
+    color: colors.brandDark,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  serviceOptionUnavailable: {
+    color: '#b91c1c',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  serviceOptionRadio: {
+    alignItems: 'center',
+    borderColor: 'rgba(217,70,239,0.35)',
+    borderRadius: 999,
+    borderWidth: 2,
+    height: 22,
+    justifyContent: 'center',
+    width: 22,
+  },
+  serviceOptionRadioActive: {
+    borderColor: colors.brandDark,
+  },
+  serviceOptionRadioDot: {
+    backgroundColor: colors.brandDark,
+    borderRadius: 999,
+    height: 11,
+    width: 11,
   },
 });

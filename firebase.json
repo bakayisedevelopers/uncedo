@@ -142,6 +142,22 @@
           ]
         },
         {
+          "source": "/profile-photo",
+          "headers": [
+            { "key": "Cache-Control", "value": "no-store, max-age=0" },
+            { "key": "Referrer-Policy", "value": "no-referrer" },
+            { "key": "X-Content-Type-Options", "value": "nosniff" }
+          ]
+        },
+        {
+          "source": "/payout-details",
+          "headers": [
+            { "key": "Cache-Control", "value": "no-store, max-age=0" },
+            { "key": "Referrer-Policy", "value": "no-referrer" },
+            { "key": "X-Content-Type-Options", "value": "nosniff" }
+          ]
+        },
+        {
           "source": "/whatsapp-link",
           "headers": [
             {
@@ -174,6 +190,14 @@
         },
         {
           "source": "/service-photos",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/profile-photo",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/payout-details",
           "destination": "/app.html"
         },
         {

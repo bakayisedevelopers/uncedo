@@ -168,3 +168,94 @@ test('single-active policy also blocks a second booking while a prior request is
     assert.equal(result.activeRequestId, `active-${status}`);
   }
 });
+
+test('optioned service draft persists selectedOptionId and enforces valid option before quoting', async () => {
+  const optionedCatalog = {
+    'serviceCatalog/hairstyles': {
+      categoryId: 'grooming',
+      categoryName: 'Grooming',
+      label: 'Hairstyles',
+      active: true,
+      approved: true,
+      options: [
+        { id: 'knotless_braids', title: 'Knotless Braids', price: 320, selectedQuestionIds: [] },
+        { id: 'buzz_cut', title: 'Buzz Cut', price: 95, selectedQuestionIds: [] },
+      ],
+      questionnaire: {
+        required: [
+          {
+            id: 'service_address_target',
+            type: 'standard',
+            prompt: 'Service address',
+            answerType: 'enum',
+            options: [{ value: 'saved_home_address', label: 'Home' }],
+          },
+        ],
+        optional: [],
+      },
+    },
+  };
+  const operationsDb = createFirestoreMock({
+    ...optionedCatalog,
+    'users/customer-opt-1': { uid: 'customer-opt-1', role: 'customer', whatsappGuestPrincipalIds: [] },
+  });
+  const operations = createMarketplaceRequestOperations({
+    db: operationsDb,
+    admin: { firestore: { FieldValue: { serverTimestamp: () => 'server-time' } } },
+  });
+
+  const missingOptCreated = await operations.createDraft({
+    requestId: 'opt-req-missing',
+    principalId: 'customer-opt-1',
+    categoryId: 'grooming',
+    serviceIds: ['hairstyles'],
+    structuredAnswers: { service_address_target: 'saved_home_address' },
+    now: 1000,
+  });
+  assert.equal(missingOptCreated.code, 'missing-service-option');
+
+  const invalidOptCreated = await operations.createDraft({
+    requestId: 'opt-req-invalid',
+    principalId: 'customer-opt-1',
+    categoryId: 'grooming',
+    serviceIds: ['hairstyles'],
+    selectedOptionId: 'unknown_style',
+    structuredAnswers: { service_address_target: 'saved_home_address' },
+    now: 1500,
+  });
+  assert.equal(invalidOptCreated.code, 'invalid-service-option');
+
+  const validCreated = await operations.createDraft({
+    requestId: 'opt-req-valid',
+    principalId: 'customer-opt-1',
+    categoryId: 'grooming',
+    serviceIds: ['hairstyles'],
+    selectedOptionId: 'knotless_braids',
+    selectedOptionTitle: 'Knotless Braids',
+    structuredAnswers: { service_address_target: 'saved_home_address' },
+    now: 3000,
+  });
+  assert.equal(validCreated.code, 'created');
+  const quoted = await operations.quoteDraft({
+    requestId: 'opt-req-valid',
+    principalId: 'customer-opt-1',
+    now: 4000,
+  });
+  assert.equal(quoted.code, 'quoted');
+  assert.equal(quoted.quote.selectedOptionId, 'knotless_braids');
+  assert.equal(quoted.quote.selectedOptionTitle, 'Knotless Braids');
+
+  const confirmed = await operations.confirmDraft({
+    requestId: 'opt-req-valid',
+    principalId: 'customer-opt-1',
+    approvedQuote: quoted.quote,
+    quoteExpiresAtMs: quoted.quoteExpiresAtMs,
+    source: 'app',
+    now: 5000,
+  });
+  assert.equal(confirmed.code, 'submitted');
+  const submittedDoc = operationsDb.documents.get('serviceRequests/opt-req-valid');
+  assert.equal(submittedDoc.selectedOptionId, 'knotless_braids');
+  assert.equal(submittedDoc.selectedOptionTitle, 'Knotless Braids');
+});
+

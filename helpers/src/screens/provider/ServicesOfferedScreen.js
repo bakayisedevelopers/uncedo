@@ -21,7 +21,7 @@ export function ServicesOfferedScreen({ navigate, goBack }) {
   const { helperServiceOfferings, actions, saving, saveError } = useHelpersApp();
   const [mastery, setMastery] = useState([]);
   const orderedServiceOfferings = [...helperServiceOfferings].sort((left, right) => (
-    `${left.serviceName}`.localeCompare(`${right.serviceName}`)
+    `${left.serviceName} ${left.optionTitle || ''}`.localeCompare(`${right.serviceName} ${right.optionTitle || ''}`)
   ));
   const masteryByService = useMemo(() => new Map(mastery.map((item) => [String(item.serviceId || item.id || ''), item])), [mastery]);
 
@@ -73,6 +73,9 @@ export function ServicesOfferedScreen({ navigate, goBack }) {
                 parentTab: 'Profile',
                 serviceId: offering.serviceId,
                 serviceName: offering.serviceName,
+                optionId: offering.optionId || '',
+                optionTitle: offering.optionTitle || '',
+                offeringId: offering.offeringId,
               },
             })}
             style={({ pressed }) => [styles.offeringRowPressable, pressed && styles.rowPressed]}
@@ -81,8 +84,12 @@ export function ServicesOfferedScreen({ navigate, goBack }) {
               <Ionicons color={colors.brandDark} name="sparkles-outline" size={18} />
             </View>
             <View style={styles.offeringBody}>
-              <Text style={styles.offeringTitle}>{offering.serviceName}</Text>
-              <Text style={styles.offeringSubtitle}>{offering.serviceName}</Text>
+              <Text style={styles.offeringTitle}>
+                {offering.optionTitle ? `${offering.serviceName} — ${offering.optionTitle}` : offering.serviceName}
+              </Text>
+              <Text style={styles.offeringSubtitle}>
+                {offering.optionTitle ? offering.serviceName : 'Service-wide offering'}
+              </Text>
               <Text style={styles.offeringMeta}>
                 {offering.photos.length} work photo{offering.photos.length === 1 ? '' : 's'}
               </Text>
@@ -101,6 +108,8 @@ export function ServicesOfferedScreen({ navigate, goBack }) {
               onValueChange={(value) => actions.toggleServiceOfferingActive({
                 serviceId: offering.serviceId,
                 serviceName: offering.serviceName,
+                optionId: offering.optionId || '',
+                offeringId: offering.offeringId,
                 active: value,
               })}
               thumbColor="#ffffff"

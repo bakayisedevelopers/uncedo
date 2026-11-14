@@ -69,6 +69,7 @@ function groupRows(rows = [], getKey, buildMeta) {
     totalCount: groupedRows.length,
     pendingCount: groupedRows.filter((row) => isPendingServiceOfferingStatus(row.offeringStatus)).length,
     approvedCount: groupedRows.filter((row) => isApprovedServiceOfferingStatus(row.offeringStatus)).length,
+    approvedActiveCount: groupedRows.filter((row) => isApprovedServiceOfferingStatus(row.offeringStatus) && row.offeringActive !== false).length,
     rejectedCount: groupedRows.filter((row) => isRejectedServiceOfferingStatus(row.offeringStatus)).length,
     pausedCount: groupedRows.filter((row) => row.offeringActive === false).length,
     serviceCount: new Set(groupedRows.map((row) => row.serviceId).filter(Boolean)).size,

@@ -62,19 +62,58 @@ function normalizeOption(option = {}) {
   };
 }
 
+function normalizeServiceOption(option = {}, index = 0) {
+  if (!option || typeof option !== 'object') return null;
+  const rawTitle = String(option.title || option.label || '').trim();
+  const id = String(option.id || slugify(rawTitle || `option_${index + 1}`)).trim().toLowerCase();
+  if (!id && !rawTitle) return null;
+
+  return {
+    draftKey: String(option.draftKey || id || `option_${index + 1}`).trim(),
+    id,
+    title: rawTitle || id,
+    description: String(option.description || '').trim(),
+    imageUrl: String(option.imageUrl || '').trim(),
+    price: Math.max(0, roundCurrency(normalizeNumber(option.price ?? option.priceAdder ?? 0, 0))),
+    selectedQuestionIds: [...new Set(
+      (Array.isArray(option.selectedQuestionIds) ? option.selectedQuestionIds : [])
+        .map((item) => String(item || '').trim())
+        .filter(Boolean),
+    )],
+    requiresNoOptionSpecificQuestions: normalizeBoolean(option.requiresNoOptionSpecificQuestions, false),
+  };
+}
+
 function normalizeQuestion(question = {}) {
   const id = String(question.id || '').trim();
   if (!id) return null;
+
+  const depQuestionId = String(
+    question.dependencyRule?.dependsOnQuestionId
+    || question.dependsOn?.questionId
+    || '',
+  ).trim();
+  const depOptionValue = String(
+    question.dependencyRule?.dependsOnOptionValue
+    || question.dependsOn?.optionValue
+    || '',
+  ).trim();
+  const rawType = String(question.type || 'option-specific').trim().toLowerCase();
 
   return {
     id,
     prompt: String(question.prompt || question.label || id).trim(),
     answerType: String(question.answerType || 'text').trim().toLowerCase(),
     required: normalizeBoolean(question.required, false),
+    type: rawType === 'standard' ? 'standard' : 'option-specific',
     answerHint: String(question.answerHint || '').trim(),
-    dependsOn: question.dependsOn && typeof question.dependsOn === 'object' && question.dependsOn.questionId ? {
-      questionId: String(question.dependsOn.questionId).trim(),
-      optionValue: String(question.dependsOn.optionValue || '').trim(),
+    dependsOn: depQuestionId ? {
+      questionId: depQuestionId,
+      optionValue: depOptionValue,
+    } : null,
+    dependencyRule: depQuestionId ? {
+      dependsOnQuestionId: depQuestionId,
+      dependsOnOptionValue: depOptionValue,
     } : null,
     options: (Array.isArray(question.options) ? question.options : [])
       .map(normalizeOption)
@@ -134,6 +173,7 @@ function normalizeServiceCatalogEntry(entry = {}) {
   const questionSets = entry.questionnaire && typeof entry.questionnaire === 'object'
     ? entry.questionnaire
     : { required: entry.requiredQuestions, optional: entry.optionalQuestions };
+  const rawOptionMode = String(entry.optionApplicationMode || '').trim().toLowerCase();
 
   return {
     id,
@@ -145,6 +185,7 @@ function normalizeServiceCatalogEntry(entry = {}) {
     type: String(entry.type || 'service').trim().toLowerCase(),
     active: entry.active !== false,
     approved: entry.approved !== false,
+    optionApplicationMode: rawOptionMode === 'unified' ? 'unified' : 'per_option',
     requiresPortfolioSelection: normalizeBoolean(entry.requiresPortfolioSelection, false),
     requiresHelperPortfolio: normalizeBoolean(entry.requiresHelperPortfolio, true),
     inheritBundleImages: normalizeBoolean(entry.inheritBundleImages, true),
@@ -157,6 +198,9 @@ function normalizeServiceCatalogEntry(entry = {}) {
     images: (Array.isArray(entry.images) ? entry.images : [])
       .map(normalizeImage)
       .filter(Boolean),
+    options: (Array.isArray(entry.options) ? entry.options : [])
+      .map((opt, index) => normalizeServiceOption(opt, index))
+      .filter(Boolean),
     pricing: normalizePricing(entry.pricing || {}),
     questionnaire: {
       required: (Array.isArray(questionSets?.required) ? questionSets.required : [])
@@ -167,6 +211,38 @@ function normalizeServiceCatalogEntry(entry = {}) {
         .filter(Boolean),
     },
   };
+}
+
+function resolveSelectedServiceOption(service = {}, selectedOptionId = '') {
+  const options = Array.isArray(service?.options) ? service.options : [];
+  if (!options.length) return null;
+  const targetRaw = String(selectedOptionId || '').trim().toLowerCase();
+  if (!targetRaw) return null;
+  const targetSlug = slugify(targetRaw);
+
+  return options.find((opt) => {
+    const optId = String(opt?.id || '').trim().toLowerCase();
+    const optSlug = slugify(optId);
+    const titleSlug = slugify(opt?.title || opt?.label || '');
+    return optId === targetRaw
+      || (targetSlug && (optSlug === targetSlug || titleSlug === targetSlug));
+  }) || null;
+}
+
+function isQuestionIncludedForOption(question = {}, service = {}, selectedOption = null) {
+  const options = Array.isArray(service?.options) ? service.options : [];
+  if (!options.length) return true;
+
+  const qType = String(question?.type || 'option-specific').trim().toLowerCase();
+  if (qType === 'standard') return true;
+  if (!selectedOption) return false;
+  if (selectedOption.requiresNoOptionSpecificQuestions) return false;
+  const selectedIds = new Set(
+    (Array.isArray(selectedOption.selectedQuestionIds) ? selectedOption.selectedQuestionIds : [])
+      .map((id) => String(id || '').trim())
+      .filter(Boolean),
+  );
+  return selectedIds.has(String(question?.id || '').trim());
 }
 
 function getTimeBucket(date = new Date()) {
@@ -229,62 +305,73 @@ function getScheduleMultiplier(pricing = {}, signalContext = {}) {
   };
 }
 
-function getQuestionAdjustments(service, structuredAnswers = {}) {
+function getQuestionAdjustments(service, structuredAnswers = {}, selectedOption = null) {
   let subtotalAdder = 0;
   let materialAdder = 0;
   let multiplier = 1;
   const lines = [];
 
   [...(service.questionnaire?.required || []), ...(service.questionnaire?.optional || [])].forEach((question) => {
-    if (question.dependsOn && question.dependsOn.questionId) {
-      const parentAnswer = String(structuredAnswers?.[question.dependsOn.questionId] || '').trim().toLowerCase();
-      if (parentAnswer !== String(question.dependsOn.optionValue || '').trim().toLowerCase()) {
-        return;
-      }
-    }
-
-    const answerValue = String(structuredAnswers?.[question.id] || '').trim().toLowerCase();
-    if (!answerValue || !Array.isArray(question.options) || !question.options.length) {
+    if (!isQuestionIncludedForOption(question, service, selectedOption)) {
       return;
     }
 
-    const selectedOption = question.options.find((option) => String(option.value || '').trim().toLowerCase() === answerValue);
-    if (!selectedOption) return;
-
-    if (selectedOption.dependsOn && selectedOption.dependsOn.questionId) {
-      const parentAnswer = String(structuredAnswers?.[selectedOption.dependsOn.questionId] || '').trim().toLowerCase();
-      if (parentAnswer !== String(selectedOption.dependsOn.optionValue || '').trim().toLowerCase()) {
+    const depQuestionId = question.dependencyRule?.dependsOnQuestionId || question.dependsOn?.questionId;
+    const depOptionValue = question.dependencyRule?.dependsOnOptionValue || question.dependsOn?.optionValue;
+    if (depQuestionId) {
+      const parentAnswer = String(structuredAnswers?.[depQuestionId] || '').trim().toLowerCase();
+      if (parentAnswer !== String(depOptionValue || '').trim().toLowerCase()) {
         return;
       }
     }
 
-    const optionPriceAdder = Number(selectedOption.priceAdder || 0);
-    const optionMultiplier = Number(selectedOption.multiplier || 1);
-
-    subtotalAdder += optionPriceAdder;
-    materialAdder += Number(selectedOption.materialAdder || 0);
-    if (optionMultiplier && optionMultiplier !== 1) {
-      multiplier *= optionMultiplier;
+    const rawAnswer = structuredAnswers?.[question.id];
+    const answerValues = Array.isArray(rawAnswer)
+      ? rawAnswer.map((v) => String(v || '').trim().toLowerCase()).filter(Boolean)
+      : [String(rawAnswer || '').trim().toLowerCase()].filter(Boolean);
+    if (!answerValues.length || !Array.isArray(question.options) || !question.options.length) {
+      return;
     }
 
-    if (optionPriceAdder) {
-      lines.push({
-        label: `${service.label}: ${selectedOption.label}`,
-        amount: roundCurrency(optionPriceAdder),
-      });
-    }
-    if (selectedOption.materialAdder) {
-      lines.push({
-        label: `${service.label}: ${selectedOption.label} materials`,
-        amount: roundCurrency(selectedOption.materialAdder),
-      });
-    }
-    if (optionMultiplier && optionMultiplier !== 1) {
-      lines.push({
-        label: `${service.label}: ${selectedOption.label} multiplier (×${optionMultiplier})`,
-        amount: roundCurrency(0),
-      });
-    }
+    answerValues.forEach((answerValue) => {
+      const selectedChoice = question.options.find((option) => String(option.value || '').trim().toLowerCase() === answerValue);
+      if (!selectedChoice) return;
+
+      if (selectedChoice.dependsOn && selectedChoice.dependsOn.questionId) {
+        const parentAnswer = String(structuredAnswers?.[selectedChoice.dependsOn.questionId] || '').trim().toLowerCase();
+        if (parentAnswer !== String(selectedChoice.dependsOn.optionValue || '').trim().toLowerCase()) {
+          return;
+        }
+      }
+
+      const optionPriceAdder = Number(selectedChoice.priceAdder || 0);
+      const optionMultiplier = Number(selectedChoice.multiplier || 1);
+
+      subtotalAdder += optionPriceAdder;
+      materialAdder += Number(selectedChoice.materialAdder || 0);
+      if (optionMultiplier && optionMultiplier !== 1) {
+        multiplier *= optionMultiplier;
+      }
+
+      if (optionPriceAdder) {
+        lines.push({
+          label: `${service.label}: ${selectedChoice.label}`,
+          amount: roundCurrency(optionPriceAdder),
+        });
+      }
+      if (selectedChoice.materialAdder) {
+        lines.push({
+          label: `${service.label}: ${selectedChoice.label} materials`,
+          amount: roundCurrency(selectedChoice.materialAdder),
+        });
+      }
+      if (optionMultiplier && optionMultiplier !== 1) {
+        lines.push({
+          label: `${service.label}: ${selectedChoice.label} multiplier (×${optionMultiplier})`,
+          amount: roundCurrency(0),
+        });
+      }
+    });
   });
 
   return {
@@ -295,24 +382,26 @@ function getQuestionAdjustments(service, structuredAnswers = {}) {
   };
 }
 
-function createLeafQuote(service, structuredAnswers = {}, signalContext = {}) {
+function createLeafQuote(service, structuredAnswers = {}, signalContext = {}, selectedOptionId = '') {
   const pricing = normalizePricing(service.pricing || {});
-  const questionAdjustments = getQuestionAdjustments(service, structuredAnswers);
+  const selectedOption = resolveSelectedServiceOption(service, selectedOptionId || structuredAnswers?.selectedOptionId || '');
+  const baseOptionPrice = selectedOption ? Math.max(0, roundCurrency(Number(selectedOption.price || 0))) : pricing.basePrice;
+  const questionAdjustments = getQuestionAdjustments(service, structuredAnswers, selectedOption);
   const schedule = getScheduleMultiplier(pricing, signalContext);
   const signalMultiplier = getSignalMultiplier(pricing, signalContext);
   const combinedMultiplier = schedule.multiplier * signalMultiplier * questionAdjustments.multiplier;
-  const baseLabor = pricing.basePrice + questionAdjustments.subtotalAdder;
+  const baseLabor = baseOptionPrice + questionAdjustments.subtotalAdder;
   const materialFee = pricing.materialFee + questionAdjustments.materialAdder;
   const laborTotal = roundCurrency(baseLabor * combinedMultiplier);
   const subtotal = roundCurrency(laborTotal + materialFee);
-  const clampedTotal = pricing.maximumTotal > 0 || pricing.minimumTotal > 0
+  const clampedTotal = (!selectedOption && (pricing.maximumTotal > 0 || pricing.minimumTotal > 0))
     ? roundCurrency(clamp(subtotal, pricing.minimumTotal || 0, pricing.maximumTotal || Number.POSITIVE_INFINITY))
     : subtotal;
 
   const lines = [
     {
-      label: `${service.label}: base labor`,
-      amount: roundCurrency(pricing.basePrice),
+      label: selectedOption ? `${service.label}: ${selectedOption.title}` : `${service.label}: base labor`,
+      amount: roundCurrency(baseOptionPrice),
     },
     ...questionAdjustments.lines,
   ];
@@ -341,6 +430,8 @@ function createLeafQuote(service, structuredAnswers = {}, signalContext = {}) {
   return {
     serviceId: service.id,
     label: service.label,
+    selectedOptionId: selectedOption?.id || null,
+    selectedOptionTitle: selectedOption?.title || null,
     subtotal: clampedTotal,
     estimatedDurationMinutes: pricing.durationMinutes || 0,
     lines,
@@ -363,6 +454,7 @@ function computeBundleAdjustment(componentTotal, bundlePricing = {}) {
 function computeServiceNode({
   serviceId,
   catalogIndex,
+  selectedOptionId = '',
   structuredAnswers = {},
   signalContext = {},
   stack = new Set(),
@@ -377,7 +469,7 @@ function computeServiceNode({
   }
 
   if (service.type !== 'bundle' || !service.includedServiceIds.length) {
-    return createLeafQuote(service, structuredAnswers, signalContext);
+    return createLeafQuote(service, structuredAnswers, signalContext, selectedOptionId);
   }
 
   const nextStack = new Set(stack);
@@ -386,6 +478,7 @@ function computeServiceNode({
     .map((includedId) => computeServiceNode({
       serviceId: includedId,
       catalogIndex,
+      selectedOptionId,
       structuredAnswers,
       signalContext,
       stack: nextStack,
@@ -430,6 +523,7 @@ function inferSignalLevels({ onlineHelpers = 0, activeRequests = 0 }) {
 function computeMarketplaceQuote({
   categoryId = '',
   serviceIds = [],
+  selectedOptionId = '',
   structuredAnswers = {},
   catalogEntries = [],
   signalContext = {},
@@ -456,6 +550,7 @@ function computeMarketplaceQuote({
     .map((serviceId) => computeServiceNode({
       serviceId,
       catalogIndex,
+      selectedOptionId,
       structuredAnswers,
       signalContext: normalizedSignals,
     }))
@@ -469,6 +564,7 @@ function computeMarketplaceQuote({
 
   return {
     categoryId: String(categoryId || '').trim().toLowerCase(),
+    selectedOptionId: String(selectedOptionId || '').trim().toLowerCase() || null,
     currency,
     serviceBreakdown,
     lines: [
@@ -497,6 +593,9 @@ module.exports = {
   DEFAULT_TRAVEL_FEE,
   computeMarketplaceQuote,
   inferSignalLevels,
+  isQuestionIncludedForOption,
   normalizeServiceCatalogEntry,
+  normalizeServiceOption,
+  resolveSelectedServiceOption,
 };
 

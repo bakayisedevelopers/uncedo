@@ -191,21 +191,26 @@ function getHelperOnboardingStatus(profile, { serviceCatalog = [], serviceCatalo
   );
   const isVerified = profile?.verificationStatus === 'verified';
   const hasAnyService = helperServiceOfferings.length > 0;
-  const activeCatalogIds = new Set(
+  const catalogById = new Map(
     (Array.isArray(serviceCatalog) ? serviceCatalog : [])
       .filter((entry) => entry.active !== false)
-      .map((entry) => String(entry.id || '').trim().toLowerCase())
-      .filter(Boolean),
+      .map((entry) => [String(entry.id || '').trim().toLowerCase(), entry])
+      .filter(([key]) => Boolean(key)),
   );
-  const hasQualifiedServiceOfferings = helperServiceOfferings.some((offering) => (
-    offering.status === 'approved'
-    && offering.active !== false
-    && offering.approved === true
-    && offering.verified === true
-    && (serviceCatalogResolved ? activeCatalogIds.has(String(offering.serviceId || '').trim().toLowerCase()) : true)
-    && Array.isArray(offering.photos)
-    && offering.photos.length > 0
-  ));
+  const hasQualifiedServiceOfferings = helperServiceOfferings.some((offering) => {
+    const svcKey = String(offering.serviceId || '').trim().toLowerCase();
+    const catalogEntry = catalogById.get(svcKey) || null;
+    if (serviceCatalogResolved && !catalogEntry) return false;
+    const requiresPerOption = Array.isArray(catalogEntry?.options) && catalogEntry.options.length > 0 && catalogEntry.optionApplicationMode !== 'unified';
+    const hasOptionOrUnified = !requiresPerOption || Boolean(String(offering.optionId || '').trim());
+    return offering.status === 'approved'
+      && offering.active !== false
+      && offering.approved === true
+      && offering.verified === true
+      && hasOptionOrUnified
+      && Array.isArray(offering.photos)
+      && offering.photos.length > 0;
+  });
   const hasProfilePhoto = Boolean(String(profile?.profilePhoto || profile?.selfieUrl || '').trim());
   const hasName = Boolean(fullName || (firstName && lastName));
   const hasProviderType = providerType === 'individual' || providerType === 'business';
@@ -818,7 +823,16 @@ export function HelpersAppProvider({ children }) {
     }
   };
 
-  const addServiceOfferingWithPhoto = async ({ serviceId, serviceName, categoryId, imageAsset, imageAssets }) => {
+  const addServiceOfferingWithPhoto = async ({
+    serviceId,
+    serviceName,
+    categoryId,
+    optionId = '',
+    optionTitle = '',
+    offeringId = '',
+    imageAsset,
+    imageAssets,
+  }) => {
     const assets = [
       ...(Array.isArray(imageAssets) ? imageAssets : []),
       ...(imageAsset ? [imageAsset] : []),
@@ -828,21 +842,35 @@ export function HelpersAppProvider({ children }) {
     setSaveError('');
 
     try {
-      const catalogEntry = (Array.isArray(serviceCatalog) ? serviceCatalog : []).find((entry) => String(entry.id || '').trim().toLowerCase() === String(serviceId || '').trim().toLowerCase()) || null;
-      const existingOffering = (Array.isArray(helperServiceOfferings) ? helperServiceOfferings : []).find((entry) => String(entry.serviceId || '').trim().toLowerCase() === String(serviceId || '').trim().toLowerCase()) || null;
+      const normalizedServiceId = String(serviceId || '').trim().toLowerCase();
+      const normalizedOptionId = String(optionId || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+      const catalogEntry = (Array.isArray(serviceCatalog) ? serviceCatalog : []).find((entry) => String(entry.id || '').trim().toLowerCase() === normalizedServiceId) || null;
+      const existingOffering = (Array.isArray(helperServiceOfferings) ? helperServiceOfferings : []).find((entry) => (
+        (offeringId && entry.offeringId === offeringId)
+        || (String(entry.serviceId || '').trim().toLowerCase() === normalizedServiceId
+          && String(entry.optionId || '').trim().toLowerCase() === normalizedOptionId)
+      )) || null;
       const resolvedCategoryId = categoryId || catalogEntry?.categoryId || '';
       const allowsInheritedPortfolio = catalogEntry?.type === 'bundle' && catalogEntry?.inheritBundleImages !== false;
+      const requiresOptionSelection = Array.isArray(catalogEntry?.options) && catalogEntry.options.length > 0 && catalogEntry.optionApplicationMode !== 'unified';
+      if (requiresOptionSelection && !normalizedOptionId) {
+        return { success: false, message: 'Select a specific option for this service before uploading proof photos.' };
+      }
       if (!user?.uid || !serviceId || (!assets.length && !allowsInheritedPortfolio)) {
         return { success: false, message: 'A service and uploaded work photo are required unless this bundle inherits its portfolio.' };
       }
+      const matchedCatalogOption = normalizedOptionId
+        ? (Array.isArray(catalogEntry?.options) ? catalogEntry.options.find((opt) => String(opt.id || '').trim().toLowerCase() === normalizedOptionId) : null)
+        : null;
+      const resolvedOptionTitle = String(optionTitle || matchedCatalogOption?.title || existingOffering?.optionTitle || '').trim();
       const photos = [];
       for (const asset of assets) {
         const upload = await uploadLocalFile({
           userId: user.uid,
           fileUri: asset.uri,
-          fileName: asset.fileName || `${slugify(serviceName || serviceId)}.jpg`,
+          fileName: asset.fileName || `${slugify(resolvedOptionTitle || serviceName || serviceId)}.jpg`,
           mimeType: asset.mimeType || 'image/jpeg',
-          pathPrefix: `helper-services/${serviceId}`,
+          pathPrefix: normalizedOptionId ? `helper-services/${serviceId}/${normalizedOptionId}` : `helper-services/${serviceId}`,
         });
         photos.push(createPicture({ uri: upload.downloadUrl, objectPath: upload.objectPath, uploadedAt: upload.uploadedAt }));
       }
@@ -851,9 +879,15 @@ export function HelpersAppProvider({ children }) {
         serviceId,
         categoryId: resolvedCategoryId,
         serviceName: serviceName || catalogEntry?.label || catalogEntry?.name || serviceId,
+        optionId: normalizedOptionId,
+        optionTitle: resolvedOptionTitle,
+        offeringId: offeringId || existingOffering?.offeringId || '',
         photos: [...(existingOffering?.photos || []), ...photos].slice(0, 10),
       });
-      return { success: true, message: `${serviceName || catalogEntry?.label || serviceId} submitted for approval.` };
+      const label = resolvedOptionTitle
+        ? `${serviceName || catalogEntry?.label || serviceId} — ${resolvedOptionTitle}`
+        : `${serviceName || catalogEntry?.label || serviceId}`;
+      return { success: true, message: `${label} submitted for approval.` };
     } catch (error) {
       logError('HelpersAppContext.addServiceOfferingWithPhoto', error);
       setSaveError(error.message || 'Unable to upload this service photo right now.');
@@ -863,19 +897,23 @@ export function HelpersAppProvider({ children }) {
     }
   };
 
-  const toggleServiceOfferingActive = async ({ serviceId, active }) => {
-    if (!user?.uid || !serviceId) return { success: false, message: 'Service reference is required.' };
-    await updateHelperServiceOfferingActive({ helperId: user.uid, serviceId, active });
+  const toggleServiceOfferingActive = async ({ serviceId, optionId = '', offeringId = '', active }) => {
+    if (!user?.uid || (!serviceId && !offeringId)) return { success: false, message: 'Service reference is required.' };
+    await updateHelperServiceOfferingActive({ helperId: user.uid, serviceId, optionId, offeringId, active });
     return { success: true };
   };
 
-  const removeServiceOffering = async ({ serviceId }) => {
-    if (!user?.uid || !serviceId) return { success: false, message: 'Service reference is required.' };
-    const offering = helperServiceOfferingsState.find((item) => item.serviceId === serviceId);
+  const removeServiceOffering = async ({ serviceId, optionId = '', offeringId = '' }) => {
+    if (!user?.uid || (!serviceId && !offeringId)) return { success: false, message: 'Service reference is required.' };
+    const normalizedOptionId = String(optionId || '').trim().toLowerCase();
+    const offering = helperServiceOfferingsState.find((item) => (
+      (offeringId && item.offeringId === offeringId)
+      || (item.serviceId === serviceId && String(item.optionId || '').trim().toLowerCase() === normalizedOptionId)
+    ));
     await Promise.all((offering?.photos || []).map((photo) => photo?.objectPath).filter(Boolean).map((objectPath) => deleteUploadedFile(objectPath).catch((error) => {
       logError('HelpersAppContext.removeServiceOffering.deleteUploadedFile', error);
     })));
-    await deleteHelperServiceOffering({ helperId: user.uid, serviceId });
+    await deleteHelperServiceOffering({ helperId: user.uid, serviceId, optionId, offeringId: offeringId || offering?.offeringId || '' });
     return { success: true };
   };
 

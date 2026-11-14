@@ -68,18 +68,30 @@ const TOOL_DEFINITIONS = Object.freeze({
     }, ['code']),
   },
   getServiceDetails: {
-    description: 'Read full details of a specific Uncedo service by serviceId or keyword query. Returns questionnaire options, description, category, price estimate range, and active helper availability count.',
+    description: 'Read full details of a specific Uncedo service by serviceId or keyword query. Returns service options, questionnaire options, description, category, price estimate range, and active helper availability count.',
     roles: ['guest', 'customer', 'helper'], auth: 'public',
-    fields: { serviceId: 'short-text', query: 'short-text' }, required: [],
+    fields: { serviceId: 'short-text', query: 'short-text', serviceOption: 'short-text' }, required: [],
     handler: 'getServiceDetails', canonicalBackend: 'liveServiceCatalogReader',
     outputSchema: resultSchema({
       code: stringSchema,
+      error: stringSchema,
+      query: stringSchema,
+      availableServices: Object.freeze({ type: 'array', items: stringSchema }),
       id: stringSchema,
       label: stringSchema,
       description: stringSchema,
       category: stringSchema,
       priceRange: stringSchema,
       helperCount: Object.freeze({ type: 'integer' }),
+      serviceOptions: Object.freeze({
+        type: 'array',
+        items: resultSchema({
+          id: stringSchema,
+          title: stringSchema,
+          price: Object.freeze({ type: 'number' }),
+          description: stringSchema,
+        }, ['id', 'title']),
+      }),
       options: Object.freeze({
         type: 'array',
         items: resultSchema({
@@ -94,16 +106,29 @@ const TOOL_DEFINITIONS = Object.freeze({
     }, ['code']),
   },
   initiateServiceBooking: {
-    description: 'Initiate a service booking by serviceId or keyword. Loads the service questionnaire, required questions, and starts the booking intake flow.',
+    description: 'Initiate a service booking by serviceId or keyword, optionally including the chosen serviceOption. Loads the service options or questionnaire and starts the booking intake flow.',
     roles: ['guest', 'customer', 'helper'], auth: 'public',
-    fields: { serviceId: 'short-text', query: 'short-text' }, required: [],
+    fields: { serviceId: 'short-text', query: 'short-text', serviceOption: 'short-text' }, required: [],
     handler: 'initiateServiceBooking', canonicalBackend: 'serviceBookingInitiator',
     stateChanging: true, confirmation: 'not-required', idempotency: 'inbound-event-id',
     outputSchema: resultSchema({
       code: stringSchema,
+      error: stringSchema,
+      query: stringSchema,
       serviceId: stringSchema,
       serviceName: stringSchema,
       categoryName: stringSchema,
+      selectedOptionId: stringSchema,
+      selectedOptionTitle: stringSchema,
+      serviceOptions: Object.freeze({
+        type: 'array',
+        items: resultSchema({
+          id: stringSchema,
+          title: stringSchema,
+          price: Object.freeze({ type: 'number' }),
+          description: stringSchema,
+        }, ['id', 'title']),
+      }),
       questions: Object.freeze({
         type: 'array',
         items: resultSchema({
@@ -116,7 +141,7 @@ const TOOL_DEFINITIONS = Object.freeze({
           }),
         }, ['id', 'prompt']),
       }),
-    }, ['code', 'serviceId', 'serviceName']),
+    }, ['code']),
   },
 });
 
@@ -136,13 +161,17 @@ function validateToolArguments(definition, args) {
   for (const key of definition.required || []) {
     if (args[key] === undefined || args[key] === null || args[key] === '') throw new Error(`Tool argument ${key} is required.`);
   }
+  const requiredFields = new Set(definition.required || []);
   const normalized = {};
   for (const [key, type] of Object.entries(definition.fields || {})) {
-    if (args[key] === undefined) continue;
+    if (args[key] === undefined || args[key] === null) continue;
     const value = args[key];
     if (type === 'short-text') {
       const item = safeText(value, 120);
-      if (!item) throw new Error(`Tool argument ${key} is required.`);
+      if (!item) {
+        if (requiredFields.has(key)) throw new Error(`Tool argument ${key} is required.`);
+        continue;
+      }
       normalized[key] = item;
     } else if (type === 'profile-field') {
       const item = safeText(value, 40);

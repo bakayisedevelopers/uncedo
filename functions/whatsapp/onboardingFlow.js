@@ -13,6 +13,8 @@ const WHATSAPP_ONBOARDING_BUTTONS = Object.freeze({
   ADD_HELPER_SERVICE: 'wa_helper_service_add',
   DONE_HELPER_SERVICES: 'wa_helper_service_done',
   NEXT_HELPER_SERVICES: 'wa_helper_service_next',
+  DONE_HELPER_SERVICE_OPTIONS: 'wa_helper_opt_done',
+  NEXT_HELPER_SERVICE_OPTIONS: 'wa_helper_opt_next',
 });
 
 function cleanOnboardingText(value, maximum = 240) {
@@ -125,7 +127,19 @@ function transitionWhatsAppOnboarding({ state = {}, buttonId = '', text = '', in
     agreementLinkExpiresAtMs: Number(state.agreementLinkExpiresAtMs || 0),
     agreementLinkChallengeHash: String(state.agreementLinkChallengeHash || ''),
     selectedServiceIds: Array.isArray(state.selectedServiceIds) ? state.selectedServiceIds.map((id) => String(id || '').trim()).filter(Boolean).slice(0, 10) : [],
+    selectedServiceOptions: Array.isArray(state.selectedServiceOptions)
+      ? state.selectedServiceOptions
+          .map((item) => ({
+            serviceId: String(item?.serviceId || '').trim(),
+            optionId: String(item?.optionId || '').trim(),
+            optionTitle: String(item?.optionTitle || '').trim(),
+          }))
+          .filter((item) => item.serviceId && item.optionId)
+          .slice(0, 40)
+      : [],
+    pendingOptionServiceId: String(state.pendingOptionServiceId || '').trim(),
     servicePage: Math.max(0, Number(state.servicePage || 0)),
+    optionPage: Math.max(0, Number(state.optionPage || 0)),
   };
   const button = String(buttonId || '').trim();
   const input = cleanOnboardingText(text);
@@ -281,8 +295,23 @@ function transitionWhatsAppOnboarding({ state = {}, buttonId = '', text = '', in
     return { state: current, action: 'await-helper-agreement' };
   }
 
+  if (current.stage === 'awaiting_helper_profile_photo') {
+    if (String(inboundType || '').trim().toLowerCase() === 'image') {
+      return { state: current, action: 'submit-helper-profile-photo' };
+    }
+    return { state: current, action: 'await-helper-profile-photo' };
+  }
+
   if (current.stage === 'awaiting_helper_service_photos') {
     return { state: current, action: 'await-helper-service-photos' };
+  }
+
+  if (current.stage === 'awaiting_helper_payout') {
+    return { state: current, action: 'await-helper-payout' };
+  }
+
+  if (current.stage === 'awaiting_helper_admin_verification') {
+    return { state: current, action: 'await-helper-admin-verification' };
   }
 
   if (current.stage === 'awaiting_helper_police_clearance') {
@@ -314,17 +343,93 @@ function transitionWhatsAppOnboarding({ state = {}, buttonId = '', text = '', in
     }
     const match = button.match(/^wa_helper_service_([A-Za-z0-9_-]{1,120})$/);
     if (!match) return { state: current, action: 'show-helper-services' };
-    if (current.selectedServiceIds.includes(match[1])) return { state: current, action: 'show-helper-services' };
-    const selectedServiceIds = [...current.selectedServiceIds, match[1]].slice(0, 10);
-    return { state: { ...current, selectedServiceIds, servicePage: 0, stage: 'awaiting_helper_service_more' }, action: 'select-helper-service', serviceId: match[1] };
+    const selectedServiceIds = current.selectedServiceIds.includes(match[1])
+      ? current.selectedServiceIds
+      : [...current.selectedServiceIds, match[1]].slice(0, 10);
+    return {
+      state: {
+        ...current,
+        selectedServiceIds,
+        pendingOptionServiceId: match[1],
+        servicePage: 0,
+        optionPage: 0,
+        stage: 'awaiting_helper_service_more',
+      },
+      action: 'select-helper-service',
+      serviceId: match[1],
+    };
+  }
+
+  if (current.stage === 'awaiting_helper_service_options') {
+    const activeServiceId = current.pendingOptionServiceId || current.selectedServiceIds[current.selectedServiceIds.length - 1] || '';
+    if (!activeServiceId) {
+      return { state: { ...current, stage: 'awaiting_helper_services', optionPage: 0 }, action: 'show-helper-services' };
+    }
+    if (button === WHATSAPP_ONBOARDING_BUTTONS.NEXT_HELPER_SERVICE_OPTIONS) {
+      return { state: { ...current, optionPage: current.optionPage + 1 }, action: 'show-helper-service-options', serviceId: activeServiceId };
+    }
+    if (button === WHATSAPP_ONBOARDING_BUTTONS.ADD_HELPER_SERVICE) {
+      return {
+        state: { ...current, stage: 'awaiting_helper_services', servicePage: 0, optionPage: 0, pendingOptionServiceId: '' },
+        action: 'show-helper-services',
+      };
+    }
+    const hasOptionForActive = current.selectedServiceOptions.some(
+      (item) => item.serviceId.toLowerCase() === activeServiceId.toLowerCase(),
+    );
+    if (button === WHATSAPP_ONBOARDING_BUTTONS.DONE_HELPER_SERVICE_OPTIONS || /^(done|finish|next|continue|no more)$/i.test(input)) {
+      if (!hasOptionForActive) {
+        return {
+          state: { ...current, pendingOptionServiceId: activeServiceId },
+          reply: 'Please select at least one option for this service first.',
+          action: 'show-helper-service-options',
+          serviceId: activeServiceId,
+        };
+      }
+      return {
+        state: { ...current, pendingOptionServiceId: '', optionPage: 0, stage: 'awaiting_helper_service_more' },
+        action: 'ask-helper-service-more',
+      };
+    }
+    const optMatch = button.match(/^wa_helper_opt_sel_([A-Za-z0-9_.:-]{1,120})$/);
+    if (!optMatch) {
+      return {
+        state: { ...current, pendingOptionServiceId: activeServiceId },
+        action: 'show-helper-service-options',
+        serviceId: activeServiceId,
+      };
+    }
+    const optionId = optMatch[1];
+    const exists = current.selectedServiceOptions.some(
+      (item) => item.serviceId.toLowerCase() === activeServiceId.toLowerCase() && item.optionId.toLowerCase() === optionId.toLowerCase(),
+    );
+    const nextSelectedOptions = exists
+      ? current.selectedServiceOptions
+      : [...current.selectedServiceOptions, { serviceId: activeServiceId, optionId, optionTitle: '' }].slice(0, 40);
+    return {
+      state: {
+        ...current,
+        pendingOptionServiceId: activeServiceId,
+        selectedServiceOptions: nextSelectedOptions,
+        optionPage: 0,
+      },
+      action: 'select-helper-service-option',
+      serviceId: activeServiceId,
+      optionId,
+    };
   }
 
   if (current.stage === 'awaiting_helper_service_more') {
     if (button === WHATSAPP_ONBOARDING_BUTTONS.ADD_HELPER_SERVICE || /^(add another|another service|add service)$/i.test(input)) {
-      return { state: { ...current, stage: 'awaiting_helper_services', servicePage: 0 }, action: 'show-helper-services' };
+      return { state: { ...current, stage: 'awaiting_helper_services', servicePage: 0, optionPage: 0, pendingOptionServiceId: '' }, action: 'show-helper-services' };
     }
     if (button === WHATSAPP_ONBOARDING_BUTTONS.DONE_HELPER_SERVICES || /^(done|finish|no more|submit)$/i.test(input)) {
-      return { state: { ...current, stage: 'awaiting_helper_service_photos' }, action: 'submit-helper-services', requestedServiceIds: current.selectedServiceIds };
+      return {
+        state: { ...current, stage: 'awaiting_helper_service_photos', pendingOptionServiceId: '', optionPage: 0 },
+        action: 'submit-helper-services',
+        requestedServiceIds: current.selectedServiceIds,
+        requestedServiceOptions: current.selectedServiceOptions,
+      };
     }
     return { state: current, action: 'ask-helper-service-more' };
   }

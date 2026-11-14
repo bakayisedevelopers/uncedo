@@ -19,6 +19,11 @@ function resolveWhatsAppHelperReadinessState({
   ready = false,
   policeClearanceRequired = true,
   policeClearanceStatus = '',
+  hasProfilePhoto = false,
+  servicePhotosComplete = false,
+  agreementCurrent = false,
+  payoutVerified = false,
+  adminReviewEligible = true,
   nowMs = Date.now(),
 } = {}) {
   const current = { ...state };
@@ -84,6 +89,55 @@ function resolveWhatsAppHelperReadinessState({
           stage: 'awaiting_helper_police_clearance_review',
           updatedAtMs: nowMs,
         },
+      };
+    }
+  }
+
+  if (stage === 'awaiting_helper_profile_photo' && (ready || hasProfilePhoto)) {
+    return {
+      changed: true,
+      reason: 'profile-photo-saved',
+      state: { ...current, role: 'helper', accountMode: 'account', stage: ready ? 'complete' : 'helper_readiness', updatedAtMs: nowMs },
+    };
+  }
+
+  if (stage === 'awaiting_helper_service_photos' && (ready || servicePhotosComplete)) {
+    return {
+      changed: true,
+      reason: 'service-photos-complete',
+      state: { ...current, role: 'helper', accountMode: 'account', stage: ready ? 'complete' : 'helper_readiness', updatedAtMs: nowMs },
+    };
+  }
+
+  if (stage === 'awaiting_helper_agreement' && (ready || agreementCurrent)) {
+    return {
+      changed: true,
+      reason: 'agreement-accepted',
+      state: { ...current, role: 'helper', accountMode: 'account', stage: ready ? 'complete' : 'helper_readiness', updatedAtMs: nowMs },
+    };
+  }
+
+  if (stage === 'awaiting_helper_payout' && (ready || payoutVerified)) {
+    return {
+      changed: true,
+      reason: 'payout-verified',
+      state: { ...current, role: 'helper', accountMode: 'account', stage: ready ? 'complete' : 'helper_readiness', updatedAtMs: nowMs },
+    };
+  }
+
+  if (stage === 'awaiting_helper_admin_verification') {
+    if (ready) {
+      return {
+        changed: true,
+        reason: 'admin-verification-approved',
+        state: { ...current, role: 'helper', accountMode: 'account', stage: 'complete', updatedAtMs: nowMs },
+      };
+    }
+    if (!adminReviewEligible) {
+      return {
+        changed: true,
+        reason: 'helper-action-required',
+        state: { ...current, role: 'helper', accountMode: 'account', stage: 'helper_readiness', updatedAtMs: nowMs },
       };
     }
   }

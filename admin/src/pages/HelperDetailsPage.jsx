@@ -3,6 +3,7 @@ import { ArrowLeft, Check, Image as ImageIcon, Pause, RefreshCw, ShieldAlert, Sh
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Badge, Card, EmptyState, LoadingState, SectionTitle } from '../components/ui';
 import {
+  bulkUpdateHelperServiceStatus,
   flattenProviderServices,
   listHelperProfiles,
   getHelperPoliceClearanceReview,
@@ -146,8 +147,27 @@ export default function HelperDetailsPage() {
         uid: row.providerUid,
         serviceId: row.serviceId,
         serviceName: row.serviceName,
+        optionId: row.optionId || '',
+        optionTitle: row.optionTitle || '',
         offeringId: row.offeringId,
         updates,
+      });
+      await load();
+    } finally {
+      setIsMutating(false);
+    }
+  };
+
+  const applyBulkServiceApprove = async (group) => {
+    if (!selected?.uid || !group?.rows?.length) return;
+    setIsMutating(true);
+    try {
+      await bulkUpdateHelperServiceStatus({
+        uid: selected.uid,
+        serviceId: group.serviceId,
+        serviceName: group.serviceName,
+        offerings: group.rows,
+        updates: { status: 'approved', active: true, verified: true },
       });
       await load();
     } finally {
@@ -162,6 +182,8 @@ export default function HelperDetailsPage() {
         uid: row.providerUid,
         serviceId: row.serviceId,
         serviceName: row.serviceName,
+        optionId: row.optionId || '',
+        optionTitle: row.optionTitle || '',
         offeringId: row.offeringId,
       });
       await load();
@@ -457,7 +479,18 @@ export default function HelperDetailsPage() {
                       <p className="text-base font-bold text-white">{group.serviceName}</p>
                       <p className="mt-1 text-sm text-ink-200">{group.serviceDescription || 'No service description saved.'}</p>
                     </div>
-                    <div className="flex flex-wrap gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {group.rows.length > 0 && group.approvedActiveCount < group.rows.length ? (
+                        <button
+                          type="button"
+                          disabled={isMutating}
+                          onClick={() => applyBulkServiceApprove(group)}
+                          className="inline-flex items-center gap-1.5 rounded-2xl bg-brand px-3 py-1.5 text-xs font-bold text-white disabled:opacity-60"
+                        >
+                          <Check className="h-3.5 w-3.5" />
+                          Approve all options
+                        </button>
+                      ) : null}
                       <Badge tone={group.pendingCount ? 'warning' : 'success'}>{group.pendingCount} pending</Badge>
                       <Badge tone={group.totalCount ? 'brand' : 'neutral'}>{group.totalCount} offering{group.totalCount === 1 ? '' : 's'}</Badge>
                     </div>
@@ -466,14 +499,19 @@ export default function HelperDetailsPage() {
                   <div className="mt-4 space-y-3">
                     {group.rows.map((row, index) => {
                       const defaultOpen = focusedServiceId === group.serviceId && index === 0;
+                      const optionHeading = row.optionTitle
+                        || (row.optionId ? row.optionId : `${row.serviceName} · All options (Unified)`);
+                      const optionSubtitle = row.optionId
+                        ? `${row.serviceName} · Option submission`
+                        : `${row.serviceName} · Service-level submission`;
 
                       return (
                         <details key={row.offeringId} open={defaultOpen} className="rounded-[20px] border border-white/10 bg-white/5">
                           <summary className="list-none [&::-webkit-details-marker]:hidden cursor-pointer rounded-[20px] px-4 py-4">
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0">
-                                <p className="text-sm font-bold text-white">{row.serviceName}</p>
-                                <p className="mt-1 text-xs text-ink-300">{row.serviceName}</p>
+                                <p className="text-sm font-bold text-white">{optionHeading}</p>
+                                <p className="mt-1 text-xs text-ink-300">{optionSubtitle}</p>
                               </div>
                               <div className="flex flex-wrap gap-2">
                                 <Badge tone={statusTone(row.offeringStatus)}>{row.offeringStatus}</Badge>

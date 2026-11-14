@@ -66,6 +66,7 @@ function buildAssistantPrompt({ requestState = {}, appInstruction = '' } = {}) {
     categoryId: requestState.categoryId,
     serviceIds: requestState.serviceIds,
     selectedPackageId: requestState.selectedPackageId,
+    selectedOptionId: requestState.selectedOptionId,
     structuredAnswers: requestState.structuredAnswers || {},
   });
 
@@ -81,6 +82,7 @@ function buildRequestDraft({ requestState = {}, customerText = '' } = {}) {
     categoryId: requestState.categoryId,
     serviceIds: requestState.serviceIds,
     selectedPackageId: requestState.selectedPackageId,
+    selectedOptionId: requestState.selectedOptionId,
     structuredAnswers: requestState.structuredAnswers || {},
   });
 
@@ -123,12 +125,14 @@ export async function streamCustomerAssistantTurn({
     categoryId: mergedState.categoryId,
     serviceIds: mergedState.serviceIds,
     selectedPackageId: mergedState.selectedPackageId,
+    selectedOptionId: mergedState.selectedOptionId,
     structuredAnswers: mergedState.structuredAnswers,
   });
   const nextQuestion = getNextCustomerIntakeQuestion({
     categoryId: mergedState.categoryId,
     serviceIds: mergedState.serviceIds,
     selectedPackageId: mergedState.selectedPackageId,
+    selectedOptionId: mergedState.selectedOptionId,
     structuredAnswers: mergedState.structuredAnswers,
   });
   const selectedServiceLabel = getCustomerServiceById(mergedState.selectedPackageId || mergedState.serviceIds?.[0])?.label || '';

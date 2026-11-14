@@ -111,3 +111,42 @@ test('formatWhatsAppNextQuestion presents free questions without interactive but
   assert.match(result.text, /Describe the issue/);
   assert.match(result.text, /Please type your answer below/);
 });
+
+test('formatWhatsAppServiceOptionPrompt renders interactive buttons or list rows with wa_book_opt_ IDs', () => {
+  const { formatWhatsAppServiceOptionPrompt } = require('./serviceBookingPresentation');
+  const fewOptions = formatWhatsAppServiceOptionPrompt({
+    service: { id: 'hairstyles', label: 'Hairstyles' },
+    options: [
+      { id: 'knotless_braids', title: 'Knotless Braids', price: 350 },
+      { id: 'buzz_cut', title: 'Buzz Cut', price: 100 },
+    ],
+  });
+  assert.equal(fewOptions.interactive.type, 'button');
+  assert.equal(fewOptions.interactive.action.buttons[0].reply.id, 'wa_book_opt_knotless_braids');
+  assert.match(fewOptions.text, /R350\.00/);
+
+  const manyOptions = formatWhatsAppServiceOptionPrompt({
+    service: { id: 'cleaning', label: 'Cleaning' },
+    options: [
+      { id: 'opt1', title: 'Option 1', price: 100 },
+      { id: 'opt2', title: 'Option 2', price: 150 },
+      { id: 'opt3', title: 'Option 3', price: 200 },
+      { id: 'opt4', title: 'Option 4', price: 250 },
+    ],
+  });
+  assert.equal(manyOptions.interactive.type, 'list');
+  assert.equal(manyOptions.interactive.action.sections[0].rows[3].id, 'wa_book_opt_opt4');
+});
+
+test('booking confirmation displays selectedOption title when present', () => {
+  const confirmation = formatWhatsAppBookingConfirmation({
+    service: { label: 'Hairstyles' },
+    selectedOption: { id: 'knotless_braids', title: 'Knotless Braids' },
+    questions: [],
+    answers: {},
+    quote: { total: 350, currency: 'ZAR', selectedOptionTitle: 'Knotless Braids' },
+  });
+  assert.match(confirmation.text, /\*Option:\* Knotless Braids/);
+  assert.match(confirmation.buttonBody, /Hairstyles — Knotless Braids/);
+});
+

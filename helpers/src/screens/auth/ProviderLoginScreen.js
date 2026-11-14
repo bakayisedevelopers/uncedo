@@ -21,7 +21,15 @@ const webSocialButtons = [
   { label: 'WhatsApp', icon: 'logo-whatsapp' },
 ];
 
-export function ProviderLoginScreen({ initialMode = 'login', onRouteChange, onHome, disableSignupMode = false, emailOnly = false }) {
+export function ProviderLoginScreen({
+  initialMode = 'login',
+  onRouteChange,
+  onHome,
+  disableSignupMode = false,
+  emailOnly = false,
+  emailOnlyTitle = '',
+  emailOnlySubtitle = '',
+}) {
   const {
     authError,
     user,
@@ -225,11 +233,11 @@ export function ProviderLoginScreen({ initialMode = 'login', onRouteChange, onHo
         onPress: () => handleSocialPress(button.label),
       }))}
       subtitle={emailOnly
-        ? 'Sign in with the helper email account linked to the WhatsApp number that received this agreement link.'
+        ? (emailOnlySubtitle || 'Sign in with the helper email account linked to the WhatsApp number for this setup step.')
         : isSignup
         ? 'Welcome to Helpers. Create your account, complete your profile, and finish verification before accepting work.'
         : 'Welcome back to Helpers. Sign in to manage availability, offers, and active work.'}
-      title={emailOnly ? 'Sign in to review\nyour agreement' : isSignup ? 'Create\nAccount' : 'Welcome\nBack'}
+      title={emailOnly ? (emailOnlyTitle || 'Sign in to continue\nhelper setup') : isSignup ? 'Create\nAccount' : 'Welcome\nBack'}
     >
       <View style={styles.formBlock}>
         <AuthMessage inverted={isSignup} text={formError || authError || ''} />

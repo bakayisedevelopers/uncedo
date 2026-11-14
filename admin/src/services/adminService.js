@@ -292,6 +292,9 @@ function normalizeHelperServiceOfferingRow(docId = '', data = {}, helperProfiles
     categoryId: String(data.categoryId || '').trim(),
     serviceName: String(data.serviceName || data.name || serviceId).trim(),
     serviceDescription: String(data.description || '').trim(),
+    optionId: String(data.optionId || '').trim(),
+    optionTitle: String(data.optionTitle || data.optionLabel || '').trim(),
+    applicationMode: String(data.applicationMode || (data.optionId ? 'option' : 'service')).trim().toLowerCase(),
     offeringId: String(data.offeringId || docId).trim(),
     offeringStatus: String(data.status || 'pending').toLowerCase(),
     offeringActive: data.active !== false,
@@ -304,11 +307,19 @@ function normalizeHelperServiceOfferingRow(docId = '', data = {}, helperProfiles
   };
 }
 
-export async function updateHelperServiceStatus({ uid, serviceId, serviceName = '', offeringId, updates = {} }) {
+export async function updateHelperServiceStatus({
+  uid,
+  serviceId,
+  serviceName = '',
+  optionId = '',
+  optionTitle = '',
+  offeringId,
+  updates = {},
+}) {
   const clients = await getFirebaseClients();
   if (!clients) throw new Error('Firebase is not configured for the admin app.');
   const { db, firestoreModule } = clients;
-  const { doc, serverTimestamp, setDoc } = firestoreModule;
+  const { collection, doc, serverTimestamp, setDoc } = firestoreModule;
   const normalizedStatus = String(updates.status || '').trim().toLowerCase();
   const nextUpdates = {
     ...updates,
@@ -317,17 +328,27 @@ export async function updateHelperServiceStatus({ uid, serviceId, serviceName = 
     ...(normalizedStatus === 'approved' && !('approvalSource' in updates) ? { approvalSource: 'manual' } : {}),
     updatedAt: serverTimestamp(),
   };
-  await setDoc(doc(db, 'helperServices', offeringId || `${uid}_${serviceId}`), nextUpdates, { merge: true });
+  const targetOfferingId = offeringId || (optionId ? `${uid}_${serviceId}__${optionId}` : `${uid}_${serviceId}`);
+  await setDoc(doc(db, 'helperServices', targetOfferingId), nextUpdates, { merge: true });
   const action = normalizedStatus === 'approved' ? 'approved'
     : normalizedStatus === 'rejected' ? 'declined'
       : normalizedStatus === 'pending' && updates.active === false ? 'paused'
         : updates.active === false ? 'paused' : '';
+  const displayServiceName = optionTitle
+    ? `${String(serviceName || serviceId || '').trim()} — ${String(optionTitle).trim()}`
+    : String(serviceName || serviceId || '').trim();
   if (action) {
     const eventRef = doc(collection(db, 'helperServiceModerationEvents'));
     await setDoc(eventRef, {
-      helperUid: String(uid || ''), serviceId: String(serviceId || ''),
-      serviceName: String(serviceName || serviceId || '').trim(), action,
-      offeringId: String(offeringId || `${uid}_${serviceId}`), status: 'pending', createdAt: serverTimestamp(),
+      helperUid: String(uid || ''),
+      serviceId: String(serviceId || ''),
+      serviceName: displayServiceName,
+      optionId: String(optionId || ''),
+      optionTitle: String(optionTitle || ''),
+      action,
+      offeringId: String(targetOfferingId),
+      status: 'pending',
+      createdAt: serverTimestamp(),
     });
   }
   await reconcileOpenServiceRequests({
@@ -337,17 +358,82 @@ export async function updateHelperServiceStatus({ uid, serviceId, serviceName = 
   return getUserProfile(uid);
 }
 
-export async function removeHelperServiceOffering({ uid, serviceId, serviceName = '', offeringId }) {
+export async function bulkUpdateHelperServiceStatus({
+  uid,
+  serviceId,
+  serviceName = '',
+  offerings = [],
+  updates = { status: 'approved', active: true, verified: true },
+}) {
   const clients = await getFirebaseClients();
   if (!clients) throw new Error('Firebase is not configured for the admin app.');
   const { db, firestoreModule } = clients;
-  const { deleteDoc, doc } = firestoreModule;
-  await deleteDoc(doc(db, 'helperServices', offeringId || `${uid}_${serviceId}`));
+  const { collection, doc, serverTimestamp, setDoc } = firestoreModule;
+  const normalizedStatus = String(updates.status || '').trim().toLowerCase();
+  const list = Array.isArray(offerings) ? offerings.filter((item) => item?.offeringId) : [];
+  if (!list.length) return getUserProfile(uid);
+
+  const nextUpdates = {
+    ...updates,
+    ...(normalizedStatus === 'approved' ? { approved: true, verified: true, active: updates.active !== false } : {}),
+    ...(normalizedStatus === 'rejected' ? { approved: false, verified: false, active: false } : {}),
+    ...(normalizedStatus === 'approved' && !('approvalSource' in updates) ? { approvalSource: 'manual' } : {}),
+    updatedAt: serverTimestamp(),
+  };
+
+  await Promise.all(
+    list.map((item) => setDoc(doc(db, 'helperServices', item.offeringId), nextUpdates, { merge: true })),
+  );
+
+  const action = normalizedStatus === 'approved' ? 'approved'
+    : normalizedStatus === 'rejected' ? 'declined'
+      : updates.active === false ? 'paused' : '';
+  if (action) {
+    const eventRef = doc(collection(db, 'helperServiceModerationEvents'));
+    const optionSummary = list.map((item) => item.optionTitle).filter(Boolean);
+    const displayServiceName = optionSummary.length > 0
+      ? `${String(serviceName || serviceId || '').trim()} (${optionSummary.length} option${optionSummary.length === 1 ? '' : 's'})`
+      : String(serviceName || serviceId || '').trim();
+    await setDoc(eventRef, {
+      helperUid: String(uid || ''),
+      serviceId: String(serviceId || ''),
+      serviceName: displayServiceName,
+      bulkOptionIds: list.map((item) => String(item.optionId || '')).filter(Boolean),
+      action,
+      offeringId: String(list[0].offeringId),
+      status: 'pending',
+      createdAt: serverTimestamp(),
+    });
+  }
+
+  await reconcileOpenServiceRequests({
+    reason: 'admin_helper_service_bulk_status_updated',
+    touchedServiceIds: [serviceId],
+  }).catch(() => null);
+  return getUserProfile(uid);
+}
+
+export async function removeHelperServiceOffering({ uid, serviceId, serviceName = '', optionId = '', optionTitle = '', offeringId }) {
+  const clients = await getFirebaseClients();
+  if (!clients) throw new Error('Firebase is not configured for the admin app.');
+  const { db, firestoreModule } = clients;
+  const { collection, deleteDoc, doc, serverTimestamp, setDoc } = firestoreModule;
+  const targetOfferingId = offeringId || (optionId ? `${uid}_${serviceId}__${optionId}` : `${uid}_${serviceId}`);
+  await deleteDoc(doc(db, 'helperServices', targetOfferingId));
+  const displayServiceName = optionTitle
+    ? `${String(serviceName || serviceId || '').trim()} — ${String(optionTitle).trim()}`
+    : String(serviceName || serviceId || '').trim();
   const eventRef = doc(collection(db, 'helperServiceModerationEvents'));
   await setDoc(eventRef, {
-    helperUid: String(uid || ''), serviceId: String(serviceId || ''),
-    serviceName: String(serviceName || serviceId || '').trim(), action: 'removed',
-    offeringId: String(offeringId || `${uid}_${serviceId}`), status: 'pending', createdAt: serverTimestamp(),
+    helperUid: String(uid || ''),
+    serviceId: String(serviceId || ''),
+    serviceName: displayServiceName,
+    optionId: String(optionId || ''),
+    optionTitle: String(optionTitle || ''),
+    action: 'removed',
+    offeringId: String(targetOfferingId),
+    status: 'pending',
+    createdAt: serverTimestamp(),
   });
   await reconcileOpenServiceRequests({
     reason: 'admin_helper_service_removed',

@@ -72,3 +72,26 @@ test('buildWhatsAppServiceCarousel generates valid interactive carousel cards wi
   // Service without image falls back to placeholder image
   assert.match(carousel.action.cards[1].header.image.link, /^https:\/\//);
 });
+
+test('services with configured options derive price range from option prices when no explicit range exists', () => {
+  const hairstyles = {
+    label: 'Hairstyles',
+    options: [
+      { id: 'buzz_cut', title: 'Buzz Cut', price: 100 },
+      { id: 'knotless_braids', title: 'Knotless Braids', price: 350 },
+    ],
+  };
+  assert.deepEqual(getConfiguredServicePriceRange(hairstyles), {
+    currency: 'ZAR',
+    minimum: 100,
+    maximum: 350,
+  });
+  const singleOption = {
+    label: 'Basic Trim',
+    options: [{ id: 'trim', title: 'Trim', price: 120 }],
+  };
+  const guidance = formatWhatsAppPriceGuidance('Basic Trim', getConfiguredServicePriceRange(singleOption));
+  assert.match(guidance, /ZAR 120\.00/);
+  assert.doesNotMatch(guidance, /ZAR 120\.00–ZAR 120\.00/);
+});
+

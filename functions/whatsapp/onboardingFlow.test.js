@@ -143,9 +143,69 @@ test('police-clearance onboarding accepts only document or image messages and wa
   assert.match(pending.reply, /awaiting Uncedo review/);
 });
 
+test('profile photo onboarding accepts images and prompts link for non-image messages', () => {
+  const stage = { stage: 'awaiting_helper_profile_photo', role: 'helper', accountMode: 'account' };
+  const image = transitionWhatsAppOnboarding({ state: stage, inboundType: 'image' });
+  assert.equal(image.action, 'submit-helper-profile-photo');
+  const text = transitionWhatsAppOnboarding({ state: stage, inboundType: 'text', text: 'where do I upload?' });
+  assert.equal(text.action, 'await-helper-profile-photo');
+});
+
+test('payout and admin verification onboarding stages return deterministic wait actions', () => {
+  const payout = transitionWhatsAppOnboarding({
+    state: { stage: 'awaiting_helper_payout', role: 'helper', accountMode: 'account' },
+    inboundType: 'text',
+    text: '1234567890',
+  });
+  assert.equal(payout.action, 'await-helper-payout');
+
+  const adminWait = transitionWhatsAppOnboarding({
+    state: { stage: 'awaiting_helper_admin_verification', role: 'helper', accountMode: 'account' },
+    inboundType: 'text',
+    text: 'Hi',
+  });
+  assert.equal(adminWait.action, 'await-helper-admin-verification');
+});
+
 test('invalid onboarding input is re-prompted and control characters are removed', () => {
   const invalidName = transitionWhatsAppOnboarding({ state: { stage: 'awaiting_preferred_name' }, text: '\u0000   ' });
   assert.equal(invalidName.action, 'reask-preferred-name');
   const invalidAddress = transitionWhatsAppOnboarding({ state: { stage: 'awaiting_home_address' }, text: '123' });
   assert.equal(invalidAddress.action, 'reask-home-address');
 });
+
+test('helper service onboarding supports option selection before proceeding to photo upload', () => {
+  const pickedService = transitionWhatsAppOnboarding({
+    state: { stage: 'awaiting_helper_services', role: 'helper', onboardingPath: 'helper' },
+    buttonId: 'wa_helper_service_hairstyles',
+  });
+  assert.equal(pickedService.action, 'select-helper-service');
+  assert.equal(pickedService.serviceId, 'hairstyles');
+  assert.deepEqual(pickedService.state.selectedServiceIds, ['hairstyles']);
+
+  const pickedOpt = transitionWhatsAppOnboarding({
+    state: { ...pickedService.state, stage: 'awaiting_helper_service_options', pendingOptionServiceId: 'hairstyles' },
+    buttonId: 'wa_helper_opt_sel_knotless_braids',
+  });
+  assert.equal(pickedOpt.action, 'select-helper-service-option');
+  assert.equal(pickedOpt.optionId, 'knotless_braids');
+  assert.equal(pickedOpt.state.selectedServiceOptions.length, 1);
+  assert.equal(pickedOpt.state.selectedServiceOptions[0].optionId, 'knotless_braids');
+
+  const doneOpts = transitionWhatsAppOnboarding({
+    state: pickedOpt.state,
+    buttonId: WHATSAPP_ONBOARDING_BUTTONS.DONE_HELPER_SERVICE_OPTIONS,
+  });
+  assert.equal(doneOpts.action, 'ask-helper-service-more');
+  assert.equal(doneOpts.state.stage, 'awaiting_helper_service_more');
+
+  const submit = transitionWhatsAppOnboarding({
+    state: doneOpts.state,
+    buttonId: WHATSAPP_ONBOARDING_BUTTONS.DONE_HELPER_SERVICES,
+  });
+  assert.equal(submit.action, 'submit-helper-services');
+  assert.deepEqual(submit.requestedServiceIds, ['hairstyles']);
+  assert.equal(submit.requestedServiceOptions.length, 1);
+  assert.equal(submit.requestedServiceOptions[0].optionId, 'knotless_braids');
+});
+

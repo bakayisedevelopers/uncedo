@@ -24,26 +24,31 @@ export function ServiceOfferingCatalogScreen({ navigate, goBack }) {
 
   const catalogServiceOfferings = useMemo(
     () => catalogGroups.flatMap((service) => (
-        service.services.map((entry) => ({
-          id: entry.id,
-          serviceId: entry.id,
-          categoryId: service.id,
-          serviceName: entry.label,
-          serviceDescription: entry.description || service.description,
-          active: entry.active !== false,
-          type: entry.type || 'service',
-        }))
+      service.services.map((entry) => ({
+        id: entry.id,
+        serviceId: entry.id,
+        categoryId: service.id,
+        serviceName: entry.label,
+        serviceDescription: entry.description || service.description,
+        active: entry.active !== false,
+        type: entry.type || 'service',
+        optionsCount: Array.isArray(entry.options) ? entry.options.length : 0,
+        optionApplicationMode: entry.optionApplicationMode || 'per_option',
+      }))
     )),
     [catalogGroups],
   );
 
-  const existingServiceOfferingMap = useMemo(() => new Map(
-    helperServiceOfferings.flatMap((offering) => ([
-      [String(offering.serviceId || '').trim().toLowerCase(), offering],
-      [slugify(offering.serviceName), offering],
-      [slugify(`${offering.serviceId || ''}_${offering.serviceName || ''}`), offering],
-    ])).filter(([key]) => Boolean(key)),
-  ), [helperServiceOfferings]);
+  const offeringsByServiceId = useMemo(() => {
+    const grouped = new Map();
+    helperServiceOfferings.forEach((offering) => {
+      const key = String(offering.serviceId || '').trim().toLowerCase();
+      if (!key) return;
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key).push(offering);
+    });
+    return grouped;
+  }, [helperServiceOfferings]);
 
   return (
     <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false}>
@@ -56,19 +61,26 @@ export function ServiceOfferingCatalogScreen({ navigate, goBack }) {
         <Text style={styles.eyebrow}>Helper</Text>
         <Text style={styles.title}>Add service</Text>
         <Text style={styles.description}>
-          Choose from the live catalog that the admin team has published. Each service opens the next page where you upload the work pictures and submit it for approval.
+          Choose from the live catalog that the admin team has published. Select the specific options you offer and upload your work pictures for approval.
         </Text>
       </View>
 
       <Card>
         <SectionHeading
           title="Available services"
-          subtitle="Only services that the admin has published appear here. If you already added a service, you can still open it and update its pictures."
+          subtitle="Services with configurable options let you apply and upload work proof per option."
         />
       </Card>
 
       {catalogServiceOfferings.length ? catalogServiceOfferings.map((item) => {
-        const existing = existingServiceOfferingMap.get(item.serviceId);
+        const existingList = offeringsByServiceId.get(String(item.serviceId || '').toLowerCase()) || [];
+        const approvedCount = existingList.filter((entry) => entry.status === 'approved').length;
+        const badgeLabel = existingList.length
+          ? (item.optionsCount > 0 && item.optionApplicationMode !== 'unified'
+            ? `${approvedCount}/${item.optionsCount} approved`
+            : (approvedCount > 0 ? 'Approved' : 'Pending'))
+          : 'Add';
+        const badgeTone = approvedCount > 0 ? 'success' : existingList.length ? 'warning' : 'info';
         return (
           <Pressable
             accessibilityRole="button"
@@ -80,7 +92,7 @@ export function ServiceOfferingCatalogScreen({ navigate, goBack }) {
                 serviceId: item.serviceId,
                 categoryId: item.categoryId,
                 serviceName: item.serviceName,
-                mode: existing ? 'edit' : 'create',
+                mode: existingList.length ? 'edit' : 'create',
               },
             })}
             style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
@@ -90,13 +102,13 @@ export function ServiceOfferingCatalogScreen({ navigate, goBack }) {
             </View>
             <View style={styles.rowBody}>
               <Text style={styles.rowTitle}>{item.serviceName}</Text>
-              <Text style={styles.rowDescription}>{item.serviceName}{item.type === 'bundle' ? ' • bundle' : ''}</Text>
+              <Text style={styles.rowDescription}>
+                {item.optionsCount > 0
+                  ? `${item.optionsCount} option${item.optionsCount === 1 ? '' : 's'}${item.optionApplicationMode === 'unified' ? ' · unified approval' : ' · choose options'}`
+                  : (item.type === 'bundle' ? 'Bundle service' : item.serviceDescription || item.serviceName)}
+              </Text>
             </View>
-            {existing ? (
-              <StatusBadge label={existing.status === 'approved' ? 'Approved' : 'Pending'} tone={existing.status === 'approved' ? 'success' : 'warning'} />
-            ) : (
-              <StatusBadge label="Add" tone="info" />
-            )}
+            <StatusBadge label={badgeLabel} tone={badgeTone} />
           </Pressable>
         );
       }) : (

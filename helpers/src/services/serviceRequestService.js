@@ -130,23 +130,31 @@ async function seedAcceptedLiveTracking({ requestId, request, helperId, helperSn
   }
 }
 
-export function getRequestedServiceLabels(categoryId = '', serviceIds = []) {
+export function getRequestedServiceLabels(categoryId = '', serviceIds = [], selectedOptionTitle = '') {
   const categoryLabels = REQUEST_CATEGORY_SERVICE_LABELS[categoryId] || [];
   if (!Array.isArray(serviceIds) || !serviceIds.length) {
     return categoryLabels.slice(0, 3);
   }
 
-  return serviceIds
+  const cleanOptionTitle = String(selectedOptionTitle || '').trim();
+  const baseLabels = serviceIds
     .map((item) => String(item || '').trim())
     .filter(Boolean)
     .map((item) => item.replace(/_/g, ' '))
     .map((item) => item.replace(/\b\w/g, (char) => char.toUpperCase()));
+
+  if (cleanOptionTitle && baseLabels.length === 1) {
+    return [`${baseLabels[0]} — ${cleanOptionTitle}`];
+  }
+  return baseLabels;
 }
 
 export function mapServiceRequestToOffer(request) {
   if (!request?.id) return null;
   const timingPreference = String(request?.requestPayload?.timingPreference || 'now').trim().toLowerCase();
   const scheduledForText = String(request?.requestPayload?.scheduledForText || '').trim();
+  const selectedOptionId = String(request?.selectedOptionId || request?.requestPayload?.selectedOptionId || '').trim();
+  const selectedOptionTitle = String(request?.selectedOptionTitle || request?.requestPayload?.selectedOptionTitle || '').trim();
 
   return {
     id: request.id,
@@ -159,7 +167,9 @@ export function mapServiceRequestToOffer(request) {
     serviceId: request.categoryId || 'cleaning',
     categoryId: request.categoryId || '',
     serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
-    requestedServiceOfferings: getRequestedServiceLabels(request.categoryId, request.serviceIds),
+    selectedOptionId,
+    selectedOptionTitle,
+    requestedServiceOfferings: getRequestedServiceLabels(request.categoryId, request.serviceIds, selectedOptionTitle),
     payoutEstimate: mapPricingTotal(request.pricingSnapshot),
     offerExpiresAt: Number(request.offerExpiresAt || 0),
     offerToken: String(request.offerToken || ''),
@@ -178,6 +188,8 @@ export function mapServiceRequestToOffer(request) {
 
 export function mapServiceRequestToActiveJob(request) {
   if (!request?.id) return null;
+  const selectedOptionId = String(request?.selectedOptionId || request?.requestPayload?.selectedOptionId || '').trim();
+  const selectedOptionTitle = String(request?.selectedOptionTitle || request?.requestPayload?.selectedOptionTitle || '').trim();
 
   return {
     id: request.id,
@@ -195,7 +207,9 @@ export function mapServiceRequestToActiveJob(request) {
     ).trim(),
     serviceId: request.categoryId || 'cleaning',
     categoryId: request.categoryId || '',
-    requestedServiceOfferings: getRequestedServiceLabels(request.categoryId, request.serviceIds),
+    selectedOptionId,
+    selectedOptionTitle,
+    requestedServiceOfferings: getRequestedServiceLabels(request.categoryId, request.serviceIds, selectedOptionTitle),
     status: request.status || 'accepted',
     statusDetail: request.statusDetail || '',
     pricingSnapshot: request.pricingSnapshot || null,
@@ -209,6 +223,8 @@ export function mapServiceRequestToActiveJob(request) {
 
 export function mapServiceRequestToHistoryItem(request) {
   if (!request?.id) return null;
+  const selectedOptionId = String(request?.selectedOptionId || request?.requestPayload?.selectedOptionId || '').trim();
+  const selectedOptionTitle = String(request?.selectedOptionTitle || request?.requestPayload?.selectedOptionTitle || '').trim();
 
   return {
     id: request.id,
@@ -220,7 +236,9 @@ export function mapServiceRequestToHistoryItem(request) {
     serviceId: request.categoryId || 'cleaning',
     categoryId: request.categoryId || '',
     serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
-    requestedServiceOfferings: getRequestedServiceLabels(request.categoryId, request.serviceIds),
+    selectedOptionId,
+    selectedOptionTitle,
+    requestedServiceOfferings: getRequestedServiceLabels(request.categoryId, request.serviceIds, selectedOptionTitle),
     status: request.status || 'matching',
     statusDetail: request.statusDetail || '',
     totalAmount: mapPricingTotal(request.pricingSnapshot),

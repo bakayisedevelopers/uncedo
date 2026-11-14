@@ -187,3 +187,37 @@ test('getServiceDetails tool executes for guests and linked accounts', async () 
   assert.equal(result.serviceName, 'Barber Grooming');
   assert.equal(result.whatIsOffered, 'Haircut style: Fade, Buzz; Beard grooming');
 });
+
+test('service discovery, detail, and booking tools allow optional empty string arguments and error codes', async () => {
+  const guestContext = {
+    role: 'guest',
+    identity: { guestPrincipalId: 'guest-1' },
+    authorization: { role: 'guest', verified: false, linked: false },
+  };
+  const registry = createWhatsAppToolRegistry({
+    handlers: {
+      sendServicesToUser: async (args) => {
+        assert.deepEqual(args, {});
+        return { code: 'sent', sentCount: 4 };
+      },
+      getServiceDetails: async (args) => {
+        assert.deepEqual(args, { serviceId: 'barber' });
+        return { code: 'not-found', query: 'barber', availableServices: ['Haircuts', 'Cleaning'] };
+      },
+      initiateServiceBooking: async (args) => {
+        assert.deepEqual(args, {});
+        return { code: 'missing-query', error: 'Please specify the service you wish to book.' };
+      },
+    },
+  });
+
+  const sent = await registry.execute('sendServicesToUser', { category: '' }, guestContext);
+  assert.deepEqual(sent, { code: 'sent', sentCount: 4 });
+
+  const details = await registry.execute('getServiceDetails', { serviceId: 'barber', query: '', serviceOption: '' }, guestContext);
+  assert.equal(details.code, 'not-found');
+
+  const booking = await registry.execute('initiateServiceBooking', { serviceId: '', query: null }, guestContext);
+  assert.equal(booking.code, 'missing-query');
+});
+

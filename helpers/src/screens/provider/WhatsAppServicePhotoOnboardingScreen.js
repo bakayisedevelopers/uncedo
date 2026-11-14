@@ -10,32 +10,42 @@ import { colors } from '../../theme/colors';
 export function WhatsAppServicePhotoOnboardingScreen() {
   const { user } = useAuth();
   const { helperServiceOfferings, actions } = useHelpersApp();
-  const [assetsByService, setAssetsByService] = useState({});
-  const [busyServiceId, setBusyServiceId] = useState('');
+  const [assetsByOffering, setAssetsByOffering] = useState({});
+  const [busyOfferingKey, setBusyOfferingKey] = useState('');
   const [message, setMessage] = useState('');
   const [finishing, setFinishing] = useState(false);
   const selected = useMemo(() => (Array.isArray(helperServiceOfferings) ? helperServiceOfferings : [])
     .filter((offering) => offering.status === 'pending'), [helperServiceOfferings]);
 
+  const keyFor = (offering) => String(offering?.offeringId || offering?.id || offering?.serviceId || '');
+
   const choose = async (offering) => {
+    const key = keyFor(offering);
     const assets = await pickServiceOfferingImagesFromLibrary({ maxSelection: Math.max(1, 10 - offering.photos.length) }).catch((error) => {
       setMessage(error.message || 'Could not open your photos.');
       return null;
     });
-    if (assets?.length) setAssetsByService((current) => ({ ...current, [offering.serviceId]: [...(current[offering.serviceId] || []), ...assets].slice(0, 10) }));
+    if (assets?.length) setAssetsByOffering((current) => ({ ...current, [key]: [...(current[key] || []), ...assets].slice(0, 10) }));
   };
 
   const upload = async (offering) => {
-    const assets = assetsByService[offering.serviceId] || [];
+    const key = keyFor(offering);
+    const assets = assetsByOffering[key] || [];
     if (!assets.length) return;
-    setBusyServiceId(offering.serviceId);
+    setBusyOfferingKey(key);
     setMessage('');
     const result = await actions.addServiceOfferingWithPhoto({
-      serviceId: offering.serviceId, serviceName: offering.serviceName, categoryId: offering.categoryId, imageAssets: assets,
+      serviceId: offering.serviceId,
+      serviceName: offering.serviceName,
+      categoryId: offering.categoryId,
+      optionId: offering.optionId || '',
+      optionTitle: offering.optionTitle || '',
+      offeringId: offering.offeringId || '',
+      imageAssets: assets,
     });
     setMessage(result?.message || '');
-    if (result?.success) setAssetsByService((current) => ({ ...current, [offering.serviceId]: [] }));
-    setBusyServiceId('');
+    if (result?.success) setAssetsByOffering((current) => ({ ...current, [key]: [] }));
+    setBusyOfferingKey('');
   };
 
   const finish = async () => {
@@ -47,7 +57,7 @@ export function WhatsAppServicePhotoOnboardingScreen() {
       await call({});
       setMessage('All service photos are complete. Check WhatsApp for your agreement link.');
     } catch (error) {
-      setMessage(error?.message || 'Upload at least one photo for each selected service before continuing.');
+      setMessage(error?.message || 'Upload at least one photo for each selected option/service before continuing.');
     } finally {
       setFinishing(false);
     }
@@ -58,16 +68,20 @@ export function WhatsAppServicePhotoOnboardingScreen() {
   return <ScrollView contentContainerStyle={styles.wrap}>
     <Text style={styles.eyebrow}>WhatsApp helper setup</Text>
     <Text style={styles.title}>Add service work photos</Text>
-    <Text style={styles.copy}>Choose photos from your device for every service you selected. Your progress is saved as each service is uploaded.</Text>
+    <Text style={styles.copy}>Choose photos from your device for every service option you selected. Your progress is saved as each item is uploaded.</Text>
     {selected.map((offering) => {
-      const assets = assetsByService[offering.serviceId] || [];
+      const key = keyFor(offering);
+      const assets = assetsByOffering[key] || [];
       const photoCount = (offering.photos || []).length;
-      return <Card key={offering.serviceId}>
-        <SectionHeading title={offering.serviceName} subtitle={`${photoCount ? `${photoCount} uploaded` : 'At least one photo required'}${assets.length ? ` · ${assets.length} selected` : ''}`} />
+      const title = offering.optionTitle
+        ? `${offering.serviceName} — ${offering.optionTitle}`
+        : offering.serviceName;
+      return <Card key={key}>
+        <SectionHeading title={title} subtitle={`${photoCount ? `${photoCount} uploaded` : 'At least one photo required'}${assets.length ? ` · ${assets.length} selected` : ''}`} />
         {!!assets.length && <View style={styles.grid}>{assets.map((asset, index) => <Image key={`${asset.uri}-${index}`} source={{ uri: asset.uri }} style={styles.photo} />)}</View>}
         <View style={styles.actions}>
-          <ActionButton label="Choose photos" tone="secondary" onPress={() => choose(offering)} disabled={busyServiceId === offering.serviceId} />
-          <ActionButton label={busyServiceId === offering.serviceId ? 'Uploading…' : 'Upload photos'} onPress={() => upload(offering)} disabled={!assets.length || busyServiceId === offering.serviceId} />
+          <ActionButton label="Choose photos" tone="secondary" onPress={() => choose(offering)} disabled={busyOfferingKey === key} />
+          <ActionButton label={busyOfferingKey === key ? 'Uploading…' : 'Upload photos'} onPress={() => upload(offering)} disabled={!assets.length || busyOfferingKey === key} />
         </View>
       </Card>;
     })}

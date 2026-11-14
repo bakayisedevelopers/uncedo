@@ -34,9 +34,47 @@ function normalizePicture(picture) {
   };
 }
 
+function resolveStartingPrice(service) {
+  const options = Array.isArray(service?.options) ? service.options : [];
+  if (options.length) {
+    const prices = options
+      .map((option) => Number(option?.price ?? 0))
+      .filter((value) => Number.isFinite(value) && value >= 0);
+    if (prices.length) {
+      const positive = prices.filter((value) => value > 0);
+      return positive.length ? Math.min(...positive) : 0;
+    }
+  }
+  return Number(service?.pricing?.basePrice || service?.pricing?.minimumCallout || 0) || 0;
+}
+
 function buildCardPriceLabel(service) {
-  const price = Number(service?.pricing?.basePrice || service?.pricing?.minimumCallout || 0) || 0;
+  const price = resolveStartingPrice(service);
+  const options = Array.isArray(service?.options) ? service.options : [];
+  if (options.length > 1) {
+    return `From R${price.toFixed(0)}`;
+  }
   return service?.pricing?.pricingMode === 'fixed' ? `R${price.toFixed(0)}` : `From R${price.toFixed(0)}`;
+}
+
+function helperSupportsOption(helper, serviceToken, optionToken) {
+  if (!helper || !serviceToken || !optionToken) return false;
+  const approvedKeys = Array.isArray(helper.approvedOptionKeys) ? helper.approvedOptionKeys : [];
+  return approvedKeys.includes(`${serviceToken}::${optionToken}`)
+    || approvedKeys.includes(`${serviceToken}::__unified__`);
+}
+
+function helperSupportsService(helper, serviceToken, serviceOptions = []) {
+  if (!helper || !serviceToken) return false;
+  const approvedKeys = Array.isArray(helper.approvedOptionKeys) ? helper.approvedOptionKeys : [];
+  if (Array.isArray(serviceOptions) && serviceOptions.length > 0) {
+    return serviceOptions.some((option) => helperSupportsOption(helper, serviceToken, normalizeToken(option?.id || '')));
+  }
+  if (approvedKeys.length > 0) {
+    return approvedKeys.includes(`${serviceToken}::__legacy__`)
+      || approvedKeys.some((key) => key.startsWith(`${serviceToken}::`));
+  }
+  return helper.expandedServiceIds.includes(serviceToken);
 }
 
 function buildDiscoveryDescription(service, categoryLabel) {
@@ -61,6 +99,9 @@ function buildDiscoveryItems({ helpers = [], serviceCatalog = [], preferredCateg
       onlineStatus: helper.online === true ? 'online' : normalizeRole(helper.onlineStatus || 'offline'),
       categoryIds: Array.isArray(helper.categoryIds) ? helper.categoryIds.map(normalizeToken) : [],
       expandedServiceIds: Array.isArray(helper.expandedServiceIds) ? helper.expandedServiceIds.map(normalizeToken) : [],
+      approvedOptionKeys: Array.isArray(helper.approvedOptionKeys)
+        ? helper.approvedOptionKeys.map((key) => String(key || '').trim().toLowerCase()).filter(Boolean)
+        : [],
     }))
     .filter((helper) => helper.id);
 
@@ -80,13 +121,25 @@ function buildDiscoveryItems({ helpers = [], serviceCatalog = [], preferredCateg
     const categoryLabel = category?.label || entry.categoryName || categoryId;
     const serviceToken = normalizeToken(customerService.id || entry.id);
     const categoryToken = normalizeToken(categoryId);
+    const serviceOptions = Array.isArray(customerService.options) ? customerService.options : [];
     const matchingHelpers = helperItems.filter((helper) => (
       helper.onlineStatus === 'online'
       && helper.categoryIds.includes(categoryToken)
-      && helper.expandedServiceIds.includes(serviceToken)
+      && helperSupportsService(helper, serviceToken, serviceOptions)
     ));
     const imageUris = resolveDiscoveryImageUris(entry);
     if (!matchingHelpers.length || !imageUris.length) return;
+
+    const enrichedOptions = serviceOptions.map((option) => {
+      const optToken = normalizeToken(option?.id || '');
+      const optionHelperCount = matchingHelpers.filter((helper) => (
+        helperSupportsOption(helper, serviceToken, optToken)
+      )).length;
+      return {
+        ...option,
+        onlineHelperCount: optionHelperCount,
+      };
+    });
 
     const onlineHelperCount = matchingHelpers.length;
     const resolvedServiceId = customerService.id || entry.id;
@@ -104,8 +157,10 @@ function buildDiscoveryItems({ helpers = [], serviceCatalog = [], preferredCateg
       title: customerService.label || entry.label,
       description: buildDiscoveryDescription(customerService, categoryLabel),
       priceLabel: buildCardPriceLabel(customerService),
-      priceValue: Number(customerService?.pricing?.basePrice || customerService?.pricing?.minimumCallout || 0) || 0,
+      priceValue: resolveStartingPrice(customerService),
       pricing: customerService.pricing || {},
+      optionApplicationMode: customerService.optionApplicationMode || 'per_option',
+      options: enrichedOptions,
       serviceIds: [resolvedServiceId],
       includedLabels: Array.isArray(customerService.includedServiceIds) && customerService.includedServiceIds.length
         ? customerService.includedServiceIds.map((serviceId) => getCustomerServiceById(serviceId)?.label || serviceId).filter(Boolean)

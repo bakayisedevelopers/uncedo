@@ -19,6 +19,7 @@ async function extractQuestionnaireAnswers({
   model,
   message,
   service,
+  selectedOption = null,
   questions = [],
   existingAnswers = {},
   fallbackAnswers = {},
@@ -36,6 +37,8 @@ async function extractQuestionnaireAnswers({
         mode: 'booking_intake',
         intent: 'service_booking',
         selectedServiceId: String(service?.id || ''),
+        ...(selectedOption?.id ? { selectedOptionId: String(selectedOption.id) } : {}),
+        ...(selectedOption?.title ? { selectedOptionTitle: String(selectedOption.title) } : {}),
         answers: existingAnswers,
         missingQuestionIds: (Array.isArray(questions) ? questions : [])
           .filter((question) => question?.required === true && !String(existingAnswers?.[question.id] ?? '').trim())

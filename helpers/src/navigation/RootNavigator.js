@@ -33,6 +33,8 @@ import { ServicesOfferedScreen } from '../screens/provider/ServicesOfferedScreen
 import { ServiceOfferingCatalogScreen } from '../screens/provider/SkillCatalogScreen';
 import { ServiceOfferingDetailsScreen } from '../screens/provider/SkillDetailsScreen';
 import { VerificationScreen } from '../screens/provider/VerificationScreen';
+import { WhatsAppPayoutOnboardingScreen } from '../screens/provider/WhatsAppPayoutOnboardingScreen';
+import { WhatsAppProfilePhotoOnboardingScreen } from '../screens/provider/WhatsAppProfilePhotoOnboardingScreen';
 import { WhatsAppServicePhotoOnboardingScreen } from '../screens/provider/WhatsAppServicePhotoOnboardingScreen';
 import { HelperHowToEarnScreen } from '../screens/provider/HelperHowToEarnScreen';
 import { HelperMembershipScreen } from '../screens/provider/HelperMembershipScreen';
@@ -66,6 +68,8 @@ const rootScreens = {
 };
 
 const secondaryScreens = {
+  WhatsAppProfilePhoto: WhatsAppProfilePhotoOnboardingScreen,
+  WhatsAppPayout: WhatsAppPayoutOnboardingScreen,
   WhatsAppServicePhotos: WhatsAppServicePhotoOnboardingScreen,
   ProviderDetails: ProviderDetailsScreen,
   ProviderSecurity: ProviderSecurityScreen,
@@ -117,12 +121,28 @@ function getWhatsAppAgreementRoute() {
 }
 
 function getInitialRoute() {
-  return getWhatsAppAgreementRoute() || getWhatsAppServicePhotosRoute() || DEFAULT_ROUTE;
+  return (
+    getWhatsAppAgreementRoute()
+    || getWhatsAppServicePhotosRoute()
+    || getWhatsAppProfilePhotoRoute()
+    || getWhatsAppPayoutRoute()
+    || DEFAULT_ROUTE
+  );
 }
 
 function getWhatsAppServicePhotosRoute() {
   if (Platform.OS !== 'web' || typeof window === 'undefined' || window.location.pathname !== '/service-photos') return null;
   return { key: 'WhatsAppServicePhotos', params: { whatsappOnboardingFlow: true } };
+}
+
+function getWhatsAppProfilePhotoRoute() {
+  if (Platform.OS !== 'web' || typeof window === 'undefined' || window.location.pathname !== '/profile-photo') return null;
+  return { key: 'WhatsAppProfilePhoto', params: { whatsappOnboardingFlow: true } };
+}
+
+function getWhatsAppPayoutRoute() {
+  if (Platform.OS !== 'web' || typeof window === 'undefined' || window.location.pathname !== '/payout-details') return null;
+  return { key: 'WhatsAppPayout', params: { whatsappOnboardingFlow: true } };
 }
 
 function normalizeRoute(target) {
@@ -302,7 +322,13 @@ export function RootNavigator() {
       return;
     }
 
-    const unauthenticatedRoute = getWhatsAppAgreementRoute() || getWhatsAppServicePhotosRoute() || DEFAULT_ROUTE;
+    const unauthenticatedRoute = (
+      getWhatsAppAgreementRoute()
+      || getWhatsAppServicePhotosRoute()
+      || getWhatsAppProfilePhotoRoute()
+      || getWhatsAppPayoutRoute()
+      || DEFAULT_ROUTE
+    );
     routeHistoryRef.current = [];
     activeRouteRef.current = unauthenticatedRoute;
     setRouteHistory([]);

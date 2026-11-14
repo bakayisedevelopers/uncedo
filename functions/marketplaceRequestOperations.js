@@ -5,6 +5,7 @@ const {
   getQuestionnaireForSelection,
   normalizeAndValidateAnswers,
   quoteFromCatalogEntries,
+  validateAndResolveOptionSelection,
 } = require('./serviceRequestPricing');
 
 const ACTIVE_REQUEST_STATUSES = [
@@ -32,6 +33,8 @@ function getRequestSelection(request = {}) {
     serviceIds: [...new Set((Array.isArray(request.serviceIds) ? request.serviceIds : payload.serviceIds || [])
       .map((value) => String(value || '').trim().toLowerCase()).filter(Boolean))],
     selectedPackageId: String(request.selectedPackageId || payload.selectedPackageId || '').trim().toLowerCase(),
+    selectedOptionId: String(request.selectedOptionId || payload.selectedOptionId || '').trim().toLowerCase(),
+    selectedOptionTitle: String(request.selectedOptionTitle || payload.selectedOptionTitle || '').trim(),
     answers: request.structuredAnswers || payload.structuredAnswers || {},
   };
 }
@@ -59,6 +62,7 @@ function createMarketplaceRequestOperations({ db, admin }) {
     categoryId: rawCategoryId,
     serviceIds: rawServiceIds,
     selectedPackageId: rawSelectedPackageId = '',
+    selectedOptionId: rawSelectedOptionId = '',
     structuredAnswers: rawAnswers = {},
     location: rawLocation = null,
     serviceAddress: rawServiceAddress = '',
@@ -75,6 +79,7 @@ function createMarketplaceRequestOperations({ db, admin }) {
     const categoryId = String(rawCategoryId || '').trim().toLowerCase();
     const serviceIds = normalizeServiceIds(rawServiceIds);
     const selectedPackageId = String(rawSelectedPackageId || '').trim().toLowerCase();
+    const selectedOptionId = String(rawSelectedOptionId || '').trim().toLowerCase();
     const structuredAnswers = rawAnswers && typeof rawAnswers === 'object' && !Array.isArray(rawAnswers) ? rawAnswers : {};
     if (!/^[A-Za-z0-9_-]{8,180}$/.test(normalizedRequestId) || !ownerId || !categoryId || !serviceIds.length || serviceIds.length > 30) {
       return { code: 'invalid-service-selection' };
@@ -109,11 +114,22 @@ function createMarketplaceRequestOperations({ db, admin }) {
       if (packageEntry?.includedServiceIds?.length
         && serviceIds.some((id) => !packageEntry.includedServiceIds.includes(id))) return { code: 'invalid-package-selection' };
 
+      let resolvedOptionSelection = { selectedOption: null, selectedOptionId: '' };
+      try {
+        resolvedOptionSelection = validateAndResolveOptionSelection(entries, selectedOptionId);
+      } catch (error) {
+        return { code: error.code || 'invalid-service-option', message: error.message };
+      }
+
       let answers;
       try {
         answers = normalizeAndValidateAnswers({
           answers: structuredAnswers,
-          questions: getQuestionnaireForSelection({ services: entries, selectedPackageId }),
+          questions: getQuestionnaireForSelection({
+            services: entries,
+            selectedPackageId,
+            selectedOptionId: resolvedOptionSelection.selectedOptionId,
+          }),
           strictUnknown: true,
         }).answers;
       } catch (error) {
@@ -138,10 +154,14 @@ function createMarketplaceRequestOperations({ db, admin }) {
       const parsedSchedule = Date.parse(scheduledForText);
       const scheduledForAtMs = Number.isFinite(parsedSchedule) ? parsedSchedule : null;
       const labels = requested.map((item) => item.label);
-      const summary = packageEntry?.label || labels.join(', ') || 'Service request';
+      const optionId = resolvedOptionSelection.selectedOption?.id || '';
+      const optionTitle = resolvedOptionSelection.selectedOption?.title || '';
+      const baseSummary = packageEntry?.label || labels.join(', ') || 'Service request';
+      const summary = optionTitle ? `${baseSummary} — ${optionTitle}` : baseSummary;
       const timestamp = admin.firestore.FieldValue.serverTimestamp();
       const payload = {
-        categoryId, serviceIds, selectedPackageId, summary, structuredAnswers: answers,
+        categoryId, serviceIds, selectedPackageId, selectedOptionId: optionId, selectedOptionTitle: optionTitle,
+        summary, structuredAnswers: answers,
         selectedPortfolioReferences: [], attachments: [], pricingSnapshot: null, aiUsageSnapshot: null,
         timingPreference, scheduledForText, scheduledForAtMs, location, serviceAddress,
       };
@@ -162,8 +182,10 @@ function createMarketplaceRequestOperations({ db, admin }) {
         categoryId,
         serviceIds,
         selectedPackageId,
+        selectedOptionId: optionId,
+        selectedOptionTitle: optionTitle,
         subject: packageEntry?.label || requested[0]?.categoryName || 'Service request',
-        topic: labels.join(', '),
+        topic: optionTitle ? `${labels.join(', ')} (${optionTitle})` : labels.join(', '),
         description: summary,
         serviceSummary: summary,
         pricingSnapshot: null,
@@ -188,9 +210,10 @@ function createMarketplaceRequestOperations({ db, admin }) {
         serviceId: serviceIds[0] || selectedPackageId || categoryId,
         categoryId,
         serviceIds,
+        selectedOptionId: optionId || null,
         requestId: normalizedRequestId,
         source,
-        metadata: { subject: packageEntry?.label || requested[0]?.categoryName || 'Service request' },
+        metadata: { subject: packageEntry?.label || requested[0]?.categoryName || 'Service request', selectedOptionTitle: optionTitle || null },
         createdAt: timestamp,
         createdAtMs: now,
         dayBucket: new Date(now).toISOString().slice(0, 10),
@@ -208,6 +231,7 @@ function createMarketplaceRequestOperations({ db, admin }) {
     categoryId: rawCategoryId,
     serviceIds: rawServiceIds,
     selectedPackageId: rawSelectedPackageId,
+    selectedOptionId: rawSelectedOptionId,
     timingPreference: rawTimingPreference,
     scheduledForText: rawScheduledForText,
     now = Date.now(),
@@ -227,6 +251,9 @@ function createMarketplaceRequestOperations({ db, admin }) {
         selectedPackageId: rawSelectedPackageId === undefined
           ? currentSelection.selectedPackageId
           : String(rawSelectedPackageId || '').trim().toLowerCase(),
+        selectedOptionId: rawSelectedOptionId === undefined
+          ? currentSelection.selectedOptionId
+          : String(rawSelectedOptionId || '').trim().toLowerCase(),
       };
       if (!selection.categoryId || !selection.serviceIds.length || selection.serviceIds.length > 30) return { code: 'invalid-service-selection' };
       const catalogIds = [...new Set([...selection.serviceIds, ...(selection.selectedPackageId ? [selection.selectedPackageId] : [])])];
@@ -240,7 +267,19 @@ function createMarketplaceRequestOperations({ db, admin }) {
         || (selection.selectedPackageId && (!packageEntry || !packageEntry.active || !packageEntry.approved || packageEntry.categoryId !== selection.categoryId))) {
         return { code: 'service-unavailable' };
       }
-      const questions = getQuestionnaireForSelection({ services: entries, selectedPackageId: selection.selectedPackageId });
+
+      let resolvedOptionSelection = { selectedOption: null, selectedOptionId: '' };
+      try {
+        resolvedOptionSelection = validateAndResolveOptionSelection(entries, selection.selectedOptionId);
+      } catch (error) {
+        return { code: error.code || 'invalid-service-option', message: error.message };
+      }
+
+      const questions = getQuestionnaireForSelection({
+        services: entries,
+        selectedPackageId: selection.selectedPackageId,
+        selectedOptionId: resolvedOptionSelection.selectedOptionId,
+      });
       let answers;
       try {
         const inputAnswers = structuredAnswers === undefined ? currentSelection.answers : structuredAnswers;
@@ -250,7 +289,10 @@ function createMarketplaceRequestOperations({ db, admin }) {
       }
       const nextLocation = location === undefined ? request.location || null : normalizeLocation(location, answers).location;
       const labels = selectedServices.map((item) => item.label);
-      const summary = packageEntry?.label || labels.join(', ') || 'Service request';
+      const optionId = resolvedOptionSelection.selectedOption?.id || '';
+      const optionTitle = resolvedOptionSelection.selectedOption?.title || '';
+      const baseSummary = packageEntry?.label || labels.join(', ') || 'Service request';
+      const summary = optionTitle ? `${baseSummary} — ${optionTitle}` : baseSummary;
       const nextAddress = rawServiceAddress === undefined
         ? answers.service_address || nextLocation?.address || request.serviceAddress || request.requestPayload?.serviceAddress || ''
         : String(rawServiceAddress || '').trim();
@@ -260,6 +302,8 @@ function createMarketplaceRequestOperations({ db, admin }) {
         categoryId: selection.categoryId,
         serviceIds: selection.serviceIds,
         selectedPackageId: selection.selectedPackageId,
+        selectedOptionId: optionId,
+        selectedOptionTitle: optionTitle,
         summary,
         structuredAnswers: answers,
         location: nextLocation,
@@ -272,8 +316,10 @@ function createMarketplaceRequestOperations({ db, admin }) {
         categoryId: selection.categoryId,
         serviceIds: selection.serviceIds,
         selectedPackageId: selection.selectedPackageId,
+        selectedOptionId: optionId,
+        selectedOptionTitle: optionTitle,
         subject: packageEntry?.label || selectedServices[0]?.categoryName || 'Service request',
-        topic: labels.join(', '),
+        topic: optionTitle ? `${labels.join(', ')} (${optionTitle})` : labels.join(', '),
         description: summary,
         serviceSummary: summary,
         structuredAnswers: answers,
@@ -299,7 +345,7 @@ function createMarketplaceRequestOperations({ db, admin }) {
       const request = requestSnap.data() || {};
       if (!(await isRequestOwnerInTransaction(transaction, db, request, ownerId))) return { code: 'not-owner' };
       if (request.status !== 'collecting_details' || request.helperAssignment?.helperId) return { code: 'invalid-request-state' };
-      const { categoryId, serviceIds, selectedPackageId, answers } = getRequestSelection(request);
+      const { categoryId, serviceIds, selectedPackageId, selectedOptionId, answers } = getRequestSelection(request);
       if (!categoryId || !serviceIds.length) return { code: 'invalid-service-selection' };
       const ids = [...new Set([...serviceIds, ...(selectedPackageId ? [selectedPackageId] : [])])];
       const snapshots = [];
@@ -307,7 +353,15 @@ function createMarketplaceRequestOperations({ db, admin }) {
       const entries = snapshots.filter((item) => item.exists).map((item) => normalizeServiceCatalogEntry({ id: item.id, ...item.data() }));
       let quote;
       try {
-        quote = quoteFromCatalogEntries({ entries, categoryId, serviceIds, selectedPackageId, structuredAnswers: answers, strictUnknownAnswers: true });
+        quote = quoteFromCatalogEntries({
+          entries,
+          categoryId,
+          serviceIds,
+          selectedPackageId,
+          selectedOptionId,
+          structuredAnswers: answers,
+          strictUnknownAnswers: true,
+        });
       } catch (error) {
         return { code: error.code || 'quote-invalid', message: error.message, missingQuestionIds: error.missingQuestionIds || [] };
       }
@@ -340,7 +394,7 @@ function createMarketplaceRequestOperations({ db, admin }) {
       const suppliedExpiry = Number(quoteExpiresAtMs || 0);
       const effectiveExpiry = persistedExpiry || suppliedExpiry;
       if (effectiveExpiry > 0 && effectiveExpiry < now) return { code: 'quote-expired' };
-      const { categoryId, serviceIds, selectedPackageId, answers } = getRequestSelection(request);
+      const { categoryId, serviceIds, selectedPackageId, selectedOptionId, answers } = getRequestSelection(request);
       if (!categoryId || !serviceIds.length || serviceIds.length > 30) return { code: 'invalid-service-selection' };
       const ids = [...new Set([...serviceIds, ...(selectedPackageId ? [selectedPackageId] : [])])];
       const snapshots = [];
@@ -348,14 +402,23 @@ function createMarketplaceRequestOperations({ db, admin }) {
       const entries = snapshots.filter((item) => item.exists).map((item) => normalizeServiceCatalogEntry({ id: item.id, ...item.data() }));
       let quote;
       try {
-        quote = quoteFromCatalogEntries({ entries, categoryId, serviceIds, selectedPackageId, structuredAnswers: answers, strictUnknownAnswers: true });
+        quote = quoteFromCatalogEntries({
+          entries,
+          categoryId,
+          serviceIds,
+          selectedPackageId,
+          selectedOptionId,
+          structuredAnswers: answers,
+          strictUnknownAnswers: true,
+        });
       } catch (error) {
         return { code: error.code || 'quote-invalid', message: error.message, missingQuestionIds: error.missingQuestionIds || [] };
       }
       const approvedMatches = Number(approvedQuote?.total) === Number(quote.total)
         && String(approvedQuote?.currency || '') === String(quote.currency || '')
         && String(approvedQuote?.questionnaireVersion || '') === String(quote.questionnaireVersion || '')
-        && String(approvedQuote?.serviceCatalogVersion || '') === String(quote.serviceCatalogVersion || '');
+        && String(approvedQuote?.serviceCatalogVersion || '') === String(quote.serviceCatalogVersion || '')
+        && String(approvedQuote?.selectedOptionId || '') === String(quote.selectedOptionId || '');
       if (!approvedMatches) return { code: 'quote-changed', quote };
 
       const userSnap = await transaction.get(db.collection('users').doc(ownerId));
@@ -375,15 +438,19 @@ function createMarketplaceRequestOperations({ db, admin }) {
       const nextStatus = timingPreference === 'later' ? 'scheduled_pending' : 'matching';
       const labels = serviceIds.map((id) => entries.find((item) => item.id === id)?.label || id);
       const packageEntry = entries.find((item) => item.id === selectedPackageId);
-      const summary = packageEntry?.label || `${categoryId}: ${labels.join(', ')}`;
+      const optionId = quote.selectedOptionId || selectedOptionId || '';
+      const optionTitle = quote.selectedOptionTitle || currentOptionTitle(entries, serviceIds, optionId);
+      const baseSummary = packageEntry?.label || `${categoryId}: ${labels.join(', ')}`;
+      const summary = optionTitle ? `${baseSummary} — ${optionTitle}` : baseSummary;
       const { location, serviceAddress } = normalizeLocation(
         request.location || request.requestPayload?.location,
         answers,
         answers.service_address || request.location?.address || request.serviceAddress || request.requestPayload?.serviceAddress,
       );
       const nextPayload = {
-        ...(request.requestPayload || {}), categoryId, serviceIds, selectedPackageId, summary,
-        structuredAnswers: answers,
+        ...(request.requestPayload || {}), categoryId, serviceIds, selectedPackageId,
+        selectedOptionId: optionId, selectedOptionTitle: optionTitle,
+        summary, structuredAnswers: answers,
         selectedPortfolioReferences: request.selectedPortfolioReferences || request.requestPayload?.selectedPortfolioReferences || [],
         attachments: request.referenceAttachments || request.requestPayload?.attachments || [],
         pricingSnapshot: quote, timingPreference, scheduledForText, scheduledForAtMs, location, serviceAddress,
@@ -397,8 +464,10 @@ function createMarketplaceRequestOperations({ db, admin }) {
       const timestamp = admin.firestore.FieldValue.serverTimestamp();
       transaction.update(requestRef, {
         categoryId, serviceIds, selectedPackageId,
+        selectedOptionId: optionId, selectedOptionTitle: optionTitle,
         subject: packageEntry?.label || entries.find((item) => item.id === serviceIds[0])?.categoryName || 'Service request',
-        topic: labels.join(', '), description: summary, serviceSummary: summary,
+        topic: optionTitle ? `${labels.join(', ')} (${optionTitle})` : labels.join(', '),
+        description: summary, serviceSummary: summary,
         structuredAnswers: answers, pricingSnapshot: quote, quoteExpiresAtMs: null, status: nextStatus,
         statusDetail: timingPreference === 'later'
           ? `Scheduled for ${scheduledForText || 'later'}. Matching will begin closer to the requested time.`
@@ -413,8 +482,8 @@ function createMarketplaceRequestOperations({ db, admin }) {
       if (!submitEventSnap.exists) {
         transaction.create(submitEventRef, {
           customerId: ownerId, eventType: 'request_submitted', serviceId: serviceIds[0] || selectedPackageId || categoryId,
-          categoryId, serviceIds, requestId, source,
-          metadata: { callId: callId || null, timingPreference },
+          categoryId, serviceIds, selectedOptionId: optionId || null, requestId, source,
+          metadata: { callId: callId || null, timingPreference, selectedOptionTitle: optionTitle || null },
           createdAt: timestamp, createdAtMs: now, dayBucket: new Date(now).toISOString().slice(0, 10),
         });
       }
@@ -429,6 +498,16 @@ function createMarketplaceRequestOperations({ db, admin }) {
   }
 
   return { createDraft, updateDraft, quoteDraft, confirmDraft };
+}
+
+function currentOptionTitle(entries = [], serviceIds = [], optionId = '') {
+  if (!optionId) return '';
+  for (const id of serviceIds) {
+    const entry = entries.find((item) => item?.id === id);
+    const opt = (entry?.options || []).find((item) => String(item?.id || '').toLowerCase() === String(optionId).toLowerCase());
+    if (opt?.title) return opt.title;
+  }
+  return '';
 }
 
 module.exports = { ACTIVE_REQUEST_STATUSES, createMarketplaceRequestOperations };

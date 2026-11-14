@@ -28,8 +28,76 @@ function renderMissingWhatsAppQuestions({ serviceLabel = '', questions = [], mis
   return formatWhatsAppText([heading, intro, ...numbered].join('\n\n'));
 }
 
-function formatWhatsAppBookingConfirmation({ service = {}, questions = [], answers = {}, quote = {} } = {}) {
+function formatWhatsAppServiceOptionPrompt({ service = {}, options = [] } = {}) {
+  const serviceLabel = safeLabel(service.label || service.id || 'Selected service', 120);
+  const validOptions = (Array.isArray(options) ? options : [])
+    .filter((opt) => String(opt?.id || '').trim() && String(opt?.title || '').trim())
+    .slice(0, 10);
+  if (!validOptions.length) return null;
+
+  const listLines = validOptions.map((opt, idx) => {
+    const priceNum = Number(opt.price);
+    const priceLabel = Number.isFinite(priceNum) && priceNum >= 0 ? ` — R${priceNum.toFixed(2)}` : '';
+    return `${idx + 1}. *${safeLabel(opt.title, 80)}*${priceLabel}`;
+  });
+  const text = formatWhatsAppText(`🛠️ *${serviceLabel}*\n\nPlease choose which option you need:\n\n${listLines.join('\n')}`);
+
+  if (validOptions.length <= 3) {
+    return {
+      text,
+      interactive: {
+        type: 'button',
+        body: {
+          text: formatWhatsAppText(`🛠️ *${serviceLabel}*\n\nWhich option would you like to book?`),
+        },
+        action: {
+          buttons: validOptions.map((opt) => ({
+            type: 'reply',
+            reply: {
+              id: `wa_book_opt_${String(opt.id).trim()}`.slice(0, 250),
+              title: safeLabel(opt.title, 20),
+            },
+          })),
+        },
+      },
+    };
+  }
+
+  return {
+    text,
+    interactive: {
+      type: 'list',
+      body: {
+        text: formatWhatsAppText(`🛠️ *${serviceLabel}*\n\nTap *Choose option* below to select what you need.`),
+      },
+      action: {
+        button: 'Choose option',
+        sections: [
+          {
+            title: safeLabel(serviceLabel, 24),
+            rows: validOptions.map((opt) => {
+              const priceNum = Number(opt.price);
+              const pricePrefix = Number.isFinite(priceNum) && priceNum >= 0 ? `R${priceNum.toFixed(2)}` : '';
+              const desc = [pricePrefix, safeLabel(opt.description || '', 60)].filter(Boolean).join(' · ');
+              return {
+                id: `wa_book_opt_${String(opt.id).trim()}`.slice(0, 200),
+                title: safeLabel(opt.title, 24),
+                description: desc.slice(0, 72),
+              };
+            }),
+          },
+        ],
+      },
+    },
+  };
+}
+
+function formatWhatsAppBookingConfirmation({ service = {}, selectedOption = null, questions = [], answers = {}, quote = {} } = {}) {
   const serviceLabel = safeLabel(service.label || 'Selected service', 180);
+  const optionTitle = safeLabel(selectedOption?.title || quote?.selectedOptionTitle || '', 140);
+  const displayService = optionTitle && !serviceLabel.includes(optionTitle)
+    ? `${serviceLabel} — ${optionTitle}`
+    : serviceLabel;
   const questionList = Array.isArray(questions) ? questions : [];
   const answerMap = answers && typeof answers === 'object' && !Array.isArray(answers) ? answers : {};
   const detailLines = questionList
@@ -56,7 +124,7 @@ function formatWhatsAppBookingConfirmation({ service = {}, questions = [], answe
   const formattedAmount = currency === 'ZAR' ? `R${amount}` : `${currency} ${amount}`;
   const sections = [
     '*Please review your service request*',
-    `*Service:* ${serviceLabel}`,
+    `*Service:* ${serviceLabel}${optionTitle ? `\n*Option:* ${optionTitle}` : ''}`,
     detailLines.length ? `*Details:*\n${detailLines.join('\n')}` : '',
     `*Final quote: ${formattedAmount}*`,
     'This amount comes from the current Uncedo pricing calculation.',
@@ -65,19 +133,22 @@ function formatWhatsAppBookingConfirmation({ service = {}, questions = [], answe
 
   return {
     text: formatWhatsAppText(sections.join('\n\n')),
-    buttonBody: formatWhatsAppText(`*${serviceLabel}*\n*Final quote: ${formattedAmount}*\nConfirm to submit or edit the details.`),
+    buttonBody: formatWhatsAppText(`*${displayService}*\n*Final quote: ${formattedAmount}*\nConfirm to submit or edit the details.`),
   };
 }
 
 function formatWhatsAppNextQuestion({
   service = {},
+  selectedOption = null,
   question = {},
   index = 0,
   total = 1,
   answers = {},
   hasSavedHomeAddress = false,
 } = {}) {
-  const serviceLabel = safeLabel(service.label || 'Service', 80);
+  const baseLabel = safeLabel(service.label || 'Service', 60);
+  const optTitle = safeLabel(selectedOption?.title || '', 40);
+  const serviceLabel = optTitle ? `${baseLabel} (${optTitle})` : baseLabel;
   const prompt = safeLabel(question.prompt || question.label || question.id || 'Please choose an option.', 200);
   const stepHeader = `📋 *${serviceLabel}* (Step ${index + 1} of ${total})`;
 
@@ -217,5 +288,6 @@ function formatWhatsAppNextQuestion({
 module.exports = {
   formatWhatsAppBookingConfirmation,
   formatWhatsAppNextQuestion,
+  formatWhatsAppServiceOptionPrompt,
   renderMissingWhatsAppQuestions,
 };

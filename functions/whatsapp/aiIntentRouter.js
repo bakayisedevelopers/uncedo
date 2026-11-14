@@ -183,6 +183,13 @@ function buildPrompt({ message, recentHistory = [], conversationState = {}, conv
     categoryId: boundedString(service.categoryId, 120),
     label: boundedString(service.label, 160),
     description: boundedString(service.description, 500),
+    ...(Array.isArray(service.options) && service.options.length > 0 ? {
+      options: service.options.slice(0, 20).map((opt) => ({
+        id: boundedString(opt.id, 120),
+        title: boundedString(opt.title, 120),
+        price: Number(opt.price || 0),
+      })),
+    } : {}),
   }));
   const safeQuestions = questions.slice(0, 80).map((question) => ({
     id: boundedString(question.id, 120),
@@ -270,6 +277,8 @@ function buildPrompt({ message, recentHistory = [], conversationState = {}, conv
         mode: boundedString(conversationState.mode, 80),
         intent: boundedString(conversationState.intent, 80),
         selectedServiceId: boundedString(conversationState.selectedServiceId, 160),
+        ...(conversationState.selectedOptionId ? { selectedOptionId: boundedString(conversationState.selectedOptionId, 160) } : {}),
+        ...(conversationState.selectedOptionTitle ? { selectedOptionTitle: boundedString(conversationState.selectedOptionTitle, 160) } : {}),
         locationPinRequired: conversationState.locationPinRequired === true,
         missingQuestionIds: Array.isArray(conversationState.missingQuestionIds)
           ? conversationState.missingQuestionIds.slice(0, 40)

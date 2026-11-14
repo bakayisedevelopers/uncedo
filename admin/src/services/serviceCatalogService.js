@@ -95,6 +95,9 @@ export function normalizeServiceCatalogEntry(entry = {}, fallback = null) {
       optional: normalizedOptional,
     },
     requiresPortfolioSelection: Boolean(entry.requiresPortfolioSelection ?? fallbackItem?.requiresPortfolioSelection),
+    optionApplicationMode: entry.optionApplicationMode === 'unified'
+      ? 'unified'
+      : (fallbackItem?.optionApplicationMode === 'unified' && !entry.optionApplicationMode ? 'unified' : 'per_option'),
     inheritBundleImages: entry.inheritBundleImages !== false,
     createdAt: entry.createdAt || null,
     updatedAt: entry.updatedAt || null,

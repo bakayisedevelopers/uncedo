@@ -1,6 +1,8 @@
 export const SERVICE_REQUEST_PAYLOAD_FIELDS = [
   'categoryId',
   'serviceIds',
+  'selectedOptionId',
+  'selectedOptionTitle',
   'summary',
   'conversationTranscript',
   'structuredAnswers',
@@ -18,6 +20,8 @@ export const SERVICE_REQUEST_PAYLOAD_FIELDS = [
 export const DEFAULT_SERVICE_REQUEST_DRAFT = {
   categoryId: '',
   serviceIds: [],
+  selectedOptionId: '',
+  selectedOptionTitle: '',
   summary: '',
   conversationTranscript: [],
   structuredAnswers: {},

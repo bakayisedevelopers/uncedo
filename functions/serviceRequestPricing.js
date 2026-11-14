@@ -2,7 +2,11 @@
 
 const { createHash, randomUUID } = require('node:crypto');
 const { createCategoryPricingEngine } = require('./shared/categoryPricingEngineFactory.cjs');
-const { normalizeServiceCatalogEntry } = require('./serviceMarketplacePricing');
+const {
+  isQuestionIncludedForOption,
+  normalizeServiceCatalogEntry,
+  resolveSelectedServiceOption,
+} = require('./serviceMarketplacePricing');
 
 const PRICING_CONTROL_ANSWER_IDS = new Set(['travel_distance_km']);
 
@@ -27,13 +31,15 @@ function getServiceQuestionnaire(service) {
   };
 }
 
-function getQuestionnaireForSelection({ services = [], selectedPackageId = '' }) {
+function getQuestionnaireForSelection({ services = [], selectedPackageId = '', selectedOptionId = '' }) {
   const selected = new Map();
   const addQuestions = (service, required) => {
+    const selectedOption = resolveSelectedServiceOption(service, selectedOptionId);
     const questionnaire = getServiceQuestionnaire(service);
     const questions = required ? questionnaire.required : questionnaire.optional;
     questions.forEach((question) => {
       if (!question?.id || selected.has(question.id)) return;
+      if (!isQuestionIncludedForOption(question, service, selectedOption)) return;
       selected.set(question.id, { ...question, required });
     });
   };
@@ -55,10 +61,12 @@ function getQuestionnaireForSelection({ services = [], selectedPackageId = '' })
 
 function isQuestionApplicable(question, normalizedAnswers) {
   const rule = question?.dependencyRule;
-  if (!rule || !rule.dependsOnQuestionId) return true;
-  const parentValue = normalizedAnswers[rule.dependsOnQuestionId];
+  const depQuestionId = rule?.dependsOnQuestionId || question?.dependsOn?.questionId;
+  const depOptionValue = rule?.dependsOnOptionValue || question?.dependsOn?.optionValue;
+  if (!depQuestionId) return true;
+  const parentValue = normalizedAnswers[depQuestionId];
   if (!parentValue) return false;
-  const expected = String(rule.dependsOnOptionValue || '').trim().toLowerCase();
+  const expected = String(depOptionValue || '').trim().toLowerCase();
   const actualValues = Array.isArray(parentValue) ? parentValue.map((v) => String(v).toLowerCase()) : [String(parentValue).toLowerCase()];
   return actualValues.includes(expected);
 }
@@ -119,20 +127,48 @@ function normalizeAndValidateAnswers({ answers = {}, questions = [], strictUnkno
   return { answers: normalized, missingRequired };
 }
 
-function buildQuestionnaireHash(services = []) {
-  const source = services
-    .slice()
-    .sort((left, right) => left.id.localeCompare(right.id))
-    .map((service) => ({
-      id: service.id,
-      categoryId: service.categoryId,
-      active: service.active,
-      approved: service.approved,
-      pricing: service.pricing,
-      includedServiceIds: service.includedServiceIds,
-      questionnaire: service.questionnaire,
-    }));
+function buildQuestionnaireHash(services = [], selectedOptionId = '') {
+  const source = {
+    selectedOptionId: String(selectedOptionId || '').trim().toLowerCase() || '',
+    services: services
+      .slice()
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map((service) => ({
+        id: service.id,
+        categoryId: service.categoryId,
+        active: service.active,
+        approved: service.approved,
+        optionApplicationMode: service.optionApplicationMode || 'per_option',
+        options: Array.isArray(service.options) ? service.options : [],
+        pricing: service.pricing,
+        includedServiceIds: service.includedServiceIds,
+        questionnaire: service.questionnaire,
+      })),
+  };
   return createHash('sha256').update(JSON.stringify(source)).digest('hex');
+}
+
+function validateAndResolveOptionSelection(services = [], selectedOptionId = '') {
+  const normalizedOptionId = String(selectedOptionId || '').trim().toLowerCase();
+  const optionServices = (Array.isArray(services) ? services : [])
+    .filter((service) => Array.isArray(service?.options) && service.options.length > 0);
+  if (!optionServices.length) {
+    return { selectedOption: null, selectedOptionId: '' };
+  }
+  if (!normalizedOptionId) {
+    const error = new Error('Please choose a service option before requesting a quote.');
+    error.code = 'missing-service-option';
+    throw error;
+  }
+  for (const service of optionServices) {
+    const match = resolveSelectedServiceOption(service, normalizedOptionId);
+    if (match) {
+      return { selectedOption: match, selectedOptionId: match.id };
+    }
+  }
+  const error = new Error('The selected service option is unavailable.');
+  error.code = 'invalid-service-option';
+  throw error;
 }
 
 function quoteFromCatalogEntries({
@@ -140,6 +176,7 @@ function quoteFromCatalogEntries({
   categoryId = '',
   serviceIds = [],
   selectedPackageId = '',
+  selectedOptionId = '',
   structuredAnswers = {},
   strictUnknownAnswers = true,
   currency = 'ZAR',
@@ -173,7 +210,12 @@ function quoteFromCatalogEntries({
   const selectedQuestionnaireServices = packageId && !normalizedServiceIds.includes(packageId)
     ? [...selectedServices, catalogById.get(packageId)]
     : selectedServices;
-  const questions = getQuestionnaireForSelection({ services: selectedQuestionnaireServices, selectedPackageId: packageId });
+  const resolvedOptionSelection = validateAndResolveOptionSelection(selectedQuestionnaireServices, selectedOptionId);
+  const questions = getQuestionnaireForSelection({
+    services: selectedQuestionnaireServices,
+    selectedPackageId: packageId,
+    selectedOptionId: resolvedOptionSelection.selectedOptionId,
+  });
   const validation = normalizeAndValidateAnswers({
     answers: structuredAnswers,
     questions,
@@ -194,6 +236,7 @@ function quoteFromCatalogEntries({
   });
   const result = engine({
     serviceIds: normalizedServiceIds,
+    selectedOptionId: resolvedOptionSelection.selectedOptionId,
     structuredAnswers: validation.answers,
     currency,
   });
@@ -201,9 +244,11 @@ function quoteFromCatalogEntries({
     ...result,
     quoteId: `service_quote_${randomUUID()}`,
     selectedPackageId: packageId || null,
+    selectedOptionId: resolvedOptionSelection.selectedOption?.id || null,
+    selectedOptionTitle: resolvedOptionSelection.selectedOption?.title || null,
     structuredAnswers: validation.answers,
-    questionnaireVersion: buildQuestionnaireHash(selectedQuestionnaireServices),
-    serviceCatalogVersion: buildQuestionnaireHash(selectedServices),
+    questionnaireVersion: buildQuestionnaireHash(selectedQuestionnaireServices, resolvedOptionSelection.selectedOptionId),
+    serviceCatalogVersion: buildQuestionnaireHash(selectedServices, resolvedOptionSelection.selectedOptionId),
     quotedAt: new Date().toISOString(),
   };
 }
@@ -236,4 +281,5 @@ module.exports = {
   normalizeAndValidateAnswers,
   quoteFromCatalogEntries,
   quoteFromFirestore,
+  validateAndResolveOptionSelection,
 };

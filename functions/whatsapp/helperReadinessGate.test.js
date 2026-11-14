@@ -76,3 +76,65 @@ test('readiness rechecks do not interrupt an active profile answer step', () => 
   assert.equal(result.changed, false);
   assert.equal(result.state.stage, 'awaiting_home_address');
 });
+
+test('completed helper profile photo, service photos, and payout verification release their gates', () => {
+  const photo = resolveWhatsAppHelperReadinessState({
+    state: { stage: 'awaiting_helper_profile_photo', role: 'helper' },
+    hasProfilePhoto: true,
+    ready: false,
+    nowMs: 400,
+  });
+  assert.equal(photo.changed, true);
+  assert.equal(photo.reason, 'profile-photo-saved');
+  assert.equal(photo.state.stage, 'helper_readiness');
+
+  const photos = resolveWhatsAppHelperReadinessState({
+    state: { stage: 'awaiting_helper_service_photos', role: 'helper' },
+    servicePhotosComplete: true,
+    ready: false,
+    nowMs: 401,
+  });
+  assert.equal(photos.changed, true);
+  assert.equal(photos.reason, 'service-photos-complete');
+  assert.equal(photos.state.stage, 'helper_readiness');
+
+  const payout = resolveWhatsAppHelperReadinessState({
+    state: { stage: 'awaiting_helper_payout', role: 'helper' },
+    payoutVerified: true,
+    ready: false,
+    nowMs: 402,
+  });
+  assert.equal(payout.changed, true);
+  assert.equal(payout.reason, 'payout-verified');
+  assert.equal(payout.state.stage, 'helper_readiness');
+});
+
+test('admin verification stage stays waiting until approved or helper action is required', () => {
+  const waiting = resolveWhatsAppHelperReadinessState({
+    state: { stage: 'awaiting_helper_admin_verification', role: 'helper' },
+    adminReviewEligible: true,
+    ready: false,
+    nowMs: 500,
+  });
+  assert.equal(waiting.changed, false);
+
+  const rejectedOffering = resolveWhatsAppHelperReadinessState({
+    state: { stage: 'awaiting_helper_admin_verification', role: 'helper' },
+    adminReviewEligible: false,
+    ready: false,
+    nowMs: 501,
+  });
+  assert.equal(rejectedOffering.changed, true);
+  assert.equal(rejectedOffering.reason, 'helper-action-required');
+  assert.equal(rejectedOffering.state.stage, 'helper_readiness');
+
+  const approved = resolveWhatsAppHelperReadinessState({
+    state: { stage: 'awaiting_helper_admin_verification', role: 'helper' },
+    adminReviewEligible: true,
+    ready: true,
+    nowMs: 502,
+  });
+  assert.equal(approved.changed, true);
+  assert.equal(approved.reason, 'admin-verification-approved');
+  assert.equal(approved.state.stage, 'complete');
+});

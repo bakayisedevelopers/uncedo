@@ -4,6 +4,7 @@ import {
   getCustomerServiceById,
   getCustomerServicesForCategory,
   getLiveQuestionnaireForService,
+  getLiveServiceOption,
 } from './serviceCatalog';
 
 function q(id, prompt, config = {}) {
@@ -13,6 +14,9 @@ function q(id, prompt, config = {}) {
     answerType: config.answerType || 'text',
     options: Array.isArray(config.options) ? config.options : [],
     answerHint: config.answerHint || '',
+    type: config.type || 'option-specific',
+    dependsOn: config.dependsOn || null,
+    dependencyRule: config.dependencyRule || null,
   };
 }
 
@@ -28,15 +32,61 @@ function hasAnswerValue(value) {
   return String(value || '').trim().length > 0;
 }
 
-function getLiveServiceQuestionPlan(serviceId = '') {
-  const questionnaire = getLiveQuestionnaireForService(serviceId);
+function isQuestionDependencyMet(question = {}, structuredAnswers = null) {
+  if (!structuredAnswers || typeof structuredAnswers !== 'object') {
+    return true;
+  }
+  const depQuestionId = String(
+    question?.dependencyRule?.dependsOnQuestionId
+    || question?.dependsOn?.questionId
+    || '',
+  ).trim();
+  if (!depQuestionId) return true;
+  const expectedValue = String(
+    question?.dependencyRule?.dependsOnOptionValue
+    || question?.dependsOn?.optionValue
+    || '',
+  ).trim().toLowerCase();
+  const actual = structuredAnswers[depQuestionId];
+  if (Array.isArray(actual)) {
+    return actual.map((entry) => String(entry || '').trim().toLowerCase()).includes(expectedValue);
+  }
+  return String(actual || '').trim().toLowerCase() === expectedValue;
+}
+
+function isQuestionInOptionScope(question = {}, service = {}, selectedOption = null) {
+  const options = Array.isArray(service?.options) ? service.options : [];
+  if (!options.length) return true;
+
+  const qType = String(question?.type || 'option-specific').trim().toLowerCase();
+  if (qType === 'standard') return true;
+  if (!selectedOption) return false;
+  if (selectedOption.requiresNoOptionSpecificQuestions) return false;
+
+  const selectedIds = new Set(
+    (Array.isArray(selectedOption.selectedQuestionIds) ? selectedOption.selectedQuestionIds : [])
+      .map((item) => String(item || '').trim())
+      .filter(Boolean),
+  );
+  return selectedIds.has(String(question?.id || '').trim());
+}
+
+function getLiveServiceQuestionPlan(serviceId = '', selectedOptionId = '', structuredAnswers = null) {
+  const service = getCustomerServiceById(serviceId);
+  const questionnaire = service?.questionnaire || getLiveQuestionnaireForService(serviceId);
   if (!questionnaire) {
     return null;
   }
 
+  const selectedOption = selectedOptionId ? getLiveServiceOption(serviceId, selectedOptionId) : null;
+  const filterList = (list = []) => (Array.isArray(list) ? list : [])
+    .filter((question) => isQuestionInOptionScope(question, service, selectedOption))
+    .filter((question) => isQuestionDependencyMet(question, structuredAnswers))
+    .map((question) => q(question.id, question.prompt, question));
+
   return {
-    required: (Array.isArray(questionnaire.required) ? questionnaire.required : []).map((question) => q(question.id, question.prompt, question)),
-    optional: (Array.isArray(questionnaire.optional) ? questionnaire.optional : []).map((question) => q(question.id, question.prompt, question)),
+    required: filterList(questionnaire.required),
+    optional: filterList(questionnaire.optional),
   };
 }
 
@@ -864,8 +914,8 @@ const PACKAGE_QUESTION_PLAN = {
   },
 };
 
-export function getServiceQuestionPlan(serviceId) {
-  const livePlan = getLiveServiceQuestionPlan(serviceId);
+export function getServiceQuestionPlan(serviceId, selectedOptionId = '', structuredAnswers = null) {
+  const livePlan = getLiveServiceQuestionPlan(serviceId, selectedOptionId, structuredAnswers);
   if (livePlan) {
     return livePlan;
   }
@@ -938,14 +988,20 @@ export function getSelectedServiceMetadata(serviceIds = []) {
     }));
 }
 
-export function getRequiredQuestionDefinitions({ categoryId = '', serviceIds = [], selectedPackageId = '' } = {}) {
+export function getRequiredQuestionDefinitions({
+  categoryId = '',
+  serviceIds = [],
+  selectedPackageId = '',
+  selectedOptionId = '',
+  structuredAnswers = null,
+} = {}) {
   const useCategoryFallback = !hasLiveSelectionQuestionPlan({ serviceIds, selectedPackageId });
   const categoryRequired = useCategoryFallback ? getCategoryQuestionPlan(categoryId).required : [];
   const seen = new Set(categoryRequired.map((question) => question.id));
   const allRequired = [...categoryRequired];
 
   if (selectedPackageId) {
-    getServiceQuestionPlan(selectedPackageId).required.forEach((question) => {
+    getServiceQuestionPlan(selectedPackageId, selectedOptionId, structuredAnswers).required.forEach((question) => {
       if (!seen.has(question.id)) {
         seen.add(question.id);
         allRequired.push(question);
@@ -954,7 +1010,7 @@ export function getRequiredQuestionDefinitions({ categoryId = '', serviceIds = [
   }
 
   (serviceIds || []).forEach((serviceId) => {
-    getServiceQuestionPlan(serviceId).required.forEach((question) => {
+    getServiceQuestionPlan(serviceId, selectedOptionId, structuredAnswers).required.forEach((question) => {
       if (!seen.has(question.id)) {
         seen.add(question.id);
         allRequired.push(question);
@@ -965,14 +1021,20 @@ export function getRequiredQuestionDefinitions({ categoryId = '', serviceIds = [
   return allRequired;
 }
 
-export function getOptionalQuestionDefinitions({ categoryId = '', serviceIds = [], selectedPackageId = '' } = {}) {
+export function getOptionalQuestionDefinitions({
+  categoryId = '',
+  serviceIds = [],
+  selectedPackageId = '',
+  selectedOptionId = '',
+  structuredAnswers = null,
+} = {}) {
   const useCategoryFallback = !hasLiveSelectionQuestionPlan({ serviceIds, selectedPackageId });
   const categoryOptional = useCategoryFallback ? getCategoryQuestionPlan(categoryId).optional : [];
   const seen = new Set(categoryOptional.map((question) => question.id));
   const allOptional = [...categoryOptional];
 
   if (selectedPackageId) {
-    getServiceQuestionPlan(selectedPackageId).optional.forEach((question) => {
+    getServiceQuestionPlan(selectedPackageId, selectedOptionId, structuredAnswers).optional.forEach((question) => {
       if (!seen.has(question.id)) {
         seen.add(question.id);
         allOptional.push(question);
@@ -981,7 +1043,7 @@ export function getOptionalQuestionDefinitions({ categoryId = '', serviceIds = [
   }
 
   (serviceIds || []).forEach((serviceId) => {
-    getServiceQuestionPlan(serviceId).optional.forEach((question) => {
+    getServiceQuestionPlan(serviceId, selectedOptionId, structuredAnswers).optional.forEach((question) => {
       if (!seen.has(question.id)) {
         seen.add(question.id);
         allOptional.push(question);
@@ -992,26 +1054,58 @@ export function getOptionalQuestionDefinitions({ categoryId = '', serviceIds = [
   return allOptional;
 }
 
-export function getQuestionDefinitionById({ categoryId = '', serviceIds = [], selectedPackageId = '', questionId = '' } = {}) {
+export function getQuestionDefinitionById({
+  categoryId = '',
+  serviceIds = [],
+  selectedPackageId = '',
+  selectedOptionId = '',
+  structuredAnswers = null,
+  questionId = '',
+} = {}) {
   const targetId = String(questionId || '').trim();
   if (!targetId) return null;
   return [
-    ...getRequiredQuestionDefinitions({ categoryId, serviceIds, selectedPackageId }),
-    ...getOptionalQuestionDefinitions({ categoryId, serviceIds, selectedPackageId }),
+    ...getRequiredQuestionDefinitions({ categoryId, serviceIds, selectedPackageId, selectedOptionId, structuredAnswers }),
+    ...getOptionalQuestionDefinitions({ categoryId, serviceIds, selectedPackageId, selectedOptionId, structuredAnswers }),
   ].find((question) => question.id === targetId) || null;
 }
 
-export function getNextCustomerIntakeQuestion({ categoryId = '', serviceIds = [], selectedPackageId = '', structuredAnswers = {} } = {}) {
-  const missingRequired = buildMissingRequiredFields({ categoryId, serviceIds, selectedPackageId, structuredAnswers });
-  const nextQuestionId = missingRequired.find((item) => !['category', 'service'].includes(String(item || '').trim()));
+export function getNextCustomerIntakeQuestion({
+  categoryId = '',
+  serviceIds = [],
+  selectedPackageId = '',
+  selectedOptionId = '',
+  structuredAnswers = {},
+} = {}) {
+  const missingRequired = buildMissingRequiredFields({
+    categoryId,
+    serviceIds,
+    selectedPackageId,
+    selectedOptionId,
+    structuredAnswers,
+  });
+  const nextQuestionId = missingRequired.find((item) => !['category', 'service', 'service_option'].includes(String(item || '').trim()));
   if (!nextQuestionId) return null;
-  return getQuestionDefinitionById({ categoryId, serviceIds, selectedPackageId, questionId: nextQuestionId });
+  return getQuestionDefinitionById({
+    categoryId,
+    serviceIds,
+    selectedPackageId,
+    selectedOptionId,
+    structuredAnswers,
+    questionId: nextQuestionId,
+  });
 }
 
-export function getQuestionIdsForSelection({ categoryId = '', serviceIds = [], selectedPackageId = '' } = {}) {
+export function getQuestionIdsForSelection({
+  categoryId = '',
+  serviceIds = [],
+  selectedPackageId = '',
+  selectedOptionId = '',
+  structuredAnswers = null,
+} = {}) {
   return [
-    ...getRequiredQuestionDefinitions({ categoryId, serviceIds, selectedPackageId }),
-    ...getOptionalQuestionDefinitions({ categoryId, serviceIds, selectedPackageId }),
+    ...getRequiredQuestionDefinitions({ categoryId, serviceIds, selectedPackageId, selectedOptionId, structuredAnswers }),
+    ...getOptionalQuestionDefinitions({ categoryId, serviceIds, selectedPackageId, selectedOptionId, structuredAnswers }),
   ].map((question) => question.id);
 }
 
@@ -1276,13 +1370,32 @@ function createQuickReplyOptionsFromLabels(entries = []) {
   return entries.map(([value, label]) => createQuickReply(value, label));
 }
 
-export function buildMissingRequiredFields({ categoryId = '', serviceIds = [], selectedPackageId = '', structuredAnswers = {} } = {}) {
+export function buildMissingRequiredFields({
+  categoryId = '',
+  serviceIds = [],
+  selectedPackageId = '',
+  selectedOptionId = '',
+  structuredAnswers = {},
+} = {}) {
   const missing = [];
   if (!categoryId) missing.push('category');
   if (!Array.isArray(serviceIds) || !serviceIds.length) missing.push('service');
   if (missing.length) return missing;
 
-  const requiredQuestions = getRequiredQuestionDefinitions({ categoryId, serviceIds, selectedPackageId });
+  const primaryServiceId = selectedPackageId || serviceIds[0];
+  const primaryService = primaryServiceId ? getCustomerServiceById(primaryServiceId) : null;
+  const serviceOptions = Array.isArray(primaryService?.options) ? primaryService.options : [];
+  if (serviceOptions.length > 0 && !getLiveServiceOption(primaryServiceId, selectedOptionId)) {
+    missing.push('service_option');
+  }
+
+  const requiredQuestions = getRequiredQuestionDefinitions({
+    categoryId,
+    serviceIds,
+    selectedPackageId,
+    selectedOptionId,
+    structuredAnswers,
+  });
   requiredQuestions.forEach((question) => {
     const answerValue = normalizeAnswerValue(structuredAnswers?.[question.id]);
     if (!hasAnswerValue(answerValue)) {

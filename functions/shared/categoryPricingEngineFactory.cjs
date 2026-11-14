@@ -831,7 +831,44 @@ function createServicePricer(categoryId) {
   return (service) => createServiceResult(service, Number(service?.pricing?.basePrice || 0), [{ label: 'Base service rate', amount: Number(service?.pricing?.basePrice || 0) }]);
 }
 
-function computeQuestionnaireOptionAdjustments(service, answers = {}) {
+function resolveEngineServiceOption(service = {}, selectedOptionId = '') {
+  const options = Array.isArray(service?.options) ? service.options : [];
+  if (!options.length) return null;
+  const target = toLower(selectedOptionId);
+  if (!target) return null;
+  const targetSlug = target.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return options.find((opt) => {
+    const optId = toLower(opt?.id);
+    const optSlug = optId.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    const titleSlug = toLower(opt?.title || opt?.label).replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    return optId === target || (targetSlug && (optSlug === targetSlug || titleSlug === targetSlug));
+  }) || null;
+}
+
+function isEngineQuestionInOptionScope(question = {}, service = {}, selectedOption = null) {
+  const options = Array.isArray(service?.options) ? service.options : [];
+  if (!options.length) return true;
+  if (toLower(question?.type || 'option-specific') === 'standard') return true;
+  if (!selectedOption) return false;
+  if (selectedOption.requiresNoOptionSpecificQuestions) return false;
+  const selectedIds = new Set(
+    (Array.isArray(selectedOption.selectedQuestionIds) ? selectedOption.selectedQuestionIds : [])
+      .map((id) => normalizeText(id))
+      .filter(Boolean),
+  );
+  return selectedIds.has(normalizeText(question?.id));
+}
+
+function isEngineQuestionDependencyMet(question = {}, answers = {}) {
+  const depQuestionId = normalizeText(question?.dependencyRule?.dependsOnQuestionId || question?.dependsOn?.questionId);
+  if (!depQuestionId) return true;
+  const expected = toLower(question?.dependencyRule?.dependsOnOptionValue || question?.dependsOn?.optionValue);
+  const raw = answers?.[depQuestionId];
+  const actualValues = Array.isArray(raw) ? raw.map(toLower) : [toLower(raw)];
+  return actualValues.includes(expected);
+}
+
+function computeQuestionnaireOptionAdjustments(service, answers = {}, selectedOption = null) {
   const questionnaire = service?.questionnaire || {};
   const allQuestions = [...(questionnaire.required || []), ...(questionnaire.optional || [])];
   let totalAdder = 0;
@@ -839,6 +876,8 @@ function computeQuestionnaireOptionAdjustments(service, answers = {}) {
   const lines = [];
 
   allQuestions.forEach((q) => {
+    if (!isEngineQuestionInOptionScope(q, service, selectedOption)) return;
+    if (!isEngineQuestionDependencyMet(q, answers)) return;
     const qId = q.id;
     const answer = answers[qId];
     if (!answer || !Array.isArray(q.options)) return;
@@ -871,6 +910,7 @@ function createCategoryPricingEngine(categoryId, catalogue = {}) {
 
   return function categoryPricingEngine({
     serviceIds = [],
+    selectedOptionId = '',
     structuredAnswers = {},
     serviceOverrides = {},
     currency = 'ZAR',
@@ -883,8 +923,29 @@ function createCategoryPricingEngine(categoryId, catalogue = {}) {
       .filter((service) => service && service.categoryId === categoryId);
 
     const serviceBreakdown = selectedServices.map((service) => {
-      const baseResult = priceService(service, structuredAnswers, serviceOverrides[service.id] || {});
-      const optionAdjustments = computeQuestionnaireOptionAdjustments(service, structuredAnswers);
+      const override = serviceOverrides[service.id] || {};
+      const resolvedOption = resolveEngineServiceOption(service, override.selectedOptionId || selectedOptionId);
+      if (resolvedOption) {
+        const optionBasePrice = Math.max(0, roundCurrency(Number(resolvedOption.price || 0)));
+        const optionAdjustments = computeQuestionnaireOptionAdjustments(service, structuredAnswers, resolvedOption);
+        const subtotal = roundCurrency((optionBasePrice + optionAdjustments.totalAdder) * optionAdjustments.combinedMultiplier);
+        const optionTitle = normalizeText(resolvedOption.title || resolvedOption.label || resolvedOption.id);
+        const lines = [
+          buildLine(`${service.label}: ${optionTitle}`, optionBasePrice),
+          ...optionAdjustments.lines.map((l) => buildLine(`${service.label}: ${l.label}`, l.amount)),
+        ];
+        return {
+          serviceId: service.id,
+          label: service.label,
+          selectedOptionId: resolvedOption.id,
+          selectedOptionTitle: optionTitle,
+          subtotal,
+          lines,
+        };
+      }
+
+      const baseResult = priceService(service, structuredAnswers, override);
+      const optionAdjustments = computeQuestionnaireOptionAdjustments(service, structuredAnswers, null);
       const subtotal = roundCurrency((baseResult.subtotal + optionAdjustments.totalAdder) * optionAdjustments.combinedMultiplier);
       const lines = [
         ...baseResult.lines,
@@ -893,6 +954,8 @@ function createCategoryPricingEngine(categoryId, catalogue = {}) {
       return {
         serviceId: service.id,
         label: service.label,
+        selectedOptionId: null,
+        selectedOptionTitle: null,
         subtotal,
         lines,
       };
@@ -914,6 +977,8 @@ function createCategoryPricingEngine(categoryId, catalogue = {}) {
     return {
       categoryId,
       categoryLabel: category?.label || categoryId,
+      selectedOptionId: serviceBreakdown.find((item) => item.selectedOptionId)?.selectedOptionId || null,
+      selectedOptionTitle: serviceBreakdown.find((item) => item.selectedOptionTitle)?.selectedOptionTitle || null,
       estimateLabel: serviceBreakdown.length ? 'South Africa calibrated quote' : 'No services selected',
       pricingCalibration: PRICING_CALIBRATION,
       currency,

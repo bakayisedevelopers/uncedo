@@ -146,10 +146,15 @@ function normalizeTime(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function buildServiceRequestTitle({ categoryId = '', serviceIds = [], selectedPackageId = '' } = {}) {
+function buildServiceRequestTitle({
+  categoryId = '',
+  serviceIds = [],
+  selectedPackageId = '',
+  selectedOptionTitle = '',
+} = {}) {
   const selectedPackage = selectedPackageId ? getCustomerServiceById(selectedPackageId) : null;
   if (selectedPackage?.label) {
-    return selectedPackage.label;
+    return selectedOptionTitle ? `${selectedPackage.label} — ${selectedOptionTitle}` : selectedPackage.label;
   }
 
   const categoryLabel = getCustomerServiceCategoryById(categoryId)?.label || 'Service request';
@@ -157,11 +162,20 @@ function buildServiceRequestTitle({ categoryId = '', serviceIds = [], selectedPa
     .map((serviceId) => getCustomerServiceById(serviceId)?.label || '')
     .filter(Boolean);
   if (!serviceLabels.length) return categoryLabel;
+  if (selectedOptionTitle && serviceLabels.length === 1) {
+    return `${categoryLabel}: ${serviceLabels[0]} (${selectedOptionTitle})`;
+  }
   return `${categoryLabel}: ${serviceLabels.join(', ')}`;
 }
 
-export function buildServiceRequestSummary({ categoryId = '', serviceIds = [], selectedPackageId = '', structuredAnswers = {} } = {}) {
-  const title = buildServiceRequestTitle({ categoryId, serviceIds, selectedPackageId });
+export function buildServiceRequestSummary({
+  categoryId = '',
+  serviceIds = [],
+  selectedPackageId = '',
+  selectedOptionTitle = '',
+  structuredAnswers = {},
+} = {}) {
+  const title = buildServiceRequestTitle({ categoryId, serviceIds, selectedPackageId, selectedOptionTitle });
   const notableAnswers = Object.entries(structuredAnswers || {})
     .filter(([, value]) => String(value || '').trim())
     .slice(0, 4)
@@ -173,6 +187,7 @@ export function buildServiceRequestSummary({ categoryId = '', serviceIds = [], s
 export function buildServicePricingSnapshot({
   categoryId = '',
   serviceIds = [],
+  selectedOptionId = '',
   structuredAnswers = {},
   serviceOverrides = {},
   travelDistanceKm = null,
@@ -182,8 +197,12 @@ export function buildServicePricingSnapshot({
   if (!engine || !serviceIds.length) return null;
   const result = engine({
     serviceIds,
+    selectedOptionId,
     structuredAnswers,
-    serviceOverrides,
+    serviceOverrides: {
+      ...(serviceOverrides || {}),
+      ...(selectedOptionId ? { selectedOptionId } : {}),
+    },
     travelDistanceKm,
     aiUsageSnapshot,
   });
@@ -197,6 +216,7 @@ export async function fetchServicePricingQuote({
   categoryId = '',
   serviceIds = [],
   selectedPackageId = '',
+  selectedOptionId = '',
   structuredAnswers = {},
 } = {}) {
   const { auth } = getFirebaseClients();
@@ -209,7 +229,7 @@ export async function fetchServicePricingQuote({
     const response = await fetch(getFunctionEndpoint('getCustomerServicePricingQuote'), {
       method: 'POST',
       headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ categoryId, serviceIds, selectedPackageId, structuredAnswers }),
+      body: JSON.stringify({ categoryId, serviceIds, selectedPackageId, selectedOptionId, structuredAnswers }),
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || payload?.success !== true || !payload.quote) {
@@ -221,6 +241,7 @@ export async function fetchServicePricingQuote({
   return buildServicePricingSnapshot({
     categoryId,
     serviceIds,
+    selectedOptionId,
     structuredAnswers,
   });
 }
@@ -233,6 +254,8 @@ export async function createCustomerServiceRequest({ user, location, initialDraf
   const { db } = getFirebaseClients();
   const selectedPackageId = String(initialDraft.selectedPackageId || '').trim();
   const selectedPackage = selectedPackageId ? getCustomerServiceById(selectedPackageId) : null;
+  const selectedOptionId = String(initialDraft.selectedOptionId || '').trim();
+  const selectedOptionTitle = String(initialDraft.selectedOptionTitle || '').trim();
   const categoryId = String(initialDraft.categoryId || selectedPackage?.categoryId || '').trim();
   const serviceIds = (
     Array.isArray(initialDraft.serviceIds) && initialDraft.serviceIds.length
@@ -258,13 +281,17 @@ export async function createCustomerServiceRequest({ user, location, initialDraf
     categoryId,
     serviceIds,
     selectedPackageId,
+    selectedOptionTitle,
     structuredAnswers: draft.structuredAnswers,
   });
   const categoryLabel = getCustomerServiceCategoryById(categoryId)?.label || 'Service request';
   const subject = selectedPackage?.label || categoryLabel;
-  const topic = selectedPackage?.label
+  const baseTopic = selectedPackage?.label
     || serviceIds.map((serviceId) => getCustomerServiceById(serviceId)?.label || '').filter(Boolean).join(', ')
     || categoryLabel;
+  const topic = selectedOptionTitle && !baseTopic.includes(selectedOptionTitle)
+    ? `${baseTopic} — ${selectedOptionTitle}`
+    : baseTopic;
   if (USE_SERVER_REQUEST_LIFECYCLE) {
     const { auth } = getFirebaseClients();
     const currentUser = auth.currentUser;
@@ -281,6 +308,7 @@ export async function createCustomerServiceRequest({ user, location, initialDraf
         categoryId,
         serviceIds,
         selectedPackageId,
+        selectedOptionId,
         structuredAnswers: draft.structuredAnswers || {},
         serviceAddress: draft.serviceAddress || '',
         location: resolvedLocation,
@@ -319,6 +347,8 @@ export async function createCustomerServiceRequest({ user, location, initialDraf
     requestPayload: {
       ...draft,
       selectedPackageId,
+      selectedOptionId,
+      selectedOptionTitle,
       location: resolvedLocation,
       timingPreference: draft.timingPreference || 'now',
       scheduledForText: draft.scheduledForText || '',
@@ -327,6 +357,8 @@ export async function createCustomerServiceRequest({ user, location, initialDraf
     categoryId,
     serviceIds,
     selectedPackageId,
+    selectedOptionId,
+    selectedOptionTitle,
     subject,
     topic,
     description: summary,
@@ -455,6 +487,7 @@ export async function saveCustomerServiceQuotePreview({
   categoryId,
   serviceIds,
   selectedPackageId = '',
+  selectedOptionId = '',
   structuredAnswers = {},
   aiUsageSnapshot = null,
   selectedPortfolioReferences = [],
@@ -473,7 +506,7 @@ export async function saveCustomerServiceQuotePreview({
       method: 'POST',
       headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        requestId, categoryId, serviceIds, selectedPackageId, structuredAnswers,
+        requestId, categoryId, serviceIds, selectedPackageId, selectedOptionId, structuredAnswers,
       }),
     });
     const payload = await response.json().catch(() => ({}));
@@ -497,6 +530,7 @@ export async function saveCustomerServiceQuotePreview({
     categoryId,
     serviceIds,
     selectedPackageId,
+    selectedOptionId,
     structuredAnswers,
   });
 
@@ -506,7 +540,15 @@ export async function saveCustomerServiceQuotePreview({
   const existingRequest = existingSnap.exists() ? existingSnap.data() || {} : {};
   const existingPayload = existingRequest.requestPayload || {};
   const resolvedPackageId = String(selectedPackageId || existingRequest.selectedPackageId || existingPayload.selectedPackageId || '').trim();
-  const summary = buildServiceRequestSummary({ categoryId, serviceIds, selectedPackageId: resolvedPackageId, structuredAnswers });
+  const resolvedOptionId = String(selectedOptionId || existingRequest.selectedOptionId || existingPayload.selectedOptionId || '').trim();
+  const resolvedOptionTitle = String(pricingSnapshot?.selectedOptionTitle || existingRequest.selectedOptionTitle || existingPayload.selectedOptionTitle || '').trim();
+  const summary = buildServiceRequestSummary({
+    categoryId,
+    serviceIds,
+    selectedPackageId: resolvedPackageId,
+    selectedOptionTitle: resolvedOptionTitle,
+    structuredAnswers,
+  });
   const timingDetails = deriveTimingDetails(structuredAnswers);
   const serviceAddress = existingPayload.serviceAddress || existingRequest.serviceAddress || '';
   const location = await resolveRequestLocation({
@@ -519,6 +561,8 @@ export async function saveCustomerServiceQuotePreview({
     categoryId,
     serviceIds,
     selectedPackageId: resolvedPackageId,
+    selectedOptionId: resolvedOptionId,
+    selectedOptionTitle: resolvedOptionTitle,
     serviceSummary: summary,
     structuredAnswers,
     selectedPortfolioReferences,
@@ -540,6 +584,8 @@ export async function saveCustomerServiceQuotePreview({
       categoryId,
       serviceIds,
       selectedPackageId: resolvedPackageId,
+      selectedOptionId: resolvedOptionId,
+      selectedOptionTitle: resolvedOptionTitle,
       summary,
       structuredAnswers,
       selectedPortfolioReferences,
@@ -571,6 +617,7 @@ export async function finalizeCustomerServiceRequest({
   categoryId,
   serviceIds,
   selectedPackageId = '',
+  selectedOptionId = '',
   approvedQuote = null,
   structuredAnswers = {},
   aiUsageSnapshot = null,
@@ -602,6 +649,7 @@ export async function finalizeCustomerServiceRequest({
     categoryId,
     serviceIds,
     selectedPackageId,
+    selectedOptionId,
     structuredAnswers,
   });
   const timingDetails = deriveTimingDetails(structuredAnswers);
@@ -623,20 +671,34 @@ export async function finalizeCustomerServiceRequest({
   const existingRequest = existingSnap.exists() ? existingSnap.data() || {} : {};
   const existingPayload = existingRequest.requestPayload || {};
   const resolvedPackageId = String(selectedPackageId || existingRequest.selectedPackageId || existingPayload.selectedPackageId || '').trim();
-  const summary = buildServiceRequestSummary({ categoryId, serviceIds, selectedPackageId: resolvedPackageId, structuredAnswers });
+  const resolvedOptionId = String(selectedOptionId || existingRequest.selectedOptionId || existingPayload.selectedOptionId || '').trim();
+  const resolvedOptionTitle = String(pricingSnapshot?.selectedOptionTitle || existingRequest.selectedOptionTitle || existingPayload.selectedOptionTitle || '').trim();
+  const summary = buildServiceRequestSummary({
+    categoryId,
+    serviceIds,
+    selectedPackageId: resolvedPackageId,
+    selectedOptionTitle: resolvedOptionTitle,
+    structuredAnswers,
+  });
   const serviceAddress = existingPayload.serviceAddress || existingRequest.serviceAddress || '';
   const location = await resolveRequestLocation({
     location: existingPayload.location || existingRequest.location || null,
     serviceAddress,
     serviceAddressTarget: structuredAnswers?.service_address_target || existingRequest.structuredAnswers?.service_address_target || '',
   });
+  const baseTopic = serviceLabels.join(', ') || categoryLabel;
+  const topic = resolvedOptionTitle && !baseTopic.includes(resolvedOptionTitle)
+    ? `${baseTopic} — ${resolvedOptionTitle}`
+    : baseTopic;
 
   await updateDoc(requestRef, {
     categoryId,
     serviceIds,
     selectedPackageId: resolvedPackageId,
+    selectedOptionId: resolvedOptionId,
+    selectedOptionTitle: resolvedOptionTitle,
     subject: categoryLabel,
-    topic: serviceLabels.join(', ') || categoryLabel,
+    topic,
     description: summary,
     serviceSummary: summary,
     structuredAnswers,
@@ -662,6 +724,8 @@ export async function finalizeCustomerServiceRequest({
       categoryId,
       serviceIds,
       selectedPackageId: resolvedPackageId,
+      selectedOptionId: resolvedOptionId,
+      selectedOptionTitle: resolvedOptionTitle,
       summary,
       structuredAnswers,
       selectedPortfolioReferences,

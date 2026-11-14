@@ -35,9 +35,43 @@ function normalizeEnumOptions(options = []) {
     .filter(Boolean);
 }
 
+function normalizeServiceOption(option = {}, index = 0) {
+  if (!option || typeof option !== 'object') return null;
+  const rawTitle = String(option.title || option.label || '').trim();
+  const id = String(option.id || slugify(rawTitle || `option_${index + 1}`)).trim().toLowerCase();
+  if (!id && !rawTitle) return null;
+
+  return {
+    draftKey: String(option.draftKey || id || `option_${index + 1}`).trim(),
+    id,
+    title: rawTitle || id,
+    description: String(option.description || '').trim(),
+    imageUrl: String(option.imageUrl || '').trim(),
+    price: Math.max(0, Math.round(Number(option.price ?? option.priceAdder ?? 0) || 0)),
+    selectedQuestionIds: [...new Set(
+      (Array.isArray(option.selectedQuestionIds) ? option.selectedQuestionIds : [])
+        .map((item) => String(item || '').trim())
+        .filter(Boolean),
+    )],
+    requiresNoOptionSpecificQuestions: Boolean(option.requiresNoOptionSpecificQuestions),
+  };
+}
+
 function normalizeLiveQuestion(question = {}) {
   const id = String(question.id || '').trim();
   if (!id) return null;
+
+  const rawType = String(question.type || 'option-specific').trim().toLowerCase();
+  const depQuestionId = String(
+    question.dependencyRule?.dependsOnQuestionId
+    || question.dependsOn?.questionId
+    || '',
+  ).trim();
+  const depOptionValue = String(
+    question.dependencyRule?.dependsOnOptionValue
+    || question.dependsOn?.optionValue
+    || '',
+  ).trim();
 
   return {
     id,
@@ -46,6 +80,15 @@ function normalizeLiveQuestion(question = {}) {
     answerHint: String(question.answerHint || '').trim(),
     options: normalizeEnumOptions(question.options),
     required: question.required !== false,
+    type: rawType === 'standard' ? 'standard' : 'option-specific',
+    dependsOn: depQuestionId ? {
+      questionId: depQuestionId,
+      optionValue: depOptionValue,
+    } : null,
+    dependencyRule: depQuestionId ? {
+      dependsOnQuestionId: depQuestionId,
+      dependsOnOptionValue: depOptionValue,
+    } : null,
   };
 }
 
@@ -76,6 +119,7 @@ function buildLiveServiceEntry(entry = {}) {
     ? entry.questionnaire
     : { required: entry.requiredQuestions, optional: entry.optionalQuestions };
   const type = String(entry.type || 'service').trim().toLowerCase();
+  const rawOptionMode = String(entry.optionApplicationMode || '').trim().toLowerCase();
 
   return {
     id,
@@ -88,6 +132,10 @@ function buildLiveServiceEntry(entry = {}) {
       .map((item) => String(item || '').trim().toLowerCase())
       .filter(Boolean),
     packageQuestions: [],
+    optionApplicationMode: rawOptionMode === 'unified' ? 'unified' : 'per_option',
+    options: (Array.isArray(entry.options) ? entry.options : [])
+      .map((option, index) => normalizeServiceOption(option, index))
+      .filter(Boolean),
     pricing: entry.pricing && typeof entry.pricing === 'object' ? { ...entry.pricing } : {},
     questionnaire: {
       required: (Array.isArray(questionnaire?.required) ? questionnaire.required : [])
@@ -176,6 +224,23 @@ export function hydrateLiveServiceCatalog(entries = []) {
 
 export function getLiveQuestionnaireForService(serviceId = '') {
   return liveServiceMap.get(String(serviceId || '').trim().toLowerCase())?.questionnaire || null;
+}
+
+export function getLiveServiceOption(serviceId = '', optionId = '') {
+  const service = liveServiceMap.get(String(serviceId || '').trim().toLowerCase()) || null;
+  const options = Array.isArray(service?.options) ? service.options : [];
+  if (!options.length) return null;
+  const targetRaw = String(optionId || '').trim().toLowerCase();
+  if (!targetRaw) return null;
+  const targetSlug = slugify(targetRaw);
+
+  return options.find((opt) => {
+    const optId = String(opt?.id || '').trim().toLowerCase();
+    const optSlug = slugify(optId);
+    const titleSlug = slugify(opt?.title || '');
+    return optId === targetRaw
+      || (targetSlug && (optSlug === targetSlug || titleSlug === targetSlug));
+  }) || null;
 }
 
 export function getCustomerServiceCategoryById(categoryId) {

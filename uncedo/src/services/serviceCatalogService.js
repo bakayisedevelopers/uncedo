@@ -46,6 +46,10 @@ export function normalizeServiceCatalogEntry(entry = {}) {
       .map((item) => String(item || '').trim().toLowerCase())
       .filter(Boolean),
     pricing: entry.pricing && typeof entry.pricing === 'object' ? { ...entry.pricing } : {},
+    optionApplicationMode: String(entry.optionApplicationMode || '').trim().toLowerCase() === 'unified'
+      ? 'unified'
+      : 'per_option',
+    options: Array.isArray(entry.options) ? entry.options : [],
     questionnaire: entry.questionnaire && typeof entry.questionnaire === 'object'
       ? entry.questionnaire
       : { required: entry.requiredQuestions || [], optional: entry.optionalQuestions || [] },

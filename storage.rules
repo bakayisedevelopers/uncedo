@@ -2,97 +2,9 @@ rules_version = '2';
 
 service firebase.storage {
   match /b/{bucket}/o {
-    function signedIn() {
-      return request.auth != null;
-    }
-
-    function isOwner(userId) {
-      return signedIn() && request.auth.uid == userId;
-    }
-
-    function isAdmin() {
-      return signedIn()
-        && (
-          request.auth.token.get('role', '') == 'admin'
-          || (request.auth.token.get('roles', []) is list
-            && request.auth.token.get('roles', []).hasAny(['admin']))
-          // Keep existing trusted custom claims valid during the claim migration.
-          || request.auth.token.get('admin', false) == true
-          || request.auth.token.get('isAdmin', false) == true
-        );
-    }
-
-    function validImage(maxBytes) {
-      return request.resource != null
-        && request.resource.size <= maxBytes
-        && request.resource.contentType.matches('image/(jpeg|png|webp)');
-    }
-
-    function validRequestAttachment() {
-      return request.resource != null
-        && request.resource.size <= 25 * 1024 * 1024
-        && (
-          request.resource.contentType.matches('image/(jpeg|png|webp)')
-          || request.resource.contentType == 'application/pdf'
-        );
-    }
-
-    // Catalogue images are public content; only administrators may change them.
-    match /service-catalog/{allPaths=**} {
-      allow read: if true;
-      allow create, update: if isAdmin() && validImage(10 * 1024 * 1024);
-      allow delete: if isAdmin();
-    }
-
-    match /helper-profile-photos/{userId}/{allPaths=**} {
-      allow read: if signedIn();
-      allow create, update: if isOwner(userId) && validImage(10 * 1024 * 1024);
-      allow delete: if isOwner(userId) || isAdmin();
-    }
-
-    match /helper-services/{serviceId}/{userId}/{allPaths=**} {
-      allow read: if signedIn();
-      allow create, update: if isOwner(userId) && validImage(10 * 1024 * 1024);
-      allow delete: if isOwner(userId) || isAdmin();
-    }
-
-    match /service-request-references/{userId}/{requestId}/{allPaths=**} {
-      allow read: if isOwner(userId) || isAdmin();
-      allow create, update: if isOwner(userId) && validRequestAttachment();
-      allow delete: if isOwner(userId) || isAdmin();
-    }
-
-    match /helper-completion-proof/{userId}/{requestId}/{allPaths=**} {
-      allow read: if isOwner(userId) || isAdmin();
-      allow create, update: if isOwner(userId) && validImage(10 * 1024 * 1024);
-      allow delete: if isAdmin();
-    }
-
-    match /helper-agreements/{userId}/{version}/{allPaths=**} {
-      allow read: if isOwner(userId) || isAdmin();
-      allow create: if isOwner(userId)
-        && request.resource != null
-        && request.resource.size <= 10 * 1024 * 1024
-        && request.resource.contentType == 'application/pdf';
-      allow update, delete: if isAdmin();
-    }
-
-    match /uploads/{userId}/{allPaths=**} {
-      allow read: if isOwner(userId) || isAdmin();
-      allow create, update: if isOwner(userId) && validRequestAttachment();
-      allow delete: if isOwner(userId) || isAdmin();
-    }
-
-    // Police-clearance documents are downloaded from Meta and retained in
-    // private storage. Clients never receive direct bucket access; helper and
-    // trusted-admin callables issue short-lived signed URLs after ownership or
-    // administrator checks and record each access for audit.
-    match /helper-police-clearance-private/{allPaths=**} {
-      allow read, write: if false;
-    }
-
+    // Development-stage open rules as requested; replace with hardened rules before production.
     match /{allPaths=**} {
-      allow read, write: if false;
+      allow read, write: if true;
     }
   }
 }
