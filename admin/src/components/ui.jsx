@@ -16,7 +16,7 @@ export function Badge({ tone = 'neutral', children }) {
 
 export function Card({ className = '', children }) {
   return (
-    <div className={`rounded-[28px] border border-white/10 bg-white/5 p-5 shadow-glow backdrop-blur ${className}`}>
+    <div className={`min-w-0 w-full rounded-[28px] border border-white/10 bg-white/5 p-5 shadow-glow backdrop-blur ${className}`}>
       {children}
     </div>
   );
@@ -25,7 +25,7 @@ export function Card({ className = '', children }) {
 export function SectionTitle({ eyebrow, title, description, action }) {
   return (
     <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-      <div className="max-w-2xl space-y-1">
+      <div className="min-w-0 max-w-2xl space-y-1">
         {eyebrow ? <p className="text-[11px] font-bold uppercase tracking-[0.28em] text-brand-soft/80">{eyebrow}</p> : null}
         <h2 className="text-2xl font-bold tracking-tight text-white">{title}</h2>
         {description ? <p className="text-sm leading-6 text-ink-200">{description}</p> : null}
@@ -44,7 +44,7 @@ export function MetricCard({ label, value, detail, tone = 'brand' }) {
   };
 
   return (
-    <div className={`rounded-[24px] border bg-gradient-to-br p-4 ${toneClasses[tone] || toneClasses.brand}`}>
+    <div className={`min-w-0 rounded-[24px] border bg-gradient-to-br p-4 ${toneClasses[tone] || toneClasses.brand}`}>
       <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-ink-200">{label}</p>
       <p className="mt-3 text-3xl font-bold tracking-tight text-white">{value}</p>
       {detail ? <p className="mt-2 text-sm text-ink-200">{detail}</p> : null}
@@ -54,7 +54,7 @@ export function MetricCard({ label, value, detail, tone = 'brand' }) {
 
 export function EmptyState({ title, description, action }) {
   return (
-    <div className="rounded-[24px] border border-dashed border-white/10 bg-white/5 p-8 text-center">
+    <div className="min-w-0 w-full rounded-[24px] border border-dashed border-white/10 bg-white/5 p-6 sm:p-8 text-center">
       <h3 className="text-lg font-bold text-white">{title}</h3>
       {description ? <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-ink-200">{description}</p> : null}
       {action ? <div className="mt-5">{action}</div> : null}

@@ -8,19 +8,26 @@
   color-scheme: dark;
 }
 
-html {
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
   scroll-behavior: smooth;
   overflow-x: hidden;
+  max-width: 100%;
 }
 
 body {
   @apply bg-ink-900 text-ink-50 antialiased;
   font-family: 'Space Grotesk', system-ui, sans-serif;
-  overflow-x: hidden;
 }
 
 #root {
   min-height: 100vh;
+  overflow-x: hidden;
+  max-width: 100%;
 }
 
 ::selection {

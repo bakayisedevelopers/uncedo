@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Check, Image as ImageIcon, Pencil, Plus, Sparkles, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowLeft, Check, Image as ImageIcon, Pencil, Plus, Sparkles, Trash2, X } from 'lucide-react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Badge, Card, EmptyState, LoadingState, SectionTitle } from '../components/ui';
 import { getAdminCatalogCategories } from '../constants/serviceCatalog';
@@ -49,6 +49,29 @@ function createServiceOptionDraft(option = {}, index = 0) {
     selectedQuestionIds: Array.isArray(option.selectedQuestionIds) ? option.selectedQuestionIds : [],
     requiresNoOptionSpecificQuestions: Boolean(option.requiresNoOptionSpecificQuestions),
   };
+}
+
+function isServiceOptionComplete(option = {}) {
+  const title = String(option.title || '').trim();
+  const description = String(option.description || '').trim();
+  const price = Number(option.price);
+  return Boolean(title && description && Number.isFinite(price) && price >= 0);
+}
+
+function normalizeServiceOptions(options = []) {
+  return (Array.isArray(options) ? options : [])
+    .filter((option) => String(option.title || '').trim() || String(option.description || '').trim())
+    .map((option, index) => ({
+      id: String(option.id || slugify(option.title) || `option_${index + 1}`).trim(),
+      title: String(option.title || '').trim(),
+      description: String(option.description || '').trim(),
+      imageUrl: String(option.imageUrl || '').trim(),
+      price: Number(option.price || 0),
+      selectedQuestionIds: (Array.isArray(option.selectedQuestionIds) ? option.selectedQuestionIds : [])
+        .map((id) => String(id || '').trim())
+        .filter(Boolean),
+      requiresNoOptionSpecificQuestions: Boolean(option.requiresNoOptionSpecificQuestions),
+    }));
 }
 
 function createOptionDraft(option = {}, index = 0) {
@@ -170,33 +193,21 @@ function ServiceOptionEditor({ option, allQuestions = [], onChange, onRemove }) 
   };
 
   return (
-    <div className="rounded-[24px] border border-white/10 bg-ink-950/30 p-4 space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <span className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Service Option</span>
-        <button
-          type="button"
-          onClick={onRemove}
-          className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm font-bold text-white"
-        >
-          <Trash2 className="h-4 w-4" />
-          Remove option
-        </button>
-      </div>
-
-      <div className="grid gap-4 md:grid-cols-2">
-        <label className="space-y-2">
+    <div className="min-w-0 w-full space-y-4">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <label className="block min-w-0 space-y-2">
           <span className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Option title</span>
           <input
             value={option.title}
             onChange={(event) => onChange({ ...option, title: event.target.value })}
             placeholder="e.g. Executive Fade & Beard Trim"
-            className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
+            className="w-full min-w-0 rounded-2xl border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
           />
         </label>
-        <div className="space-y-2">
+        <div className="min-w-0 space-y-2">
           <span className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Price (R)</span>
-          <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-bold text-white">
-            <span>R</span>
+          <div className="flex min-w-0 items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-bold text-white">
+            <span className="shrink-0">R</span>
             <input
               type="number"
               min={0}
@@ -204,26 +215,26 @@ function ServiceOptionEditor({ option, allQuestions = [], onChange, onRemove }) 
               step={5}
               value={option.price}
               onChange={(event) => handlePriceChange(event.target.value)}
-              className="w-full bg-transparent text-right text-white outline-none"
+              className="w-full min-w-0 bg-transparent text-right text-white outline-none"
             />
           </div>
         </div>
       </div>
 
-      <label className="block space-y-2">
+      <label className="block min-w-0 space-y-2">
         <span className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Short description</span>
         <textarea
           value={option.description}
           onChange={(event) => onChange({ ...option, description: event.target.value })}
           rows={2}
           placeholder="Briefly describe what this option includes..."
-          className="w-full rounded-[22px] border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
+          className="w-full min-w-0 rounded-[22px] border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
         />
       </label>
 
-      <div className="space-y-2">
-        <span className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Option picture (Firebase Storage)</span>
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+      <div className="min-w-0 space-y-2">
+        <span className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Option picture (Optional · Firebase Storage)</span>
+        <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center">
           {option.imageUrl ? (
             <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-xl border border-white/10 bg-white/5">
               <img src={option.imageUrl} alt="Option preview" className="h-full w-full object-cover" />
@@ -233,10 +244,10 @@ function ServiceOptionEditor({ option, allQuestions = [], onChange, onRemove }) 
               <ImageIcon className="h-6 w-6" />
             </div>
           )}
-          <div className="flex-1 space-y-2">
-            <div className="flex items-center gap-2">
+          <div className="min-w-0 flex-1 space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
               <label className="cursor-pointer inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-bold text-white hover:bg-white/10 transition">
-                <ImageIcon className="h-3.5 w-3.5" />
+                <ImageIcon className="h-3.5 w-3.5 shrink-0" />
                 <span>{isUploading ? 'Uploading to Firebase...' : 'Upload picture from device'}</span>
                 <input
                   type="file"
@@ -260,39 +271,41 @@ function ServiceOptionEditor({ option, allQuestions = [], onChange, onRemove }) 
               value={option.imageUrl || ''}
               onChange={(event) => onChange({ ...option, imageUrl: event.target.value })}
               placeholder="Or paste image URL directly..."
-              className="w-full rounded-xl border border-white/10 bg-ink-950/50 px-3 py-2 text-xs text-white outline-none"
+              className="w-full min-w-0 rounded-xl border border-white/10 bg-ink-950/50 px-3 py-2 text-xs text-white outline-none"
             />
           </div>
         </div>
       </div>
 
-      <div className="rounded-[20px] border border-white/10 bg-white/5 p-3 space-y-3">
-        <label className="flex items-center gap-3">
+      <div className="min-w-0 rounded-[20px] border border-white/10 bg-white/5 p-3 space-y-3">
+        <label className="flex min-w-0 items-start gap-3">
           <input
             type="checkbox"
+            className="mt-1 shrink-0"
             checked={Boolean(option.requiresNoOptionSpecificQuestions)}
             onChange={(event) => onChange({ ...option, requiresNoOptionSpecificQuestions: event.target.checked })}
           />
-          <div>
+          <div className="min-w-0">
             <p className="text-sm font-bold text-white">Requires no option-specific questions</p>
             <p className="text-xs text-ink-300">When checked, this option skips option-specific questions and uses only standard questions.</p>
           </div>
         </label>
 
         {!option.requiresNoOptionSpecificQuestions && allQuestions.length > 0 ? (
-          <div className="space-y-2 pt-2 border-t border-white/10">
+          <div className="min-w-0 space-y-2 pt-2 border-t border-white/10">
             <p className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Associated Option-Specific Questions</p>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {allQuestions.filter(q => q.type !== 'standard').map((q) => {
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {allQuestions.filter((q) => q.type !== 'standard').map((q) => {
                 const isSelected = (option.selectedQuestionIds || []).includes(q.id);
                 return (
-                  <label key={q.id} className="flex items-center gap-2 rounded-xl border border-white/10 bg-ink-950/30 px-3 py-2 text-xs text-white">
+                  <label key={q.id} className="flex min-w-0 items-center gap-2 rounded-xl border border-white/10 bg-ink-950/30 px-3 py-2 text-xs text-white">
                     <input
                       type="checkbox"
+                      className="shrink-0"
                       checked={isSelected}
                       onChange={() => toggleQuestionId(q.id)}
                     />
-                    <span className="truncate">{q.prompt || q.id}</span>
+                    <span className="min-w-0 flex-1 truncate">{q.prompt || q.id}</span>
                   </label>
                 );
               })}
@@ -387,7 +400,7 @@ function QuestionOptionEditor({ option, onChange, onRemove }) {
 
   return (
     <div className="rounded-2xl border border-white/10 bg-ink-950/30 p-3 space-y-3">
-      <div className="grid gap-3 md:grid-cols-[1.2fr_0.8fr_0.8fr_auto]">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)_minmax(0,0.8fr)_auto]">
         <input
           value={option.label}
           onChange={(event) => onChange({ ...option, label: event.target.value })}
@@ -552,7 +565,7 @@ function QuestionEditor({
               </button>
             </div>
 
-            <div className="mt-4 grid gap-4 md:grid-cols-[1.2fr_0.8fr_0.8fr]">
+            <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)_minmax(0,0.8fr)]">
               <input
                 value={question.prompt}
                 onChange={(event) => updateQuestion(index, {
@@ -635,6 +648,7 @@ export default function ServiceDetailsPage() {
   const { serviceId } = useParams();
   const isNewService = String(serviceId || '').trim().toLowerCase() === 'new';
   const categoryOptions = useMemo(() => getAdminCatalogCategories(), []);
+  const initializedServiceIdRef = useRef('');
   const [helpers, setHelpers] = useState([]);
   const [catalogEntries, setCatalogEntries] = useState([]);
   const [isLoadingHelpers, setIsLoadingHelpers] = useState(true);
@@ -659,7 +673,8 @@ export default function ServiceDetailsPage() {
   const [draftRequiredQuestions, setDraftRequiredQuestions] = useState([]);
   const [draftOptionalQuestions, setDraftOptionalQuestions] = useState([]);
   const [draftOptions, setDraftOptions] = useState([]);
-  const [expandedOptionIndex, setExpandedOptionIndex] = useState(0);
+  const [expandedOptionIndex, setExpandedOptionIndex] = useState(-1);
+  const [optionStatusMessage, setOptionStatusMessage] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -763,6 +778,8 @@ export default function ServiceDetailsPage() {
 
   useEffect(() => {
     if (!selectedService) return;
+    if (initializedServiceIdRef.current === selectedService.id) return;
+    initializedServiceIdRef.current = selectedService.id;
     const nextCategoryId = selectedService.categoryId || categoryOptions[0]?.id || '';
 
     setDraftServiceId(selectedService.id === 'new' ? '' : selectedService.id);
@@ -793,6 +810,8 @@ export default function ServiceDetailsPage() {
         ? selectedService.options.map((opt, idx) => createServiceOptionDraft(opt, idx))
         : []
     );
+    setExpandedOptionIndex(-1);
+    setOptionStatusMessage('');
     setMessage('');
   }, [categoryOptions, selectedService]);
 
@@ -883,6 +902,7 @@ export default function ServiceDetailsPage() {
       maximumTotal: Number(draftMaximumTotal || 0),
       bundleDiscountPercent: 0,
     },
+    options: normalizeServiceOptions(draftOptions),
     questionnaire: {
       required: normalizeQuestionDrafts(draftRequiredQuestions, true),
       optional: normalizeQuestionDrafts(draftOptionalQuestions, false),
@@ -907,6 +927,85 @@ export default function ServiceDetailsPage() {
     }
   };
 
+  const persistServiceOptions = async (nextOptions) => {
+    const targetServiceId = slugify(draftServiceId || draftLabel);
+    if (!targetServiceId || !draftLabel.trim() || !draftCategoryId.trim() || selectedService?.id === 'new') {
+      return false;
+    }
+
+    const saved = await saveServiceCatalogEntry(targetServiceId, {
+      ...buildPayload(effectiveImages),
+      options: normalizeServiceOptions(nextOptions),
+    });
+    upsertSavedService(saved);
+    return true;
+  };
+
+  const handleAddServiceOption = async () => {
+    setOptionStatusMessage('');
+    let currentOptions = draftOptions;
+
+    if (expandedOptionIndex >= 0 && currentOptions[expandedOptionIndex]) {
+      const openOpt = currentOptions[expandedOptionIndex];
+      if (isServiceOptionComplete(openOpt)) {
+        try {
+          const persisted = await persistServiceOptions(currentOptions);
+          if (persisted) {
+            setOptionStatusMessage('Previous option saved.');
+          }
+        } catch (error) {
+          setOptionStatusMessage(error.message || 'Could not auto-save previous option.');
+        }
+      }
+    }
+
+    setDraftOptions((current) => [...current, createServiceOptionDraft({}, current.length)]);
+    setExpandedOptionIndex(-1);
+  };
+
+  const handleEditOption = async (optIndex) => {
+    setOptionStatusMessage('');
+    if (expandedOptionIndex >= 0 && expandedOptionIndex !== optIndex && draftOptions[expandedOptionIndex]) {
+      const openOpt = draftOptions[expandedOptionIndex];
+      if (isServiceOptionComplete(openOpt)) {
+        try {
+          const persisted = await persistServiceOptions(draftOptions);
+          if (persisted) {
+            setOptionStatusMessage('Previous option auto-saved.');
+          }
+        } catch (error) {
+          setOptionStatusMessage(error.message || 'Could not auto-save previous option.');
+        }
+      }
+    }
+    setExpandedOptionIndex(optIndex);
+  };
+
+  const handleSaveSingleOption = async (optIndex) => {
+    const opt = draftOptions[optIndex];
+    if (!opt) return;
+    if (!isServiceOptionComplete(opt)) {
+      setOptionStatusMessage('Please fill in option title, description, and price before saving (image is optional).');
+      return;
+    }
+
+    setIsMutating(true);
+    setOptionStatusMessage('');
+    try {
+      const persisted = await persistServiceOptions(draftOptions);
+      setExpandedOptionIndex(-1);
+      setOptionStatusMessage(
+        persisted
+          ? 'Option saved to Firestore.'
+          : 'Option staged. Click "Create service" below to save the new service.',
+      );
+    } catch (error) {
+      setOptionStatusMessage(error.message || 'Unable to save option.');
+    } finally {
+      setIsMutating(false);
+    }
+  };
+
   const handleServiceSave = async () => {
     const targetServiceId = slugify(draftServiceId || draftLabel);
     if (!targetServiceId || !draftLabel.trim() || !draftCategoryId.trim()) {
@@ -925,6 +1024,8 @@ export default function ServiceDetailsPage() {
       upsertSavedService(saved);
 
       setDraftFiles([]);
+      setExpandedOptionIndex(-1);
+      setOptionStatusMessage('');
       setMessage('Service saved to Firestore.');
       await refreshHelpers();
     } catch (error) {
@@ -984,7 +1085,7 @@ export default function ServiceDetailsPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="min-w-0 w-full space-y-6">
       <Card>
         <SectionTitle
           eyebrow="Service details"
@@ -1001,10 +1102,10 @@ export default function ServiceDetailsPage() {
           )}
         />
 
-        <div className="grid gap-6 xl:grid-cols-[1.25fr_0.85fr]">
-          <div className="space-y-6">
+        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.25fr)_minmax(0,0.85fr)]">
+          <div className="min-w-0 w-full space-y-6">
             <Card className="bg-white/7">
-              <div className="grid gap-4 md:grid-cols-2">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 <label className="space-y-2">
                   <span className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Service id</span>
                   <input
@@ -1128,7 +1229,7 @@ export default function ServiceDetailsPage() {
                 )}
 
                 {matchedSuggestion ? (
-                  <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                  <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
                     <div className="rounded-[20px] border border-white/10 bg-ink-950/30 px-4 py-3">
                       <p className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Base</p>
                       <p className="mt-2 text-lg font-bold text-white">R{matchedSuggestion.pricing.basePrice}</p>
@@ -1165,7 +1266,7 @@ export default function ServiceDetailsPage() {
                       Inherit service images
                     </label>
                   </div>
-                  <div className="mt-4 grid gap-2 md:grid-cols-2">
+                  <div className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-2">
                     {selectableBundleServices.map((entry) => {
                       const isSelected = draftIncludedServiceIds.includes(entry.id);
                       return (
@@ -1189,7 +1290,7 @@ export default function ServiceDetailsPage() {
                 </div>
               ) : null}
 
-              <div className="mt-5 grid gap-4 md:grid-cols-2">
+              <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2">
                 <SliderField
                   label="Base price"
                   help="Starting labour price for this service before answer-based additions are applied."
@@ -1228,7 +1329,7 @@ export default function ServiceDetailsPage() {
                 />
               </div>
 
-              <div className="mt-5 grid gap-4 md:grid-cols-2">
+              <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2">
                 <div className="rounded-[24px] border border-white/10 bg-white/5 p-4">
                   <label className="flex items-start gap-3">
                     <input
@@ -1261,64 +1362,77 @@ export default function ServiceDetailsPage() {
                 </div>
               </div>
 
-              <div className="mt-5 rounded-[24px] border border-white/10 bg-white/5 p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
+              <div className="mt-5 min-w-0 w-full rounded-[24px] border border-white/10 bg-white/5 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
                     <p className="font-bold text-white">Service Options</p>
                     <p className="mt-1 text-sm text-ink-200">Configure distinct options/packages for this service, each with title, description, image, price, and associated questions.</p>
                   </div>
                   <button
                     type="button"
-                    onClick={() => {
-                      setDraftOptions((current) => {
-                        const next = [...current, createServiceOptionDraft({}, current.length)];
-                        setExpandedOptionIndex(next.length - 1);
-                        return next;
-                      });
-                    }}
-                    className="inline-flex items-center gap-2 rounded-2xl bg-brand px-4 py-3 text-sm font-bold text-white"
+                    onClick={handleAddServiceOption}
+                    className="inline-flex shrink-0 items-center gap-2 rounded-2xl bg-brand px-4 py-3 text-sm font-bold text-white"
                   >
                     <Plus className="h-4 w-4" />
                     Add service option
                   </button>
                 </div>
 
-                <div className="mt-4 space-y-3">
+                {optionStatusMessage ? (
+                  <p className="mt-3 text-xs font-bold text-brand-soft">{optionStatusMessage}</p>
+                ) : null}
+
+                <div className="mt-4 min-w-0 w-full space-y-3">
                   {draftOptions.length ? draftOptions.map((opt, optIndex) => {
                     const isExpanded = expandedOptionIndex === optIndex;
                     return (
-                      <div key={opt.draftKey || `opt_${optIndex}`} className="rounded-[22px] border border-white/10 bg-ink-950/40 p-4 transition">
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="flex items-center gap-3 min-w-0">
-                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand/25 text-brand-soft font-bold text-sm">
+                      <div key={opt.draftKey || `opt_${optIndex}`} className="min-w-0 w-full rounded-[22px] border border-white/10 bg-ink-950/40 p-3 sm:p-4 transition">
+                        <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
+                          <div className="flex min-w-0 flex-1 items-center gap-3">
+                            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand/25 text-brand-soft font-bold text-sm">
                               #{optIndex + 1}
                             </div>
-                            <div className="min-w-0">
-                              <p className="truncate font-bold text-white text-base">{opt.title || `Option ${optIndex + 1} (Untitled)`}</p>
-                              <p className="text-xs text-ink-300">Price: R{opt.price || 0} {opt.description ? `• ${opt.description}` : ''}</p>
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate font-bold text-white text-sm sm:text-base">{opt.title || `Option ${optIndex + 1} (Untitled)`}</p>
+                              <p className="truncate text-xs text-ink-300">Price: R{opt.price || 0}{opt.description ? ` • ${opt.description}` : ''}</p>
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-2 shrink-0">
+                          <div className="flex shrink-0 items-center gap-2">
                             {isExpanded ? (
-                              <button
-                                type="button"
-                                onClick={() => setExpandedOptionIndex(-1)}
-                                title="Save & collapse option"
-                                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-500/20 px-3 py-2 text-xs font-bold text-emerald-300 transition hover:bg-emerald-500/30"
-                              >
-                                <Check className="h-4 w-4" />
-                                <span>Save</span>
-                              </button>
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => handleSaveSingleOption(optIndex)}
+                                  disabled={isMutating}
+                                  title="Save option details"
+                                  aria-label="Save option details"
+                                  className="inline-flex items-center justify-center rounded-xl bg-emerald-500/20 p-2 text-emerald-300 transition hover:bg-emerald-500/30 disabled:opacity-60"
+                                >
+                                  <Check className="h-4 w-4" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setExpandedOptionIndex(-1);
+                                    setOptionStatusMessage('');
+                                  }}
+                                  title="Collapse option"
+                                  aria-label="Collapse option"
+                                  className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 p-2 text-ink-200 transition hover:bg-white/10 hover:text-white"
+                                >
+                                  <X className="h-4 w-4" />
+                                </button>
+                              </>
                             ) : (
                               <button
                                 type="button"
-                                onClick={() => setExpandedOptionIndex(optIndex)}
+                                onClick={() => handleEditOption(optIndex)}
                                 title="Edit option details"
-                                className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-bold text-white transition hover:bg-white/10"
+                                aria-label="Edit option details"
+                                className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 p-2 text-brand-soft transition hover:bg-white/10"
                               >
-                                <Pencil className="h-4 w-4 text-brand-soft" />
-                                <span>Edit</span>
+                                <Pencil className="h-4 w-4" />
                               </button>
                             )}
 
@@ -1327,8 +1441,11 @@ export default function ServiceDetailsPage() {
                               onClick={() => {
                                 setDraftOptions((current) => current.filter((_, idx) => idx !== optIndex));
                                 if (expandedOptionIndex === optIndex) setExpandedOptionIndex(-1);
+                                else if (expandedOptionIndex > optIndex) setExpandedOptionIndex((prev) => prev - 1);
                               }}
-                              className="rounded-xl border border-red-500/20 bg-red-500/10 p-2 text-red-300 transition hover:bg-red-500/20"
+                              title="Remove option"
+                              aria-label="Remove option"
+                              className="inline-flex items-center justify-center rounded-xl border border-red-500/20 bg-red-500/10 p-2 text-red-300 transition hover:bg-red-500/20"
                             >
                               <Trash2 className="h-4 w-4" />
                             </button>
@@ -1336,7 +1453,7 @@ export default function ServiceDetailsPage() {
                         </div>
 
                         {isExpanded ? (
-                          <div className="mt-4 pt-4 border-t border-white/10">
+                          <div className="mt-4 min-w-0 w-full pt-4 border-t border-white/10">
                             <ServiceOptionEditor
                               option={opt}
                               allQuestions={[...draftRequiredQuestions, ...draftOptionalQuestions]}
@@ -1413,7 +1530,7 @@ export default function ServiceDetailsPage() {
                   </div>
                 </div>
                 {draftFiles.length ? (
-                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
                     {draftFiles.map((file) => (
                       <div key={`${file.name}-${file.lastModified}`} className="rounded-[20px] border border-white/10 bg-ink-950/40 px-4 py-3">
                         <p className="text-sm font-bold text-white">{file.name}</p>
@@ -1424,7 +1541,7 @@ export default function ServiceDetailsPage() {
                 ) : null}
               </div>
 
-              <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 {effectiveImages.length ? effectiveImages.map((picture) => (
                   <div key={picture.id} className="overflow-hidden rounded-[20px] border border-white/10 bg-white/5">
                     <img src={picture.uri} alt={draftLabel || 'Service'} className="h-40 w-full object-cover" />

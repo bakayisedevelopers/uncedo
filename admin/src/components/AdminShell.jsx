@@ -72,8 +72,8 @@ export default function AdminShell() {
   };
 
   return (
-    <div className="min-h-screen bg-dashboard-radial text-white">
-      <div className="mx-auto flex min-h-screen max-w-[1700px] flex-col lg:flex-row">
+    <div className="min-h-screen w-full overflow-x-hidden bg-dashboard-radial text-white">
+      <div className="mx-auto flex min-h-screen w-full max-w-[1700px] flex-col lg:flex-row">
         <aside className={`fixed inset-y-0 left-0 z-40 w-80 border-r border-white/10 bg-ink-900/96 px-5 py-6 shadow-2xl shadow-black/30 backdrop-blur transition-transform duration-200 lg:sticky lg:top-0 lg:flex lg:h-screen lg:translate-x-0 ${menuOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}`}>
           <div className="flex h-full flex-col gap-6">
             <div className="flex items-start justify-between">
@@ -136,7 +136,7 @@ export default function AdminShell() {
 
         {menuOpen ? <button type="button" aria-label="Close menu" className="fixed inset-0 z-30 bg-black/60 lg:hidden" onClick={() => setMenuOpen(false)} /> : null}
 
-        <main className="flex-1 px-4 pb-10 pt-4 sm:px-6 lg:px-8 lg:py-6">
+        <main className="min-w-0 w-full flex-1 px-4 pb-10 pt-4 sm:px-6 lg:px-8 lg:py-6">
           <header className="mb-6 flex items-center justify-between gap-4 rounded-[28px] border border-white/10 bg-white/5 px-4 py-4 shadow-glow backdrop-blur sm:px-5">
             <div className="min-w-0">
               <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-brand-soft/80">Admin console</p>
