@@ -106,6 +106,14 @@ function mapQuestionDrafts(questions = [], required = true) {
   return (Array.isArray(questions) ? questions : []).map((question, index) => createQuestionDraft(question, index, required));
 }
 
+function isQuestionComplete(question = {}) {
+  const prompt = String(question.prompt || '').trim();
+  if (!prompt) return false;
+  if (question.answerType === 'text') return true;
+  return (Array.isArray(question.options) ? question.options : [])
+    .some((option) => String(option?.label || '').trim());
+}
+
 function normalizeQuestionDrafts(questions = [], required = true) {
   return (Array.isArray(questions) ? questions : [])
     .filter((question) => question.enabled !== false && String(question.prompt || '').trim())
@@ -462,51 +470,129 @@ function QuestionEditor({
   questions,
   suggestions = [],
   onChange,
+  onPersistQuestions,
+  isMutating = false,
+  resetKey = '',
+  saveVersion = 0,
 }) {
+  const [expandedQuestionIndex, setExpandedQuestionIndex] = useState(-1);
+  const [questionStatusMessage, setQuestionStatusMessage] = useState('');
+
+  useEffect(() => {
+    setExpandedQuestionIndex(-1);
+    setQuestionStatusMessage('');
+  }, [resetKey]);
+
+  useEffect(() => {
+    if (!saveVersion) return;
+    setExpandedQuestionIndex(-1);
+    setQuestionStatusMessage('');
+  }, [saveVersion]);
+
   const updateQuestion = (targetIndex, nextQuestion) => {
     onChange(questions.map((question, index) => (index === targetIndex ? nextQuestion : question)));
   };
 
   const removeQuestion = (targetIndex) => {
     onChange(questions.filter((_, index) => index !== targetIndex));
+    if (expandedQuestionIndex === targetIndex) setExpandedQuestionIndex(-1);
+    else if (expandedQuestionIndex > targetIndex) setExpandedQuestionIndex((prev) => prev - 1);
   };
 
-  const addQuestion = () => {
-    onChange([
+  const autoSavePreviousOpenQuestion = async (nextIndex = -1) => {
+    if (expandedQuestionIndex < 0 || expandedQuestionIndex === nextIndex) return;
+    const openQuestion = questions[expandedQuestionIndex];
+    if (!openQuestion || !isQuestionComplete(openQuestion) || typeof onPersistQuestions !== 'function') return;
+    try {
+      const persisted = await onPersistQuestions(questions);
+      if (persisted) {
+        setQuestionStatusMessage('Previous question auto-saved.');
+      }
+    } catch (error) {
+      setQuestionStatusMessage(error.message || 'Could not auto-save previous question.');
+    }
+  };
+
+  const addQuestion = async () => {
+    setQuestionStatusMessage('');
+    await autoSavePreviousOpenQuestion(-1);
+    const usedIds = new Set(questions.map((q) => String(q.id || '').trim()).filter(Boolean));
+    let seq = questions.length + 1;
+    while (usedIds.has(`question_${seq}`)) seq += 1;
+    const nextQuestions = [
       ...questions,
       createQuestionDraft({
-        id: `question_${questions.length + 1}`,
+        id: `question_${seq}`,
         prompt: '',
         answerType: 'enum',
         options: [],
-      }, questions.length),
-    ]);
+      }, questions.length, required),
+    ];
+    onChange(nextQuestions);
+    setExpandedQuestionIndex(nextQuestions.length - 1);
+  };
+
+  const handleEditQuestion = async (targetIndex) => {
+    setQuestionStatusMessage('');
+    await autoSavePreviousOpenQuestion(targetIndex);
+    setExpandedQuestionIndex(targetIndex);
+  };
+
+  const handleSaveSingleQuestion = async (targetIndex) => {
+    const question = questions[targetIndex];
+    if (!question) return;
+    if (!isQuestionComplete(question)) {
+      setQuestionStatusMessage('Please enter a question prompt and at least one option (or switch to Text answer) before saving.');
+      return;
+    }
+
+    setQuestionStatusMessage('');
+    try {
+      const persisted = typeof onPersistQuestions === 'function'
+        ? await onPersistQuestions(questions)
+        : false;
+      setExpandedQuestionIndex(-1);
+      setQuestionStatusMessage(
+        persisted
+          ? 'Question saved to Firestore.'
+          : 'Question staged. Click "Create service" below to save the new service.',
+      );
+    } catch (error) {
+      setQuestionStatusMessage(error.message || 'Unable to save question.');
+    }
   };
 
   const appendSuggestedQuestion = (question) => {
+    setQuestionStatusMessage('');
     onChange(mergeQuestionDrafts(questions, [question], question.required !== false));
   };
 
   const appendAllSuggestedQuestions = () => {
+    setQuestionStatusMessage('');
     onChange(mergeQuestionDrafts(questions, suggestions, required));
   };
 
   return (
-    <div className="rounded-[24px] border border-white/10 bg-white/5 p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
+    <div className="min-w-0 w-full rounded-[24px] border border-white/10 bg-white/5 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
           <p className="font-bold text-white">{title}</p>
           <p className="mt-1 text-sm leading-6 text-ink-200">{description}</p>
         </div>
         <button
           type="button"
           onClick={addQuestion}
-          className="inline-flex items-center gap-2 rounded-2xl bg-brand px-4 py-3 text-sm font-bold text-white"
+          disabled={isMutating}
+          className="inline-flex shrink-0 items-center gap-2 rounded-2xl bg-brand px-4 py-3 text-sm font-bold text-white disabled:opacity-60"
         >
           <Plus className="h-4 w-4" />
           Add question
         </button>
       </div>
+
+      {questionStatusMessage ? (
+        <p className="mt-3 text-xs font-bold text-brand-soft">{questionStatusMessage}</p>
+      ) : null}
 
       {suggestions.length ? (
         <div className="mt-4 rounded-[20px] border border-dashed border-white/10 bg-ink-950/20 p-4">
@@ -540,102 +626,164 @@ function QuestionEditor({
         </div>
       ) : null}
 
-      <div className="mt-4 space-y-4">
-        {questions.length ? questions.map((question, index) => (
-          <div key={question.draftKey || `question_${index}`} className="rounded-[24px] border border-white/10 bg-ink-950/30 p-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-4">
-                <span className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Question {index + 1}</span>
-                <label className="flex items-center gap-2 text-sm text-ink-200">
-                  <input
-                    type="checkbox"
-                    checked={question.enabled !== false}
-                    onChange={(event) => updateQuestion(index, { ...question, enabled: event.target.checked })}
-                  />
-                  Enabled
-                </label>
-              </div>
-              <button
-                type="button"
-                onClick={() => removeQuestion(index)}
-                className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-bold text-white"
-              >
-                <Trash2 className="h-4 w-4" />
-                Remove
-              </button>
-            </div>
+      <div className="mt-4 min-w-0 w-full space-y-3">
+        {questions.length ? questions.map((question, index) => {
+          const isExpanded = expandedQuestionIndex === index;
+          const answerSummary = question.answerType === 'text'
+            ? 'Text answer'
+            : `Options (${Array.isArray(question.options) ? question.options.length : 0})`;
+          const typeSummary = question.type === 'standard' ? 'Standard' : 'Option-specific';
 
-            <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)_minmax(0,0.8fr)]">
-              <input
-                value={question.prompt}
-                onChange={(event) => updateQuestion(index, {
-                  ...question,
-                  prompt: event.target.value,
-                })}
-                placeholder="Question prompt"
-                className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
-              />
-              <select
-                value={question.type || 'option-specific'}
-                onChange={(event) => updateQuestion(index, { ...question, type: event.target.value })}
-                className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
-              >
-                <option value="option-specific">Option-specific</option>
-                <option value="standard">Standard (Always asked)</option>
-              </select>
-              <select
-                value={question.answerType}
-                onChange={(event) => updateQuestion(index, { ...question, answerType: event.target.value })}
-                className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
-              >
-                <option value="enum">Options</option>
-                <option value="text">Text answer</option>
-              </select>
-            </div>
+          return (
+            <div key={question.draftKey || `question_${index}`} className="min-w-0 w-full rounded-[22px] border border-white/10 bg-ink-950/40 p-3 sm:p-4 transition">
+              <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
+                <div className="flex min-w-0 flex-1 items-center gap-3">
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand/25 text-brand-soft font-bold text-sm">
+                    #{index + 1}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-bold text-white text-sm sm:text-base">{question.prompt || `Question ${index + 1} (Untitled)`}</p>
+                    <p className="truncate text-xs text-ink-300">
+                      {typeSummary} • {answerSummary}{question.enabled === false ? ' • Disabled' : ''}
+                    </p>
+                  </div>
+                </div>
 
-            {question.answerType === 'text' ? (
-              <input
-                value={question.answerHint}
-                onChange={(event) => updateQuestion(index, { ...question, answerHint: event.target.value })}
-                placeholder="Answer hint for customers"
-                className="mt-4 w-full rounded-2xl border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
-              />
-            ) : (
-              <div className="mt-4 space-y-3">
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-sm font-bold text-white">Options and added price</p>
+                <div className="flex shrink-0 items-center gap-2">
+                  {isExpanded ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => handleSaveSingleQuestion(index)}
+                        disabled={isMutating}
+                        title="Save question details"
+                        aria-label="Save question details"
+                        className="inline-flex items-center justify-center rounded-xl bg-emerald-500/20 p-2 text-emerald-300 transition hover:bg-emerald-500/30 disabled:opacity-60"
+                      >
+                        <Check className="h-4 w-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setExpandedQuestionIndex(-1);
+                          setQuestionStatusMessage('');
+                        }}
+                        title="Collapse question"
+                        aria-label="Collapse question"
+                        className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 p-2 text-ink-200 transition hover:bg-white/10 hover:text-white"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => handleEditQuestion(index)}
+                      title="Edit question details"
+                      aria-label="Edit question details"
+                      className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 p-2 text-brand-soft transition hover:bg-white/10"
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </button>
+                  )}
+
                   <button
                     type="button"
-                    onClick={() => updateQuestion(index, {
-                      ...question,
-                      options: [...question.options, createOptionDraft({}, question.options.length)],
-                    })}
-                    className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-bold text-white"
+                    onClick={() => removeQuestion(index)}
+                    title="Remove question"
+                    aria-label="Remove question"
+                    className="inline-flex items-center justify-center rounded-xl border border-red-500/20 bg-red-500/10 p-2 text-red-300 transition hover:bg-red-500/20"
                   >
-                    <Plus className="h-4 w-4" />
-                    Add option
+                    <Trash2 className="h-4 w-4" />
                   </button>
                 </div>
-                {question.options.length ? question.options.map((option, optionIndex) => (
-                  <QuestionOptionEditor
-                    key={option.draftKey || `option_${optionIndex}`}
-                    option={option}
-                    onChange={(nextOption) => updateQuestion(index, {
-                      ...question,
-                      options: question.options.map((currentOption, currentIndex) => (currentIndex === optionIndex ? nextOption : currentOption)),
-                    })}
-                    onRemove={() => updateQuestion(index, {
-                      ...question,
-                      options: question.options.filter((_, currentIndex) => currentIndex !== optionIndex),
-                    })}
-                  />
-                )) : (
-                  <p className="text-sm text-ink-300">Add at least one option so the admin can control the added price for each answer.</p>
-                )}
               </div>
-            )}
-          </div>
-        )) : (
+
+              {isExpanded ? (
+                <div className="mt-4 min-w-0 w-full space-y-4 pt-4 border-t border-white/10">
+                  <label className="flex items-center gap-2 text-sm text-ink-200">
+                    <input
+                      type="checkbox"
+                      checked={question.enabled !== false}
+                      onChange={(event) => updateQuestion(index, { ...question, enabled: event.target.checked })}
+                    />
+                    Enabled
+                  </label>
+
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)_minmax(0,0.8fr)]">
+                    <input
+                      value={question.prompt}
+                      onChange={(event) => updateQuestion(index, {
+                        ...question,
+                        prompt: event.target.value,
+                      })}
+                      placeholder="Question prompt"
+                      className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
+                    />
+                    <select
+                      value={question.type || 'option-specific'}
+                      onChange={(event) => updateQuestion(index, { ...question, type: event.target.value })}
+                      className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
+                    >
+                      <option value="option-specific">Option-specific</option>
+                      <option value="standard">Standard (Always asked)</option>
+                    </select>
+                    <select
+                      value={question.answerType}
+                      onChange={(event) => updateQuestion(index, { ...question, answerType: event.target.value })}
+                      className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
+                    >
+                      <option value="enum">Options</option>
+                      <option value="text">Text answer</option>
+                    </select>
+                  </div>
+
+                  {question.answerType === 'text' ? (
+                    <input
+                      value={question.answerHint}
+                      onChange={(event) => updateQuestion(index, { ...question, answerHint: event.target.value })}
+                      placeholder="Answer hint for customers"
+                      className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-4 py-3 text-sm text-white outline-none"
+                    />
+                  ) : (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-sm font-bold text-white">Options and added price</p>
+                        <button
+                          type="button"
+                          onClick={() => updateQuestion(index, {
+                            ...question,
+                            options: [...question.options, createOptionDraft({}, question.options.length)],
+                          })}
+                          className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-bold text-white"
+                        >
+                          <Plus className="h-4 w-4" />
+                          Add option
+                        </button>
+                      </div>
+                      {question.options.length ? question.options.map((option, optionIndex) => (
+                        <QuestionOptionEditor
+                          key={option.draftKey || `option_${optionIndex}`}
+                          option={option}
+                          onChange={(nextOption) => updateQuestion(index, {
+                            ...question,
+                            options: question.options.map((currentOption, currentIndex) => (currentIndex === optionIndex ? nextOption : currentOption)),
+                          })}
+                          onRemove={() => updateQuestion(index, {
+                            ...question,
+                            options: question.options.filter((_, currentIndex) => currentIndex !== optionIndex),
+                          })}
+                        />
+                      )) : (
+                        <p className="text-sm text-ink-300">Add at least one option so the admin can control the added price for each answer.</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </div>
+          );
+        }) : (
           <EmptyState title="No questions yet" description="Add questions here so the customer flow reads them directly from the backend." />
         )}
       </div>
@@ -675,6 +823,7 @@ export default function ServiceDetailsPage() {
   const [draftOptions, setDraftOptions] = useState([]);
   const [expandedOptionIndex, setExpandedOptionIndex] = useState(-1);
   const [optionStatusMessage, setOptionStatusMessage] = useState('');
+  const [questionSaveVersion, setQuestionSaveVersion] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -1007,6 +1156,28 @@ export default function ServiceDetailsPage() {
     }
   };
 
+  const persistQuestionnaireSection = async (sectionKey, nextQuestions) => {
+    const targetServiceId = slugify(draftServiceId || draftLabel);
+    if (!targetServiceId || !draftLabel.trim() || !draftCategoryId.trim() || selectedService?.id === 'new') {
+      return false;
+    }
+
+    setIsMutating(true);
+    try {
+      const saved = await saveServiceCatalogEntry(targetServiceId, {
+        ...buildPayload(effectiveImages),
+        questionnaire: {
+          required: normalizeQuestionDrafts(sectionKey === 'required' ? nextQuestions : draftRequiredQuestions, true),
+          optional: normalizeQuestionDrafts(sectionKey === 'optional' ? nextQuestions : draftOptionalQuestions, false),
+        },
+      });
+      upsertSavedService(saved);
+      return true;
+    } finally {
+      setIsMutating(false);
+    }
+  };
+
   const handleServiceSave = async () => {
     const targetServiceId = slugify(draftServiceId || draftLabel);
     if (!targetServiceId || !draftLabel.trim() || !draftCategoryId.trim()) {
@@ -1027,6 +1198,7 @@ export default function ServiceDetailsPage() {
       setDraftFiles([]);
       setExpandedOptionIndex(-1);
       setOptionStatusMessage('');
+      setQuestionSaveVersion((prev) => prev + 1);
       setMessage('Service saved to Firestore.');
       await refreshHelpers();
     } catch (error) {
@@ -1514,6 +1686,10 @@ export default function ServiceDetailsPage() {
                   questions={draftRequiredQuestions}
                   suggestions={suggestedQuestionSet.required}
                   onChange={setDraftRequiredQuestions}
+                  onPersistQuestions={(nextQuestions) => persistQuestionnaireSection('required', nextQuestions)}
+                  isMutating={isMutating}
+                  resetKey={selectedService?.id || 'new'}
+                  saveVersion={questionSaveVersion}
                 />
                 <QuestionEditor
                   title="Optional questions"
@@ -1522,6 +1698,10 @@ export default function ServiceDetailsPage() {
                   questions={draftOptionalQuestions}
                   suggestions={suggestedQuestionSet.optional}
                   onChange={setDraftOptionalQuestions}
+                  onPersistQuestions={(nextQuestions) => persistQuestionnaireSection('optional', nextQuestions)}
+                  isMutating={isMutating}
+                  resetKey={selectedService?.id || 'new'}
+                  saveVersion={questionSaveVersion}
                 />
               </div>
 

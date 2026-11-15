@@ -173,6 +173,23 @@
               "value": "nosniff"
             }
           ]
+        },
+        {
+          "source": "/onboarding",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "no-cache, max-age=0, must-revalidate"
+            },
+            {
+              "key": "Referrer-Policy",
+              "value": "no-referrer"
+            },
+            {
+              "key": "X-Content-Type-Options",
+              "value": "nosniff"
+            }
+          ]
         }
       ],
       "rewrites": [
@@ -182,6 +199,10 @@
         },
         {
           "source": "/sign-up",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/onboarding",
           "destination": "/app.html"
         },
         {

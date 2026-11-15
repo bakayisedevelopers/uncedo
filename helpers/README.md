@@ -20,8 +20,7 @@ This folder contains the Expo React Native app for helpers.
 - Automatic Monday helper payout batching backed by Firestore payout records
 - New wallet-accounted earnings are kept out of the legacy request-based earnings summary so the same amount is not counted twice. Failed new wallet payouts return to available wallet funds after Paystack confirms failure; pending outcomes remain reserved.
 - Map-driven job and route views
-- Browser build served from a dedicated Firebase Hosting site. It uses the same helper identity, profile-completion steps, and pending/verified status checks as the mobile app. `/sign-agreement` is a sign-in-only route for short-lived WhatsApp-linked agreement invitations; `/service-photos` is a sign-in-only page where WhatsApp helpers upload device photos for each selected service; `/profile-photo` is a sign-in-only page where WhatsApp helpers capture or upload their profile photo; `/payout-details` is a sign-in-only page where WhatsApp helpers verify their South African bank payout account via Paystack. The backend verifies the signed-in UID matches the linked helper identity before advancing the WhatsApp conversation.
-- The Helpers website opens on a dedicated responsive landing page at `/`, with separate `/sign-in` and `/sign-up` routes. This marketing-style entry page is web-only; native apps continue to open the existing authentication flow.
+- Browser onboarding and account routes (`/`, `/sign-in`, `/sign-up`, `/onboarding`, `/sign-agreement`, `/service-photos`, `/profile-photo`, `/payout-details`, `/whatsapp-link`) are served from Firebase Hosting `helpers/dist`, built by the dedicated React + Vite web portal in `../helpers-web`. It shares the same Firebase project, Firestore schemas, Cloud Functions, and verification rules while providing a dedicated 7-step web onboarding UI separate from the mobile app.
 
 ## Stack
 
@@ -40,14 +39,11 @@ npm run start
 npm run android
 npm run ios
 npm run web
-npm run web:build
 ```
 
 `npm run start`, `npm run android`, `npm run ios`, and `npm run web` now auto-run the Google Maps key preparation script before Expo starts so local map builds do not keep the native placeholder key.
 
-`npm run web:build` exports the helper application into `helpers/dist/app.html` and prepares a separate static landing page as `helpers/dist/index.html`. The Firebase Hosting root serves the landing page; `/sign-in`, `/sign-up`, `/sign-agreement`, `/service-photos`, `/profile-photo`, and `/payout-details` serve the Expo app. Agreement invitations use an opaque token in the URL fragment, require email sign-in, and use the same callable acceptance operation as the Helpers app. Native Google Navigation SDK guidance is unavailable in the browser; web builds use a no-op navigation adapter.
-
-Browser Google sign-in uses Firebase Authentication and stays disabled until the Google provider and OAuth client are configured in Firebase. The `/whatsapp-link` route consumes a one-time link delivered to the matching WhatsApp chat, connects the uniquely matched account, and returns the user to Uncedo without asking for email credentials. WhatsApp OTP sign-in remains unavailable until the matching Cloud Functions and approved Meta authentication template are configured; the button reports this state while its feature flag is false.
+The deployed website in `helpers/dist` is built from `../helpers-web` (`npm --prefix ../helpers-web run build`), which outputs `helpers/dist/index.html` and copies it to `helpers/dist/app.html` for Firebase Hosting rewrites. Native mobile builds continue to run directly from `/helpers`.
 
 The helper Android app now requires React Native new architecture and Android core-library desugaring because the Google Navigation SDK depends on them.
 

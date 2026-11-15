@@ -6,6 +6,7 @@ const {
   getWhatsAppSignupUrl,
   getWhatsAppAccountLinkUrl,
   getWhatsAppHelperAgreementUrl,
+  getWhatsAppHelperOnboardingUrl,
 } = require('./signupLinks');
 
 test('WhatsApp signup links use the customer and helper custom domains', () => {
@@ -23,8 +24,13 @@ test('WhatsApp account verification pages use the role-specific custom domain', 
   assert.equal(getWhatsAppAccountLinkUrl({ role: 'helper' }).toString(), 'https://helpers.bakayise.com/whatsapp-link');
 });
 
-test('WhatsApp helper agreement uses the helper custom domain', () => {
+test('WhatsApp helper agreement and onboarding use the helper custom domain', () => {
   assert.equal(getWhatsAppHelperAgreementUrl(), 'https://helpers.bakayise.com/sign-agreement');
+  assert.equal(getWhatsAppHelperOnboardingUrl(), 'https://helpers.bakayise.com/onboarding');
+  assert.equal(
+    getWhatsAppHelperOnboardingUrl({ env: { WHATSAPP_HELPER_ONBOARDING_URL: 'https://custom.example/start?ref=1' } }),
+    'https://custom.example/onboarding',
+  );
 });
 
 test('configured account URLs retain their host while selecting the correct route', () => {
@@ -44,4 +50,5 @@ test('WhatsApp account URLs reject unsupported roles, modes, and insecure scheme
   assert.throws(() => getWhatsAppSignupUrl({ role: 'helper', mode: 'register' }), /mode/);
   assert.throws(() => getWhatsAppSignupUrl({ role: 'helper', env: { WHATSAPP_HELPER_SIGNUP_URL: 'http://example.test/sign-up' } }), /HTTPS/);
   assert.throws(() => getWhatsAppHelperAgreementUrl({ env: { WHATSAPP_HELPER_AGREEMENT_URL: 'http://example.test/sign-agreement' } }), /HTTPS/);
+  assert.throws(() => getWhatsAppHelperOnboardingUrl({ env: { WHATSAPP_HELPER_ONBOARDING_URL: 'http://example.test/onboarding' } }), /HTTPS/);
 });

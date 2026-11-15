@@ -150,3 +150,61 @@ test('booking confirmation displays selectedOption title when present', () => {
   assert.match(confirmation.buttonBody, /Hairstyles — Knotless Braids/);
 });
 
+test('formatWhatsAppNextQuestion builds schema-valid carousel cards when question options include images', () => {
+  const { formatWhatsAppNextQuestion } = require('./serviceBookingPresentation');
+  const result = formatWhatsAppNextQuestion({
+    service: { label: 'Barber' },
+    question: {
+      id: 'cut_style',
+      prompt: 'Choose a haircut',
+      options: [
+        { value: 'fade', label: 'Taper Fade', imageUrl: 'https://example.com/fade.jpg', priceAdder: 50 },
+        { value: 'brush', label: 'Brush Cut', imageUrl: '' },
+      ],
+    },
+    index: 0,
+    total: 2,
+  });
+  assert.equal(result.interactive.type, 'carousel');
+  assert.equal(result.interactive.action.cards.length, 2);
+  assert.equal(result.interactive.action.cards[0].type, 'button');
+  assert.equal(result.interactive.action.cards[1].type, 'button');
+  assert.equal(result.interactive.action.cards[0].header.image.link, 'https://example.com/fade.jpg');
+  assert.equal(result.interactive.action.cards[1].header.image.link, 'https://uncedo.bakayise.com/logo.png');
+});
+
+test('formatWhatsAppSubmittedRequestConfirmation shows lively summary details without a request reference', () => {
+  const { formatWhatsAppSubmittedRequestConfirmation } = require('./serviceBookingPresentation');
+  const message = formatWhatsAppSubmittedRequestConfirmation({
+    service: { id: 'hairstyle', label: 'Hairstyle' },
+    selectedOption: { id: 'braids', title: 'Box Braids' },
+    questions: [
+      { id: 'hair_length', prompt: 'Hair length', options: [{ value: 'long', label: 'Long' }] },
+      { id: 'notes', prompt: 'Extra notes' },
+    ],
+    answers: { hair_length: 'long', notes: 'Please bring gel' },
+    quote: { total: 350, currency: 'ZAR' },
+    location: { address: '12 Main Road, Sandton' },
+  });
+  assert.match(message, /Awesome — your service request is confirmed/);
+  assert.match(message, /🛠️ \*Service:\* Hairstyle/);
+  assert.match(message, /✨ \*Option:\* Box Braids/);
+  assert.match(message, /📍 \*Location:\* 12 Main Road, Sandton/);
+  assert.match(message, /💰 \*Quote:\* R350\.00/);
+  assert.match(message, /• \*Hair length:\* Long/);
+  assert.match(message, /• \*Extra notes:\* Please bring gel/);
+  assert.doesNotMatch(message, /reference|wa_req_/i);
+});
+
+test('formatWhatsAppRequestExpiredMessage is warm, cleans category prefix, and omits request reference', () => {
+  const { formatWhatsAppRequestExpiredMessage } = require('./serviceBookingPresentation');
+  const message = formatWhatsAppRequestExpiredMessage({
+    request: { id: 'wa_req_123', serviceSummary: 'beauty: Hairstyle — Phondo', subject: 'Beauty' },
+  });
+  assert.match(message, /No helpers were available right now/);
+  assert.match(message, /\*Hairstyle — Phondo\*/);
+  assert.match(message, /5-minute matching window/);
+  assert.match(message, /"Book"/);
+  assert.doesNotMatch(message, /wa_req_123|reference|beauty:/i);
+});
+

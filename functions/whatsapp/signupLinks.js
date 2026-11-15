@@ -54,9 +54,27 @@ function getWhatsAppHelperAgreementUrl({ env = process.env } = {}) {
   return url.toString();
 }
 
+function getWhatsAppHelperOnboardingUrl({ env = process.env } = {}) {
+  const configured = String(env?.WHATSAPP_HELPER_ONBOARDING_URL || env?.WHATSAPP_HELPER_SIGNUP_URL || 'https://helpers.bakayise.com/onboarding').trim();
+  let url;
+  try {
+    url = new URL(configured);
+  } catch (_) {
+    throw new Error('The WhatsApp helper onboarding URL is invalid.');
+  }
+  if (url.protocol !== 'https:' || url.username || url.password) {
+    throw new Error('The WhatsApp helper onboarding URL must use HTTPS and cannot contain credentials.');
+  }
+  url.pathname = '/onboarding';
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
 module.exports = {
   DEFAULT_SIGNUP_URLS,
   getWhatsAppSignupUrl,
   getWhatsAppAccountLinkUrl,
   getWhatsAppHelperAgreementUrl,
+  getWhatsAppHelperOnboardingUrl,
 };

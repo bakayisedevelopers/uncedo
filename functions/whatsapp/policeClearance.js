@@ -124,6 +124,33 @@ function meetsHelperPoliceClearanceRequirement(required, status) {
   return required !== true || isHelperPoliceClearanceApproved(status);
 }
 
+function validatePoliceClearanceBuffer({ mimeType = '', buffer = null } = {}) {
+  if (!Buffer.isBuffer(buffer) || !buffer.length) return null;
+  const normalizedMime = String(mimeType || '').split(';')[0].trim().toLowerCase();
+  if (normalizedMime === 'application/pdf') {
+    const maxBytes = 10 * 1024 * 1024;
+    if (buffer.length > maxBytes) return null;
+    if (buffer.subarray(0, 5).toString('ascii') !== '%PDF-') return null;
+    return { mediaType: 'document', mimeType: 'application/pdf', extension: 'pdf', maxBytes, size: buffer.length };
+  }
+  if (normalizedMime === 'image/jpeg' || normalizedMime === 'image/jpg') {
+    const maxBytes = 5 * 1024 * 1024;
+    if (buffer.length > maxBytes) return null;
+    if (buffer.length < 3 || buffer[0] !== 0xff || buffer[1] !== 0xd8 || buffer[2] !== 0xff) return null;
+    return { mediaType: 'image', mimeType: 'image/jpeg', extension: 'jpg', maxBytes, size: buffer.length };
+  }
+  if (normalizedMime === 'image/png') {
+    const maxBytes = 5 * 1024 * 1024;
+    const pngSig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    if (buffer.length > maxBytes || buffer.length < pngSig.length) return null;
+    for (let i = 0; i < pngSig.length; i += 1) {
+      if (buffer[i] !== pngSig[i]) return null;
+    }
+    return { mediaType: 'image', mimeType: 'image/png', extension: 'png', maxBytes, size: buffer.length };
+  }
+  return null;
+}
+
 module.exports = {
   CLEARANCE_STATUSES,
   MAX_CLEARANCE_REVIEW_VALIDITY_DAYS,
@@ -138,4 +165,5 @@ module.exports = {
   policeClearanceStoragePath,
   policeClearanceSubmissionId,
   storePoliceClearanceObject,
+  validatePoliceClearanceBuffer,
 };

@@ -137,6 +137,92 @@ function formatWhatsAppBookingConfirmation({ service = {}, selectedOption = null
   };
 }
 
+function formatWhatsAppSubmittedRequestConfirmation({
+  service = {},
+  selectedOption = null,
+  questions = [],
+  answers = {},
+  quote = {},
+  location = null,
+} = {}) {
+  const serviceLabel = safeLabel(service.label || service.id || 'Uncedo service', 180);
+  const optionTitle = safeLabel(selectedOption?.title || quote?.selectedOptionTitle || '', 140);
+  const questionList = Array.isArray(questions) ? questions : [];
+  const answerMap = answers && typeof answers === 'object' && !Array.isArray(answers) ? answers : {};
+  const questionById = new Map(questionList.map((question) => [String(question?.id || ''), question]));
+  const detailLines = questionList.length
+    ? questionList
+      .map((question) => {
+        const raw = answerMap[question.id];
+        const values = Array.isArray(raw) ? raw : raw == null || String(raw).trim() === '' ? [] : [raw];
+        if (!values.length) return '';
+        const optionLabels = new Map((Array.isArray(question.options) ? question.options : [])
+          .map((option) => [String(option.value || '').toLowerCase(), safeLabel(option.label || option.value || '', 140)]));
+        const display = values
+          .map((value) => optionLabels.get(String(value).toLowerCase()) || safeLabel(value, 220))
+          .filter(Boolean)
+          .join(', ');
+        if (!display) return '';
+        return `• *${safeLabel(question.prompt || question.label || question.id, 140)}:* ${display}`;
+      })
+      .filter(Boolean)
+      .slice(0, 12)
+    : Object.entries(answerMap)
+      .map(([key, raw]) => {
+        if (questionById.has(key)) return '';
+        const values = Array.isArray(raw) ? raw : raw == null || String(raw).trim() === '' ? [] : [raw];
+        if (!values.length) return '';
+        const label = safeLabel(String(key).replace(/_/g, ' '), 100);
+        const display = values.map((v) => safeLabel(v, 180)).filter(Boolean).join(', ');
+        return label && display ? `• *${label}:* ${display}` : '';
+      })
+      .filter(Boolean)
+      .slice(0, 10);
+
+  const addressText = safeLabel(location?.address || '', 200);
+  const hasCoordinates = Number.isFinite(Number(location?.latitude)) && Number.isFinite(Number(location?.longitude));
+  const locationLine = addressText
+    ? `📍 *Location:* ${addressText}`
+    : hasCoordinates
+      ? '📍 *Location:* Shared WhatsApp location pin'
+      : '';
+
+  const total = Number(quote?.total);
+  const normalizedCurrency = String(quote?.currency || 'ZAR').trim().toUpperCase();
+  const currency = /^[A-Z]{3}$/.test(normalizedCurrency) ? normalizedCurrency : 'ZAR';
+  const formattedAmount = Number.isFinite(total) && total > 0
+    ? (currency === 'ZAR' ? `R${total.toFixed(2)}` : `${currency} ${total.toFixed(2)}`)
+    : '';
+
+  const summaryLines = [
+    `🛠️ *Service:* ${serviceLabel}`,
+    optionTitle ? `✨ *Option:* ${optionTitle}` : '',
+    locationLine,
+    formattedAmount ? `💰 *Quote:* ${formattedAmount}` : '',
+  ].filter(Boolean);
+
+  const sections = [
+    '🎉 *Awesome — your service request is confirmed!*',
+    `*Request summary*\n${summaryLines.join('\n')}`,
+    detailLines.length ? `📋 *Your details:*\n${detailLines.join('\n')}` : '',
+    '🔍 We’re now reaching out to nearby verified helpers for you. Hang tight — we’ll message you right here as soon as a helper accepts! 🙌',
+  ].filter(Boolean);
+
+  return formatWhatsAppText(sections.join('\n\n'));
+}
+
+function formatWhatsAppRequestExpiredMessage({ request = {} } = {}) {
+  const rawSummary = safeLabel(request.serviceSummary || request.subject || '', 160);
+  const cleanedSummary = rawSummary.replace(/^[a-z][a-z0-9 _-]{1,40}:\s*/i, '').trim() || rawSummary;
+  const servicePhrase = cleanedSummary ? `*${cleanedSummary}*` : 'your service';
+  const sections = [
+    '😔 *No helpers were available right now*',
+    `All nearby verified helpers for ${servicePhrase} were busy or out of reach within our 5-minute matching window, so this request has expired.`,
+    '🔄 Whenever you’re ready to try again, simply reply *"Book"* or *"What services do you offer?"* to start a fresh request or try a different time! ✨',
+  ];
+  return formatWhatsAppText(sections.join('\n\n'));
+}
+
 function formatWhatsAppNextQuestion({
   service = {},
   selectedOption = null,
@@ -186,14 +272,17 @@ function formatWhatsAppNextQuestion({
     };
   }).filter((opt) => opt.value);
 
-  const hasImages = options.some((opt) => opt.imageUrl && opt.imageUrl.startsWith('http'));
-  if (hasImages && options.length <= 10) {
-    const cards = options.map((opt, index) => ({
-      card_index: index,
+  const hasImages = options.some((opt) => opt.imageUrl && opt.imageUrl.startsWith('https://'));
+  if (hasImages && options.length >= 2 && options.length <= 10) {
+    const cards = options.map((opt, cardIndex) => ({
+      card_index: cardIndex,
+      type: 'button',
       header: {
         type: 'image',
         image: {
-          link: opt.imageUrl,
+          link: (opt.imageUrl && opt.imageUrl.startsWith('https://') && !/\.(?:webp|svg|gif|avif)(?:$|[?#])/i.test(opt.imageUrl))
+            ? opt.imageUrl
+            : 'https://uncedo.bakayise.com/logo.png',
         },
       },
       body: {
@@ -288,6 +377,8 @@ function formatWhatsAppNextQuestion({
 module.exports = {
   formatWhatsAppBookingConfirmation,
   formatWhatsAppNextQuestion,
+  formatWhatsAppRequestExpiredMessage,
   formatWhatsAppServiceOptionPrompt,
+  formatWhatsAppSubmittedRequestConfirmation,
   renderMissingWhatsAppQuestions,
 };

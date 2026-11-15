@@ -96,6 +96,8 @@ function createMetaWhatsAppClient({ accessToken, phoneNumberId, graphApiVersion,
       error.code = `meta_http_${response.status}`;
       error.metaCode = String(result?.error?.code || '');
       error.metaSubcode = String(result?.error?.error_subcode || '');
+      error.metaMessage = String(result?.error?.message || '').slice(0, 300);
+      error.metaDetails = String(result?.error?.error_data?.details || '').slice(0, 300);
       throw error;
     }
     const messageId = String(result?.messages?.[0]?.id || '');

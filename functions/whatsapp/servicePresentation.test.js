@@ -54,23 +54,59 @@ test('pricing is included only when the wording asks or implies a price question
   assert.doesNotMatch(pricing, /250/);
 });
 
-test('buildWhatsAppServiceCarousel generates valid interactive carousel cards with Book and Learn More buttons', () => {
+test('buildWhatsAppServiceCarousel generates valid interactive carousel cards with type=button, Book/Learn more buttons, and safe HTTPS images', () => {
   const { buildWhatsAppServiceCarousel } = require('./servicePresentation');
   const services = [
-    { id: 'svc_barber', label: 'Barber Grooming', categoryName: 'Personal Care', description: 'Fresh haircut', images: [{ uri: 'https://example.com/barber.jpg' }] },
-    { id: 'svc_clean', label: 'House Cleaning', categoryName: 'Home Care', description: 'Deep home cleaning' },
+    { id: 'svc_barber', label: 'Barber Grooming', categoryName: 'Personal Care', description: 'Fresh haircut with a very long description that exceeds the card character limit smoothly without breaking bold markers.', images: [{ uri: 'https://example.com/barber.jpg' }] },
+    { id: 'svc_clean', label: 'House Cleaning', categoryName: 'Home Care', description: 'Deep home cleaning', images: [{ uri: 'https://example.com/photo.webp' }] },
   ];
   const carousel = buildWhatsAppServiceCarousel(services);
   assert.equal(carousel.type, 'carousel');
   assert.equal(carousel.action.cards.length, 2);
+  assert.equal(carousel.action.cards[0].type, 'button');
+  assert.equal(carousel.action.cards[1].type, 'button');
   assert.equal(carousel.action.cards[0].header.image.link, 'https://example.com/barber.jpg');
+  assert.ok(carousel.action.cards[0].body.text.length <= 160);
   assert.equal(carousel.action.cards[0].action.buttons[0].quick_reply.title, 'Book');
   assert.equal(carousel.action.cards[0].action.buttons[0].quick_reply.id, 'wa_book_svc_svc_barber');
   assert.equal(carousel.action.cards[0].action.buttons[1].quick_reply.title, 'Learn more');
   assert.equal(carousel.action.cards[0].action.buttons[1].quick_reply.id, 'wa_learn_svc_svc_barber');
 
-  // Service without image falls back to placeholder image
-  assert.match(carousel.action.cards[1].header.image.link, /^https:\/\//);
+  // Unsupported .webp or missing image falls back to HTTPS PNG placeholder image
+  assert.equal(carousel.action.cards[1].header.image.link, 'https://uncedo.bakayise.com/logo.png');
+});
+
+test('formatWhatsAppServiceDetailsMessage and formatWhatsAppPriceDetailsMessage stay within 1024-char button body limit with complete info', () => {
+  const {
+    MAX_INTERACTIVE_BODY_CHARS,
+    formatWhatsAppPriceDetailsMessage,
+    formatWhatsAppServiceDetailsMessage,
+  } = require('./servicePresentation');
+  const service = {
+    id: 'hairstyle',
+    label: 'Hairstyle',
+    categoryName: 'Beauty',
+    description: 'Professional home-visit hair styling for every occasion.',
+    options: [
+      { id: 'opt_1', title: 'Braids/Twist', price: 250 },
+      { id: 'opt_2', title: 'Straight back', price: 150 },
+    ],
+  };
+  const info = formatWhatsAppServiceDetailsMessage({
+    service,
+    questions: [{ id: 'length', prompt: 'What hair length do you prefer?' }],
+  });
+  assert.ok(info.length <= MAX_INTERACTIVE_BODY_CHARS);
+  assert.match(info, /\*Hairstyle\*/);
+  assert.match(info, /Professional home-visit hair styling/);
+  assert.match(info, /R150\.00 – R250\.00/);
+  assert.match(info, /\*Braids\/Twist\* — R250\.00/);
+  assert.match(info, /What hair length do you prefer\?/);
+
+  const priceDetails = formatWhatsAppPriceDetailsMessage({ service });
+  assert.ok(priceDetails.length <= MAX_INTERACTIVE_BODY_CHARS);
+  assert.match(priceDetails, /ZAR 150\.00–ZAR 250\.00/);
+  assert.match(priceDetails, /\*Braids\/Twist:\* R250\.00/);
 });
 
 test('services with configured options derive price range from option prices when no explicit range exists', () => {

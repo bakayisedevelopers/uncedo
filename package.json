@@ -3,12 +3,16 @@
   "private": true,
   "workspaces": [
     "web",
-    "admin"
+    "admin",
+    "helpers-web"
   ],
   "scripts": {
-    "dev": "npm run dev --workspace=uncedo-admin",
-    "build": "npm run build --workspace=uncedo-admin",
-    "lint": "npm run build --workspace=uncedo-admin",
+    "dev": "npm run dev --workspace=uncedo-helpers-web",
+    "dev:admin": "npm run dev --workspace=uncedo-admin",
+    "dev:helpers": "npm run dev --workspace=uncedo-helpers-web",
+    "build": "npm run build --workspace=uncedo-helpers-web",
+    "build:admin": "npm run build --workspace=uncedo-admin",
+    "lint": "npm run build --workspace=uncedo-helpers-web && npm run build --workspace=uncedo-admin",
     "validate:rewards:shared": "node scripts/validate-reward-shared.cjs",
     "test:constants": "node scripts/validate-reward-constants.js",
     "test:rules": "firebase emulators:exec --project demo-uncedo-phase0 --only auth,firestore,storage \"node --test functions/test/firestore.rules.test.js\"",

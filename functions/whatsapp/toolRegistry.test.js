@@ -167,14 +167,15 @@ test('getServiceDetails tool executes for guests and linked accounts', async () 
     getServiceDetails: async (args) => {
       assert.equal(args.query, 'barber');
       return {
-        found: true,
-        serviceId: 'svc_barber',
-        serviceName: 'Barber Grooming',
-        categoryName: 'Personal Care',
+        code: 'found',
+        id: 'svc_barber',
+        label: 'Barber Grooming',
+        category: 'Personal Care',
         description: 'Professional barber cuts at your home.',
-        whatIsOffered: 'Haircut style: Fade, Buzz; Beard grooming',
-        priceEstimate: 'R150 - R300',
-        optionsAvailable: 'Style | Beard',
+        priceRange: 'R150.00 - R300.00 ZAR',
+        helperCount: 3,
+        serviceOptions: [{ id: 'fade', title: 'Fade Cut', price: 150, description: 'Clean fade' }],
+        options: [{ id: 'style', prompt: 'Haircut style', options: ['Fade', 'Buzz'] }],
       };
     },
   } });
@@ -183,9 +184,9 @@ test('getServiceDetails tool executes for guests and linked accounts', async () 
     identity: { guestPrincipalId: 'guest-1' },
     authorization: { role: 'guest', verified: false, linked: false },
   });
-  assert.equal(result.found, true);
-  assert.equal(result.serviceName, 'Barber Grooming');
-  assert.equal(result.whatIsOffered, 'Haircut style: Fade, Buzz; Beard grooming');
+  assert.equal(result.code, 'found');
+  assert.equal(result.label, 'Barber Grooming');
+  assert.equal(result.serviceOptions[0].title, 'Fade Cut');
 });
 
 test('service discovery, detail, and booking tools allow optional empty string arguments and error codes', async () => {

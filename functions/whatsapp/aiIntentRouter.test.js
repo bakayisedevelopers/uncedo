@@ -39,6 +39,7 @@ test('intent prompt bounds history, includes approved tools, and marks messages 
   assert.match(prompt, /"text":"11"/);
   assert.match(prompt, /getMyProfile/);
   assert.match(prompt, /ordinary conversation do not need a tool/);
+  assert.match(prompt, /NEVER call initiateServiceBooking for informational/);
   assert.match(prompt, /"allowedIntents":\[/);
   assert.match(prompt, /"allowedToolNames":\["","getMyProfile"\]/);
 });
@@ -306,4 +307,12 @@ test('Vertex service-disabled diagnostics remain specific without exposing provi
     assert.doesNotMatch(`${error.message} ${JSON.stringify(error.providerFailures)}`, /private-project-id|private message/);
     return true;
   });
+});
+
+test('classification prompt forbids re-calling already-completed tools in toolResults', () => {
+  const prompt = buildPrompt({
+    message: { text: 'Tell me about hairstyle' },
+    toolResults: [{ toolName: 'getServiceDetails', result: { code: 'found', id: 'hairstyle' } }],
+  });
+  assert.match(prompt, /NEVER call that tool again; set toolName to ""/);
 });

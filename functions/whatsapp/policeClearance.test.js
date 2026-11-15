@@ -14,6 +14,7 @@ const {
   policeClearanceStoragePath,
   policeClearanceSubmissionId,
   storePoliceClearanceObject,
+  validatePoliceClearanceBuffer,
 } = require('./policeClearance');
 
 test('police-clearance uploads accept only PDF, JPEG, and PNG attachments', () => {
@@ -85,4 +86,13 @@ test('private police-clearance object is create-only and no-store without a dele
   assert.equal(Object.hasOwn(saved.options.metadata.metadata, 'retentionExpiresAtMs'), false);
   assert.equal(normalizePoliceClearanceStatus('approved'), 'approved');
   assert.equal(normalizePoliceClearanceStatus('untrusted'), 'missing');
+});
+
+test('validatePoliceClearanceBuffer verifies magic bytes and supported MIME types', () => {
+  assert.equal(validatePoliceClearanceBuffer({ mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4\n...') }).extension, 'pdf');
+  assert.equal(validatePoliceClearanceBuffer({ mimeType: 'image/jpeg', buffer: Buffer.from([0xff, 0xd8, 0xff, 0xe0]) }).extension, 'jpg');
+  assert.equal(validatePoliceClearanceBuffer({ mimeType: 'image/png', buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) }).extension, 'png');
+  assert.equal(validatePoliceClearanceBuffer({ mimeType: 'application/pdf', buffer: Buffer.from('not-a-pdf') }), null);
+  assert.equal(validatePoliceClearanceBuffer({ mimeType: 'image/png', buffer: Buffer.from('%PDF-1.4') }), null);
+  assert.equal(validatePoliceClearanceBuffer({ mimeType: 'text/plain', buffer: Buffer.from('hello') }), null);
 });
