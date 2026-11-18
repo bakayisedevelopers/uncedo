@@ -5,6 +5,8 @@ import { LandingPage } from './pages/LandingPage';
 import { AuthPage } from './pages/AuthPage';
 import { WhatsAppLinkPage } from './pages/WhatsAppLinkPage';
 import { OnboardingPage } from './pages/OnboardingPage';
+import { WorkspacePage } from './pages/WorkspacePage';
+import { RequestDetailPage } from './pages/RequestDetailPage';
 
 function normalizePath(path = '/') {
   const clean = String(path || '/').split('?')[0].split('#')[0].replace(/\/+$/, '');
@@ -52,12 +54,13 @@ export default function App() {
   }, []);
 
   const isOnboardingRoute = pathname === '/onboarding' || Boolean(mapPathnameToStepId(pathname));
+  const requestMatch = pathname.match(/^\/requests\/([A-Za-z0-9_-]+)$/);
 
   useEffect(() => {
-    if (authReady && isOnboardingRoute && !user) {
+    if (authReady && (isOnboardingRoute || pathname === '/workspace' || requestMatch) && !user) {
       navigate('/sign-in');
     }
-  }, [authReady, isOnboardingRoute, navigate, user]);
+  }, [authReady, isOnboardingRoute, pathname, requestMatch, navigate, user]);
 
   if (!authReady) {
     return (
@@ -65,6 +68,14 @@ export default function App() {
         <div className="text-sm text-ink-500">Loading Uncedo Helpers…</div>
       </div>
     );
+  }
+
+  if (pathname === '/workspace' && user) {
+    return <WorkspacePage user={user} onNavigate={navigate} />;
+  }
+
+  if (requestMatch && user) {
+    return <RequestDetailPage user={user} requestId={requestMatch[1]} onNavigate={navigate} />;
   }
 
   if (pathname === '/whatsapp-link') {

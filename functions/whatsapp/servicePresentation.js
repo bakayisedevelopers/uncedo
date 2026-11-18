@@ -250,5 +250,6 @@ module.exports = {
   formatWhatsAppServiceList,
   getConfiguredServicePriceRange,
   isPriceQuestion,
+  isSupportedWhatsAppImageUrl,
   selectWhatsAppCarouselImageUrl,
 };

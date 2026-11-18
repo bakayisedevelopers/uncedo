@@ -845,9 +845,28 @@ function resolveEngineServiceOption(service = {}, selectedOptionId = '') {
   }) || null;
 }
 
-function isEngineQuestionInOptionScope(question = {}, service = {}, selectedOption = null) {
+function isEngineQuestionInOptionScope(question = {}, service = {}, selectedOption = null, visited = new Set()) {
   const options = Array.isArray(service?.options) ? service.options : [];
   if (!options.length) return true;
+
+  const questionId = normalizeText(question?.id);
+  if (questionId && visited.has(questionId)) return false;
+
+  const depQuestionId = normalizeText(
+    question?.dependencyRule?.dependsOnQuestionId || question?.dependsOn?.questionId,
+  );
+  if (depQuestionId) {
+    const allQuestions = [
+      ...(Array.isArray(service?.questionnaire?.required) ? service.questionnaire.required : []),
+      ...(Array.isArray(service?.questionnaire?.optional) ? service.questionnaire.optional : []),
+    ];
+    const parentQuestion = allQuestions.find((candidate) => normalizeText(candidate?.id) === depQuestionId);
+    if (!parentQuestion) return false;
+    const nextVisited = new Set(visited);
+    if (questionId) nextVisited.add(questionId);
+    return isEngineQuestionInOptionScope(parentQuestion, service, selectedOption, nextVisited);
+  }
+
   if (toLower(question?.type || 'option-specific') === 'standard') return true;
   if (!selectedOption) return false;
   if (selectedOption.requiresNoOptionSpecificQuestions) return false;
@@ -856,28 +875,45 @@ function isEngineQuestionInOptionScope(question = {}, service = {}, selectedOpti
       .map((id) => normalizeText(id))
       .filter(Boolean),
   );
-  return selectedIds.has(normalizeText(question?.id));
+  return selectedIds.has(questionId);
 }
 
-function isEngineQuestionDependencyMet(question = {}, answers = {}) {
+function isEngineQuestionDependencyMet(question = {}, answers = {}, questionMap = null, visited = new Set()) {
+  const questionId = normalizeText(question?.id);
+  if (questionId && visited.has(questionId)) return true;
   const depQuestionId = normalizeText(question?.dependencyRule?.dependsOnQuestionId || question?.dependsOn?.questionId);
   if (!depQuestionId) return true;
-  const expected = toLower(question?.dependencyRule?.dependsOnOptionValue || question?.dependsOn?.optionValue);
+  if (questionMap) {
+    const parentQuestion = questionMap.get(depQuestionId);
+    if (!parentQuestion) return false;
+    const nextVisited = new Set(visited);
+    if (questionId) nextVisited.add(questionId);
+    if (!isEngineQuestionDependencyMet(parentQuestion, answers, questionMap, nextVisited)) {
+      return false;
+    }
+  }
+  const rawExpected = [
+    ...(Array.isArray(question?.dependencyRule?.dependsOnOptionValues) ? question.dependencyRule.dependsOnOptionValues : []),
+    ...(Array.isArray(question?.dependsOn?.optionValues) ? question.dependsOn.optionValues : []),
+    question?.dependencyRule?.dependsOnOptionValue ?? question?.dependsOn?.optionValue ?? '',
+  ].map(toLower).filter(Boolean);
+  const expectedSet = new Set(rawExpected.length ? rawExpected : ['']);
   const raw = answers?.[depQuestionId];
   const actualValues = Array.isArray(raw) ? raw.map(toLower) : [toLower(raw)];
-  return actualValues.includes(expected);
+  return actualValues.some((val) => expectedSet.has(val));
 }
 
 function computeQuestionnaireOptionAdjustments(service, answers = {}, selectedOption = null) {
   const questionnaire = service?.questionnaire || {};
   const allQuestions = [...(questionnaire.required || []), ...(questionnaire.optional || [])];
+  const questionMap = new Map(allQuestions.map((item) => [normalizeText(item?.id), item]));
   let totalAdder = 0;
   let combinedMultiplier = 1.0;
   const lines = [];
 
   allQuestions.forEach((q) => {
     if (!isEngineQuestionInOptionScope(q, service, selectedOption)) return;
-    if (!isEngineQuestionDependencyMet(q, answers)) return;
+    if (!isEngineQuestionDependencyMet(q, answers, questionMap)) return;
     const qId = q.id;
     const answer = answers[qId];
     if (!answer || !Array.isArray(q.options)) return;

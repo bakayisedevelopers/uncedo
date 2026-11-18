@@ -30,6 +30,7 @@ function normalizeEnumOptions(options = []) {
       return {
         value,
         label: String(option.label || value).trim(),
+        imageUrl: String(option.imageUrl || option.imageUri || '').trim(),
       };
     })
     .filter(Boolean);
@@ -67,11 +68,11 @@ function normalizeLiveQuestion(question = {}) {
     || question.dependsOn?.questionId
     || '',
   ).trim();
-  const depOptionValue = String(
-    question.dependencyRule?.dependsOnOptionValue
-    || question.dependsOn?.optionValue
-    || '',
-  ).trim();
+  const depOptionValues = [...new Set([
+    ...(Array.isArray(question.dependencyRule?.dependsOnOptionValues) ? question.dependencyRule.dependsOnOptionValues : []),
+    ...(Array.isArray(question.dependsOn?.optionValues) ? question.dependsOn.optionValues : []),
+    question.dependencyRule?.dependsOnOptionValue ?? question.dependsOn?.optionValue ?? '',
+  ].map((val) => String(val || '').trim()).filter(Boolean))];
 
   return {
     id,
@@ -80,14 +81,16 @@ function normalizeLiveQuestion(question = {}) {
     answerHint: String(question.answerHint || '').trim(),
     options: normalizeEnumOptions(question.options),
     required: question.required !== false,
-    type: rawType === 'standard' ? 'standard' : 'option-specific',
+    type: depQuestionId ? 'dependent' : (rawType === 'standard' ? 'standard' : 'option-specific'),
     dependsOn: depQuestionId ? {
       questionId: depQuestionId,
-      optionValue: depOptionValue,
+      optionValue: depOptionValues[0] || '',
+      optionValues: depOptionValues,
     } : null,
     dependencyRule: depQuestionId ? {
       dependsOnQuestionId: depQuestionId,
-      dependsOnOptionValue: depOptionValue,
+      dependsOnOptionValue: depOptionValues[0] || '',
+      dependsOnOptionValues: depOptionValues,
     } : null,
   };
 }

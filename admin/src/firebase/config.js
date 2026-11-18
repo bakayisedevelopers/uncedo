@@ -14,6 +14,7 @@ import {
 import {
   connectFirestoreEmulator,
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -105,6 +106,7 @@ function initializeFirebase() {
     },
     firestoreModule: {
       collection,
+      deleteDoc,
       doc,
       getDoc,
       getDocs,

@@ -17,6 +17,7 @@ import { Button } from '../../components/ui/Button';
 import { ErrorState } from '../../components/ui/States';
 import {
   buildMissingRequiredFields,
+  getOptionalQuestionDefinitions,
   getQuestionDefinitionById,
   getQuestionIdsForSelection,
   getRequiredQuestionDefinitions,
@@ -209,8 +210,19 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
     });
   }, [categoryId, selectedOptionId, selectedPackageId, serviceIds, structuredAnswers]);
 
+  const optionalQuestions = useMemo(() => {
+    if (!categoryId || !serviceIds.length) return [];
+    return getOptionalQuestionDefinitions({
+      categoryId,
+      serviceIds,
+      selectedPackageId,
+      selectedOptionId,
+      structuredAnswers,
+    });
+  }, [categoryId, selectedOptionId, selectedPackageId, serviceIds, structuredAnswers]);
+
   const renderQuestions = useMemo(() => {
-    if (!requiredQuestions.length) return [];
+    if (!requiredQuestions.length && !optionalQuestions.length) return [];
     const questions = [...requiredQuestions];
     if (String(structuredAnswers?.timing_preference || '').trim().toLowerCase() === 'later') {
       const scheduledQuestion = getQuestionDefinitionById({
@@ -225,8 +237,14 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
         questions.push(scheduledQuestion);
       }
     }
+    optionalQuestions.forEach((optQ) => {
+      if (optQ.id === 'scheduled_for_text') return;
+      if (!questions.some((q) => q.id === optQ.id)) {
+        questions.push({ ...optQ, prompt: optQ.dependencyRule ? optQ.prompt : `${optQ.prompt} (Optional)` });
+      }
+    });
     return questions;
-  }, [categoryId, requiredQuestions, selectedOptionId, selectedPackageId, serviceIds, structuredAnswers]);
+  }, [categoryId, optionalQuestions, requiredQuestions, selectedOptionId, selectedPackageId, serviceIds, structuredAnswers]);
 
   const missingRequired = useMemo(
     () => buildMissingRequiredFields({
@@ -304,10 +322,35 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
   };
 
   const handleAnswerChange = (questionId, nextValue) => {
-    setStructuredAnswers((current) => ({
-      ...current,
-      [questionId]: nextValue,
-    }));
+    setStructuredAnswers((current) => {
+      let nextAnswers = {
+        ...current,
+        [questionId]: nextValue,
+      };
+      for (let pass = 0; pass < 5; pass += 1) {
+        const validIds = new Set(
+          getQuestionIdsForSelection({
+            categoryId,
+            serviceIds,
+            selectedPackageId,
+            selectedOptionId,
+            structuredAnswers: nextAnswers,
+          }),
+        );
+        let changed = false;
+        const pruned = {};
+        Object.entries(nextAnswers).forEach(([key, val]) => {
+          if (key === 'travel_distance_km' || validIds.has(key)) {
+            pruned[key] = val;
+          } else {
+            changed = true;
+          }
+        });
+        nextAnswers = pruned;
+        if (!changed) break;
+      }
+      return nextAnswers;
+    });
   };
 
   const handleRequest = async () => {

@@ -7,14 +7,15 @@ const { TOOL_DEFINITIONS, createWhatsAppToolRegistry } = require('./toolRegistry
 const linkedCustomer = { uid: 'customer-1', role: 'customer', linked: true, verified: true };
 const linkedHelper = { uid: 'helper-1', role: 'helper', linked: true, verified: true, helperVerified: true };
 
-test('guests get profile/account lookup and service tools while linked customers and helpers also get confirmed name change', () => {
+test('guests get profile/account lookup and service tools while linked customers and helpers also get confirmed name change and helper application tool', () => {
   const registry = createWhatsAppToolRegistry();
-  const linkedNames = ['getMyProfile', 'proposeProfileChange', 'getAvailableServices', 'sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking'];
-  assert.deepEqual(Object.keys(TOOL_DEFINITIONS), ['getMyProfile', 'checkMyAccountByWhatsAppNumber', 'proposeProfileChange', 'getAvailableServices', 'sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking']);
+  const linkedCustomerNames = ['getMyProfile', 'proposeProfileChange', 'getAvailableServices', 'sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking'];
+  const linkedHelperNames = [...linkedCustomerNames, 'applyForHelperService'];
+  assert.deepEqual(Object.keys(TOOL_DEFINITIONS), ['getMyProfile', 'checkMyAccountByWhatsAppNumber', 'proposeProfileChange', 'getAvailableServices', 'sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking', 'applyForHelperService']);
   const guestTools = registry.definitions({ identity: { guestPrincipalId: 'guest-1' }, authorization: { role: 'guest' } });
   assert.deepEqual(guestTools.map((tool) => tool.name), ['getMyProfile', 'checkMyAccountByWhatsAppNumber', 'getAvailableServices', 'sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking']);
-  assert.deepEqual(registry.definitions({ authorization: linkedCustomer }).map((tool) => tool.name), linkedNames);
-  assert.deepEqual(registry.definitions({ authorization: linkedHelper }).map((tool) => tool.name), linkedNames);
+  assert.deepEqual(registry.definitions({ authorization: linkedCustomer }).map((tool) => tool.name), linkedCustomerNames);
+  assert.deepEqual(registry.definitions({ authorization: linkedHelper }).map((tool) => tool.name), linkedHelperNames);
 
   const tools = registry.definitions({ authorization: linkedCustomer });
   assert.equal(tools[0].stateChanging, false);
@@ -26,6 +27,12 @@ test('guests get profile/account lookup and service tools while linked customers
   assert.equal(tools[4].stateChanging, false);
   assert.equal(tools[5].name, 'initiateServiceBooking');
   assert.equal(tools[5].stateChanging, true);
+
+  const helperTools = registry.definitions({ authorization: linkedHelper });
+  const applyTool = helperTools.find((tool) => tool.name === 'applyForHelperService');
+  assert.ok(applyTool);
+  assert.equal(applyTool.stateChanging, true);
+  assert.equal(applyTool.auth, 'verified-linked');
 });
 
 test('profile lookup requires a verified linked account and returns only its declared fields', async () => {
@@ -221,4 +228,78 @@ test('service discovery, detail, and booking tools allow optional empty string a
   const booking = await registry.execute('initiateServiceBooking', { serviceId: '', query: null }, guestContext);
   assert.equal(booking.code, 'missing-query');
 });
+
+test('applyForHelperService is restricted to verified linked helpers and validates multi-option input and output schema', async () => {
+  let receivedArgs;
+  const registry = createWhatsAppToolRegistry({
+    handlers: {
+      applyForHelperService: async (args, context) => {
+        receivedArgs = { args, uid: context.authorization.uid };
+        return {
+          code: 'submitted',
+          serviceId: 'hair_styling',
+          serviceName: 'Hair Styling',
+          optionApplicationMode: 'per_option',
+          submittedNames: ['Hair Styling — Box Braids', 'Hair Styling — Cornrows'],
+          appliedOptions: [
+            { serviceId: 'hair_styling', serviceName: 'Hair Styling', optionId: 'box_braids', optionTitle: 'Box Braids', status: 'pending', hasPhotos: false },
+            { serviceId: 'hair_styling', serviceName: 'Hair Styling', optionId: 'cornrows', optionTitle: 'Cornrows', status: 'pending', hasPhotos: false },
+          ],
+          photoUploadUrl: 'https://helpers.bakayise.com/onboarding',
+          needsPhotos: true,
+        };
+      },
+    },
+  });
+
+  await assert.rejects(
+    registry.execute('applyForHelperService', {}, {
+      role: 'guest',
+      identity: { guestPrincipalId: 'guest-1' },
+      authorization: { role: 'guest', verified: false, linked: false },
+    }),
+    { code: 'tool-permission-denied' },
+  );
+
+  await assert.rejects(
+    registry.execute('applyForHelperService', {}, { role: 'customer', authorization: linkedCustomer }),
+    { code: 'tool-permission-denied' },
+  );
+
+  await assert.rejects(
+    registry.execute('applyForHelperService', {}, {
+      role: 'helper',
+      authorization: { ...linkedHelper, verified: false },
+    }),
+    { code: 'identity-verification-required' },
+  );
+
+  await assert.rejects(
+    registry.execute('applyForHelperService', { helperId: 'other-helper' }, { role: 'helper', authorization: linkedHelper }),
+    /unsupported fields/,
+  );
+
+  const result = await registry.execute(
+    'applyForHelperService',
+    { query: '  Hair Styling ', serviceOption: '  Box Braids,   Cornrows  ' },
+    { role: 'helper', authorization: linkedHelper },
+  );
+  assert.deepEqual(receivedArgs, {
+    args: { query: 'Hair Styling', serviceOption: 'Box Braids, Cornrows' },
+    uid: 'helper-1',
+  });
+  assert.equal(result.code, 'submitted');
+  assert.equal(result.appliedOptions.length, 2);
+
+  const badOutputRegistry = createWhatsAppToolRegistry({
+    handlers: {
+      applyForHelperService: async () => ({ code: 'submitted', secretUidLeak: 'helper-1' }),
+    },
+  });
+  await assert.rejects(
+    badOutputRegistry.execute('applyForHelperService', {}, { role: 'helper', authorization: linkedHelper }),
+    { code: 'tool-output-invalid' },
+  );
+});
+
 

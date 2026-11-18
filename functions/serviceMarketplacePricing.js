@@ -42,22 +42,44 @@ function normalizeBoolean(value, fallback = false) {
   return fallback;
 }
 
+function extractDependencyOptionValues(rule = null) {
+  if (!rule || typeof rule !== 'object') return [];
+  const raw = [
+    ...(Array.isArray(rule.dependsOnOptionValues) ? rule.dependsOnOptionValues : []),
+    ...(Array.isArray(rule.optionValues) ? rule.optionValues : []),
+    rule.dependsOnOptionValue ?? rule.optionValue ?? '',
+  ];
+  const seen = new Set();
+  const values = [];
+  raw.forEach((entry) => {
+    const clean = String(entry || '').trim();
+    const key = clean.toLowerCase();
+    if (!clean || seen.has(key)) return;
+    seen.add(key);
+    values.push(clean);
+  });
+  return values;
+}
+
 function normalizeOption(option = {}) {
   const value = String(option.value || option.id || '').trim();
   if (!value) return null;
 
-  const pricingType = String(option.pricingType || (option.multiplier && option.multiplier !== 1 ? 'multiplier' : 'adder')).trim().toLowerCase();
+  const rawMultiplier = option.factor ?? option.multiplier;
+  const pricingType = String(option.pricingType || (rawMultiplier && Number(rawMultiplier) !== 1 ? 'multiplier' : 'adder')).trim().toLowerCase();
+  const depValues = extractDependencyOptionValues(option.dependsOn);
   return {
     value,
     label: String(option.label || value).trim(),
     pricingType,
     priceAdder: pricingType === 'adder' ? roundCurrency(normalizeNumber(option.priceAdder ?? option.priceValue, 0)) : 0,
     materialAdder: roundCurrency(normalizeNumber(option.materialAdder, 0)),
-    multiplier: pricingType === 'multiplier' ? Math.max(0, normalizeNumber(option.multiplier, 1)) : 1,
-    imageUrl: String(option.imageUrl || '').trim(),
+    multiplier: pricingType === 'multiplier' ? Math.max(0, normalizeNumber(rawMultiplier, 1)) : 1,
+    imageUrl: String(option.imageUrl || option.imageUri || '').trim(),
     dependsOn: option.dependsOn && typeof option.dependsOn === 'object' && option.dependsOn.questionId ? {
       questionId: String(option.dependsOn.questionId).trim(),
-      optionValue: String(option.dependsOn.optionValue || '').trim(),
+      optionValue: depValues[0] || '',
+      optionValues: depValues,
     } : null,
   };
 }
@@ -93,27 +115,31 @@ function normalizeQuestion(question = {}) {
     || question.dependsOn?.questionId
     || '',
   ).trim();
-  const depOptionValue = String(
-    question.dependencyRule?.dependsOnOptionValue
-    || question.dependsOn?.optionValue
-    || '',
-  ).trim();
+  const depOptionValues = [
+    ...extractDependencyOptionValues(question.dependencyRule),
+    ...extractDependencyOptionValues(question.dependsOn),
+  ].filter((val, idx, arr) => arr.findIndex((item) => item.toLowerCase() === val.toLowerCase()) === idx);
   const rawType = String(question.type || 'option-specific').trim().toLowerCase();
+  const effectiveType = depQuestionId
+    ? 'dependent'
+    : (rawType === 'standard' ? 'standard' : 'option-specific');
 
   return {
     id,
     prompt: String(question.prompt || question.label || id).trim(),
     answerType: String(question.answerType || 'text').trim().toLowerCase(),
     required: normalizeBoolean(question.required, false),
-    type: rawType === 'standard' ? 'standard' : 'option-specific',
+    type: effectiveType,
     answerHint: String(question.answerHint || '').trim(),
     dependsOn: depQuestionId ? {
       questionId: depQuestionId,
-      optionValue: depOptionValue,
+      optionValue: depOptionValues[0] || '',
+      optionValues: depOptionValues,
     } : null,
     dependencyRule: depQuestionId ? {
       dependsOnQuestionId: depQuestionId,
-      dependsOnOptionValue: depOptionValue,
+      dependsOnOptionValue: depOptionValues[0] || '',
+      dependsOnOptionValues: depOptionValues,
     } : null,
     options: (Array.isArray(question.options) ? question.options : [])
       .map(normalizeOption)
@@ -229,9 +255,29 @@ function resolveSelectedServiceOption(service = {}, selectedOptionId = '') {
   }) || null;
 }
 
-function isQuestionIncludedForOption(question = {}, service = {}, selectedOption = null) {
+function isQuestionIncludedForOption(question = {}, service = {}, selectedOption = null, visited = new Set()) {
   const options = Array.isArray(service?.options) ? service.options : [];
   if (!options.length) return true;
+
+  const questionId = String(question?.id || '').trim();
+  if (questionId && visited.has(questionId)) return false;
+
+  const depQuestionId = String(
+    question?.dependencyRule?.dependsOnQuestionId
+    || question?.dependsOn?.questionId
+    || '',
+  ).trim();
+  if (depQuestionId) {
+    const allQuestions = [
+      ...(Array.isArray(service?.questionnaire?.required) ? service.questionnaire.required : []),
+      ...(Array.isArray(service?.questionnaire?.optional) ? service.questionnaire.optional : []),
+    ];
+    const parentQuestion = allQuestions.find((candidate) => String(candidate?.id || '').trim() === depQuestionId);
+    if (!parentQuestion) return false;
+    const nextVisited = new Set(visited);
+    if (questionId) nextVisited.add(questionId);
+    return isQuestionIncludedForOption(parentQuestion, service, selectedOption, nextVisited);
+  }
 
   const qType = String(question?.type || 'option-specific').trim().toLowerCase();
   if (qType === 'standard') return true;
@@ -242,7 +288,7 @@ function isQuestionIncludedForOption(question = {}, service = {}, selectedOption
       .map((id) => String(id || '').trim())
       .filter(Boolean),
   );
-  return selectedIds.has(String(question?.id || '').trim());
+  return selectedIds.has(questionId);
 }
 
 function getTimeBucket(date = new Date()) {
@@ -317,10 +363,17 @@ function getQuestionAdjustments(service, structuredAnswers = {}, selectedOption 
     }
 
     const depQuestionId = question.dependencyRule?.dependsOnQuestionId || question.dependsOn?.questionId;
-    const depOptionValue = question.dependencyRule?.dependsOnOptionValue || question.dependsOn?.optionValue;
+    const depOptionValues = [
+      ...extractDependencyOptionValues(question.dependencyRule),
+      ...extractDependencyOptionValues(question.dependsOn),
+    ].map((val) => val.toLowerCase());
     if (depQuestionId) {
-      const parentAnswer = String(structuredAnswers?.[depQuestionId] || '').trim().toLowerCase();
-      if (parentAnswer !== String(depOptionValue || '').trim().toLowerCase()) {
+      const rawParentAnswer = structuredAnswers?.[depQuestionId];
+      const parentValues = Array.isArray(rawParentAnswer)
+        ? rawParentAnswer.map((val) => String(val || '').trim().toLowerCase())
+        : [String(rawParentAnswer || '').trim().toLowerCase()];
+      const expectedList = depOptionValues.length ? depOptionValues : [''];
+      if (!parentValues.some((val) => expectedList.includes(val))) {
         return;
       }
     }
@@ -338,8 +391,13 @@ function getQuestionAdjustments(service, structuredAnswers = {}, selectedOption 
       if (!selectedChoice) return;
 
       if (selectedChoice.dependsOn && selectedChoice.dependsOn.questionId) {
-        const parentAnswer = String(structuredAnswers?.[selectedChoice.dependsOn.questionId] || '').trim().toLowerCase();
-        if (parentAnswer !== String(selectedChoice.dependsOn.optionValue || '').trim().toLowerCase()) {
+        const rawChoiceParent = structuredAnswers?.[selectedChoice.dependsOn.questionId];
+        const choiceParentValues = Array.isArray(rawChoiceParent)
+          ? rawChoiceParent.map((val) => String(val || '').trim().toLowerCase())
+          : [String(rawChoiceParent || '').trim().toLowerCase()];
+        const choiceExpected = extractDependencyOptionValues(selectedChoice.dependsOn).map((val) => val.toLowerCase());
+        const choiceTargetList = choiceExpected.length ? choiceExpected : [''];
+        if (!choiceParentValues.some((val) => choiceTargetList.includes(val))) {
           return;
         }
       }

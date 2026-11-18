@@ -600,3 +600,96 @@ export async function syncMyHelperVerificationStatus() {
   const res = await call({});
   return res.data || {};
 }
+
+export async function updateWebHelperLiveLocation(coords) {
+  const { functions, httpsCallable } = getFirebaseClients();
+  const call = httpsCallable(functions, 'updateWebHelperLiveLocation');
+  const res = await call(coords);
+  return res.data || {};
+}
+
+export async function reportHelperAppVisibility(state) {
+  const { functions, httpsCallable } = getFirebaseClients();
+  const call = httpsCallable(functions, 'reportHelperAppVisibility');
+  const res = await call(state);
+  return res.data || {};
+}
+
+export async function sendHelperRequestMessage({ requestId, text }) {
+  const { functions, httpsCallable } = getFirebaseClients();
+  const call = httpsCallable(functions, 'sendHelperRequestMessage');
+  const res = await call({ requestId, text });
+  return res.data || {};
+}
+
+export async function respondToServiceRequestOfferApi({ requestId, offerToken, offerRevision, action }) {
+  const { auth } = getFirebaseClients();
+  const token = await auth.currentUser?.getIdToken();
+  const endpoint = getFunctionEndpoint('respondToServiceRequestOffer');
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ requestId, offerToken, offerRevision, action }),
+  });
+  const text = await response.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!response.ok || data?.success === false) {
+    throw new Error(data?.message || 'Unable to process offer response.');
+  }
+  return data;
+}
+
+export async function updateHelperServiceRequestApi({ requestId, action, status, reason }) {
+  const { auth } = getFirebaseClients();
+  const token = await auth.currentUser?.getIdToken();
+  const endpoint = getFunctionEndpoint('updateHelperServiceRequest');
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ requestId, action, status, reason }),
+  });
+  const text = await response.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!response.ok && !data?.success) {
+    throw new Error(data?.message || 'Unable to update service request.');
+  }
+  return data;
+}
+
+export function subscribeToPendingHelperOffers(helperId, callback) {
+  const { db, firestoreModule } = getFirebaseClients();
+  const q = firestoreModule.query(
+    firestoreModule.collection(db, 'serviceRequests'),
+    firestoreModule.where('status', '==', 'helper_found'),
+    firestoreModule.where('currentOfferHelperId', '==', helperId),
+  );
+  return firestoreModule.onSnapshot(q, (snap) => {
+    const offers = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    callback(offers);
+  }, () => callback([]));
+}
+
+export function subscribeToActiveServiceRequest(requestId, callback) {
+  const { db, firestoreModule } = getFirebaseClients();
+  return firestoreModule.onSnapshot(firestoreModule.doc(db, 'serviceRequests', requestId), (snap) => {
+    callback(snap.exists() ? { id: snap.id, ...snap.data() } : null);
+  }, () => callback(null));
+}
+
+export function subscribeToRequestMessages(requestId, callback) {
+  const { db, firestoreModule } = getFirebaseClients();
+  const q = firestoreModule.query(
+    firestoreModule.collection(db, 'serviceRequests', requestId, 'messages'),
+    firestoreModule.orderBy('createdAtMs', 'asc'),
+  );
+  return firestoreModule.onSnapshot(q, (snap) => {
+    const msgs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    callback(msgs);
+  }, () => callback([]));
+}

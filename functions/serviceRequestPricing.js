@@ -59,16 +59,44 @@ function getQuestionnaireForSelection({ services = [], selectedPackageId = '', s
   return [...selected.values()];
 }
 
-function isQuestionApplicable(question, normalizedAnswers) {
+function isQuestionApplicable(question, normalizedAnswers = {}, questionsOrMap = null, visited = new Set()) {
+  const questionId = String(question?.id || '').trim();
+  if (questionId) {
+    if (visited.has(questionId)) return true;
+  }
   const rule = question?.dependencyRule;
-  const depQuestionId = rule?.dependsOnQuestionId || question?.dependsOn?.questionId;
-  const depOptionValue = rule?.dependsOnOptionValue || question?.dependsOn?.optionValue;
+  const legacy = question?.dependsOn;
+  const depQuestionId = String(rule?.dependsOnQuestionId || legacy?.questionId || '').trim();
+  const depOptionValues = [...new Set([
+    ...(Array.isArray(rule?.dependsOnOptionValues) ? rule.dependsOnOptionValues : []),
+    ...(Array.isArray(legacy?.optionValues) ? legacy.optionValues : []),
+    rule?.dependsOnOptionValue ?? legacy?.optionValue ?? '',
+  ].map((val) => String(val || '').trim().toLowerCase()).filter(Boolean))];
   if (!depQuestionId) return true;
-  const parentValue = normalizedAnswers[depQuestionId];
-  if (!parentValue) return false;
-  const expected = String(depOptionValue || '').trim().toLowerCase();
-  const actualValues = Array.isArray(parentValue) ? parentValue.map((v) => String(v).toLowerCase()) : [String(parentValue).toLowerCase()];
-  return actualValues.includes(expected);
+
+  const questionMap = questionsOrMap instanceof Map
+    ? questionsOrMap
+    : Array.isArray(questionsOrMap)
+      ? new Map(questionsOrMap.map((item) => [String(item?.id || '').trim(), item]))
+      : null;
+
+  if (questionMap) {
+    const parentQuestion = questionMap.get(depQuestionId);
+    if (!parentQuestion) return false;
+    const nextVisited = new Set(visited);
+    if (questionId) nextVisited.add(questionId);
+    if (!isQuestionApplicable(parentQuestion, normalizedAnswers, questionMap, nextVisited)) {
+      return false;
+    }
+  }
+
+  const parentValue = normalizedAnswers?.[depQuestionId];
+  if (!hasAnswer(parentValue)) return false;
+  const expectedSet = new Set(depOptionValues.length ? depOptionValues : ['']);
+  const actualValues = Array.isArray(parentValue)
+    ? parentValue.map((v) => String(v || '').trim().toLowerCase())
+    : [String(parentValue || '').trim().toLowerCase()];
+  return actualValues.some((val) => expectedSet.has(val));
 }
 
 function normalizeAndValidateAnswers({ answers = {}, questions = [], strictUnknown = true } = {}) {
@@ -114,17 +142,25 @@ function normalizeAndValidateAnswers({ answers = {}, questions = [], strictUnkno
     normalized[questionId] = answer;
   });
 
-  const applicableQuestions = questions.filter((question) => isQuestionApplicable(question, normalized));
+  const applicableQuestions = questions.filter((question) => isQuestionApplicable(question, normalized, questionMap));
+  const applicableQuestionIds = new Set(applicableQuestions.map((question) => question.id));
+  const cleanedAnswers = {};
+  Object.entries(normalized).forEach(([questionId, value]) => {
+    if (PRICING_CONTROL_ANSWER_IDS.has(questionId) || applicableQuestionIds.has(questionId)) {
+      cleanedAnswers[questionId] = value;
+    }
+  });
+
   const missingRequired = applicableQuestions
-    .filter((question) => question.required === true && !hasAnswer(normalized[question.id]))
+    .filter((question) => question.required === true && !hasAnswer(cleanedAnswers[question.id]))
     .map((question) => question.id);
-  if (String(normalized.timing_preference || '').trim().toLowerCase() === 'later'
-    && !hasAnswer(normalized.scheduled_for_text)
+  if (String(cleanedAnswers.timing_preference || '').trim().toLowerCase() === 'later'
+    && !hasAnswer(cleanedAnswers.scheduled_for_text)
     && questions.some((question) => question.id === 'scheduled_for_text')) {
     if (!missingRequired.includes('scheduled_for_text')) missingRequired.push('scheduled_for_text');
   }
 
-  return { answers: normalized, missingRequired };
+  return { answers: cleanedAnswers, missingRequired };
 }
 
 function buildQuestionnaireHash(services = [], selectedOptionId = '') {
@@ -278,6 +314,7 @@ async function quoteFromFirestore({ db, ...input }) {
 module.exports = {
   buildQuestionnaireHash,
   getQuestionnaireForSelection,
+  isQuestionApplicable,
   normalizeAndValidateAnswers,
   quoteFromCatalogEntries,
   quoteFromFirestore,

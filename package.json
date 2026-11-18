@@ -20,7 +20,12 @@
     "test:phase0": "npm run test:rules && npm run test:rewards:integration"
   },
   "dependencies": {
-    "firebase-functions": "^7.4.0"
+    "@google/genai": "^3.3.0",
+    "firebase-admin": "12.7.0",
+    "firebase-functions": "^7.4.0",
+    "h3-js": "^4.5.0",
+    "pdfkit": "^0.20.2",
+    "resend": "^6.38.1"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^5.0.1",

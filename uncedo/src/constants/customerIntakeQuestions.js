@@ -32,31 +32,67 @@ function hasAnswerValue(value) {
   return String(value || '').trim().length > 0;
 }
 
-function isQuestionDependencyMet(question = {}, structuredAnswers = null) {
+function isQuestionDependencyMet(question = {}, structuredAnswers = null, questionMap = null, visited = new Set()) {
   if (!structuredAnswers || typeof structuredAnswers !== 'object') {
     return true;
   }
+  const questionId = String(question?.id || '').trim();
+  if (questionId && visited.has(questionId)) return true;
   const depQuestionId = String(
     question?.dependencyRule?.dependsOnQuestionId
     || question?.dependsOn?.questionId
     || '',
   ).trim();
   if (!depQuestionId) return true;
-  const expectedValue = String(
-    question?.dependencyRule?.dependsOnOptionValue
-    || question?.dependsOn?.optionValue
-    || '',
-  ).trim().toLowerCase();
+  if (questionMap) {
+    const parentQuestion = questionMap instanceof Map
+      ? questionMap.get(depQuestionId)
+      : Array.isArray(questionMap)
+        ? questionMap.find((item) => String(item?.id || '').trim() === depQuestionId)
+        : null;
+    if (!parentQuestion) return false;
+    const nextVisited = new Set(visited);
+    if (questionId) nextVisited.add(questionId);
+    if (!isQuestionDependencyMet(parentQuestion, structuredAnswers, questionMap, nextVisited)) {
+      return false;
+    }
+  }
+  const expectedValues = [...new Set([
+    ...(Array.isArray(question?.dependencyRule?.dependsOnOptionValues) ? question.dependencyRule.dependsOnOptionValues : []),
+    ...(Array.isArray(question?.dependsOn?.optionValues) ? question.dependsOn.optionValues : []),
+    question?.dependencyRule?.dependsOnOptionValue ?? question?.dependsOn?.optionValue ?? '',
+  ].map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean))];
+  const expectedSet = new Set(expectedValues.length ? expectedValues : ['']);
   const actual = structuredAnswers[depQuestionId];
   if (Array.isArray(actual)) {
-    return actual.map((entry) => String(entry || '').trim().toLowerCase()).includes(expectedValue);
+    return actual.some((entry) => expectedSet.has(String(entry || '').trim().toLowerCase()));
   }
-  return String(actual || '').trim().toLowerCase() === expectedValue;
+  return expectedSet.has(String(actual || '').trim().toLowerCase());
 }
 
-function isQuestionInOptionScope(question = {}, service = {}, selectedOption = null) {
+function isQuestionInOptionScope(question = {}, service = {}, selectedOption = null, visited = new Set()) {
   const options = Array.isArray(service?.options) ? service.options : [];
   if (!options.length) return true;
+
+  const questionId = String(question?.id || '').trim();
+  if (questionId && visited.has(questionId)) return false;
+
+  const depQuestionId = String(
+    question?.dependencyRule?.dependsOnQuestionId
+    || question?.dependsOn?.questionId
+    || '',
+  ).trim();
+  if (depQuestionId) {
+    const allQuestions = [
+      ...(Array.isArray(service?.questionnaire?.required) ? service.questionnaire.required : []),
+      ...(Array.isArray(service?.questionnaire?.optional) ? service.questionnaire.optional : []),
+    ];
+    const parentQuestion = allQuestions.find((candidate) => String(candidate?.id || '').trim() === depQuestionId);
+    if (!parentQuestion) return false;
+    const nextVisited = new Set(visited);
+    if (questionId) nextVisited.add(questionId);
+    return isQuestionInOptionScope(parentQuestion, service, selectedOption, nextVisited);
+  }
 
   const qType = String(question?.type || 'option-specific').trim().toLowerCase();
   if (qType === 'standard') return true;
@@ -68,7 +104,7 @@ function isQuestionInOptionScope(question = {}, service = {}, selectedOption = n
       .map((item) => String(item || '').trim())
       .filter(Boolean),
   );
-  return selectedIds.has(String(question?.id || '').trim());
+  return selectedIds.has(questionId);
 }
 
 function getLiveServiceQuestionPlan(serviceId = '', selectedOptionId = '', structuredAnswers = null) {
@@ -79,14 +115,21 @@ function getLiveServiceQuestionPlan(serviceId = '', selectedOptionId = '', struc
   }
 
   const selectedOption = selectedOptionId ? getLiveServiceOption(serviceId, selectedOptionId) : null;
-  const filterList = (list = []) => (Array.isArray(list) ? list : [])
-    .filter((question) => isQuestionInOptionScope(question, service, selectedOption))
-    .filter((question) => isQuestionDependencyMet(question, structuredAnswers))
+  const scopedRequired = (Array.isArray(questionnaire.required) ? questionnaire.required : [])
+    .filter((question) => isQuestionInOptionScope(question, service, selectedOption));
+  const scopedOptional = (Array.isArray(questionnaire.optional) ? questionnaire.optional : [])
+    .filter((question) => isQuestionInOptionScope(question, service, selectedOption));
+  const scopedMap = new Map(
+    [...scopedRequired, ...scopedOptional].map((question) => [String(question?.id || '').trim(), question]),
+  );
+
+  const filterList = (list = []) => list
+    .filter((question) => isQuestionDependencyMet(question, structuredAnswers, scopedMap))
     .map((question) => q(question.id, question.prompt, question));
 
   return {
-    required: filterList(questionnaire.required),
-    optional: filterList(questionnaire.optional),
+    required: filterList(scopedRequired),
+    optional: filterList(scopedOptional),
   };
 }
 

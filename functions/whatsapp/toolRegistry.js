@@ -143,6 +143,60 @@ const TOOL_DEFINITIONS = Object.freeze({
       }),
     }, ['code']),
   },
+  applyForHelperService: {
+    description: 'Allow a verified linked helper to apply to offer additional Uncedo services or specific service options on WhatsApp. Accepts optional serviceId, query, and serviceOption (single or comma-separated option names/IDs). If no service is specified, sends/lists available services; if a service requires options and none are specified, sends/lists available unapplied options; if options (or a unified service) are specified, submits the pending helperService applications and prompts for work photos.',
+    roles: ['helper'],
+    auth: 'verified-linked',
+    fields: { serviceId: 'short-text', query: 'short-text', serviceOption: 'multi-text' },
+    required: [],
+    handler: 'applyForHelperService',
+    canonicalBackend: 'helperServiceApplicationWorkflow',
+    stateChanging: true,
+    confirmation: 'not-required',
+    idempotency: 'inbound-event-id',
+    outputSchema: resultSchema({
+      code: stringSchema,
+      error: stringSchema,
+      query: stringSchema,
+      serviceId: stringSchema,
+      serviceName: stringSchema,
+      optionApplicationMode: stringSchema,
+      appliedOptions: Object.freeze({
+        type: 'array',
+        items: resultSchema({
+          serviceId: stringSchema,
+          serviceName: stringSchema,
+          optionId: stringSchema,
+          optionTitle: stringSchema,
+          status: stringSchema,
+          hasPhotos: Object.freeze({ type: 'boolean' }),
+        }, ['serviceId', 'optionId']),
+      }),
+      availableServices: Object.freeze({
+        type: 'array',
+        items: resultSchema({
+          id: stringSchema,
+          label: stringSchema,
+          categoryName: stringSchema,
+          optionApplicationMode: stringSchema,
+          availableOptionCount: Object.freeze({ type: 'integer' }),
+        }, ['id', 'label']),
+      }),
+      availableOptions: Object.freeze({
+        type: 'array',
+        items: resultSchema({
+          id: stringSchema,
+          title: stringSchema,
+          price: Object.freeze({ type: 'number' }),
+          description: stringSchema,
+          alreadyAppliedStatus: stringSchema,
+        }, ['id', 'title']),
+      }),
+      submittedNames: Object.freeze({ type: 'array', items: stringSchema }),
+      photoUploadUrl: stringSchema,
+      needsPhotos: Object.freeze({ type: 'boolean' }),
+    }, ['code']),
+  },
 });
 
 function safeText(value, max = 500) {
@@ -168,6 +222,13 @@ function validateToolArguments(definition, args) {
     const value = args[key];
     if (type === 'short-text') {
       const item = safeText(value, 120);
+      if (!item) {
+        if (requiredFields.has(key)) throw new Error(`Tool argument ${key} is required.`);
+        continue;
+      }
+      normalized[key] = item;
+    } else if (type === 'multi-text') {
+      const item = safeText(value, 240);
       if (!item) {
         if (requiredFields.has(key)) throw new Error(`Tool argument ${key} is required.`);
         continue;
@@ -216,7 +277,9 @@ function createWhatsAppToolRegistry({ handlers = {} } = {}) {
           properties: Object.fromEntries(Object.entries(definition.fields || {}).map(([key, kind]) => [key,
             kind === 'profile-field'
               ? { type: 'string', enum: ['firstName', 'lastName'] }
-              : { type: 'string', maxLength: 120 },
+              : kind === 'multi-text'
+                ? { type: 'string', maxLength: 240 }
+                : { type: 'string', maxLength: 120 },
           ])),
           required: definition.required || [],
         },

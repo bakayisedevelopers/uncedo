@@ -1,3 +1,5 @@
+import { useEffect } from 'react';
+
 export function Badge({ tone = 'neutral', children }) {
   const tones = {
     neutral: 'border-white/10 bg-white/5 text-ink-200',
@@ -70,3 +72,98 @@ export function LoadingState({ label = 'Loading admin data...' }) {
     </div>
   );
 }
+
+export function ConfirmDialog({
+  open = false,
+  title = 'Confirm action',
+  description = '',
+  details = [],
+  confirmLabel = 'Confirm',
+  cancelLabel = 'Cancel',
+  tone = 'danger',
+  isBusy = false,
+  errorMessage = '',
+  onConfirm,
+  onCancel,
+}) {
+  useEffect(() => {
+    if (!open) return undefined;
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape' && !isBusy) {
+        onCancel?.();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isBusy, onCancel, open]);
+
+  if (!open) return null;
+
+  const confirmButtonClass = tone === 'danger'
+    ? 'bg-rose-600 text-white hover:bg-rose-500 border border-rose-400/30'
+    : 'bg-brand text-white hover:opacity-95';
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-ink-950/80 p-4 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="confirm-dialog-title"
+      onClick={() => {
+        if (!isBusy) onCancel?.();
+      }}
+    >
+      <div
+        className="w-full max-w-md rounded-[28px] border border-white/15 bg-ink-900 p-6 shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-rose-300/90">
+          {tone === 'danger' ? 'Destructive action' : 'Confirmation'}
+        </p>
+        <h3 id="confirm-dialog-title" className="mt-2 text-xl font-bold tracking-tight text-white">
+          {title}
+        </h3>
+        {description ? (
+          <p className="mt-2 text-sm leading-6 text-ink-200">{description}</p>
+        ) : null}
+
+        {Array.isArray(details) && details.length ? (
+          <ul className="mt-4 space-y-2 rounded-[20px] border border-white/10 bg-white/5 p-3.5 text-xs leading-5 text-ink-200">
+            {details.map((item, idx) => (
+              <li key={idx} className="flex items-start gap-2">
+                <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-rose-400" />
+                <span>{item}</span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+
+        {errorMessage ? (
+          <div className="mt-4 rounded-2xl border border-rose-400/30 bg-rose-500/15 px-4 py-3 text-xs font-medium text-rose-200">
+            {errorMessage}
+          </div>
+        ) : null}
+
+        <div className="mt-6 flex flex-wrap items-center justify-end gap-3">
+          <button
+            type="button"
+            onClick={() => onCancel?.()}
+            disabled={isBusy}
+            className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {cancelLabel}
+          </button>
+          <button
+            type="button"
+            onClick={() => onConfirm?.()}
+            disabled={isBusy}
+            className={`rounded-2xl px-4 py-2.5 text-sm font-bold transition disabled:cursor-not-allowed disabled:opacity-60 ${confirmButtonClass}`}
+          >
+            {isBusy ? 'Deleting...' : confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+

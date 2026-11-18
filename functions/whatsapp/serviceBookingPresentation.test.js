@@ -208,3 +208,77 @@ test('formatWhatsAppRequestExpiredMessage is warm, cleans category prefix, and o
   assert.doesNotMatch(message, /wa_req_123|reference|beauty:/i);
 });
 
+test('formatWhatsAppNextQuestion renders all >10 options cleanly as numbered text without truncating at 10', () => {
+  const { formatWhatsAppNextQuestion } = require('./serviceBookingPresentation');
+  const fourteenOptions = Array.from({ length: 14 }, (_, idx) => ({
+    value: String(idx + 1),
+    label: `${idx + 1} ${idx === 0 ? 'person' : 'people'}`,
+  }));
+  const result = formatWhatsAppNextQuestion({
+    service: { label: 'Makeup' },
+    question: {
+      id: 'people_count',
+      prompt: 'How many people do you want this makeup for?',
+      options: fourteenOptions,
+    },
+    index: 0,
+    total: 2,
+  });
+  assert.equal(result.interactive, null);
+  assert.match(result.text, /1\. 1 person/);
+  assert.match(result.text, /14\. 14 people/);
+});
+
+test('formatWhatsAppNextQuestion preserves normal interactive list menu when no question options have pictures', () => {
+  const { formatWhatsAppNextQuestion } = require('./serviceBookingPresentation');
+  const result = formatWhatsAppNextQuestion({
+    service: { label: 'Nails' },
+    question: {
+      id: 'nail_length',
+      prompt: 'Choose your nail length',
+      options: [
+        { value: 'short', label: 'Short', imageUrl: '' },
+        { value: 'medium', label: 'Medium', imageUrl: '' },
+        { value: 'long', label: 'Long', imageUrl: '' },
+        { value: 'xl', label: 'Extra Long', imageUrl: '' },
+      ],
+    },
+    index: 0,
+    total: 1,
+  });
+  assert.equal(result.interactive.type, 'list');
+  assert.equal(result.interactive.action.button, 'Choose option');
+  assert.equal(result.interactive.action.sections[0].rows.length, 4);
+});
+
+test('formatWhatsAppNextQuestion uses carousel with Uncedo logo fallback for options missing pictures and accepts Firebase Storage URLs', () => {
+  const { formatWhatsAppNextQuestion } = require('./serviceBookingPresentation');
+  const firebaseStorageUrl = 'https://firebasestorage.googleapis.com/v0/b/bakayise-uncedo-latest.appspot.com/o/service-catalog%2Fnails%2Fred.jpg?alt=media&token=abc123';
+  const result = formatWhatsAppNextQuestion({
+    service: { label: 'Nails' },
+    question: {
+      id: 'nail_color',
+      prompt: 'Choose a color',
+      options: [
+        { value: 'red', label: 'Ruby Red', imageUrl: firebaseStorageUrl, pricingType: 'adder', priceAdder: 30 },
+        { value: 'nude', label: 'Soft Nude', imageUrl: '' },
+        { value: 'french', label: 'French Tips', pricingType: 'multiplier', factor: 2 },
+        { value: 'chrome', label: 'Silver Chrome', imageUrl: 'https://example.com/chrome.webp' },
+      ],
+    },
+    index: 0,
+    total: 1,
+  });
+  assert.equal(result.interactive.type, 'carousel');
+  assert.equal(result.interactive.action.cards.length, 4);
+  assert.equal(result.interactive.action.cards[0].header.image.link, firebaseStorageUrl);
+  assert.match(result.interactive.action.cards[0].body.text, /\*Ruby Red\* \(\+R30\)/);
+  assert.equal(result.interactive.action.cards[1].header.image.link, 'https://uncedo.bakayise.com/logo.png');
+  assert.equal(result.interactive.action.cards[2].header.image.link, 'https://uncedo.bakayise.com/logo.png');
+  assert.match(result.interactive.action.cards[2].body.text, /\*French Tips\* \(×2\)/);
+  assert.equal(result.interactive.action.cards[3].header.image.link, 'https://uncedo.bakayise.com/logo.png');
+  assert.match(result.text, /1\. Ruby Red/);
+  assert.match(result.text, /4\. Silver Chrome/);
+});
+
+

@@ -316,3 +316,29 @@ test('classification prompt forbids re-calling already-completed tools in toolRe
   });
   assert.match(prompt, /NEVER call that tool again; set toolName to ""/);
 });
+
+test('intent router accepts applyForHelperService with provider_support intent and helper prompt guidance', () => {
+  const normalized = normalizeModelResult({
+    intent: 'provider_support',
+    serviceId: 'hair_styling',
+    confidence: 0.95,
+    extractedAnswers: {},
+    toolName: 'applyForHelperService',
+    toolArgumentsJson: '{"serviceId":"hair_styling","serviceOption":"Box Braids, Cornrows"}',
+  }, ['hair_styling']);
+  assert.equal(normalized.intent, 'provider_support');
+  assert.equal(normalized.toolName, 'applyForHelperService');
+  assert.deepEqual(normalized.toolArguments, {
+    serviceId: 'hair_styling',
+    serviceOption: 'Box Braids, Cornrows',
+  });
+
+  const prompt = buildPrompt({
+    message: { text: 'Box Braids and Cornrows' },
+    conversationState: { mode: 'helper_service_application', intent: 'provider_support', selectedServiceId: 'hair_styling' },
+    availableTools: [{ name: 'applyForHelperService', description: 'Apply for helper services.' }],
+  });
+  assert.match(prompt, /"allowedToolNames":\["","applyForHelperService"\]/);
+  assert.match(prompt, /helper_service_application/);
+});
+

@@ -51,19 +51,41 @@ export function normalizeServiceCatalogEntry(entry = {}, fallback = null) {
     categoryId: String(entry.categoryId || fallbackItem?.categoryId || '').trim(),
   });
 
-  const normalizedRequired = (Array.isArray(entry.questionnaire?.required) ? entry.questionnaire.required : entry.requiredQuestions || presetQuestionnaire.required || [])
-    .map((q, idx) => ({
+  const normalizeQuestion = (q = {}, idx = 0) => {
+    const depQ = String(q.dependencyRule?.dependsOnQuestionId || q.dependsOn?.questionId || '').trim();
+    const depVals = [...new Set([
+      ...(Array.isArray(q.dependencyRule?.dependsOnOptionValues) ? q.dependencyRule.dependsOnOptionValues : []),
+      ...(Array.isArray(q.dependsOn?.optionValues) ? q.dependsOn.optionValues : []),
+      q.dependencyRule?.dependsOnOptionValue || q.dependsOn?.optionValue || '',
+    ].map((val) => String(val || '').trim()).filter(Boolean))];
+    return {
       ...q,
       id: String(q.id || `question_${idx + 1}`).trim(),
-      type: String(q.type || 'option-specific').trim().toLowerCase() === 'standard' ? 'standard' : 'option-specific',
-    }));
+      type: depQ && depVals.length > 0
+        ? 'dependent'
+        : (String(q.type || 'option-specific').trim().toLowerCase() === 'standard' ? 'standard' : 'option-specific'),
+      dependencyRule: depQ && depVals.length > 0
+        ? {
+            dependsOnQuestionId: depQ,
+            dependsOnOptionValue: depVals[0],
+            dependsOnOptionValues: depVals,
+          }
+        : null,
+      options: Array.isArray(q.options)
+        ? q.options.map((opt) => (
+          typeof opt === 'string'
+            ? opt
+            : { ...opt, imageUrl: String(opt?.imageUrl || opt?.imageUri || '').trim() }
+        ))
+        : [],
+    };
+  };
+
+  const normalizedRequired = (Array.isArray(entry.questionnaire?.required) ? entry.questionnaire.required : entry.requiredQuestions || presetQuestionnaire.required || [])
+    .map((q, idx) => normalizeQuestion(q, idx));
 
   const normalizedOptional = (Array.isArray(entry.questionnaire?.optional) ? entry.questionnaire.optional : entry.optionalQuestions || presetQuestionnaire.optional || [])
-    .map((q, idx) => ({
-      ...q,
-      id: String(q.id || `question_${idx + 1}`).trim(),
-      type: String(q.type || 'option-specific').trim().toLowerCase() === 'standard' ? 'standard' : 'option-specific',
-    }));
+    .map((q, idx) => normalizeQuestion(q, idx));
 
   return {
     id: serviceId,
@@ -299,5 +321,75 @@ export async function deleteServiceCatalogImage(objectPath = '') {
     }
     throw error;
   }
+}
+
+export async function deleteServiceCatalogEntry(serviceId) {
+  const clients = await getFirebaseClients();
+  const normalizedId = String(serviceId || '').trim();
+  if (!clients || !normalizedId) {
+    throw new Error('Firebase is not configured for the admin app.');
+  }
+
+  const { db, firestoreModule } = clients;
+  const {
+    collection,
+    deleteDoc,
+    doc,
+    getDoc,
+    getDocs,
+    query,
+    serverTimestamp,
+    updateDoc,
+    where,
+  } = firestoreModule;
+
+  const refDoc = doc(db, 'serviceCatalog', normalizedId);
+  const existing = await getDoc(refDoc);
+  if (!existing.exists()) {
+    return { deleted: false, serviceId: normalizedId };
+  }
+
+  const current = existing.data() || {};
+  const categoryId = String(current.categoryId || '').trim();
+  const servicePrefix = `service-catalog/${normalizedId}/`;
+
+  await deleteDoc(refDoc);
+
+  // Remove deleted serviceId from any bundles referencing it.
+  try {
+    const bundleQuery = query(
+      collection(db, 'serviceCatalog'),
+      where('includedServiceIds', 'array-contains', normalizedId),
+    );
+    const bundleSnap = await getDocs(bundleQuery);
+    await Promise.all(bundleSnap.docs.map(async (bundleDoc) => {
+      const bundleData = bundleDoc.data() || {};
+      const nextIncluded = (Array.isArray(bundleData.includedServiceIds) ? bundleData.includedServiceIds : [])
+        .map((item) => String(item || '').trim())
+        .filter((item) => item && item !== normalizedId);
+      await updateDoc(bundleDoc.ref, {
+        includedServiceIds: nextIncluded,
+        updatedAt: serverTimestamp(),
+      });
+    }));
+  } catch (_error) {
+    // Non-fatal bundle reference cleanup.
+  }
+
+  // Best-effort cleanup of images stored specifically under this service folder.
+  const images = Array.isArray(current.images) ? current.images : [];
+  await Promise.all(
+    images
+      .map((img) => String(img?.objectPath || '').trim())
+      .filter((objectPath) => objectPath.startsWith(servicePrefix))
+      .map((objectPath) => deleteServiceCatalogImage(objectPath).catch(() => null)),
+  );
+
+  await reconcileOpenServiceRequests({
+    reason: 'admin_service_catalog_deleted',
+    touchedServiceIds: [normalizedId, categoryId].filter(Boolean),
+  }).catch(() => null);
+
+  return { deleted: true, serviceId: normalizedId };
 }
 

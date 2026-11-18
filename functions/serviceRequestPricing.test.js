@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  isQuestionApplicable,
   normalizeAndValidateAnswers,
   quoteFromCatalogEntries,
   quoteFromFirestore,
@@ -53,7 +54,7 @@ test('backend quote uses the same shared category pricing source and Firestore q
 
   assert.equal(backendQuote.total, appEquivalentQuote.total);
   assert.deepEqual(backendQuote.serviceBreakdown, appEquivalentQuote.serviceBreakdown);
-  assert.equal(backendQuote.total, 317.14);
+  assert.equal(backendQuote.total, 317);
   assert.match(backendQuote.questionnaireVersion, /^[a-f0-9]{64}$/);
 });
 
@@ -123,7 +124,7 @@ test('Firestore package lookup keeps selected package metadata out of the priced
     selectedPackageId: 'wash_bundle',
     structuredAnswers: answers,
   });
-  assert.equal(quote.total, 317.14);
+  assert.equal(quote.total, 317);
   assert.deepEqual(quote.serviceBreakdown.map((line) => line.serviceId), ['full_body_wash']);
 });
 
@@ -235,4 +236,262 @@ function normalizeAndCatalog(entries) {
   const { normalizeServiceCatalogEntry } = require('./serviceMarketplacePricing');
   return entries.map((e) => normalizeServiceCatalogEntry(e));
 }
+
+test('question dependencies support chaining, prune stale child answers, and apply multipliers > 5 without multiplying travelFee', () => {
+  const beautyCatalog = [{
+    id: 'makeup_service',
+    categoryId: 'beauty',
+    categoryName: 'Beauty',
+    label: 'Event Makeup',
+    active: true,
+    approved: true,
+    optionApplicationMode: 'per_option',
+    pricing: { bookingFee: 0, travelFee: 35 },
+    options: [
+      {
+        id: 'soft_glam',
+        title: 'Soft Glam',
+        price: 200,
+        selectedQuestionIds: ['wants_lashes', 'lash_style', 'lash_density', 'people_count'],
+        requiresNoOptionSpecificQuestions: false,
+      },
+    ],
+    questionnaire: {
+      required: [
+        {
+          id: 'wants_lashes',
+          type: 'option-specific',
+          required: true,
+          prompt: 'Do you want lashes?',
+          answerType: 'enum',
+          options: [
+            { value: 'yes', label: 'Yes', priceAdder: 50 },
+            { value: 'no', label: 'No', priceAdder: 0 },
+          ],
+        },
+        {
+          id: 'lash_style',
+          type: 'option-specific',
+          required: true,
+          prompt: 'Which lash style?',
+          answerType: 'enum',
+          dependencyRule: { dependsOnQuestionId: 'wants_lashes', dependsOnOptionValue: 'yes' },
+          options: [
+            { value: 'mink', label: 'Mink', priceAdder: 30 },
+            { value: 'classic', label: 'Classic', priceAdder: 0 },
+          ],
+        },
+        {
+          id: 'lash_density',
+          type: 'option-specific',
+          required: true,
+          prompt: 'Extra lash volume?',
+          answerType: 'enum',
+          dependencyRule: { dependsOnQuestionId: 'lash_style', dependsOnOptionValue: 'mink' },
+          options: [
+            { value: 'mega', label: 'Mega', priceAdder: 20 },
+          ],
+        },
+        {
+          id: 'people_count',
+          type: 'standard',
+          required: true,
+          prompt: 'How many people?',
+          answerType: 'enum',
+          options: [
+            { value: '1', label: '1 person', pricingType: 'multiplier', factor: 1 },
+            { value: '14', label: '14 people', pricingType: 'multiplier', factor: 14 },
+          ],
+        },
+      ],
+      optional: [],
+    },
+  }];
+
+  const questions = beautyCatalog[0].questionnaire.required;
+  const noValidation = normalizeAndValidateAnswers({
+    answers: {
+      wants_lashes: 'no',
+      lash_style: 'mink',
+      lash_density: 'mega',
+      people_count: '1',
+      travel_distance_km: 10,
+    },
+    questions,
+  });
+  assert.deepEqual(noValidation.missingRequired, []);
+  assert.equal(noValidation.answers.lash_style, undefined);
+  assert.equal(noValidation.answers.lash_density, undefined);
+  assert.equal(noValidation.answers.travel_distance_km, 10);
+
+  const yesIncomplete = normalizeAndValidateAnswers({
+    answers: { wants_lashes: 'yes', people_count: '1' },
+    questions,
+  });
+  assert.deepEqual(yesIncomplete.missingRequired, ['lash_style']);
+
+  const fullQuote = quoteFromCatalogEntries({
+    entries: beautyCatalog,
+    categoryId: 'beauty',
+    serviceIds: ['makeup_service'],
+    selectedOptionId: 'soft_glam',
+    structuredAnswers: {
+      wants_lashes: 'yes',
+      lash_style: 'mink',
+      lash_density: 'mega',
+      people_count: '14',
+      travel_distance_km: 10,
+    },
+  });
+  // Service subtotal: (200 base + 50 + 30 + 20) * 14 = 300 * 14 = 4200 (travelFee 40 is NOT multiplied by 14)
+  assert.equal(fullQuote.serviceBreakdown[0].subtotal, 4200);
+  assert.equal(fullQuote.travelFee, 40);
+  assert.equal(fullQuote.total, 4240 + fullQuote.bookingFee);
+});
+
+test('question dependency triggers when any selected dependsOnOptionValues matches and prunes otherwise', () => {
+  const nailsCatalog = [{
+    id: 'manicure_service',
+    categoryId: 'beauty',
+    categoryName: 'Beauty',
+    label: 'Manicure',
+    active: true,
+    approved: true,
+    options: [
+      { id: 'standard_manicure', title: 'Standard Manicure', price: 150, selectedQuestionIds: ['nail_type', 'nail_length'] },
+    ],
+    questionnaire: {
+      required: [
+        {
+          id: 'nail_type',
+          type: 'option-specific',
+          required: true,
+          prompt: 'Which nail type?',
+          answerType: 'enum',
+          options: [
+            { value: 'normal_nails', label: 'Normal nails', priceAdder: 0 },
+            { value: 'press_ons', label: 'Press-ons', priceAdder: 40 },
+            { value: 'natural_nails', label: 'Natural nails', priceAdder: 0 },
+          ],
+        },
+        {
+          id: 'nail_length',
+          type: 'option-specific',
+          required: true,
+          prompt: 'Which nail length?',
+          answerType: 'enum',
+          dependencyRule: {
+            dependsOnQuestionId: 'nail_type',
+            dependsOnOptionValue: 'normal_nails',
+            dependsOnOptionValues: ['normal_nails', 'press_ons'],
+          },
+          options: [
+            { value: 'short', label: 'Short', priceAdder: 0 },
+            { value: 'long', label: 'Long', priceAdder: 50 },
+          ],
+        },
+      ],
+      optional: [],
+    },
+  }];
+
+  const questions = nailsCatalog[0].questionnaire.required;
+  assert.equal(isQuestionApplicable(questions[1], { nail_type: 'normal_nails' }, questions), true);
+  assert.equal(isQuestionApplicable(questions[1], { nail_type: 'press_ons' }, questions), true);
+  assert.equal(isQuestionApplicable(questions[1], { nail_type: 'natural_nails' }, questions), false);
+
+  const pressOnMissing = normalizeAndValidateAnswers({
+    answers: { nail_type: 'press_ons' },
+    questions,
+  });
+  assert.deepEqual(pressOnMissing.missingRequired, ['nail_length']);
+
+  const naturalCleaned = normalizeAndValidateAnswers({
+    answers: { nail_type: 'natural_nails', nail_length: 'long' },
+    questions,
+  });
+  assert.deepEqual(naturalCleaned.missingRequired, []);
+  assert.equal(naturalCleaned.answers.nail_length, undefined);
+
+  const pressOnQuote = quoteFromCatalogEntries({
+    entries: nailsCatalog,
+    categoryId: 'beauty',
+    serviceIds: ['manicure_service'],
+    selectedOptionId: 'standard_manicure',
+    structuredAnswers: { nail_type: 'press_ons', nail_length: 'long', travel_distance_km: 5 },
+  });
+  // Base 150 + Press-ons 40 + Long 50 = 240
+  assert.equal(pressOnQuote.serviceBreakdown[0].subtotal, 240);
+});
+
+test('dependent questions automatically follow parent question option scope even without being listed in selectedQuestionIds', () => {
+  const { getQuestionnaireForSelection } = require('./serviceRequestPricing');
+  const dishCatalog = [{
+    id: 'dishwashing_service',
+    categoryId: 'cleaning',
+    categoryName: 'Cleaning',
+    label: 'Dishwashing',
+    active: true,
+    approved: true,
+    options: [
+      { id: 'event_wash', title: 'Event Wash', price: 200, selectedQuestionIds: ['is_event'], requiresNoOptionSpecificQuestions: false },
+      { id: 'quick_wash', title: 'Quick Rinse', price: 80, selectedQuestionIds: [], requiresNoOptionSpecificQuestions: true },
+    ],
+    questionnaire: {
+      required: [
+        {
+          id: 'is_event',
+          type: 'option-specific',
+          required: true,
+          prompt: 'Is this dishwashing for an event?',
+          answerType: 'enum',
+          options: [
+            { value: 'yes', label: 'Yes, event', priceAdder: 0 },
+            { value: 'no', label: 'No, household', priceAdder: 0 },
+          ],
+        },
+        {
+          id: 'event_people_count',
+          type: 'dependent',
+          required: true,
+          prompt: 'How many people for the event?',
+          answerType: 'enum',
+          dependencyRule: {
+            dependsOnQuestionId: 'is_event',
+            dependsOnOptionValue: 'yes',
+            dependsOnOptionValues: ['yes'],
+          },
+          options: [
+            { value: '20', label: '20 people', priceAdder: 100 },
+          ],
+        },
+      ],
+      optional: [],
+    },
+  }];
+
+  const normalized = normalizeAndCatalog(dishCatalog);
+  const eventQuestions = getQuestionnaireForSelection({
+    services: normalized,
+    selectedOptionId: 'event_wash',
+  });
+  assert.deepEqual(eventQuestions.map((q) => q.id), ['is_event', 'event_people_count']);
+
+  const quickQuestions = getQuestionnaireForSelection({
+    services: normalized,
+    selectedOptionId: 'quick_wash',
+  });
+  assert.deepEqual(quickQuestions.map((q) => q.id), []);
+
+  const quote = quoteFromCatalogEntries({
+    entries: dishCatalog,
+    categoryId: 'cleaning',
+    serviceIds: ['dishwashing_service'],
+    selectedOptionId: 'event_wash',
+    structuredAnswers: { is_event: 'yes', event_people_count: '20' },
+  });
+  assert.equal(quote.serviceBreakdown[0].subtotal, 300);
+});
+
+
 

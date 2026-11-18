@@ -1,4 +1,5 @@
 const { onDocumentCreated, onDocumentWritten } = require('firebase-functions/v2/firestore');
+const { onValueWritten } = require('firebase-functions/v2/database');
 const { onCall, onRequest, HttpsError } = require('firebase-functions/v2/https');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onTaskDispatched } = require('firebase-functions/v2/tasks');
@@ -11,6 +12,8 @@ const {
   normalizeServiceCatalogEntry: normalizeMarketplaceServiceCatalogEntry,
   resolveSelectedServiceOption,
 } = require('./serviceMarketplacePricing');
+const { generateAdminServiceDraft: runAdminAiServiceDraft } = require('./adminAiServiceAssistant');
+const { generateAdminOptionImage: runAdminAiOptionImage } = require('./adminAiServiceImage');
 const {
   LEGAL_ENTITY_NAME,
 } = require('./legalAgreements');
@@ -87,6 +90,7 @@ const {
 const { createCategoryPricingEngine } = require('./shared/categoryPricingEngineFactory.cjs');
 const {
   getQuestionnaireForSelection,
+  isQuestionApplicable,
   normalizeAndValidateAnswers,
   quoteFromCatalogEntries,
   quoteFromFirestore,
@@ -194,6 +198,19 @@ const {
   transitionWhatsAppOnboarding,
 } = require('./whatsapp/onboardingFlow');
 const { isWhatsAppHelperProfileCaptureStage, resolveWhatsAppHelperReadinessState } = require('./whatsapp/helperReadinessGate');
+const {
+  HELPER_ADD_BUTTONS,
+  HELPER_SERVICE_APP_TTL_MS,
+  analyzeHelperServiceCatalog,
+  buildHelperAddOptionMenu,
+  buildHelperAddServiceMenu,
+  buildHelperPhotoUploadPrompt,
+  isBlockingOfferingStatus,
+  isHelperServiceApplicationActive,
+  matchCatalogService,
+  normalizeToken,
+  parseRequestedServiceOptions,
+} = require('./whatsapp/helperServiceApplication');
 const { isWhatsAppRecipientAllowed } = require('./whatsapp/testCohort');
 const { createMetaWhatsAppClient } = require('./whatsapp/metaClient');
 const {
@@ -1275,51 +1292,42 @@ async function queryHelperDispatchCandidates(categoryId = '', requestServiceIds 
   const h3Cells = getH3QueryCellsForLocation(requestLocation);
   const h3CellChunks = h3Cells.length ? chunkList(h3Cells, 10) : [null];
 
-  if (requiresOptionMatch) {
-    if (!optionQueryKeys.length) {
-      return [];
-    }
-    const snapshots = await Promise.all(optionQueryKeys.slice(0, 10).flatMap((optionKey) => (
-      h3CellChunks.map((cellChunk) => {
-        let query = base.where('approvedOptionKeys', 'array-contains', optionKey);
-        if (cellChunk) {
-          query = query.where('h3Cell', 'in', cellChunk);
-        }
-        return query.get();
+  const runCandidateQuery = async (field, values, useH3 = true) => {
+    const cells = useH3 ? h3CellChunks : [null];
+    const snaps = await Promise.all(values.slice(0, 10).flatMap((val) => (
+      cells.map((cellChunk) => {
+        let q = base.where(field, 'array-contains', val);
+        if (cellChunk) q = q.where('h3Cell', 'in', cellChunk);
+        return q.get();
       })
     )));
-    snapshots.forEach((snap) => snap.docs.forEach((docSnap) => byId.set(docSnap.id, { uid: docSnap.id, ...docSnap.data() })));
-    return helperPoliceClearanceRequired()
-      ? [...byId.values()].filter((helper) => isHelperPoliceClearanceApproved(helper.policeClearanceStatus))
-      : [...byId.values()];
-  }
+    const docs = [];
+    snaps.forEach((snap) => snap.docs.forEach((docSnap) => docs.push(docSnap)));
+    return docs;
+  };
 
-  if (requestedTokens.length) {
-    const snapshots = await Promise.all(requestedTokens.slice(0, 10).flatMap((token) => (
-      h3CellChunks.map((cellChunk) => {
-        let query = base.where('expandedServiceIds', 'array-contains', token);
-        if (cellChunk) {
-          query = query.where('h3Cell', 'in', cellChunk);
-        }
-        return query.get();
-      })
-    )));
-    snapshots.forEach((snap) => snap.docs.forEach((docSnap) => byId.set(docSnap.id, { uid: docSnap.id, ...docSnap.data() })));
-    return helperPoliceClearanceRequired()
-      ? [...byId.values()].filter((helper) => isHelperPoliceClearanceApproved(helper.policeClearanceStatus))
-      : [...byId.values()];
-  }
-
-  const categoryToken = normalizeServiceToken(categoryId);
-  if (!categoryToken) return [];
-  const snapshots = await Promise.all(h3CellChunks.map((cellChunk) => {
-    let query = base.where('categoryIds', 'array-contains', categoryToken);
-    if (cellChunk) {
-      query = query.where('h3Cell', 'in', cellChunk);
+  if (requiresOptionMatch && optionQueryKeys.length) {
+    try {
+      const docs = await runCandidateQuery('approvedOptionKeys', optionQueryKeys, true);
+      docs.forEach((docSnap) => byId.set(docSnap.id, { uid: docSnap.id, ...docSnap.data() }));
+    } catch (error) {
+      logger.warn('dispatch_option_key_query_fallback', { error: error?.message || 'index_unavailable' });
     }
-    return query.get();
-  }));
-  snapshots.forEach((snap) => snap.docs.forEach((docSnap) => byId.set(docSnap.id, { uid: docSnap.id, ...docSnap.data() })));
+  }
+
+  if (!byId.size && requestedTokens.length) {
+    const docs = await runCandidateQuery('expandedServiceIds', requestedTokens, true);
+    docs.forEach((docSnap) => byId.set(docSnap.id, { uid: docSnap.id, ...docSnap.data() }));
+  }
+
+  if (!byId.size) {
+    const categoryToken = normalizeServiceToken(categoryId);
+    if (categoryToken) {
+      const docs = await runCandidateQuery('categoryIds', [categoryToken], true);
+      docs.forEach((docSnap) => byId.set(docSnap.id, { uid: docSnap.id, ...docSnap.data() }));
+    }
+  }
+
   return helperPoliceClearanceRequired()
     ? [...byId.values()].filter((helper) => isHelperPoliceClearanceApproved(helper.policeClearanceStatus))
     : [...byId.values()];
@@ -4415,6 +4423,279 @@ async function submitWhatsAppHelperServices({
   return { code: 'submitted', names: submissionTargets.map((target) => target.displayName), uid: helperUid };
 }
 
+async function applyForHelperServicesInFirestore({
+  helperUid,
+  conversationRef = null,
+  catalogEntry,
+  selectedOptions = [],
+  existingOfferings = [],
+}) {
+  const serviceSlug = normalizeServiceToken(catalogEntry.id);
+  const serviceName = String(catalogEntry.label || catalogEntry.id).trim();
+  const isUnified = catalogEntry.optionApplicationMode === 'unified';
+  const inheritsBundleImages = catalogEntry.type === 'bundle' && catalogEntry.inheritBundleImages !== false;
+
+  const existingById = new Map(
+    (Array.isArray(existingOfferings) ? existingOfferings : []).map((item) => [String(item.offeringId || ''), item]),
+  );
+
+  const targets = (Array.isArray(selectedOptions) && selectedOptions.length > 0)
+    ? selectedOptions.map((option) => {
+        const optSlug = normalizeServiceToken(option.id);
+        const offeringId = `${helperUid}_${serviceSlug}__${optSlug}`;
+        return {
+          ref: db.collection('helperServices').doc(offeringId),
+          offeringId,
+          option,
+          applicationMode: 'option',
+          displayName: `${serviceName} — ${option.title || option.id}`,
+        };
+      })
+    : [{
+        ref: db.collection('helperServices').doc(`${helperUid}_${serviceSlug}`),
+        offeringId: `${helperUid}_${serviceSlug}`,
+        option: null,
+        applicationMode: isUnified ? 'unified' : 'service',
+        displayName: serviceName,
+      }];
+
+  let needsPhotos = false;
+  const submittedNames = [];
+  const appliedOptions = [];
+  const offeringIds = [];
+
+  await db.runTransaction(async (transaction) => {
+    const snapshots = await Promise.all(targets.map(({ ref }) => transaction.get(ref)));
+    const convSnapshot = conversationRef ? await transaction.get(conversationRef) : null;
+
+    targets.forEach((target, index) => {
+      const snap = snapshots[index];
+      const existingData = snap.exists ? (snap.data() || {}) : null;
+      if (existingData && isBlockingOfferingStatus(existingData.status)) {
+        const hasPhotos = Array.isArray(existingData.photos) && existingData.photos.length > 0;
+        appliedOptions.push({
+          serviceId: String(catalogEntry.id),
+          serviceName,
+          optionId: target.option ? String(target.option.id) : '',
+          optionTitle: target.option ? String(target.option.title || target.option.id) : '',
+          status: String(existingData.status || 'pending').toLowerCase(),
+          hasPhotos,
+        });
+        return;
+      }
+
+      const preservedPhotos = Array.isArray(existingData?.photos) ? existingData.photos.filter(Boolean) : [];
+      const targetHasPhotos = preservedPhotos.length > 0;
+      if (!inheritsBundleImages && !targetHasPhotos) {
+        needsPhotos = true;
+      }
+      submittedNames.push(target.displayName);
+      offeringIds.push(target.offeringId);
+      appliedOptions.push({
+        serviceId: String(catalogEntry.id),
+        serviceName,
+        optionId: target.option ? String(target.option.id) : '',
+        optionTitle: target.option ? String(target.option.title || target.option.id) : '',
+        status: 'pending',
+        hasPhotos: targetHasPhotos,
+      });
+
+      const payload = {
+        offeringId: target.offeringId,
+        helperId: helperUid,
+        serviceId: String(catalogEntry.id),
+        categoryId: String(catalogEntry.categoryId || ''),
+        serviceName,
+        optionId: target.option ? String(target.option.id) : '',
+        optionTitle: target.option ? String(target.option.title || target.option.id) : '',
+        applicationMode: target.applicationMode,
+        status: 'pending',
+        active: false,
+        approved: false,
+        verified: false,
+        photos: preservedPhotos,
+        approvalSource: '',
+        declineReason: '',
+        derivedFromBundleIds: [],
+        source: 'whatsapp_ai',
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+
+      if (snap.exists) {
+        transaction.set(target.ref, payload, { merge: true });
+      } else {
+        transaction.create(target.ref, {
+          ...payload,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+    });
+
+    if (conversationRef && convSnapshot?.exists) {
+      if (needsPhotos && offeringIds.length > 0) {
+        transaction.set(conversationRef, {
+          helperServiceApplication: {
+            stage: 'awaiting_photos',
+            serviceId: String(catalogEntry.id),
+            serviceName,
+            selectedOptionIds: [],
+            offeringIds,
+            submittedNames,
+            servicePage: 0,
+            optionPage: 0,
+            photoCount: 0,
+            expiresAtMs: Date.now() + HELPER_SERVICE_APP_TTL_MS,
+            updatedAtMs: Date.now(),
+          },
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+      } else {
+        transaction.set(conversationRef, {
+          helperServiceApplication: admin.firestore.FieldValue.delete(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+      }
+    }
+  });
+
+  if (!submittedNames.length && !offeringIds.length) {
+    const anyExistingPendingMissingPhotos = targets.some((target) => {
+      const existing = existingById.get(target.offeringId);
+      return existing && String(existing.status || '').toLowerCase() === 'pending' && !inheritsBundleImages && (!existing.photos || !existing.photos.length);
+    });
+    needsPhotos = anyExistingPendingMissingPhotos;
+  }
+
+  return {
+    offeringIds,
+    submittedNames,
+    appliedOptions,
+    needsPhotos,
+    inheritsBundleImages,
+  };
+}
+
+async function attachWhatsAppWorkPhotoToHelperOfferings({
+  uid,
+  identityId,
+  eventId,
+  inbound,
+  appState,
+  conversationRef,
+}) {
+  const rawType = String(inbound?.type || '').trim().toLowerCase();
+  const mime = String(inbound?.media?.mimeType || '').split(';')[0].trim().toLowerCase();
+  if (rawType !== 'image' || !inbound?.media?.mediaId) return { code: 'unsupported' };
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(mime)) return { code: 'unsupported' };
+
+  const offeringIds = Array.isArray(appState?.offeringIds)
+    ? appState.offeringIds.map((id) => String(id || '').trim()).filter(Boolean).slice(0, 20)
+    : [];
+  if (!offeringIds.length) return { code: 'no-active-application' };
+
+  const [identitySnapshot, linkSnapshot, profileSnapshot, conversationSnapshot] = await Promise.all([
+    db.collection('whatsappIdentities').doc(identityId).get(),
+    db.collection('whatsappUserLinks').doc(uid).get(),
+    db.collection('users').doc(uid).get(),
+    conversationRef.get(),
+  ]);
+  const identity = identitySnapshot.data() || {};
+  const userLink = linkSnapshot.data() || {};
+  const profile = profileSnapshot.data() || {};
+  const conversation = conversationSnapshot.data() || {};
+
+  if (!identitySnapshot.exists || !profileSnapshot.exists || !isHelperUserRecord(profile)
+    || String(identity.linkedFirebaseUid || '') !== uid
+    || String(identity.role || '').toLowerCase() !== 'helper'
+    || !normalizeTimestamp(identity.verifiedAt)
+    || String(userLink.uid || '') !== uid
+    || String(userLink.identityId || '') !== identityId) {
+    return { code: 'helper-identity-required' };
+  }
+  if (String(conversation.lastInboundEventId || '') !== eventId) {
+    return { code: 'stale' };
+  }
+
+  try {
+    const { secrets } = getWhatsAppMetaClient();
+    const media = await downloadMetaMedia({
+      mediaId: inbound.media.mediaId,
+      mediaType: 'image',
+      mimeType: mime,
+      sha256: inbound.media.sha256,
+      accessToken: secrets.accessToken,
+      graphApiVersion: secrets.graphApiVersion,
+    });
+    const bucket = admin.storage().bucket();
+    const safeServiceSlug = normalizeServiceToken(appState.serviceId || 'service') || 'service';
+    const firstOptSlug = String(offeringIds[0] || '').includes('__')
+      ? String(offeringIds[0]).split('__')[1] || 'service'
+      : 'service';
+    const objectPath = `helper-services/${safeServiceSlug}/${firstOptSlug}/${Date.now()}-${uid}-whatsapp-work.${media.extension}`;
+    const downloadToken = randomUUID();
+    const file = bucket.file(objectPath);
+    await file.save(media.buffer, {
+      resumable: false,
+      metadata: {
+        contentType: media.mimeType,
+        cacheControl: 'public,max-age=3600',
+        metadata: {
+          firebaseStorageDownloadTokens: downloadToken,
+          source: 'whatsapp_ai',
+          identityId: String(identityId),
+          uid: String(uid),
+        },
+      },
+    });
+    const downloadUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(objectPath)}?alt=media&token=${downloadToken}`;
+    const photoEntry = {
+      id: `pic_${Date.now()}`,
+      uri: downloadUrl,
+      objectPath,
+      uploadedAt: new Date().toISOString(),
+    };
+
+    let updatedCount = 0;
+    const nextPhotoCount = Number(appState.photoCount || 0) + 1;
+    await db.runTransaction(async (transaction) => {
+      const refs = offeringIds.map((id) => db.collection('helperServices').doc(id));
+      const snaps = await Promise.all(refs.map((ref) => transaction.get(ref)));
+      refs.forEach((ref, index) => {
+        const snap = snaps[index];
+        if (!snap.exists) return;
+        const data = snap.data() || {};
+        if (String(data.helperId || '') !== uid) return;
+        const existingPhotos = Array.isArray(data.photos) ? data.photos.filter(Boolean) : [];
+        const nextPhotos = [...existingPhotos, photoEntry].slice(0, 10);
+        transaction.set(ref, {
+          photos: nextPhotos,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        updatedCount += 1;
+      });
+      transaction.set(conversationRef, {
+        helperServiceApplication: {
+          ...appState,
+          photoCount: nextPhotoCount,
+          expiresAtMs: Date.now() + HELPER_SERVICE_APP_TTL_MS,
+          updatedAtMs: Date.now(),
+        },
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+    });
+
+    if (!updatedCount) return { code: 'offering-not-found' };
+    return { code: 'saved', downloadUrl, objectPath, photoCount: nextPhotoCount, updatedCount };
+  } catch (error) {
+    logger.warn('whatsapp_helper_work_photo_upload_failed', {
+      uid,
+      identityId,
+      errorCode: String(error?.code || 'media_processing_failed').slice(0, 80),
+    });
+    return { code: 'failed' };
+  }
+}
+
 async function getWhatsAppHelperReadiness(uid) {
   const [profileSnapshot, offerings, catalogue, agreementBundle, clearanceSnapshot] = await Promise.all([
     db.collection('users').doc(uid).get(), getHelperServiceOfferings(uid), getLiveServiceCatalogEntries(),
@@ -4760,7 +5041,8 @@ async function beginWhatsAppHelperOnline({ identityId, eventId, identity, conver
   });
 
   if (result.code === 'location-required') {
-    await reply('Before I can put you online, please share your current WhatsApp location pin. This is a one-time location update, not continuous tracking. If you move while online, send another pin. The request expires in 10 minutes, and a shared pin can be used for matching for up to 60 minutes.');
+    const workspaceUrl = String(process.env.WHATSAPP_HELPER_SIGNUP_URL || 'https://helpers.bakayise.com/sign-up').replace(/\/sign-up\/?$/, '/workspace');
+    await reply(`To go online and share your live device location for matching, please open your Uncedo Helpers Workspace:\n\n${workspaceUrl}`);
   } else if (result.code === 'already-online') {
     await reply('You are already online. Send “offline” when you want to stop receiving new offers.');
   } else if (result.code === 'active-request') {
@@ -5322,11 +5604,416 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
           })),
         };
       },
+      async applyForHelperService(args, context) {
+        const helperUid = String(context.authorization?.uid || '').trim();
+        if (!helperUid || context.authorization?.role !== 'helper') {
+          return { code: 'helper-authentication-required', error: 'Only verified linked helpers can apply for services.' };
+        }
+        const targetConvRef = context.conversationRef || conversationRef;
+        const [rawCatalog, existingOfferings, convSnap] = await Promise.all([
+          getLiveServiceCatalogEntries(),
+          getHelperServiceOfferings(helperUid),
+          targetConvRef ? targetConvRef.get().catch(() => null) : Promise.resolve(null),
+        ]);
+        const catalogEntries = rawCatalog.filter((service) => service.active === true && service.approved === true);
+        const analyses = analyzeHelperServiceCatalog(catalogEntries, existingOfferings);
+        const eligibleAnalyses = analyses.filter((entry) => entry.canApplyMore);
+        const convAppState = convSnap?.exists && isHelperServiceApplicationActive(convSnap.data()?.helperServiceApplication)
+          ? convSnap.data().helperServiceApplication
+          : null;
+
+        let rawServiceId = String(args?.serviceId || '').trim();
+        const rawQuery = String(args?.query || '').trim();
+        const rawOption = String(args?.serviceOption || '').trim();
+        if (!rawServiceId && !rawQuery && rawOption && convAppState?.serviceId) {
+          rawServiceId = String(convAppState.serviceId);
+        }
+
+        const formatServicesPayload = (list) => list.slice(0, 20).map((entry) => ({
+          id: String(entry.id),
+          label: String(entry.label),
+          categoryName: String(entry.categoryName || ''),
+          optionApplicationMode: String(entry.optionApplicationMode || 'service'),
+          availableOptionCount: entry.isPerOption ? entry.availableOptions.length : 0,
+        }));
+
+        const formatOptionsPayload = (optList) => optList.slice(0, 25).map((opt) => ({
+          id: String(opt.id),
+          title: String(opt.title),
+          price: Number.isFinite(Number(opt.price)) ? Number(opt.price) : 0,
+          description: String(opt.description || ''),
+          alreadyAppliedStatus: String(opt.existingStatus || ''),
+        }));
+
+        const saveSelectionState = async (stageFields) => {
+          if (!targetConvRef) return;
+          await targetConvRef.set({
+            helperServiceApplication: {
+              serviceId: '',
+              serviceName: '',
+              selectedOptionIds: [],
+              offeringIds: [],
+              submittedNames: [],
+              servicePage: 0,
+              optionPage: 0,
+              ...stageFields,
+              expiresAtMs: Date.now() + HELPER_SERVICE_APP_TTL_MS,
+              updatedAtMs: Date.now(),
+            },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true }).catch(() => null);
+        };
+
+        if (!rawServiceId && !rawQuery) {
+          if (!eligibleAnalyses.length) {
+            if (targetConvRef) {
+              await targetConvRef.set({
+                helperServiceApplication: admin.firestore.FieldValue.delete(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              }, { merge: true }).catch(() => null);
+            }
+            return { code: 'no-more-services' };
+          }
+          await saveSelectionState({ stage: 'selecting_service' });
+          return {
+            code: 'service-selection-required',
+            availableServices: formatServicesPayload(eligibleAnalyses),
+          };
+        }
+
+        const matchedService = matchCatalogService(catalogEntries, { serviceId: rawServiceId, query: rawQuery });
+        if (!matchedService) {
+          if (eligibleAnalyses.length) {
+            await saveSelectionState({ stage: 'selecting_service' });
+          }
+          return {
+            code: 'service-not-found',
+            query: rawServiceId || rawQuery,
+            availableServices: formatServicesPayload(eligibleAnalyses),
+          };
+        }
+
+        const analysis = analyses.find((item) => normalizeToken(item.id) === normalizeToken(matchedService.id));
+        if (!analysis) {
+          return {
+            code: 'service-not-found',
+            query: rawServiceId || rawQuery,
+            availableServices: formatServicesPayload(eligibleAnalyses),
+          };
+        }
+
+        const existingByComposite = new Map(
+          existingOfferings.map((item) => [
+            `${normalizeToken(item.serviceId)}::${normalizeToken(item.optionId || '')}`,
+            item,
+          ]),
+        );
+
+        if (!analysis.isPerOption) {
+          if (!analysis.canApplyMore) {
+            const existing = existingByComposite.get(`${normalizeToken(analysis.id)}::`) || null;
+            const pendingNeedsPhotos = analysis.existingStatus === 'pending'
+              && !analysis.hasPhotos
+              && !analysis.inheritsBundleImages
+              && Boolean(existing?.offeringId);
+            if (pendingNeedsPhotos) {
+              await saveSelectionState({
+                stage: 'awaiting_photos',
+                serviceId: analysis.id,
+                serviceName: analysis.label,
+                offeringIds: [existing.offeringId],
+                submittedNames: [analysis.label],
+                photoCount: 0,
+              });
+              return {
+                code: 'already-applied-needs-photos',
+                serviceId: analysis.id,
+                serviceName: analysis.label,
+                optionApplicationMode: analysis.optionApplicationMode,
+                submittedNames: [analysis.label],
+                appliedOptions: [{
+                  serviceId: analysis.id,
+                  serviceName: analysis.label,
+                  optionId: '',
+                  optionTitle: '',
+                  status: 'pending',
+                  hasPhotos: false,
+                }],
+                photoUploadUrl: getWhatsAppHelperWebOnboardingUrl(),
+                needsPhotos: true,
+              };
+            }
+            return {
+              code: 'already-applied',
+              serviceId: analysis.id,
+              serviceName: analysis.label,
+              optionApplicationMode: analysis.optionApplicationMode,
+              appliedOptions: [{
+                serviceId: analysis.id,
+                serviceName: analysis.label,
+                optionId: '',
+                optionTitle: '',
+                status: analysis.existingStatus || 'pending',
+                hasPhotos: Boolean(analysis.hasPhotos),
+              }],
+            };
+          }
+
+          const submission = await applyForHelperServicesInFirestore({
+            helperUid,
+            conversationRef: targetConvRef,
+            catalogEntry: analysis.service,
+            selectedOptions: [],
+            existingOfferings,
+          });
+          return {
+            code: 'submitted',
+            serviceId: analysis.id,
+            serviceName: analysis.label,
+            optionApplicationMode: analysis.optionApplicationMode,
+            submittedNames: submission.submittedNames,
+            appliedOptions: submission.appliedOptions,
+            photoUploadUrl: getWhatsAppHelperWebOnboardingUrl(),
+            needsPhotos: submission.needsPhotos,
+          };
+        }
+
+        if (!analysis.canApplyMore) {
+          const requestedMatched = rawOption ? parseRequestedServiceOptions(analysis.service, rawOption).matchedOptions : [];
+          const targetOptionStates = requestedMatched.length
+            ? analysis.optionStates.filter((opt) => requestedMatched.some((m) => normalizeToken(m.id) === normalizeToken(opt.id)))
+            : analysis.optionStates;
+          const pendingMissing = targetOptionStates
+            .filter((opt) => opt.existingStatus === 'pending' && !opt.hasPhotos && !analysis.inheritsBundleImages)
+            .map((opt) => existingByComposite.get(`${normalizeToken(analysis.id)}::${normalizeToken(opt.id)}`))
+            .filter(Boolean);
+          if (pendingMissing.length) {
+            const labels = pendingMissing.map((item) => item.optionTitle ? `${analysis.label} — ${item.optionTitle}` : analysis.label);
+            await saveSelectionState({
+              stage: 'awaiting_photos',
+              serviceId: analysis.id,
+              serviceName: analysis.label,
+              offeringIds: pendingMissing.map((item) => item.offeringId),
+              submittedNames: labels,
+              photoCount: 0,
+            });
+            return {
+              code: 'already-applied-needs-photos',
+              serviceId: analysis.id,
+              serviceName: analysis.label,
+              optionApplicationMode: 'per_option',
+              submittedNames: labels,
+              appliedOptions: pendingMissing.map((item) => ({
+                serviceId: analysis.id,
+                serviceName: analysis.label,
+                optionId: String(item.optionId || ''),
+                optionTitle: String(item.optionTitle || ''),
+                status: 'pending',
+                hasPhotos: false,
+              })),
+              photoUploadUrl: getWhatsAppHelperWebOnboardingUrl(),
+              needsPhotos: true,
+            };
+          }
+          return {
+            code: 'all-options-already-applied',
+            serviceId: analysis.id,
+            serviceName: analysis.label,
+            optionApplicationMode: 'per_option',
+            appliedOptions: targetOptionStates.map((opt) => ({
+              serviceId: analysis.id,
+              serviceName: analysis.label,
+              optionId: String(opt.id),
+              optionTitle: String(opt.title),
+              status: String(opt.existingStatus || 'pending'),
+              hasPhotos: Boolean(opt.hasPhotos),
+            })),
+          };
+        }
+
+        if (!rawOption) {
+          await saveSelectionState({
+            stage: 'selecting_options',
+            serviceId: analysis.id,
+            serviceName: analysis.label,
+          });
+          return {
+            code: 'option-selection-required',
+            serviceId: analysis.id,
+            serviceName: analysis.label,
+            optionApplicationMode: 'per_option',
+            availableOptions: formatOptionsPayload(analysis.availableOptions),
+          };
+        }
+
+        const parsedOptions = parseRequestedServiceOptions(analysis.service, rawOption);
+        if (!parsedOptions.matchedOptions.length) {
+          await saveSelectionState({
+            stage: 'selecting_options',
+            serviceId: analysis.id,
+            serviceName: analysis.label,
+          });
+          return {
+            code: 'option-not-found',
+            query: rawOption,
+            serviceId: analysis.id,
+            serviceName: analysis.label,
+            optionApplicationMode: 'per_option',
+            availableOptions: formatOptionsPayload(analysis.availableOptions),
+          };
+        }
+
+        const availableSet = new Set(analysis.availableOptions.map((opt) => normalizeToken(opt.id)));
+        const toApply = [];
+        const alreadyApplied = [];
+        parsedOptions.matchedOptions.forEach((opt) => {
+          const optState = analysis.optionStates.find((item) => normalizeToken(item.id) === normalizeToken(opt.id));
+          if (availableSet.has(normalizeToken(opt.id))) {
+            toApply.push(opt);
+          } else if (optState) {
+            alreadyApplied.push(optState);
+          }
+        });
+
+        if (!toApply.length) {
+          const pendingMissing = alreadyApplied
+            .filter((opt) => opt.existingStatus === 'pending' && !opt.hasPhotos && !analysis.inheritsBundleImages)
+            .map((opt) => existingByComposite.get(`${normalizeToken(analysis.id)}::${normalizeToken(opt.id)}`))
+            .filter(Boolean);
+          if (pendingMissing.length) {
+            const labels = pendingMissing.map((item) => item.optionTitle ? `${analysis.label} — ${item.optionTitle}` : analysis.label);
+            await saveSelectionState({
+              stage: 'awaiting_photos',
+              serviceId: analysis.id,
+              serviceName: analysis.label,
+              offeringIds: pendingMissing.map((item) => item.offeringId),
+              submittedNames: labels,
+              photoCount: 0,
+            });
+            return {
+              code: 'already-applied-needs-photos',
+              serviceId: analysis.id,
+              serviceName: analysis.label,
+              optionApplicationMode: 'per_option',
+              submittedNames: labels,
+              appliedOptions: pendingMissing.map((item) => ({
+                serviceId: analysis.id,
+                serviceName: analysis.label,
+                optionId: String(item.optionId || ''),
+                optionTitle: String(item.optionTitle || ''),
+                status: 'pending',
+                hasPhotos: false,
+              })),
+              photoUploadUrl: getWhatsAppHelperWebOnboardingUrl(),
+              needsPhotos: true,
+            };
+          }
+          await saveSelectionState({
+            stage: 'selecting_options',
+            serviceId: analysis.id,
+            serviceName: analysis.label,
+          });
+          return {
+            code: 'already-applied',
+            serviceId: analysis.id,
+            serviceName: analysis.label,
+            optionApplicationMode: 'per_option',
+            appliedOptions: alreadyApplied.map((opt) => ({
+              serviceId: analysis.id,
+              serviceName: analysis.label,
+              optionId: String(opt.id),
+              optionTitle: String(opt.title),
+              status: String(opt.existingStatus || 'pending'),
+              hasPhotos: Boolean(opt.hasPhotos),
+            })),
+            availableOptions: formatOptionsPayload(analysis.availableOptions),
+          };
+        }
+
+        const submission = await applyForHelperServicesInFirestore({
+          helperUid,
+          conversationRef: targetConvRef,
+          catalogEntry: analysis.service,
+          selectedOptions: toApply,
+          existingOfferings,
+        });
+        return {
+          code: 'submitted',
+          serviceId: analysis.id,
+          serviceName: analysis.label,
+          optionApplicationMode: 'per_option',
+          submittedNames: submission.submittedNames,
+          appliedOptions: submission.appliedOptions,
+          photoUploadUrl: getWhatsAppHelperWebOnboardingUrl(),
+          needsPhotos: submission.needsPhotos,
+        };
+      },
     },
   });
 }
 
 function formatWhatsAppToolResult(toolName, result = {}) {
+  if (toolName === 'applyForHelperService') {
+    if (result.code === 'no-more-services') {
+      return 'You have already applied for all currently published Uncedo services and options.';
+    }
+    if (result.code === 'service-not-found') {
+      const suggestions = Array.isArray(result.availableServices) && result.availableServices.length
+        ? `\n\nAvailable services: ${result.availableServices.map((item) => item.label).join(', ')}.`
+        : '';
+      return `I could not find a service matching "${result.query || ''}".${suggestions}`;
+    }
+    if (result.code === 'service-selection-required') {
+      const list = Array.isArray(result.availableServices)
+        ? result.availableServices.map((item) => (item.availableOptionCount > 0
+          ? `• ${item.label} (${item.availableOptionCount} option${item.availableOptionCount === 1 ? '' : 's'} available)`
+          : `• ${item.label}`)).join('\n')
+        : '';
+      return `Choose a service below to apply for it or select specific options:${list ? `\n\n${list}` : ''}`;
+    }
+    if (result.code === 'option-selection-required' || result.code === 'option-not-found') {
+      const lines = [
+        result.code === 'option-not-found'
+          ? `I could not match "${result.query || ''}" to an available option under *${result.serviceName || 'this service'}*.`
+          : `Which option(s) under *${result.serviceName || 'this service'}* would you like to apply for?`,
+      ];
+      if (Array.isArray(result.availableOptions) && result.availableOptions.length) {
+        result.availableOptions.forEach((opt) => {
+          const priceLabel = Number.isFinite(Number(opt.price)) && Number(opt.price) >= 0
+            ? ` — R${Number(opt.price).toFixed(2)}`
+            : '';
+          lines.push(`• ${opt.title}${priceLabel}`);
+        });
+      }
+      return lines.join('\n');
+    }
+    if (result.code === 'all-options-already-applied') {
+      return `You have already applied for all options under *${result.serviceName || 'this service'}*.`;
+    }
+    if (result.code === 'already-applied-needs-photos') {
+      const summary = Array.isArray(result.submittedNames) && result.submittedNames.length
+        ? result.submittedNames.join(', ')
+        : (result.serviceName || 'your selected service');
+      return `Your application for *${summary}* is already pending review and still needs at least one work photo.\n\nPlease send a work photo right here in this WhatsApp chat${result.photoUploadUrl ? `, or upload it on the web app: ${result.photoUploadUrl}` : ''}.`;
+    }
+    if (result.code === 'already-applied') {
+      const applied = Array.isArray(result.appliedOptions) ? result.appliedOptions : [];
+      const labels = applied.map((item) => item.optionTitle ? `${item.serviceName} — ${item.optionTitle} (${item.status || 'pending'})` : `${item.serviceName} (${item.status || 'pending'})`);
+      const remaining = Array.isArray(result.availableOptions) && result.availableOptions.length
+        ? `\n\nRemaining options you can apply for:\n${result.availableOptions.map((opt) => `• ${opt.title}${Number.isFinite(Number(opt.price)) ? ` — R${Number(opt.price).toFixed(2)}` : ''}`).join('\n')}`
+        : '';
+      return `You already have an application for ${labels.join(', ') || result.serviceName}.${remaining}`;
+    }
+    if (result.code === 'submitted') {
+      const names = Array.isArray(result.submittedNames) && result.submittedNames.length
+        ? result.submittedNames.join(', ')
+        : (result.serviceName || 'your selected service');
+      return result.needsPhotos !== false
+        ? `Submitted application for *${names}* (pending review). Please send at least one work photo right here in WhatsApp${result.photoUploadUrl ? `, or upload on the web app: ${result.photoUploadUrl}` : ''}.`
+        : `Submitted application for *${names}* (pending Uncedo admin review).`;
+    }
+    return 'I could not process that helper service application right now.';
+  }
   if (toolName === 'initiateServiceBooking') {
     if (result.code === 'not-found') {
       return `🔍 I couldn't find the service you requested to book. Please check the service name or select from our available services.`;
@@ -6740,7 +7427,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
             ? 'You already have an active service request, so this offer was not accepted.'
             : 'This helper offer is no longer available.'
         : action === 'accept'
-          ? 'You accepted the service offer. The request is now assigned to you.'
+          ? `You accepted the service offer. The request is now assigned to you.\n\nOpen it in Uncedo Helpers to drive, update status, and message the customer:\nhttps://helpers.bakayise.com/requests/${offerAction.requestId}`
           : 'You declined the service offer. Uncedo will look for the next eligible helper.';
       await reply(replyText);
       if (!outcome.error && action === 'accept') {
@@ -6960,7 +7647,15 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
                 services: getWhatsAppQuestionnaireServices(draftService, catalogEntries),
                 selectedPackageId: draftService.id,
                 selectedOptionId: draftOption?.id || '',
-              })
+              }).filter((question) => isQuestionApplicable(
+                question,
+                activeDraft.structuredAnswers || {},
+                getQuestionnaireForSelection({
+                  services: getWhatsAppQuestionnaireServices(draftService, catalogEntries),
+                  selectedPackageId: draftService.id,
+                  selectedOptionId: draftOption?.id || '',
+                }),
+              ))
             : [];
           const confirmedSummaryMessage = formatWhatsAppSubmittedRequestConfirmation({
             service: draftService,
@@ -6996,6 +7691,390 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       const policyConsent = buildWhatsAppPolicyConsent(getWhatsAppDisplayName(identity));
       await reply(policyConsent.text, policyConsent.interactive);
       await jobRef.set({ status: 'completed', intent: 'ai_consent_required', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    const activeHelperServiceApp = isHelperServiceApplicationActive(conversation.helperServiceApplication)
+      ? conversation.helperServiceApplication
+      : null;
+
+    if ((inbound.type === 'interactive' || inbound.type === 'button') && buttonId.startsWith('wa_hsvc_')) {
+      const helperAuthPrincipal = await resolveWhatsAppToolAuthorization(identityId, identity);
+      const helperAuth = helperAuthPrincipal.authorization || {};
+      if (helperAuth.role !== 'helper' || helperAuth.verified !== true || helperAuth.linked !== true || !helperAuth.uid) {
+        await conversationRef.set({
+          helperServiceApplication: admin.firestore.FieldValue.delete(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true }).catch(() => null);
+        await reply('Only verified linked helpers can apply for services via WhatsApp.');
+        await jobRef.set({ status: 'completed', intent: 'provider_support', reason: 'helper_auth_required', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+
+      const helperUid = helperAuth.uid;
+      const appState = activeHelperServiceApp || {};
+      if (buttonId === HELPER_ADD_BUTTONS.CANCEL) {
+        await conversationRef.set({
+          helperServiceApplication: admin.firestore.FieldValue.delete(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        await reply('Cancelled adding a new service. Let me know anytime you want to apply for another service or option.');
+        await jobRef.set({ status: 'completed', intent: 'provider_support', reason: 'helper_service_app_cancelled', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      if (buttonId === HELPER_ADD_BUTTONS.PHOTOS_DONE) {
+        await conversationRef.set({
+          helperServiceApplication: admin.firestore.FieldValue.delete(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        await reply('Got it! Your service application is queued for Uncedo admin review. We will notify you here once it has been reviewed.');
+        await jobRef.set({ status: 'completed', intent: 'provider_support', reason: 'helper_service_app_photos_done', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+
+      const [rawCatalog, existingOfferings] = await Promise.all([
+        getLiveServiceCatalogEntries(),
+        getHelperServiceOfferings(helperUid),
+      ]);
+      const activeCatalog = rawCatalog.filter((service) => service.active === true && service.approved === true);
+      const analyses = analyzeHelperServiceCatalog(activeCatalog, existingOfferings);
+
+      const persistAppState = async (nextState) => {
+        await conversationRef.set({
+          helperServiceApplication: {
+            serviceId: '',
+            serviceName: '',
+            selectedOptionIds: [],
+            offeringIds: [],
+            submittedNames: [],
+            servicePage: 0,
+            optionPage: 0,
+            ...nextState,
+            expiresAtMs: Date.now() + HELPER_SERVICE_APP_TTL_MS,
+            updatedAtMs: Date.now(),
+          },
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+      };
+
+      if (buttonId === HELPER_ADD_BUTTONS.BACK_TO_SERVICES || buttonId === HELPER_ADD_BUTTONS.NEXT_SERVICES) {
+        const nextPage = buttonId === HELPER_ADD_BUTTONS.NEXT_SERVICES ? Number(appState.servicePage || 0) + 1 : 0;
+        const menu = buildHelperAddServiceMenu(analyses, { page: nextPage });
+        if (menu.eligibleCount > 0) {
+          await persistAppState({ stage: 'selecting_service', servicePage: nextPage });
+        } else {
+          await conversationRef.set({ helperServiceApplication: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        }
+        await reply(menu.text, menu.interactive);
+      } else if (buttonId.startsWith(HELPER_ADD_BUTTONS.PICK_SERVICE_PREFIX)) {
+        const targetServiceId = buttonId.slice(HELPER_ADD_BUTTONS.PICK_SERVICE_PREFIX.length);
+        const entryAnalysis = analyses.find((item) => normalizeToken(item.id) === normalizeToken(targetServiceId));
+        if (!entryAnalysis) {
+          const menu = buildHelperAddServiceMenu(analyses, { leadIn: 'I could not find that service in the current catalogue.' });
+          await persistAppState({ stage: 'selecting_service', servicePage: 0 });
+          await reply(menu.text, menu.interactive);
+        } else if (!entryAnalysis.canApplyMore) {
+          const menu = buildHelperAddServiceMenu(analyses, { leadIn: `You have already applied for all options under *${entryAnalysis.label}*.` });
+          if (menu.eligibleCount > 0) {
+            await persistAppState({ stage: 'selecting_service', servicePage: 0 });
+            await reply(menu.text, menu.interactive);
+          } else {
+            await conversationRef.set({ helperServiceApplication: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            await reply(`You have already applied for all options under *${entryAnalysis.label}* and all other published Uncedo services.`);
+          }
+        } else if (entryAnalysis.isPerOption) {
+          await persistAppState({
+            stage: 'selecting_options',
+            serviceId: entryAnalysis.id,
+            serviceName: entryAnalysis.label,
+            selectedOptionIds: [],
+            optionPage: 0,
+          });
+          const menu = buildHelperAddOptionMenu(entryAnalysis, { selectedOptionIds: [], page: 0 });
+          await reply(menu.text, menu.interactive);
+        } else {
+          const submission = await applyForHelperServicesInFirestore({
+            helperUid,
+            conversationRef,
+            catalogEntry: entryAnalysis.service,
+            selectedOptions: [],
+            existingOfferings,
+          });
+          const prompt = buildHelperPhotoUploadPrompt({
+            serviceName: entryAnalysis.label,
+            submittedLabels: submission.submittedNames,
+            photoUploadUrl: getWhatsAppHelperWebOnboardingUrl(),
+            needsPhotos: submission.needsPhotos,
+          });
+          await reply(prompt.text, prompt.interactive);
+        }
+      } else if (buttonId === HELPER_ADD_BUTTONS.NEXT_OPTIONS) {
+        const entryAnalysis = analyses.find((item) => normalizeToken(item.id) === normalizeToken(appState.serviceId));
+        if (!entryAnalysis || !entryAnalysis.isPerOption || !entryAnalysis.canApplyMore) {
+          const menu = buildHelperAddServiceMenu(analyses, { leadIn: 'Let’s pick an available service to apply for:' });
+          await persistAppState({ stage: 'selecting_service', servicePage: 0 });
+          await reply(menu.text, menu.interactive);
+        } else {
+          const availableTokenSet = new Set(entryAnalysis.availableOptions.map((opt) => normalizeToken(opt.id)));
+          const sanitizedSelectedIds = (Array.isArray(appState.selectedOptionIds) ? appState.selectedOptionIds : [])
+            .map((id) => entryAnalysis.availableOptions.find((opt) => normalizeToken(opt.id) === normalizeToken(id))?.id || '')
+            .filter((id) => id && availableTokenSet.has(normalizeToken(id)));
+          const nextPage = Number(appState.optionPage || 0) + 1;
+          await persistAppState({
+            stage: 'selecting_options',
+            serviceId: entryAnalysis.id,
+            serviceName: entryAnalysis.label,
+            selectedOptionIds: [...new Set(sanitizedSelectedIds)],
+            optionPage: nextPage,
+          });
+          const menu = buildHelperAddOptionMenu(entryAnalysis, { selectedOptionIds: sanitizedSelectedIds, page: nextPage });
+          await reply(menu.text, menu.interactive);
+        }
+      } else if (buttonId === HELPER_ADD_BUTTONS.SUBMIT_OPTIONS) {
+        const entryAnalysis = analyses.find((item) => normalizeToken(item.id) === normalizeToken(appState.serviceId));
+        if (!entryAnalysis || !entryAnalysis.canApplyMore) {
+          const menu = buildHelperAddServiceMenu(analyses, { leadIn: 'Please choose an available service:' });
+          await persistAppState({ stage: 'selecting_service', servicePage: 0 });
+          await reply(menu.text, menu.interactive);
+        } else {
+          const selectedTokens = new Set(
+            (Array.isArray(appState.selectedOptionIds) ? appState.selectedOptionIds : [])
+              .map((id) => normalizeToken(id))
+              .filter(Boolean),
+          );
+          const selectedCatalogOptions = entryAnalysis.availableOptions
+            .filter((opt) => selectedTokens.has(normalizeToken(opt.id)) || selectedTokens.has(normalizeToken(opt.title)))
+            .map((opt) => (
+              (entryAnalysis.service.options || []).find((svcOpt) => normalizeToken(svcOpt.id) === normalizeToken(opt.id) || normalizeToken(svcOpt.title) === normalizeToken(opt.title))
+              || { id: opt.id, title: opt.title, price: opt.price }
+            ));
+
+          if (!selectedCatalogOptions.length) {
+            await persistAppState({
+              stage: 'selecting_options',
+              serviceId: entryAnalysis.id,
+              serviceName: entryAnalysis.label,
+              selectedOptionIds: [],
+              optionPage: 0,
+            });
+            const menu = buildHelperAddOptionMenu(entryAnalysis, {
+              selectedOptionIds: [],
+              page: 0,
+              leadIn: 'Please select at least one available option first.',
+            });
+            await reply(menu.text, menu.interactive);
+          } else {
+            const submission = await applyForHelperServicesInFirestore({
+              helperUid,
+              conversationRef,
+              catalogEntry: entryAnalysis.service,
+              selectedOptions: selectedCatalogOptions,
+              existingOfferings,
+            });
+            const prompt = buildHelperPhotoUploadPrompt({
+              serviceName: entryAnalysis.label,
+              submittedLabels: submission.submittedNames,
+              photoUploadUrl: getWhatsAppHelperWebOnboardingUrl(),
+              needsPhotos: submission.needsPhotos,
+            });
+            await reply(prompt.text, prompt.interactive);
+          }
+        }
+      } else if (buttonId.startsWith(HELPER_ADD_BUTTONS.PICK_OPTION_PREFIX)) {
+        const targetOptionId = buttonId.slice(HELPER_ADD_BUTTONS.PICK_OPTION_PREFIX.length);
+        const entryAnalysis = analyses.find((item) => normalizeToken(item.id) === normalizeToken(appState.serviceId));
+        if (!entryAnalysis || !entryAnalysis.isPerOption || !entryAnalysis.canApplyMore) {
+          const menu = buildHelperAddServiceMenu(analyses, { leadIn: 'Please select a service first:' });
+          await persistAppState({ stage: 'selecting_service', servicePage: 0 });
+          await reply(menu.text, menu.interactive);
+        } else {
+          const availableMap = new Map(entryAnalysis.availableOptions.map((opt) => [normalizeToken(opt.id), opt]));
+          const priorIds = [...new Set(
+            (Array.isArray(appState.selectedOptionIds) ? appState.selectedOptionIds : [])
+              .map((id) => availableMap.get(normalizeToken(id))?.id || '')
+              .filter(Boolean),
+          )];
+          const targetToken = normalizeToken(targetOptionId);
+          const pickedOption = entryAnalysis.availableOptions.find(
+            (opt) => normalizeToken(opt.id) === targetToken || normalizeToken(opt.title) === targetToken,
+          ) || null;
+
+          if (!pickedOption) {
+            const stateOpt = (entryAnalysis.optionStates || []).find(
+              (opt) => normalizeToken(opt.id) === targetToken || normalizeToken(opt.title) === targetToken,
+            );
+            const leadIn = stateOpt && !stateOpt.canApply
+              ? `*${stateOpt.title}* is already applied or under review.`
+              : `That option is not available under *${entryAnalysis.label}*.`;
+            await persistAppState({
+              stage: 'selecting_options',
+              serviceId: entryAnalysis.id,
+              serviceName: entryAnalysis.label,
+              selectedOptionIds: priorIds,
+              optionPage: 0,
+            });
+            const menu = buildHelperAddOptionMenu(entryAnalysis, { selectedOptionIds: priorIds, page: 0, leadIn });
+            await reply(menu.text, menu.interactive);
+          } else {
+            const nextSelectedIds = [...new Set([...priorIds, pickedOption.id])];
+            if (entryAnalysis.availableOptions.length === 1 && !priorIds.length) {
+              const catalogOpt = (entryAnalysis.service.options || []).find(
+                (opt) => normalizeToken(opt.id) === normalizeToken(pickedOption.id) || normalizeToken(opt.title) === normalizeToken(pickedOption.title),
+              ) || pickedOption;
+              const submission = await applyForHelperServicesInFirestore({
+                helperUid,
+                conversationRef,
+                catalogEntry: entryAnalysis.service,
+                selectedOptions: [catalogOpt],
+                existingOfferings,
+              });
+              const prompt = buildHelperPhotoUploadPrompt({
+                serviceName: entryAnalysis.label,
+                submittedLabels: submission.submittedNames,
+                photoUploadUrl: getWhatsAppHelperWebOnboardingUrl(),
+                needsPhotos: submission.needsPhotos,
+              });
+              await reply(prompt.text, prompt.interactive);
+            } else {
+              await persistAppState({
+                stage: 'selecting_options',
+                serviceId: entryAnalysis.id,
+                serviceName: entryAnalysis.label,
+                selectedOptionIds: nextSelectedIds,
+                optionPage: 0,
+              });
+              const menu = buildHelperAddOptionMenu(entryAnalysis, { selectedOptionIds: nextSelectedIds, page: 0 });
+              await reply(menu.text, menu.interactive);
+            }
+          }
+        }
+      } else {
+        const menu = buildHelperAddServiceMenu(analyses, { page: 0 });
+        await persistAppState({ stage: 'selecting_service', servicePage: 0 });
+        await reply(menu.text, menu.interactive);
+      }
+
+      await jobRef.set({ status: 'completed', intent: 'provider_support', reason: 'helper_service_app_interactive', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    if (inbound.type === 'image' && activeHelperServiceApp?.stage === 'awaiting_photos'
+      && String(identity.role || '').toLowerCase() === 'helper'
+      && linkedHelperUid) {
+      const photoResult = await attachWhatsAppWorkPhotoToHelperOfferings({
+        uid: linkedHelperUid,
+        identityId,
+        eventId,
+        inbound,
+        appState: activeHelperServiceApp,
+        conversationRef,
+      });
+      if (photoResult.code === 'saved') {
+        const labelSummary = Array.isArray(activeHelperServiceApp.submittedNames) && activeHelperServiceApp.submittedNames.length
+          ? activeHelperServiceApp.submittedNames.join(', ')
+          : (activeHelperServiceApp.serviceName || 'your service');
+        const msg = formatWhatsAppText(
+          `📸 Work photo #${photoResult.photoCount} saved for *${labelSummary}*.\n\nSend another work photo if you want, or tap *Done* when finished.`,
+        );
+        await reply(msg, {
+          type: 'button',
+          body: { text: msg.slice(0, 1024) },
+          action: {
+            buttons: [
+              { type: 'reply', reply: { id: HELPER_ADD_BUTTONS.BACK_TO_SERVICES, title: 'Add more services' } },
+              { type: 'reply', reply: { id: HELPER_ADD_BUTTONS.PHOTOS_DONE, title: 'Done' } },
+            ],
+          },
+        });
+      } else if (photoResult.code === 'unsupported') {
+        await reply('Please send your work photo as a JPG, PNG, or WEBP image.');
+      } else {
+        await reply(`I could not save that work photo right now. You can also upload photos on the web app: ${getWhatsAppHelperWebOnboardingUrl()}`);
+      }
+      await jobRef.set({
+        status: 'completed',
+        intent: 'provider_support',
+        reason: `helper_service_photo_${photoResult.code}`,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      return;
+    }
+
+    if (inbound.type === 'text' && activeHelperServiceApp && !activeDraft
+      && activeHelperServiceApp.stage === 'awaiting_photos'
+      && /^(?:done|finish|finished|skip|done uploading|all done)$/i.test(commandText)) {
+      await conversationRef.set({
+        helperServiceApplication: admin.firestore.FieldValue.delete(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      await reply('Got it! Your service application is queued for Uncedo admin review. We will notify you here once it has been reviewed.');
+      await jobRef.set({ status: 'completed', intent: 'provider_support', reason: 'helper_service_app_photos_done_text', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    if (inbound.type === 'text' && activeHelperServiceApp && !activeDraft
+      && activeHelperServiceApp.stage === 'selecting_options'
+      && /^(?:submit|submit selected|apply|done|confirm)$/i.test(commandText)) {
+      const helperAuthPrincipal = await resolveWhatsAppToolAuthorization(identityId, identity);
+      const helperAuth = helperAuthPrincipal.authorization || {};
+      if (helperAuth.role === 'helper' && helperAuth.verified === true && helperAuth.linked === true && helperAuth.uid) {
+        const [rawCatalog, existingOfferings] = await Promise.all([
+          getLiveServiceCatalogEntries(),
+          getHelperServiceOfferings(helperAuth.uid),
+        ]);
+        const activeCatalog = rawCatalog.filter((entry) => entry.active === true && entry.approved === true);
+        const analyses = analyzeHelperServiceCatalog(activeCatalog, existingOfferings);
+        const entryAnalysis = analyses.find((item) => normalizeToken(item.id) === normalizeToken(activeHelperServiceApp.serviceId));
+        if (entryAnalysis && entryAnalysis.canApplyMore) {
+          const selectedTokens = new Set(
+            (Array.isArray(activeHelperServiceApp.selectedOptionIds) ? activeHelperServiceApp.selectedOptionIds : [])
+              .map((id) => normalizeToken(id))
+              .filter(Boolean),
+          );
+          const selectedCatalogOptions = entryAnalysis.availableOptions
+            .filter((opt) => selectedTokens.has(normalizeToken(opt.id)) || selectedTokens.has(normalizeToken(opt.title)))
+            .map((opt) => (
+              (entryAnalysis.service.options || []).find((svcOpt) => normalizeToken(svcOpt.id) === normalizeToken(opt.id) || normalizeToken(svcOpt.title) === normalizeToken(opt.title))
+              || { id: opt.id, title: opt.title, price: opt.price }
+            ));
+          if (selectedCatalogOptions.length > 0) {
+            const submission = await applyForHelperServicesInFirestore({
+              helperUid: helperAuth.uid,
+              conversationRef,
+              catalogEntry: entryAnalysis.service,
+              selectedOptions: selectedCatalogOptions,
+              existingOfferings,
+            });
+            const prompt = buildHelperPhotoUploadPrompt({
+              serviceName: entryAnalysis.label,
+              submittedLabels: submission.submittedNames,
+              photoUploadUrl: getWhatsAppHelperWebOnboardingUrl(),
+              needsPhotos: submission.needsPhotos,
+            });
+            await reply(prompt.text, prompt.interactive);
+            await jobRef.set({ status: 'completed', intent: 'provider_support', reason: 'helper_service_app_submitted_text', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            return;
+          }
+          const menu = buildHelperAddOptionMenu(entryAnalysis, {
+            selectedOptionIds: [],
+            page: 0,
+            leadIn: 'Please select at least one available option first.',
+          });
+          await reply(menu.text, menu.interactive);
+          await jobRef.set({ status: 'completed', intent: 'provider_support', reason: 'helper_service_app_needs_selection', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          return;
+        }
+      }
+    }
+
+    if (inbound.type === 'text' && activeHelperServiceApp && !activeDraft
+      && /^(?:cancel|stop)$/i.test(commandText)) {
+      await conversationRef.set({
+        helperServiceApplication: admin.firestore.FieldValue.delete(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      await reply('Cancelled adding a new service. Let me know anytime you want to apply for another service or option.');
+      await jobRef.set({ status: 'completed', intent: 'provider_support', reason: 'helper_service_app_cancelled_text', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
     }
 
@@ -7280,9 +8359,17 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       recentHistory: Array.isArray(conversation.recentHistory) ? conversation.recentHistory : [],
       conversationSummary: conversation.conversationSummary || {},
       conversationState: {
-        mode: isLearnMoreAction ? 'assistant' : conversation.currentMode,
-        intent: isLearnMoreAction ? 'service_information' : conversation.currentIntent,
-        selectedServiceId: activeDraft?.serviceId || '',
+        mode: isLearnMoreAction
+          ? 'assistant'
+          : (!activeDraft && activeHelperServiceApp?.stage === 'selecting_options')
+            ? 'helper_service_application'
+            : conversation.currentMode,
+        intent: isLearnMoreAction
+          ? 'service_information'
+          : (!activeDraft && activeHelperServiceApp?.stage === 'selecting_options')
+            ? 'provider_support'
+            : conversation.currentIntent,
+        selectedServiceId: activeDraft?.serviceId || (!activeDraft && activeHelperServiceApp?.stage === 'selecting_options' ? (activeHelperServiceApp.serviceId || '') : ''),
         selectedOptionId: draftSelectedOption?.id || activeDraft?.selectedOptionId || '',
         selectedOptionTitle: draftSelectedOption?.title || activeDraft?.selectedOptionTitle || '',
         answers: activeDraft?.structuredAnswers || {},
@@ -7403,6 +8490,13 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       }
     }
     const executedToolResults = agentOutcome.toolResults || [];
+    const helperServiceAppObservation = [...executedToolResults]
+      .reverse()
+      .find((item) => item.toolName === 'applyForHelperService' && item.result && !item.errorCode)
+      ?.result || null;
+    if (helperServiceAppObservation) {
+      intentResult.intent = 'provider_support';
+    }
     const explicitlyAsksPricing = intentResult.intent === 'price_enquiry' || isPriceQuestion(originalUserText);
     assistantPhase = 'workflow';
     await jobRef.set({ phase: assistantPhase, retrySafe: false, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
@@ -7426,7 +8520,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       return;
     }
     const hasCompletedServiceTool = executedToolResults.some(
-      (item) => ['sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking'].includes(item.toolName)
+      (item) => ['sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking', 'applyForHelperService'].includes(item.toolName)
         && item.result && !item.errorCode && !['not-found', 'missing-query'].includes(item.result?.code),
     );
     if (agentOutcome.status === 'tool-preflight-failed'
@@ -7637,7 +8731,53 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       }
       const profileProposal = [...executedToolResults].reverse()
         .find((item) => item.toolName === 'proposeProfileChange')?.result;
-      if (profileProposal?.code === 'confirmation-required') {
+      if (helperServiceAppObservation) {
+        if (['service-selection-required', 'service-not-found'].includes(helperServiceAppObservation.code)) {
+          const helperOfferings = await getHelperServiceOfferings(toolAuthorization.uid);
+          const analyses = analyzeHelperServiceCatalog(catalog, helperOfferings);
+          const leadIn = helperServiceAppObservation.code === 'service-not-found'
+            ? `I couldn't find a service matching "${helperServiceAppObservation.query || ''}".`
+            : '';
+          const menu = buildHelperAddServiceMenu(analyses, { page: 0, leadIn });
+          await reply(menu.text, menu.interactive);
+        } else if (['option-selection-required', 'option-not-found', 'already-applied'].includes(helperServiceAppObservation.code)
+          && helperServiceAppObservation.serviceId) {
+          const helperOfferings = await getHelperServiceOfferings(toolAuthorization.uid);
+          const analyses = analyzeHelperServiceCatalog(catalog, helperOfferings);
+          const entryAnalysis = analyses.find((item) => normalizeToken(item.id) === normalizeToken(helperServiceAppObservation.serviceId));
+          if (entryAnalysis && entryAnalysis.isPerOption && entryAnalysis.availableOptions.length > 0) {
+            const leadIn = helperServiceAppObservation.code === 'option-not-found'
+              ? `I couldn't match "${helperServiceAppObservation.query || ''}" to an available option.`
+              : helperServiceAppObservation.code === 'already-applied'
+                ? `You already have an active or pending application for the requested option(s) under *${entryAnalysis.label}*.`
+                : '';
+            const menu = buildHelperAddOptionMenu(entryAnalysis, { selectedOptionIds: [], page: 0, leadIn });
+            await reply(menu.text, menu.interactive);
+          } else {
+            await reply(formatWhatsAppToolResult('applyForHelperService', helperServiceAppObservation));
+          }
+        } else if (['submitted', 'already-applied-needs-photos'].includes(helperServiceAppObservation.code)) {
+          const prompt = buildHelperPhotoUploadPrompt({
+            serviceName: helperServiceAppObservation.serviceName,
+            submittedLabels: helperServiceAppObservation.submittedNames,
+            photoUploadUrl: helperServiceAppObservation.photoUploadUrl || getWhatsAppHelperWebOnboardingUrl(),
+            needsPhotos: helperServiceAppObservation.needsPhotos !== false,
+          });
+          if (helperServiceAppObservation.code === 'already-applied-needs-photos') {
+            const summary = (Array.isArray(helperServiceAppObservation.submittedNames) && helperServiceAppObservation.submittedNames.length
+              ? helperServiceAppObservation.submittedNames.join(', ')
+              : helperServiceAppObservation.serviceName) || 'your selected service';
+            const needsText = formatWhatsAppText(
+              `Your application for *${summary}* is already pending review and still needs at least one work photo.\n\n📸 Please send a work photo right here in this WhatsApp chat, or upload it on the web app: ${helperServiceAppObservation.photoUploadUrl || getWhatsAppHelperWebOnboardingUrl()}`,
+            );
+            await reply(needsText, { ...prompt.interactive, body: { text: needsText.slice(0, 1024) } });
+          } else {
+            await reply(prompt.text, prompt.interactive);
+          }
+        } else {
+          await reply(responseText || formatWhatsAppToolResult('applyForHelperService', helperServiceAppObservation));
+        }
+      } else if (profileProposal?.code === 'confirmation-required') {
         await reply(responseText, {
           type: 'button', body: { text: 'Confirm this profile name change?' }, action: { buttons: [
             { type: 'reply', reply: { id: `wa_profile_confirm_${profileProposal.proposalId}`, title: 'Confirm change' } },
@@ -7794,7 +8934,10 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     const allowedQuestionIds = new Set(serviceQuestions.map((question) => question.id));
     if (inbound.actionChoice?.type === 'questionnaire_option') {
       const rawAnsId = inbound.actionChoice.buttonId.replace('wa_ans_', '');
-      for (const q of serviceQuestions) {
+      const sortedQuestionsByIdLength = serviceQuestions
+        .slice()
+        .sort((left, right) => String(right?.id || '').length - String(left?.id || '').length);
+      for (const q of sortedQuestionsByIdLength) {
         if (rawAnsId.startsWith(`${q.id}_`)) {
           const val = rawAnsId.slice(q.id.length + 1);
           answerExtraction.answers = { ...(answerExtraction.answers || {}), [q.id]: val };
@@ -7804,10 +8947,44 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     } else if (inbound.actionChoice?.type === 'service_address_target') {
       answerExtraction.answers = { ...(answerExtraction.answers || {}), service_address_target: inbound.actionChoice.value };
     }
-    const incomingAnswers = Object.fromEntries(Object.entries(answerExtraction.answers || {}).filter(([key]) => allowedQuestionIds.has(key)));
     const baseAnswers = activeDraft?.serviceId === service.id && activeDraft?.structuredAnswers
       ? Object.fromEntries(Object.entries(activeDraft.structuredAnswers).filter(([key]) => allowedQuestionIds.has(key)))
       : {};
+    if (
+      inbound.type === 'text'
+      && !inbound.actionChoice
+      && originalUserText.trim()
+      && Object.keys(answerExtraction.answers || {}).length === 0
+      && Array.isArray(activeDraft?.missingQuestionIds)
+      && activeDraft.missingQuestionIds.length > 0
+      && activeDraft?.serviceId === service.id
+    ) {
+      const pendingQuestionId = activeDraft.missingQuestionIds.find((id) => allowedQuestionIds.has(id));
+      const pendingQuestion = serviceQuestions.find((q) => q.id === pendingQuestionId);
+      if (pendingQuestion && String(pendingQuestion.answerType || '').toLowerCase() === 'enum' && Array.isArray(pendingQuestion.options) && pendingQuestion.options.length > 0) {
+        const trimmedReply = originalUserText.trim();
+        const lowerReply = trimmedReply.toLowerCase();
+        const opts = pendingQuestion.options;
+        let matchedOpt = opts.find((opt) => {
+          const optVal = String(typeof opt === 'string' ? opt : (opt?.value || opt?.id || '')).trim().toLowerCase();
+          const optLbl = String(typeof opt === 'string' ? opt : (opt?.label || optVal)).trim().toLowerCase();
+          return (optVal && optVal === lowerReply) || (optLbl && optLbl === lowerReply);
+        });
+        if (!matchedOpt && /^\d+$/.test(trimmedReply)) {
+          const idx = Number(trimmedReply) - 1;
+          if (idx >= 0 && idx < opts.length) {
+            matchedOpt = opts[idx];
+          }
+        }
+        if (matchedOpt) {
+          const matchedVal = String(typeof matchedOpt === 'string' ? matchedOpt : (matchedOpt?.value || matchedOpt?.id || '')).trim();
+          if (matchedVal) {
+            answerExtraction.answers = { [pendingQuestion.id]: matchedVal };
+          }
+        }
+      }
+    }
+    const incomingAnswers = Object.fromEntries(Object.entries(answerExtraction.answers || {}).filter(([key]) => allowedQuestionIds.has(key)));
     let validation;
     try {
       validation = normalizeAndValidateAnswers({
@@ -7819,6 +8996,17 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       await reply('I could not validate one of those answers against this service questionnaire. Please restate the service details or choose an option from the questionnaire.');
       await jobRef.set({ status: 'completed', intent: intentResult.intent, errorCode: 'invalid_questionnaire_answer', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
+    }
+
+    const applicableQuestions = serviceQuestions.filter((question) => isQuestionApplicable(question, validation.answers, serviceQuestions));
+    const applicableRequiredOrMissing = applicableQuestions.filter((question) => (
+      question.required === true || validation.missingRequired.includes(question.id)
+    ));
+    const removedAnswerKeys = Object.keys(baseAnswers)
+      .filter((key) => !Object.prototype.hasOwnProperty.call(validation.answers, key));
+    const structuredAnswersUpdate = { ...validation.answers };
+    for (const removedKey of removedAnswerKeys) {
+      structuredAnswersUpdate[removedKey] = admin.firestore.FieldValue.delete();
     }
 
     const now = Date.now();
@@ -7862,7 +9050,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           selectedOptionTitle: selectedOption?.title || '',
           awaitingServiceOption: false,
           requestId: canonicalRequestId || null,
-          structuredAnswers: validation.answers,
+          structuredAnswers: structuredAnswersUpdate,
           ...(currentMediaAssetId ? { mediaAssetIds: admin.firestore.FieldValue.arrayUnion(currentMediaAssetId) } : {}),
           missingQuestionIds: validation.missingRequired,
           locationPinRequired,
@@ -7885,12 +9073,12 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         }, { merge: true });
       });
-      const missingQuestions = getMissingRequiredQuestions(serviceQuestions, validation.missingRequired);
+      const missingQuestions = getMissingRequiredQuestions(applicableQuestions, validation.missingRequired);
       let questionResult;
       if (missingQuestions.length > 0) {
         const nextQ = missingQuestions[0];
-        const nextQIndex = serviceQuestions.findIndex((q) => q.id === nextQ.id);
-        const totalRequired = serviceQuestions.filter((q) => q.required).length;
+        const nextQIndex = applicableRequiredOrMissing.findIndex((q) => q.id === nextQ.id);
+        const totalRequired = applicableRequiredOrMissing.length;
         questionResult = formatWhatsAppNextQuestion({
           service,
           selectedOption,
@@ -7947,7 +9135,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     });
     const isBooking = intentResult.intent === 'service_booking';
     const bookingConfirmation = isBooking
-      ? formatWhatsAppBookingConfirmation({ service, selectedOption, questions: serviceQuestions, answers: validation.answers, quote })
+      ? formatWhatsAppBookingConfirmation({ service, selectedOption, questions: applicableQuestions, answers: validation.answers, quote })
       : null;
     const replyText = bookingConfirmation?.text || `*${service.label}${selectedOption?.title ? ` — ${selectedOption.title}` : ''}*\n\nIndicative estimate: *R${Number(quote.total || 0).toFixed(2)} ${quote.currency || 'ZAR'}*. This is based on the current Uncedo pricing calculation. To book this service, tell me you would like to book it.`;
     let canonicalRequestId = String(activeDraft?.requestId || '').trim();
@@ -8009,7 +9197,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         selectedOptionTitle: selectedOption?.title || '',
         awaitingServiceOption: false,
         requestId: canonicalRequestId || null,
-        structuredAnswers: validation.answers,
+        structuredAnswers: structuredAnswersUpdate,
         ...(currentMediaAssetId ? { mediaAssetIds: admin.firestore.FieldValue.arrayUnion(currentMediaAssetId) } : {}),
         missingQuestionIds: [],
         locationPinRequired: false,
@@ -8659,8 +9847,15 @@ exports.notifyWhatsAppHelperOfferOnServiceRequestWrite = onDocumentWritten({
   const secrets = getWhatsAppSecrets();
   const templateName = String(process.env.WHATSAPP_HELPER_OFFER_TEMPLATE_NAME || '').trim();
   const languageCode = String(process.env.WHATSAPP_HELPER_OFFER_TEMPLATE_LANGUAGE || '').trim();
+  const hasApprovedTemplate = Boolean(
+    templateName
+    && languageCode
+    && secrets.approvedTemplateNames.includes(templateName),
+  );
+  const lastInboundMs = Number(conversationSnap.data()?.lastInboundMessageAtMs || 0);
+  const canSendFreeform = isWithinCustomerServiceWindow(lastInboundMs, Date.now());
   if (!secrets.accessToken || !secrets.phoneNumberId || !secrets.graphApiVersion
-    || !templateName || !languageCode || !secrets.approvedTemplateNames.includes(templateName)) {
+    || (!hasApprovedTemplate && !canSendFreeform)) {
     logger.info('whatsapp_helper_offer_notification_not_configured', { requestId, offerRevision });
     return;
   }
@@ -8696,8 +9891,8 @@ exports.notifyWhatsAppHelperOfferOnServiceRequestWrite = onDocumentWritten({
     if (!declineSnap.exists) transaction.create(declineRef, { ...actionData, action: 'decline' });
     transaction.create(outboundRef, {
       eventId: outboundId, identityId, phoneNumberId: secrets.phoneNumberId, to: recipient,
-      requestId, direction: 'outbound', type: 'template', status: 'sending',
-      templateName, offerRevision, createdAtMs: Date.now(),
+      requestId, direction: 'outbound', type: hasApprovedTemplate ? 'template' : 'interactive', status: 'sending',
+      templateName: hasApprovedTemplate ? templateName : null, offerRevision, createdAtMs: Date.now(),
       retentionExpiresAtMs: Date.now() + whatsappRetentionDays('WHATSAPP_MESSAGE_RETENTION_DAYS', 180) * 24 * 60 * 60 * 1000,
       createdAt: now,
     });
@@ -8707,6 +9902,7 @@ exports.notifyWhatsAppHelperOfferOnServiceRequestWrite = onDocumentWritten({
 
   const bodySummary = String(after.serviceSummary || after.subject || 'Uncedo service request').trim().slice(0, 500);
   const indicativeTotal = toRand(after.pricingSnapshot?.total ?? after.pricingSnapshot?.finalAmount ?? 0);
+  const requestWebUrl = `https://helpers.bakayise.com/requests/${requestId}`;
   try {
     const client = createMetaWhatsAppClient({
       accessToken: secrets.accessToken,
@@ -8716,17 +9912,34 @@ exports.notifyWhatsAppHelperOfferOnServiceRequestWrite = onDocumentWritten({
       requestTimeoutMs: process.env.WHATSAPP_META_SEND_TIMEOUT_MS,
       isRecipientAllowed: (recipient) => isWhatsAppRecipientAllowed(recipient, process.env),
     });
-    const delivery = await client.sendTemplate({
-      to: recipient,
-      name: templateName,
-      languageCode,
-      components: buildHelperOfferTemplateComponents({
-        serviceSummary: bodySummary,
-        amountText: formatMoney(indicativeTotal),
-        acceptActionId,
-        declineActionId,
-      }),
-    });
+    const delivery = hasApprovedTemplate
+      ? await client.sendTemplate({
+          to: recipient,
+          name: templateName,
+          languageCode,
+          components: buildHelperOfferTemplateComponents({
+            serviceSummary: bodySummary,
+            amountText: formatMoney(indicativeTotal),
+            acceptActionId,
+            declineActionId,
+          }),
+        })
+      : await client.sendInteractive({
+          to: recipient,
+          lastInboundAtMs: lastInboundMs,
+          interactive: {
+            type: 'button',
+            body: {
+              text: `🔔 New Uncedo Service Offer\n\n• Service: ${bodySummary}\n• Estimate: ${formatMoney(indicativeTotal)}\n\nRespond here or open in Helpers Web:\n${requestWebUrl}`,
+            },
+            action: {
+              buttons: [
+                { type: 'reply', reply: { id: `wa_offer_accept_${acceptActionId}`, title: 'Accept' } },
+                { type: 'reply', reply: { id: `wa_offer_decline_${declineActionId}`, title: 'Decline' } },
+              ],
+            },
+          },
+        });
     await outboundRef.set({ status: 'sent', metaMessageId: delivery.messageId || null, sentAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     await reconcileWhatsAppDeliveryStatuses({ metaMessageId: delivery.messageId, recipientId: recipient, messageRef: outboundRef });
   } catch (error) {
@@ -15616,3 +16829,500 @@ exports.sendEmailFromQueue = onDocumentCreated(
 );
 
 
+
+async function computeDrivingRouteEtaWithFallback(origin, destination) {
+  const lat1 = Number(origin?.latitude);
+  const lon1 = Number(origin?.longitude);
+  const lat2 = Number(destination?.latitude);
+  const lon2 = Number(destination?.longitude);
+  const fallbackKm = Number.isFinite(lat1) && Number.isFinite(lon1) && Number.isFinite(lat2) && Number.isFinite(lon2)
+    ? calculateDistanceKm(lat1, lon1, lat2, lon2)
+    : 5;
+  const fallbackMeters = Math.max(100, Math.round(fallbackKm * 1000));
+  const fallbackSeconds = Math.max(60, Math.round((fallbackKm / 35) * 3600)); // assuming 35 km/h urban speed
+
+  const apiKey = String(process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY || '').trim();
+  if (!apiKey) {
+    return { distanceMeters: fallbackMeters, durationSeconds: fallbackSeconds, provider: 'haversine_fallback' };
+  }
+
+  try {
+    const response = await fetch(`https://routes.googleapis.com/directions/v2:computeRoutes`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': apiKey,
+        'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration',
+      },
+      body: JSON.stringify({
+        origin: { location: { latLng: { latitude: lat1, longitude: lon1 } } },
+        destination: { location: { latLng: { latitude: lat2, longitude: lon2 } } },
+        travelMode: 'DRIVE',
+        routingPreference: 'TRAFFIC_AWARE',
+      }),
+      signal: AbortSignal.timeout(6000),
+    });
+    const data = await response.json().catch(() => null);
+    const route = data?.routes?.[0];
+    const distanceMeters = Number(route?.distanceMeters);
+    const durationStr = String(route?.duration || '');
+    const durationSeconds = durationStr.endsWith('s') ? Number.parseFloat(durationStr.slice(0, -1)) : Number.parseFloat(durationStr);
+    if (response.ok && Number.isFinite(distanceMeters) && distanceMeters > 0 && Number.isFinite(durationSeconds) && durationSeconds > 0) {
+      return { distanceMeters: Math.round(distanceMeters), durationSeconds: Math.round(durationSeconds), provider: 'google_routes' };
+    }
+  } catch (error) {
+    logger.warn('google_routes_eta_failed', { error: error?.message || 'unknown' });
+  }
+  return { distanceMeters: fallbackMeters, durationSeconds: fallbackSeconds, provider: 'haversine_fallback' };
+}
+
+exports.updateWebHelperLiveLocation = onCall({ maxInstances: 5, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+  const uid = String(request.auth?.uid || '').trim();
+  if (!uid) throw new HttpsError('unauthenticated', 'You must be signed in as a helper.');
+  const userRef = db.collection('users').doc(uid);
+  const snap = await userRef.get();
+  if (!snap.exists || !isHelperUserRecord(snap.data() || {})) {
+    throw new HttpsError('permission-denied', 'A helper account is required.');
+  }
+
+  const data = request.data || {};
+  const requestedOnlineStatus = String(data.onlineStatus || '').trim().toLowerCase();
+  if (requestedOnlineStatus === 'offline') {
+    await userRef.set({
+      onlineStatus: 'offline',
+      locationSharingEnabled: false,
+      appVisibilityState: 'offline',
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    await syncHelperDispatchIndexById(uid).catch((error) => logger.warn('web_helper_offline_dispatch_sync_failed', { uid, error: error.message }));
+    try {
+      await admin.database().ref(`liveTracking/helpers/${uid}`).update({
+        online: false,
+        updatedAtMs: Date.now(),
+      });
+    } catch (err) {
+      logger.warn('rtdb_helper_offline_sync_failed', { uid, error: err.message });
+    }
+    return { success: true, onlineStatus: 'offline' };
+  }
+
+  const lat = Number(data.latitude);
+  const lon = Number(data.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+    throw new HttpsError('invalid-argument', 'Valid latitude and longitude coordinates are required.');
+  }
+
+  const nowMs = Date.now();
+  const rounded = (val) => Number(val.toFixed(6));
+  const location = {
+    latitude: rounded(lat),
+    longitude: rounded(lon),
+    accuracy: Number.isFinite(Number(data.accuracy)) ? Number(data.accuracy) : null,
+    heading: Number.isFinite(Number(data.heading)) ? Number(data.heading) : null,
+    speed: Number.isFinite(Number(data.speed)) ? Number(data.speed) : null,
+    source: 'web_app',
+    updatedAtMs: nowMs,
+  };
+
+  const geohash = encodeGeohash(location.latitude, location.longitude);
+  const h3Cell = getH3CellForLocation(location);
+  const shiftExpiresAtMs = nowMs + 8 * 60 * 60 * 1000;
+
+  await db.runTransaction(async (transaction) => {
+    transaction.set(userRef, {
+      onlineStatus: 'online',
+      locationSharingEnabled: true,
+      liveLocation: location,
+      geohash,
+      h3Cell,
+      shiftStartedAtMs: nowMs,
+      shiftExpiresAtMs,
+      appVisibilityState: 'visible',
+      lastAppVisibleAtMs: nowMs,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+  });
+
+  await syncHelperDispatchIndexById(uid).catch((error) => logger.warn('web_helper_location_dispatch_sync_failed', { uid, error: error.message }));
+  try {
+    await admin.database().ref(`liveTracking/helpers/${uid}`).set({
+      ...location,
+      online: true,
+      shiftExpiresAtMs,
+      updatedAtMs: nowMs,
+    });
+  } catch (err) {
+    logger.warn('rtdb_helper_tracking_sync_failed', { uid, error: err.message });
+  }
+
+  return { success: true, onlineStatus: 'online', liveLocation: location, shiftExpiresAtMs };
+});
+
+exports.reportHelperAppVisibility = onCall({ maxInstances: 3, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 25 }, async (request) => {
+  const uid = String(request.auth?.uid || '').trim();
+  if (!uid) throw new HttpsError('unauthenticated', 'You must be signed in.');
+  const userRef = db.collection('users').doc(uid);
+  const snap = await userRef.get();
+  if (!snap.exists) throw new HttpsError('not-found', 'User not found.');
+  const helper = snap.data() || {};
+  if (!isHelperUserRecord(helper)) throw new HttpsError('permission-denied', 'Helper account required.');
+
+  const visibilityState = String(request.data?.appVisibilityState || '').trim().toLowerCase();
+  if (!['visible', 'hidden'].includes(visibilityState)) {
+    throw new HttpsError('invalid-argument', 'Valid visibility state required.');
+  }
+
+  const nowMs = Date.now();
+  const isOnline = String(helper.onlineStatus || '').toLowerCase() === 'online';
+  const lastAlertAt = Number(helper.lastBackgroundAlertAtMs || 0);
+  const cooldownMs = 3 * 60 * 1000; // 3 minutes cooldown
+
+  await userRef.set({
+    appVisibilityState: visibilityState,
+    ...(visibilityState === 'visible' ? { lastAppVisibleAtMs: nowMs } : {}),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  if (visibilityState === 'hidden' && isOnline && nowMs - lastAlertAt > cooldownMs) {
+    const linkSnap = await db.collection('whatsappUserLinks').doc(uid).get();
+    if (linkSnap.exists) {
+      const identityId = String(linkSnap.data()?.identityId || '').trim();
+      if (identityId) {
+        const identitySnap = await db.collection('whatsappIdentities').doc(identityId).get();
+        if (identitySnap.exists) {
+          const identity = identitySnap.data() || {};
+          const secrets = getWhatsAppSecrets();
+          const activeRequestId = String(helper.activeServiceRequestId || '').trim();
+          const returnUrl = activeRequestId
+            ? `https://helpers.bakayise.com/requests/${activeRequestId}`
+            : `https://helpers.bakayise.com/workspace`;
+
+          if (identity.waId && identity.phoneNumberId === secrets.phoneNumberId && secrets.accessToken) {
+            try {
+              const client = createMetaWhatsAppClient({
+                accessToken: secrets.accessToken,
+                phoneNumberId: secrets.phoneNumberId,
+                graphApiVersion: secrets.graphApiVersion,
+                approvedTemplateNames: secrets.approvedTemplateNames,
+                isRecipientAllowed: (recipient) => isWhatsAppRecipientAllowed(recipient, process.env),
+              });
+              await client.sendText({
+                to: identity.waId,
+                text: `⚠️ You are currently ONLINE on Uncedo Helpers but have left the web app. Please reopen your Uncedo Helpers workspace so your live location stays up to date:\n\n${returnUrl}`,
+                lastInboundAtMs: nowMs - 60000,
+              });
+              await userRef.set({ lastBackgroundAlertAtMs: nowMs }, { merge: true });
+            } catch (err) {
+              logger.warn('whatsapp_stay_online_alert_failed', { uid, error: err.message });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return { success: true, visibilityState };
+});
+
+exports.sendHelperRequestMessage = onCall({ maxInstances: 5, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+  const uid = String(request.auth?.uid || '').trim();
+  if (!uid) throw new HttpsError('unauthenticated', 'You must be signed in.');
+  const requestId = String(request.data?.requestId || '').trim();
+  const text = String(request.data?.text || '').trim().slice(0, 4096);
+  if (!requestId || !text) throw new HttpsError('invalid-argument', 'Request ID and message text are required.');
+
+  const requestRef = db.collection('serviceRequests').doc(requestId);
+  const requestSnap = await requestRef.get();
+  if (!requestSnap.exists) throw new HttpsError('not-found', 'Service request not found.');
+  const reqData = requestSnap.data() || {};
+  if (String(reqData.helperAssignment?.helperId || '') !== uid) {
+    throw new HttpsError('permission-denied', 'You are not the assigned helper for this request.');
+  }
+
+  const messageId = stableEventId(`helper-web-msg:${requestId}:${uid}:${Date.now()}`);
+  const messageRef = requestRef.collection('messages').doc(messageId);
+  const now = admin.firestore.FieldValue.serverTimestamp();
+  const nowMs = Date.now();
+
+  await messageRef.set({
+    messageId,
+    requestId,
+    senderRole: 'helper',
+    senderUid: uid,
+    text,
+    channel: 'web',
+    deliveryStatus: 'sending',
+    createdAtMs: nowMs,
+    createdAt: now,
+  });
+
+  // Relay to customer WhatsApp
+  let deliveryStatus = 'sent';
+  const customerId = String(reqData.customerId || '').trim();
+  const customerIdentityId = String(reqData.originIdentityId || '').trim();
+  let recipientIdentityId = customerIdentityId;
+  if (!recipientIdentityId && customerId && !customerId.startsWith('guest_')) {
+    const customerLink = await db.collection('whatsappUserLinks').doc(customerId).get();
+    if (customerLink.exists) recipientIdentityId = String(customerLink.data()?.identityId || '').trim();
+  }
+
+  if (recipientIdentityId) {
+    const identitySnap = await db.collection('whatsappIdentities').doc(recipientIdentityId).get();
+    const convSnap = await db.collection('whatsappConversations').doc(recipientIdentityId).get();
+    if (identitySnap.exists && convSnap.exists) {
+      const identity = identitySnap.data() || {};
+      const conversation = convSnap.data() || {};
+      const secrets = getWhatsAppSecrets();
+      const lastInbound = Number(conversation.lastInboundMessageAtMs || 0);
+      if (identity.waId && identity.phoneNumberId === secrets.phoneNumberId && secrets.accessToken) {
+        try {
+          const client = createMetaWhatsAppClient({
+            accessToken: secrets.accessToken,
+            phoneNumberId: secrets.phoneNumberId,
+            graphApiVersion: secrets.graphApiVersion,
+            approvedTemplateNames: secrets.approvedTemplateNames,
+            isRecipientAllowed: (recipient) => isWhatsAppRecipientAllowed(recipient, process.env),
+          });
+          const delivery = isWithinCustomerServiceWindow(lastInbound, nowMs)
+            ? await client.sendText({ to: identity.waId, text, lastInboundAtMs: lastInbound })
+            : await client.sendTemplate({
+                to: identity.waId,
+                name: String(process.env.WHATSAPP_TEMPLATE_SERVICE_STARTED_NAME || '').trim(),
+                languageCode: String(process.env.WHATSAPP_TEMPLATE_SERVICE_STARTED_LANGUAGE || 'en').trim(),
+                components: [{ type: 'body', parameters: [{ type: 'text', text: 'Uncedo Helper' }, { type: 'text', text: text.slice(0, 150) }] }],
+              });
+          await messageRef.set({ deliveryStatus: 'sent', metaMessageId: delivery.messageId || null, updatedAt: now }, { merge: true });
+        } catch (err) {
+          deliveryStatus = classifyMetaDeliveryError(err);
+          await messageRef.set({ deliveryStatus, errorCode: err.message?.slice(0, 80), updatedAt: now }, { merge: true });
+        }
+      }
+    }
+  }
+
+  return { success: true, messageId, deliveryStatus };
+});
+
+exports.evaluateRouteTravelMilestones = onValueWritten({
+  ref: 'liveTracking/serviceRequests/{requestId}/helperLocation',
+  maxInstances: 5,
+}, async (event) => {
+  const before = event.data.before.exists() ? event.data.before.val() : null;
+  const after = event.data.after.exists() ? event.data.after.val() : null;
+  if (!after) return;
+
+  const requestId = event.params.requestId;
+  const requestDoc = await db.collection('serviceRequests').doc(requestId).get();
+  if (!requestDoc.exists) return;
+  const request = requestDoc.data() || {};
+  const status = String(request.status || '').toLowerCase();
+  if (!['accepted', 'driving', 'en_route', 'buying_resources', 'arrived'].includes(status)) return;
+
+  const customerId = String(request.customerId || '').trim();
+  const customerIdentityId = String(request.originIdentityId || '').trim();
+  let recipientIdentityId = customerIdentityId;
+  if (!recipientIdentityId && customerId && !customerId.startsWith('guest_')) {
+    const customerLink = await db.collection('whatsappUserLinks').doc(customerId).get();
+    if (customerLink.exists) recipientIdentityId = String(customerLink.data()?.identityId || '').trim();
+  }
+  if (!recipientIdentityId) return;
+
+  const identitySnap = await db.collection('whatsappIdentities').doc(recipientIdentityId).get();
+  if (!identitySnap.exists) return;
+  const identity = identitySnap.data() || {};
+  const secrets = getWhatsAppSecrets();
+  if (!identity.waId || identity.phoneNumberId !== secrets.phoneNumberId || !secrets.accessToken) return;
+
+  const customerLocation = normalizeCoordinate(request.location || request.requestPayload?.location || null);
+  if (!customerLocation) return;
+
+  const currentHelperLoc = { latitude: Number(after.latitude), longitude: Number(after.longitude) };
+  if (!Number.isFinite(currentHelperLoc.latitude) || !Number.isFinite(currentHelperLoc.longitude)) return;
+
+  const trackingRef = admin.database().ref(`liveTracking/serviceRequests/${requestId}`);
+  const trackingSnap = await trackingRef.get();
+  const trackingData = trackingSnap.exists ? trackingSnap.val() || {} : {};
+  const progress = trackingData.travelProgress || {};
+
+  let initialDistanceMeters = Number(progress.initialDistanceMeters || 0);
+  if (!initialDistanceMeters || initialDistanceMeters <= 0) {
+    const routeInfo = await computeDrivingRouteEtaWithFallback(currentHelperLoc, customerLocation);
+    initialDistanceMeters = routeInfo.distanceMeters || Math.round(calculateDistanceKm(currentHelperLoc.latitude, currentHelperLoc.longitude, customerLocation.latitude, customerLocation.longitude) * 1000);
+  }
+
+  const intervalMeters = Math.max(50, Math.round(initialDistanceMeters / 10));
+  const currentRoute = await computeDrivingRouteEtaWithFallback(currentHelperLoc, customerLocation);
+  const remainingMeters = currentRoute.distanceMeters;
+  const travelledMeters = Math.max(0, initialDistanceMeters - remainingMeters);
+  const stepIndex = travelledMeters >= initialDistanceMeters || remainingMeters <= 100
+    ? 10
+    : Math.max(1, Math.min(9, Math.floor(travelledMeters / intervalMeters)));
+
+  const lastNotifiedStep = Number(progress.lastNotifiedStep || 0);
+  const lastNotifiedLoc = progress.lastNotifiedLocation || null;
+  const distanceSinceLastNotifyMeters = lastNotifiedLoc
+    ? calculateDistanceKm(lastNotifiedLoc.latitude, lastNotifiedLoc.longitude, currentHelperLoc.latitude, currentHelperLoc.longitude) * 1000
+    : 999999;
+
+  const shouldNotify = (stepIndex > lastNotifiedStep && (distanceSinceLastNotifyMeters >= 150 || stepIndex === 10)) || (stepIndex === 10 && lastNotifiedStep < 10);
+  if (!shouldNotify) return;
+
+  // Transactional lock in RTDB
+  const transactionResult = await trackingRef.child('travelProgress').transaction((current) => {
+    const cur = current || {};
+    const curStep = Number(cur.lastNotifiedStep || 0);
+    if (stepIndex <= curStep && stepIndex < 10) return; // cancel transaction
+    return {
+      ...cur,
+      initialDistanceMeters,
+      intervalMeters,
+      lastNotifiedStep: stepIndex,
+      lastNotifiedLocation: currentHelperLoc,
+      lastNotifiedAtMs: Date.now(),
+      remainingMeters,
+      remainingKm: (remainingMeters / 1000).toFixed(1),
+      remainingMinutes: Math.ceil(currentRoute.durationSeconds / 60),
+    };
+  });
+
+  if (!transactionResult.committed) return;
+
+  const helperName = String(request.helperAssignment?.helperName || 'Your helper').trim();
+  const remainingKmText = (remainingMeters / 1000).toFixed(1);
+  const remainingMins = Math.ceil(currentRoute.durationSeconds / 60);
+  const etaEpoch = Date.now() + currentRoute.durationSeconds * 1000;
+  const etaClock = new Date(etaEpoch).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Africa/Johannesburg' });
+
+  const messageText = stepIndex >= 10
+    ? `📍 Update (10/10): ${helperName} has arrived near your location!\n\nEstimated time of arrival: Now.`
+    : `📍 Update (${stepIndex}/10): ${helperName} is on the way to your address.\n\n• Distance left: ${remainingKmText} km\n• Time left: ~${remainingMins} mins\n• Expected ETA: ${etaClock}`;
+
+  try {
+    const client = createMetaWhatsAppClient({
+      accessToken: secrets.accessToken,
+      phoneNumberId: secrets.phoneNumberId,
+      graphApiVersion: secrets.graphApiVersion,
+      approvedTemplateNames: secrets.approvedTemplateNames,
+      isRecipientAllowed: (recipient) => isWhatsAppRecipientAllowed(recipient, process.env),
+    });
+    const convSnap = await db.collection('whatsappConversations').doc(recipientIdentityId).get();
+    const lastInbound = Number(convSnap.data()?.lastInboundMessageAtMs || 0);
+    if (isWithinCustomerServiceWindow(lastInbound)) {
+      await client.sendText({ to: identity.waId, text: messageText, lastInboundAtMs: lastInbound });
+    } else {
+      const templateName = String(process.env.WHATSAPP_TEMPLATE_HELPER_ON_THE_WAY_NAME || '').trim();
+      const languageCode = String(process.env.WHATSAPP_TEMPLATE_HELPER_ON_THE_WAY_LANGUAGE || 'en').trim();
+      if (templateName && secrets.approvedTemplateNames.includes(templateName)) {
+        await client.sendTemplate({
+          to: identity.waId,
+          name: templateName,
+          languageCode,
+          components: [{ type: 'body', parameters: [{ type: 'text', text: helperName }, { type: 'text', text: `${remainingKmText} km` }] }],
+        });
+      }
+    }
+  } catch (err) {
+    logger.warn('travel_milestone_whatsapp_failed', { requestId, stepIndex, error: err.message });
+  }
+});
+
+exports.generateAdminServiceDraft = onCall({ maxInstances: 3, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 60 }, async (request) => {
+  await requireWhatsAppSupportAdmin(request);
+  const mode = String(request.data?.mode || 'create').trim().toLowerCase() === 'edit' ? 'edit' : 'create';
+  const instructions = String(request.data?.instructions || '').trim().slice(0, 2000);
+  const currentDraft = request.data?.currentDraft && typeof request.data.currentDraft === 'object' && !Array.isArray(request.data.currentDraft)
+    ? request.data.currentDraft
+    : {};
+
+  try {
+    const catalogSnapshot = await db.collection('serviceCatalog').limit(80).get();
+    const catalogServices = catalogSnapshot.docs.map((docSnap) => ({
+      id: docSnap.id,
+      ...(docSnap.data() || {}),
+    }));
+
+    const result = await runAdminAiServiceDraft({
+      mode,
+      instructions,
+      currentDraft,
+      catalogServices,
+      geminiModel: String(process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite').trim(),
+      ...whatsappGeminiVertexConfig(),
+    });
+
+    return {
+      draft: result.draft,
+      summary: result.summary,
+      model: result.model,
+      generatedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    if (error instanceof HttpsError) throw error;
+    const code = String(error?.code || 'ai_service_draft_failed');
+    const failureClass = String(error?.providerFailure?.failureClass || '').trim();
+    logger.warn('admin_ai_service_draft_failed', { code, failureClass, error: error?.message || 'unknown' });
+    if (code === 'gemini_vertex_service_disabled' || code === 'gemini_vertex_billing_disabled' || code === 'gemini_vertex_project_missing') {
+      throw new HttpsError('failed-precondition', 'Gemini service is not enabled or configured for this project.');
+    }
+    if (code === 'gemini_vertex_timeout') {
+      throw new HttpsError('deadline-exceeded', 'Gemini took too long to generate the service draft. Please try again.');
+    }
+    if (code === 'gemini_vertex_http_429' || failureClass === 'rate_limited') {
+      throw new HttpsError('resource-exhausted', 'Gemini is temporarily rate-limited. Please wait a moment and try again.');
+    }
+    throw new HttpsError('internal', error?.message || 'Unable to generate AI service suggestions right now.');
+  }
+});
+
+exports.generateAdminOptionImage = onCall({ maxInstances: 5, ...HALF_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 120 }, async (request) => {
+  await requireWhatsAppSupportAdmin(request);
+
+  const data = request.data && typeof request.data === 'object' && !Array.isArray(request.data)
+    ? request.data
+    : {};
+  const rawTargetType = String(data.targetType || 'question_option').trim().toLowerCase();
+  const targetType = rawTargetType === 'service_option'
+    ? 'service_option'
+    : (rawTargetType === 'service_image' ? 'service_image' : 'question_option');
+  const consistencyMode = String(data.consistencyMode || 'consistent').trim().toLowerCase() === 'unique'
+    ? 'unique'
+    : 'consistent';
+
+  try {
+    const result = await runAdminAiOptionImage({
+      targetType,
+      consistencyMode,
+      serviceContext: data.serviceContext && typeof data.serviceContext === 'object' ? data.serviceContext : {},
+      optionContext: data.optionContext && typeof data.optionContext === 'object' ? data.optionContext : {},
+      questionContext: data.questionContext && typeof data.questionContext === 'object' ? data.questionContext : {},
+      serviceImageContext: data.serviceImageContext && typeof data.serviceImageContext === 'object' ? data.serviceImageContext : {},
+      referenceImageDataUrl: String(data.referenceImageDataUrl || ''),
+      referenceImageUrl: String(data.referenceImageUrl || ''),
+      geminiImageModel: String(process.env.GEMINI_IMAGE_MODEL || 'gemini-3.1-flash-lite-image').trim(),
+      ...whatsappGeminiVertexConfig(),
+    });
+
+    return {
+      imageDataUrl: result.imageDataUrl,
+      mimeType: result.mimeType,
+      model: result.model,
+      usedReferenceImage: result.usedReferenceImage,
+      generatedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    if (error instanceof HttpsError) throw error;
+    const code = String(error?.code || 'ai_option_image_failed');
+    const failureClass = String(error?.providerFailure?.failureClass || '').trim();
+    logger.warn('admin_ai_option_image_failed', { code, failureClass, error: error?.message || 'unknown' });
+    if (code === 'gemini_vertex_service_disabled' || code === 'gemini_vertex_billing_disabled' || code === 'gemini_vertex_project_missing') {
+      throw new HttpsError('failed-precondition', 'Gemini image generation is not enabled or configured for this project.');
+    }
+    if (code === 'gemini_vertex_timeout') {
+      throw new HttpsError('deadline-exceeded', 'Gemini took too long to generate the image. Please try again.');
+    }
+    if (code === 'gemini_vertex_http_429' || failureClass === 'rate_limited') {
+      throw new HttpsError('resource-exhausted', 'Gemini image generation is temporarily rate-limited. Please wait a moment and try again.');
+    }
+    throw new HttpsError('internal', error?.message || 'Unable to generate an option image right now.');
+  }
+});

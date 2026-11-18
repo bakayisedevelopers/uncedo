@@ -1,6 +1,7 @@
 'use strict';
 
 const { formatWhatsAppText } = require('./messageFormatting');
+const { DEFAULT_SERVICE_PLACEHOLDER_IMAGE, isSupportedWhatsAppImageUrl } = require('./servicePresentation');
 
 function safeLabel(value, maxLength = 180) {
   return formatWhatsAppText(value).replace(/\n/g, ' ').trim().slice(0, maxLength);
@@ -263,50 +264,64 @@ function formatWhatsAppNextQuestion({
     if (typeof opt === 'string') {
       return { value: opt, label: opt.replace(/_/g, ' '), imageUrl: '', priceAdder: 0, multiplier: 1 };
     }
+    const rawMultiplier = Number(opt.factor ?? opt.multiplier ?? 1);
+    const pricingType = String(opt.pricingType || '').trim().toLowerCase();
+    const safeMultiplier = pricingType === 'adder'
+      ? 1
+      : (Number.isFinite(rawMultiplier) && rawMultiplier > 0 ? rawMultiplier : 1);
     return {
       value: String(opt.value || opt.id || '').trim(),
       label: String(opt.label || opt.value || opt.id || '').trim().replace(/_/g, ' '),
-      imageUrl: String(opt.imageUrl || '').trim(),
-      priceAdder: Number(opt.priceAdder || 0),
-      multiplier: Number(opt.multiplier || 1),
+      imageUrl: String(opt.imageUrl || opt.imageUri || '').trim(),
+      priceAdder: pricingType === 'multiplier' ? 0 : Number(opt.priceAdder || 0),
+      multiplier: safeMultiplier,
     };
   }).filter((opt) => opt.value);
 
-  const hasImages = options.some((opt) => opt.imageUrl && opt.imageUrl.startsWith('https://'));
+  const hasImages = options.some((opt) => isSupportedWhatsAppImageUrl(opt.imageUrl));
   if (hasImages && options.length >= 2 && options.length <= 10) {
-    const cards = options.map((opt, cardIndex) => ({
-      card_index: cardIndex,
-      type: 'button',
-      header: {
-        type: 'image',
-        image: {
-          link: (opt.imageUrl && opt.imageUrl.startsWith('https://') && !/\.(?:webp|svg|gif|avif)(?:$|[?#])/i.test(opt.imageUrl))
-            ? opt.imageUrl
-            : 'https://uncedo.bakayise.com/logo.png',
-        },
-      },
-      body: {
-        text: safeLabel(`${opt.label}${opt.priceAdder ? ` (+R${opt.priceAdder})` : opt.multiplier && opt.multiplier !== 1 ? ` (×${opt.multiplier})` : ''}`, 160),
-      },
-      action: {
-        buttons: [
-          {
-            type: 'quick_reply',
-            quick_reply: {
-              id: `wa_ans_${question.id}_${opt.value}`.slice(0, 250),
-              title: safeLabel(opt.label, 20),
-            },
+    const cards = options.map((opt, cardIndex) => {
+      const buttonTitle = safeLabel(opt.label || opt.value || `Option ${cardIndex + 1}`, 20) || `Option ${cardIndex + 1}`;
+      const priceSuffix = opt.priceAdder
+        ? ` (+R${opt.priceAdder})`
+        : opt.multiplier && opt.multiplier !== 1
+          ? ` (×${opt.multiplier})`
+          : '';
+      const cardBodyText = safeLabel(`*${opt.label || buttonTitle}*${priceSuffix}`, 160) || buttonTitle;
+      return {
+        card_index: cardIndex,
+        type: 'button',
+        header: {
+          type: 'image',
+          image: {
+            link: isSupportedWhatsAppImageUrl(opt.imageUrl)
+              ? opt.imageUrl
+              : DEFAULT_SERVICE_PLACEHOLDER_IMAGE,
           },
-        ],
-      },
-    }));
+        },
+        body: {
+          text: cardBodyText,
+        },
+        action: {
+          buttons: [
+            {
+              type: 'quick_reply',
+              quick_reply: {
+                id: `wa_ans_${question.id}_${opt.value}`.slice(0, 250),
+                title: buttonTitle,
+              },
+            },
+          ],
+        },
+      };
+    });
 
     return {
-      text: formatWhatsAppText(`${stepHeader}\n\n*${prompt}*\n\nTap a card below to select your option:`),
+      text: formatWhatsAppText(`${stepHeader}\n\n*${prompt}*\n\n${options.map((o, i) => `${i + 1}. ${o.label}`).join('\n')}\n\n_Tap a card or reply with your choice._`),
       interactive: {
         type: 'carousel',
         body: {
-          text: formatWhatsAppText(`${stepHeader}\n\n*${prompt}*`),
+          text: formatWhatsAppText(`${stepHeader}\n\n*${prompt}*\n\nSwipe through the options below and tap to select:`),
         },
         action: {
           cards,
@@ -339,16 +354,16 @@ function formatWhatsAppNextQuestion({
     };
   }
 
-  // More than 3 options: send interactive list rows (up to 10)
-  if (options.length > 3) {
-    const rows = options.slice(0, 10).map((opt) => ({
+  // 4 to 10 options: send interactive list rows
+  if (options.length > 3 && options.length <= 10) {
+    const rows = options.map((opt) => ({
       id: `wa_ans_${question.id}_${opt.value}`.slice(0, 200),
       title: safeLabel(opt.label, 24),
       description: '',
     }));
 
     return {
-      text: formatWhatsAppText(`${stepHeader}\n\n*${prompt}*\n\n${options.map((o, i) => `• ${o.label}`).join('\n')}`),
+      text: formatWhatsAppText(`${stepHeader}\n\n*${prompt}*\n\n${options.map((o) => `• ${o.label}`).join('\n')}`),
       interactive: {
         type: 'list',
         body: {
@@ -364,6 +379,14 @@ function formatWhatsAppNextQuestion({
           ],
         },
       },
+    };
+  }
+
+  // More than 10 options: WhatsApp lists are capped at 10 rows, so show all numbered options in text
+  if (options.length > 10) {
+    return {
+      text: formatWhatsAppText(`${stepHeader}\n\n*${prompt}*\n\n${options.map((o, i) => `${i + 1}. ${o.label}`).join('\n')}\n\n_Please reply with your choice._`),
+      interactive: null,
     };
   }
 
