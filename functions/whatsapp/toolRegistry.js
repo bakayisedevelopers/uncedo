@@ -197,6 +197,50 @@ const TOOL_DEFINITIONS = Object.freeze({
       needsPhotos: Object.freeze({ type: 'boolean' }),
     }, ['code']),
   },
+  relayMessageToHelper: {
+    description: 'Forward a customer’s message directed to their currently assigned helper into the active job live chat so the helper sees it immediately in the Uncedo Helpers app. Use ONLY during an active assigned job when the customer is addressing or communicating with their helper (e.g. gate code, directions, asking ETA, saying they are outside, replying to helper questions). NEVER use this for cancellations, complaints about the helper, support escalations, or general platform/billing questions.',
+    roles: ['guest', 'customer'],
+    auth: 'public',
+    fields: { messageText: 'multi-text', category: 'short-text' },
+    required: ['messageText'],
+    handler: 'relayMessageToHelper',
+    canonicalBackend: 'activeSessionHelperChatBridge',
+    stateChanging: true,
+    confirmation: 'not-required',
+    idempotency: 'inbound-event-id',
+    outputSchema: resultSchema({
+      code: stringSchema,
+      requestId: stringSchema,
+      deliveredToInAppChat: Object.freeze({ type: 'boolean' }),
+      relayedToHelperWhatsApp: Object.freeze({ type: 'boolean' }),
+    }, ['code']),
+  },
+  cancelServiceRequest: {
+    description: 'Search the sender’s active, non-canceled Uncedo service requests and cancel a booking for them. Accepts optional requestId (request ID or reference) and optional reason. If no requestId is passed, automatically finds the sender’s active open booking/request from conversation state or service request history and cancels it (or initiates confirmation if a cancellation fee applies).',
+    roles: ['guest', 'customer'],
+    auth: 'public',
+    fields: { requestId: 'short-text', reason: 'multi-text' },
+    required: [],
+    handler: 'cancelServiceRequest',
+    canonicalBackend: 'customerServiceRequestCancellation',
+    stateChanging: true,
+    confirmation: 'not-required',
+    idempotency: 'inbound-event-id',
+    outputSchema: resultSchema({
+      code: stringSchema,
+      requestId: stringSchema,
+      publicRequestReference: stringSchema,
+      serviceSummary: stringSchema,
+      previousStatus: stringSchema,
+      status: stringSchema,
+      cancellationAmount: Object.freeze({ type: 'number' }),
+      billingRule: stringSchema,
+      chargeConfirmed: Object.freeze({ type: 'boolean' }),
+      pendingReconciliation: Object.freeze({ type: 'boolean' }),
+      confirmationRequired: Object.freeze({ type: 'boolean' }),
+      error: stringSchema,
+    }, ['code']),
+  },
 });
 
 function safeText(value, max = 500) {
@@ -267,8 +311,10 @@ function matchesOutputSchema(value, schema) {
 function createWhatsAppToolRegistry({ handlers = {} } = {}) {
   function definitions(context = {}) {
     const role = roleForContext(context);
+    const hasOpenRelayRequest = Boolean(context.activeServiceRequest?.isOpen);
     return Object.entries(TOOL_DEFINITIONS)
-      .filter(([, definition]) => definition.roles.includes(role))
+      .filter(([name, definition]) => definition.roles.includes(role)
+        && (name !== 'relayMessageToHelper' || hasOpenRelayRequest))
       .map(([name, definition]) => ({
         name,
         description: definition.description,

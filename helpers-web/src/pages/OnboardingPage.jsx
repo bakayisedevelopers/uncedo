@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, CheckCircle2, LogOut, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, CheckCircle2, Home, LogOut, X } from 'lucide-react';
+import { BottomNav } from '../components/BottomNav';
 import { StepProcessRail } from '../components/StepProcessRail';
 import { StepBasics } from '../components/steps/StepBasics';
 import { StepProfilePhoto } from '../components/steps/StepProfilePhoto';
@@ -166,16 +167,22 @@ export function OnboardingPage({
     <div className="min-h-screen flex flex-col bg-canvas">
       {/* 3-Zone Top Bar Contract */}
       <header className="sticky top-0 z-20 border-b border-border bg-surface/95 backdrop-blur">
-        <div className="max-w-7xl mx-auto px-4 sm:px-8 h-16 flex items-center justify-between gap-8">
+        <div className="max-w-7xl mx-auto px-4 sm:px-8 h-14 md:h-16 flex items-center justify-between gap-4">
           <a
-            href="/"
+            href="/home"
             onClick={(e) => {
               e.preventDefault();
-              onNavigate('/');
+              onNavigate('/home');
             }}
-            className="font-display font-bold text-lg tracking-tight text-ink-900 whitespace-nowrap shrink-0"
+            className="flex items-center gap-2.5 font-display font-bold text-base sm:text-lg tracking-tight text-ink-900 whitespace-nowrap shrink-0"
           >
-            Uncedo Helpers
+            <img
+              src="/helpers-logo-192.png"
+              alt="Uncedo Helpers"
+              referrerPolicy="no-referrer"
+              className="h-8 w-8 rounded-lg border border-border object-cover bg-white shrink-0"
+            />
+            <span>Uncedo Helpers</span>
           </a>
 
           <div className="hidden md:flex items-center gap-2 text-xs text-ink-500 whitespace-nowrap truncate">
@@ -189,14 +196,25 @@ export function OnboardingPage({
             <span>{profile?.fullName || user.displayName || user.email}</span>
           </div>
 
-          <button
-            type="button"
-            onClick={handleSignOut}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-border bg-white hover:bg-well text-xs font-semibold text-ink-700 whitespace-nowrap shrink-0"
-          >
-            <LogOut className="h-3.5 w-3.5" />
-            Sign Out
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => onNavigate('/home')}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-white hover:bg-well text-xs font-semibold text-ink-800 whitespace-nowrap"
+            >
+              <Home className="h-3.5 w-3.5 text-tealbrand-700" />
+              <span className="hidden sm:inline">App Home</span>
+              <span className="sm:hidden">Home</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleSignOut}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-white hover:bg-well text-xs font-semibold text-ink-700 whitespace-nowrap"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Sign Out</span>
+            </button>
+          </div>
         </div>
 
         {/* Mobile compact step strip */}
@@ -227,7 +245,7 @@ export function OnboardingPage({
         </div>
       </header>
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-8 py-6 sm:py-10 space-y-6">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-8 pt-6 pb-24 md:py-10 space-y-6">
         {bannerNotice && (
           <div className="rounded-xl border border-tealbrand-600/30 bg-tealbrand-50 px-5 py-3.5 flex items-center justify-between gap-3 text-sm text-tealbrand-700">
             <div className="flex items-center gap-2.5">
@@ -331,6 +349,12 @@ export function OnboardingPage({
           </section>
         </div>
       </main>
+
+      <BottomNav
+        pathname={pathname}
+        onNavigate={onNavigate}
+        showOnboardingBadge={!evaluation.fullyVerified}
+      />
     </div>
   );
 }

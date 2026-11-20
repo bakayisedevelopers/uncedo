@@ -1,18 +1,26 @@
-# Helpers Web Portal (`/helpers-web`)
+# Helpers Web Application (`/helpers-web`)
 
-Dedicated Vite + React + Tailwind web application for Uncedo Helper onboarding and verification, deployed to `https://helpers.bakayise.com` (`bakayise-uncedo-latest-helpers`, output directory `../helpers/dist`).
+Dedicated Vite + React + Tailwind Progressive Web App (PWA) for Uncedo Helpers, deployed to `https://helpers.bakayise.com` (`bakayise-uncedo-latest-helpers`, output directory `../helpers/dist`).
 
-## Purpose
+## App Architecture & Features
 
-- Separate web UI independent from the Expo React Native mobile app in `/helpers`.
-- Step-by-step guided onboarding with a persistent process rail showing overall completion percentage and current step:
+- **Headerless App Shell & 5-Slot Bottom Navigation**: Fixed bottom navigation across all viewports (`Home` far left, `Jobs` left of center, a central **Press-and-Hold Go Online/Go Offline** animated orb working from any page, `Payments` right of center, `Profile` far right) without a global top header bar, keeping live high-accuracy GPS tracking and Firestore listeners active across tab switches.
+- **Live GPS Tracking & Reverse Geocoding**: Uses high-accuracy `watchPosition` movement + accuracy-refinement tracking while online, prevents stale background GPS pings from reverting an offline shift back to online, and reverse-geocodes live coordinates into the real street address and city (falling back to coordinates only when no street address is resolved).
+- **Global Incoming Offer Overlay (`HelperOfferOverlay`)**: Mirrors the mobile Helpers offer sheet on any page with live countdown color fill (green → amber → red), animated diagonal shimmer, timing indicator (`Now` / `Later`), active-job/verification guard, and instant `Accept` / `Decline`.
+- **Home (`/home`, `/workspace`, `/` when signed in)**: Clean shift greeting with real live city/street address, active job banner (when on a job), Quick Actions (`Add or Remove Services`, `Jobs & Activity`, `Payments & Earnings`), and conditional onboarding reminder when verification is incomplete.
+- **Services (`/services`)**: Accessible from Profile Settings and Home Quick Actions to browse the live Firestore `serviceCatalog`, add/remove services, upload work portfolio photos, and check approval statuses.
+- **Jobs (`/jobs`, `/requests/:id`)**: Pending offers, active request workspace (trip status progression, directions, live WhatsApp bridge chat, in-app cancel dialog), and completed/historical job records.
+- **Payments (`/payments`, `/profile/payouts`)**: Helper wallet balance, pending offers, incoming incomes & transaction activity, jobs & earnings history, and Paystack verified South African bank payout management.
+- **Profile (`/profile`, `/profile/details`, `/profile/security`, `/profile/legal`)**: Mobile-aligned helper identity & wallet/performance summary card, real reverse-geocoded live street address with manual refresh, conditional onboarding prompt (hidden once onboarding is complete), Personal details, Service offerings, Security & police clearance, Agreement & legal, home-screen PWA install trigger, WhatsApp support link, and sign out.
+- **Preserved 7-Step Onboarding Flow (`/onboarding` and step routes)** (accessible directly via URL and shown via missing-items banner only when incomplete):
   1. **Profile Basics**: Full name, individual or business details, home address, and WhatsApp phone linking.
   2. **Profile Selfie**: Camera capture or headshot upload.
-  3. **Services & Portfolio**: Live Firestore `serviceCatalog` browser, option selection, and work photo uploads (`helperServices`).
-  4. **Helper Agreement**: Active legal agreement viewer and electronic signature (`acceptHelperAgreement` / `acceptWhatsAppHelperAgreement`).
-  5. **Police Clearance**: Private clearance certificate upload (`submitWebHelperPoliceClearance`), status tracking, and owner-checked signed viewing (`getMyHelperPoliceClearanceViewUrl`).
-  6. **Bank Payouts**: South African bank selection and Paystack verification (`getHelperPayoutBanks`, `verifyHelperPayout`).
-  7. **Verification Status**: Live readiness checklist and WhatsApp go-online instructions once verified.
+  3. **Services & Portfolio**: Live catalog selection and work photo uploads.
+  4. **Helper Agreement**: Active legal agreement viewer and electronic signature.
+  5. **Police Clearance**: Private clearance certificate upload, status tracking, and signed viewing.
+  6. **Bank Payouts**: South African bank selection and Paystack verification.
+  7. **Verification Status**: Live readiness checklist and account activation status.
+- **PWA Home-Screen Installation & Offline Support**: `vite-plugin-pwa` manifest and service worker, 192/512/maskable/Apple touch icons, offline banner, and an in-app install popup (`beforeinstallprompt` + iOS Add to Home Screen instructions).
 
 ## Commands
 
@@ -22,4 +30,4 @@ npm run dev
 npm run build
 ```
 
-`npm run build` outputs directly to `../helpers/dist` and copies `index.html` to `app.html` plus `/helpers/assets/bakayise-helpers-icon.jpg` to `/helpers/dist/helpers-mark.jpg`.
+`npm run build` outputs directly to `../helpers/dist` (including `manifest.webmanifest`, `sw.js`, and PWA icons) and copies `index.html` to `app.html` plus `/helpers/assets/bakayise-helpers-icon.jpg` to `/helpers/dist/helpers-mark.jpg`.

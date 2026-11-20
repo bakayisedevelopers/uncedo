@@ -1022,6 +1022,7 @@ function createCategoryPricingEngine(categoryId, catalogue = {}) {
       estimatedDurationMinutes: 0,
       serviceBreakdown,
       lines: allLines,
+      subtotal: roundCurrency(serviceTotal),
       total,
       travelFee: travelLine.amount,
       bookingFee,

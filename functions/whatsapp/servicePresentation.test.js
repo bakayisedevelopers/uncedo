@@ -131,3 +131,84 @@ test('services with configured options derive price range from option prices whe
   assert.doesNotMatch(guidance, /ZAR 120\.00–ZAR 120\.00/);
 });
 
+test('buildVerifiedWhatsAppServiceCarousel skips 404/non-image/oversized URLs and falls back to working images or placeholder', async () => {
+  const {
+    DEFAULT_SERVICE_PLACEHOLDER_IMAGE,
+    buildVerifiedWhatsAppServiceCarousel,
+    verifyWhatsAppImageUrl,
+  } = require('./servicePresentation');
+
+  const fetchImpl = async (url, init = {}) => {
+    if (url === 'https://example.com/404.jpg') {
+      return { ok: false, status: 404, headers: new Headers({ 'content-type': 'application/json' }) };
+    }
+    if (url === 'https://example.com/json-masquerade.jpg') {
+      return { ok: true, status: 200, headers: new Headers({ 'content-type': 'application/json' }) };
+    }
+    if (url === 'https://example.com/oversized.png') {
+      return { ok: true, status: 200, headers: new Headers({ 'content-type': 'image/png', 'content-length': String(6 * 1024 * 1024) }) };
+    }
+    if (url === 'https://example.com/head-405.jpg') {
+      if (init.method === 'HEAD') {
+        return { ok: false, status: 405, headers: new Headers() };
+      }
+      return { ok: true, status: 200, headers: new Headers({ 'content-type': 'image/jpeg', 'content-length': '12000' }) };
+    }
+    if (url === 'https://example.com/valid-barber.jpg' || url === DEFAULT_SERVICE_PLACEHOLDER_IMAGE) {
+      return { ok: true, status: 200, headers: new Headers({ 'content-type': 'image/png', 'content-length': '45000' }) };
+    }
+    return { ok: false, status: 404, headers: new Headers() };
+  };
+
+  const headFallback = await verifyWhatsAppImageUrl('https://example.com/head-405.jpg', { fetchImpl });
+  assert.equal(headFallback.ok, true);
+  assert.equal(headFallback.contentType, 'image/jpeg');
+
+  const warnings = [];
+  const carousel = await buildVerifiedWhatsAppServiceCarousel([
+    {
+      id: 'barber',
+      label: 'Barber',
+      categoryName: 'Barber',
+      description: 'Haircuts',
+      images: [
+        { uri: 'https://example.com/404.jpg' },
+        { uri: 'https://example.com/json-masquerade.jpg' },
+        { uri: 'https://example.com/valid-barber.jpg' },
+      ],
+    },
+    {
+      id: 'cleaning',
+      label: 'Cleaning',
+      categoryName: 'Home',
+      description: 'Home cleaning',
+      images: [{ uri: 'https://example.com/oversized.png' }],
+    },
+    {
+      id: 'beauty',
+      label: 'Beauty',
+      categoryName: 'Beauty',
+      description: 'Beauty treatment',
+      images: [{ uri: 'https://example.com/head-405.jpg' }],
+    },
+  ], {
+    fetchImpl,
+    logger: { warn: (msg, meta) => warnings.push({ msg, meta }) },
+  });
+
+  assert.equal(carousel.type, 'carousel');
+  assert.equal(carousel.action.cards.length, 3);
+  assert.equal(carousel.action.cards[0].header.image.link, 'https://example.com/valid-barber.jpg');
+  assert.equal(carousel.action.cards[1].header.image.link, DEFAULT_SERVICE_PLACEHOLDER_IMAGE);
+  assert.equal(carousel.action.cards[2].header.image.link, 'https://example.com/head-405.jpg');
+  assert.ok(warnings.some((w) => w.msg === 'whatsapp_carousel_broken_image_skipped'));
+
+  const nullWhenPlaceholderBroken = await buildVerifiedWhatsAppServiceCarousel([
+    { id: 'barber', label: 'Barber', images: [{ uri: 'https://example.com/404.jpg' }] },
+    { id: 'cleaning', label: 'Cleaning', images: [{ uri: 'https://example.com/404.jpg' }] },
+  ], {
+    fetchImpl: async () => ({ ok: false, status: 404, headers: new Headers() }),
+  });
+  assert.equal(nullWhenPlaceholderBroken, null);
+});
+

@@ -17,4 +17,5 @@ test('delivery callbacks advance state without allowing stale callbacks to regre
   assert.equal(shouldApplyDeliveryStatus({ status: 'delivered', statusTimestampMs: 20 }, { status: 'sent', timestampMs: 10 }), false);
   assert.equal(shouldApplyDeliveryStatus({ status: 'read', statusTimestampMs: 20 }, { status: 'failed', timestampMs: 30 }), false);
   assert.equal(shouldApplyDeliveryStatus({ status: 'sent', statusTimestampMs: 20 }, { status: 'failed', timestampMs: 30 }), true);
+  assert.equal(shouldApplyDeliveryStatus({ status: 'sent', statusTimestampMs: 20 }, { status: 'received', deliveryStatus: 'failed', timestampMs: 30 }), true);
 });

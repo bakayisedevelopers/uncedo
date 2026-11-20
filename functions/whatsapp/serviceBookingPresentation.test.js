@@ -281,4 +281,44 @@ test('formatWhatsAppNextQuestion uses carousel with Uncedo logo fallback for opt
   assert.match(result.text, /4\. Silver Chrome/);
 });
 
+test('formatVerifiedWhatsAppNextQuestion replaces broken 404 option images and falls back to buttons when none are reachable', async () => {
+  const { formatVerifiedWhatsAppNextQuestion } = require('./serviceBookingPresentation');
+  const fetchMixed = async (url) => {
+    if (url === 'https://example.com/good.jpg' || url === 'https://uncedo.bakayise.com/logo.png') {
+      return { ok: true, status: 200, headers: new Headers({ 'content-type': 'image/jpeg', 'content-length': '20000' }) };
+    }
+    return { ok: false, status: 404, headers: new Headers({ 'content-type': 'application/json' }) };
+  };
+
+  const mixedResult = await formatVerifiedWhatsAppNextQuestion({
+    service: { label: 'Nails' },
+    question: {
+      id: 'nail_color',
+      prompt: 'Choose a color',
+      options: [
+        { value: 'red', label: 'Ruby Red', imageUrl: 'https://example.com/good.jpg' },
+        { value: 'blue', label: 'Ocean Blue', imageUrl: 'https://example.com/broken-404.jpg' },
+      ],
+    },
+    fetchImpl: fetchMixed,
+  });
+  assert.equal(mixedResult.interactive.type, 'carousel');
+  assert.equal(mixedResult.interactive.action.cards[0].header.image.link, 'https://example.com/good.jpg');
+  assert.equal(mixedResult.interactive.action.cards[1].header.image.link, 'https://uncedo.bakayise.com/logo.png');
+
+  const allBrokenResult = await formatVerifiedWhatsAppNextQuestion({
+    service: { label: 'Nails' },
+    question: {
+      id: 'nail_color',
+      prompt: 'Choose a color',
+      options: [
+        { value: 'red', label: 'Ruby Red', imageUrl: 'https://example.com/broken-1.jpg' },
+        { value: 'blue', label: 'Ocean Blue', imageUrl: 'https://example.com/broken-2.jpg' },
+      ],
+    },
+    fetchImpl: fetchMixed,
+  });
+  assert.equal(allBrokenResult.interactive.type, 'button');
+});
+
 

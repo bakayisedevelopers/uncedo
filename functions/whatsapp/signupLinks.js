@@ -5,6 +5,26 @@ const DEFAULT_SIGNUP_URLS = Object.freeze({
   helper: 'https://helpers.bakayise.com/sign-up',
 });
 
+const DEFAULT_HELPER_BASE_URL = 'https://helpers.bakayise.com';
+
+function getWhatsAppHelperBaseUrl({ env = process.env } = {}) {
+  const configured = String(
+    env?.WHATSAPP_HELPER_ONBOARDING_URL
+    || env?.WHATSAPP_HELPER_SIGNUP_URL
+    || DEFAULT_HELPER_BASE_URL,
+  ).trim();
+  let url;
+  try {
+    url = new URL(configured);
+  } catch (_) {
+    throw new Error('The WhatsApp helper web app URL is invalid.');
+  }
+  if (url.protocol !== 'https:' || url.username || url.password) {
+    throw new Error('The WhatsApp helper web app URL must use HTTPS and cannot contain credentials.');
+  }
+  return url.origin;
+}
+
 function getWhatsAppSignupUrl({ role, mode = 'signup', env = process.env } = {}) {
   const normalizedRole = String(role || '').trim().toLowerCase();
   const normalizedMode = String(mode || '').trim().toLowerCase();
@@ -41,7 +61,7 @@ function getWhatsAppAccountLinkUrl({ role, env = process.env } = {}) {
 }
 
 function getWhatsAppHelperAgreementUrl({ env = process.env } = {}) {
-  const configured = String(env?.WHATSAPP_HELPER_AGREEMENT_URL || 'https://helpers.bakayise.com/sign-agreement').trim();
+  const configured = String(env?.WHATSAPP_HELPER_AGREEMENT_URL || `${DEFAULT_HELPER_BASE_URL}/sign-agreement`).trim();
   let url;
   try {
     url = new URL(configured);
@@ -55,7 +75,11 @@ function getWhatsAppHelperAgreementUrl({ env = process.env } = {}) {
 }
 
 function getWhatsAppHelperOnboardingUrl({ env = process.env } = {}) {
-  const configured = String(env?.WHATSAPP_HELPER_ONBOARDING_URL || env?.WHATSAPP_HELPER_SIGNUP_URL || 'https://helpers.bakayise.com/onboarding').trim();
+  const configured = String(
+    env?.WHATSAPP_HELPER_ONBOARDING_URL
+    || env?.WHATSAPP_HELPER_SIGNUP_URL
+    || `${DEFAULT_HELPER_BASE_URL}/onboarding`,
+  ).trim();
   let url;
   try {
     url = new URL(configured);
@@ -72,7 +96,9 @@ function getWhatsAppHelperOnboardingUrl({ env = process.env } = {}) {
 }
 
 module.exports = {
+  DEFAULT_HELPER_BASE_URL,
   DEFAULT_SIGNUP_URLS,
+  getWhatsAppHelperBaseUrl,
   getWhatsAppSignupUrl,
   getWhatsAppAccountLinkUrl,
   getWhatsAppHelperAgreementUrl,

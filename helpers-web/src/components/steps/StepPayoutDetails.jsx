@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Building2, CheckCircle2, Landmark, Search, ShieldCheck, User } from 'lucide-react';
 import { getHelperPayoutBanks, verifyHelperPayout } from '../../services/helperDataService';
 
-export function StepPayoutDetails({ profile, onCompleteNext }) {
+export function StepPayoutDetails({ profile, onCompleteNext, showContinueButton = true }) {
   const existingPayout = profile?.payout && typeof profile.payout === 'object' ? profile.payout : {};
   const isAlreadyVerified = Boolean(
     existingPayout.bankName
@@ -362,16 +362,18 @@ export function StepPayoutDetails({ profile, onCompleteNext }) {
         </div>
       )}
 
-      <div className="pt-2 flex items-center justify-end border-t border-border">
-        <button
-          type="button"
-          onClick={() => onCompleteNext?.()}
-          disabled={!isAlreadyVerified || verifying}
-          className="px-5 py-2.5 rounded-lg bg-tealbrand-600 hover:bg-tealbrand-700 text-sm font-semibold text-white disabled:opacity-40"
-        >
-          Continue to Verification Status
-        </button>
-      </div>
+      {showContinueButton && (
+        <div className="pt-2 flex items-center justify-end border-t border-border">
+          <button
+            type="button"
+            onClick={() => onCompleteNext?.()}
+            disabled={!isAlreadyVerified || verifying}
+            className="px-5 py-2.5 rounded-lg bg-tealbrand-600 hover:bg-tealbrand-700 text-sm font-semibold text-white disabled:opacity-40"
+          >
+            Continue to Verification Status
+          </button>
+        </div>
+      )}
     </div>
   );
 }

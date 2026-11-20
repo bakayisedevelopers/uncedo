@@ -1,7 +1,11 @@
 'use strict';
 
 const { formatWhatsAppText } = require('./messageFormatting');
-const { DEFAULT_SERVICE_PLACEHOLDER_IMAGE, isSupportedWhatsAppImageUrl } = require('./servicePresentation');
+const {
+  DEFAULT_SERVICE_PLACEHOLDER_IMAGE,
+  isSupportedWhatsAppImageUrl,
+  resolveVerifiedWhatsAppImageMap,
+} = require('./servicePresentation');
 
 function safeLabel(value, maxLength = 180) {
   return formatWhatsAppText(value).replace(/\n/g, ' ').trim().slice(0, maxLength);
@@ -397,7 +401,74 @@ function formatWhatsAppNextQuestion({
   };
 }
 
+async function formatVerifiedWhatsAppNextQuestion(params = {}) {
+  const {
+    question = {},
+    fetchImpl = fetch,
+    timeoutMs = 2500,
+    logger = null,
+    useCache = fetchImpl === fetch,
+  } = params;
+  const rawOptions = Array.isArray(question?.options) ? question.options : [];
+  const candidateUrls = rawOptions
+    .map((opt) => (typeof opt === 'string' ? '' : String(opt?.imageUrl || opt?.imageUri || '').trim()))
+    .filter((url) => isSupportedWhatsAppImageUrl(url));
+
+  if (!candidateUrls.length || rawOptions.length < 2 || rawOptions.length > 10 || question?.id === 'service_address_target') {
+    return formatWhatsAppNextQuestion(params);
+  }
+
+  const verifiedMap = await resolveVerifiedWhatsAppImageMap(
+    [...candidateUrls, DEFAULT_SERVICE_PLACEHOLDER_IMAGE],
+    { fetchImpl, timeoutMs, useCache },
+  );
+  const placeholderOk = verifiedMap.get(DEFAULT_SERVICE_PLACEHOLDER_IMAGE)?.ok !== false;
+  let brokenCount = 0;
+  const sanitizedOptions = rawOptions.map((opt) => {
+    if (typeof opt === 'string') return opt;
+    const rawUrl = String(opt?.imageUrl || opt?.imageUri || '').trim();
+    if (!rawUrl || !isSupportedWhatsAppImageUrl(rawUrl)) {
+      return { ...opt, imageUrl: '', imageUri: '' };
+    }
+    const check = verifiedMap.get(rawUrl);
+    if (check && !check.ok) {
+      brokenCount += 1;
+      return { ...opt, imageUrl: '', imageUri: '' };
+    }
+    return opt;
+  });
+
+  if (brokenCount > 0) {
+    logger?.warn?.('whatsapp_question_carousel_broken_image_skipped', {
+      questionId: String(question?.id || ''),
+      brokenCount,
+    });
+  }
+
+  const hasVerifiedOptionImage = sanitizedOptions.some(
+    (opt) => typeof opt === 'object' && isSupportedWhatsAppImageUrl(opt?.imageUrl || opt?.imageUri),
+  );
+  if (!hasVerifiedOptionImage || !placeholderOk) {
+    return formatWhatsAppNextQuestion({
+      ...params,
+      question: {
+        ...question,
+        options: sanitizedOptions.map((opt) => (typeof opt === 'string' ? opt : { ...opt, imageUrl: '', imageUri: '' })),
+      },
+    });
+  }
+
+  return formatWhatsAppNextQuestion({
+    ...params,
+    question: {
+      ...question,
+      options: sanitizedOptions,
+    },
+  });
+}
+
 module.exports = {
+  formatVerifiedWhatsAppNextQuestion,
   formatWhatsAppBookingConfirmation,
   formatWhatsAppNextQuestion,
   formatWhatsAppRequestExpiredMessage,

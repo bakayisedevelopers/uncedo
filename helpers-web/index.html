@@ -2,17 +2,53 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Uncedo Helpers — Partner Onboarding & Verification</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Uncedo Helpers — Partner App &amp; Onboarding</title>
     <meta
       name="description"
-      content="Complete your Uncedo Helper profile step by step: personal details, selfie photo, service portfolio, agreement, police clearance, and bank payout verification."
+      content="Manage your Uncedo Helper shift, incoming job offers, service portfolio, onboarding steps, and payouts."
     />
-    <meta property="og:title" content="Uncedo Helpers — Partner Onboarding" />
+    <meta property="og:title" content="Uncedo Helpers — Partner App" />
     <meta
       property="og:description"
-      content="Step-by-step web onboarding for Uncedo Helpers and service providers."
+      content="Uncedo Helpers web application for service providers: live job dispatch, services portfolio, and onboarding."
     />
+    <meta name="theme-color" content="#0B5D56" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Helpers" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/helpers-logo-192.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/helpers-apple-touch-icon.png" />
+    <script>
+      (function () {
+        if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return;
+        var host = window.location.hostname || '';
+        if (host === 'localhost' || host === '127.0.0.1' || host.endsWith('.run.app')) {
+          navigator.serviceWorker.getRegistrations().then(function (regs) {
+            if (!regs || !regs.length) return;
+            var hadDevSw = false;
+            Promise.all(regs.map(function (reg) {
+              if (reg.active && reg.active.scriptURL && reg.active.scriptURL.indexOf('dev-sw') !== -1) {
+                hadDevSw = true;
+              }
+              return reg.unregister().catch(function () { return false; });
+            })).then(function () {
+              if ('caches' in window) {
+                return caches.keys().then(function (keys) {
+                  return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+                });
+              }
+            }).then(function () {
+              if (hadDevSw && !window.sessionStorage.getItem('__helpers_dev_sw_reset')) {
+                window.sessionStorage.setItem('__helpers_dev_sw_reset', '1');
+                window.location.reload();
+              }
+            });
+          }).catch(function () {});
+        }
+      })();
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link

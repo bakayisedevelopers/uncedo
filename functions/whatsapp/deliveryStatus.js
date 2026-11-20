@@ -13,8 +13,8 @@ function classifyMetaDeliveryError(error = {}) {
 }
 
 function shouldApplyDeliveryStatus(current = {}, incoming = {}) {
-  const currentStatus = String(current.status || current.deliveryStatus || '').toLowerCase();
-  const incomingStatus = String(incoming.status || '').toLowerCase();
+  const currentStatus = String(current.deliveryStatus || current.status || '').toLowerCase();
+  const incomingStatus = String(incoming.deliveryStatus || incoming.status || '').toLowerCase();
   if (!KNOWN_STATES.has(incomingStatus)) return false;
   const currentAt = Number(current.statusTimestampMs || current.deliveryStatusTimestampMs || 0);
   const incomingAt = Number(incoming.timestampMs || 0);

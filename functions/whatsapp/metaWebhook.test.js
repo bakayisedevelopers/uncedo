@@ -58,6 +58,7 @@ test('webhook normalization creates stable, bounded message and status events', 
   assert.equal(events[2].location, undefined);
   assert.equal(events[3].media.mediaId, 'media-1');
   assert.equal(events[4].eventType, 'message_status');
+  assert.equal(events[4].deliveryStatus, 'delivered');
   assert.equal(events[0].eventId, normalizeWebhookPayload({
     entry: [{ changes: [{ value: {
       metadata: { phone_number_id: '100200300' },

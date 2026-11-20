@@ -1,11 +1,25 @@
 import { useCallback, useEffect, useState } from 'react';
+import { AppShell } from './components/AppShell';
+import { HelperOfferOverlay } from './components/HelperOfferOverlay';
+import { OfflineIndicator } from './components/OfflineIndicator';
+import { PWAInstallPrompt } from './components/PWAInstallPrompt';
+import { HelperSessionProvider } from './context/HelperSessionContext';
+import { usePWAInstall } from './hooks/usePWAInstall';
 import { subscribeToAuthSession } from './services/helperDataService';
+import {
+  capturePendingWhatsAppAccountLink,
+  capturePendingWhatsAppSignup,
+} from './utils/whatsappLinkState';
 import { mapPathnameToStepId } from './utils/onboardingSteps';
 import { LandingPage } from './pages/LandingPage';
 import { AuthPage } from './pages/AuthPage';
 import { WhatsAppLinkPage } from './pages/WhatsAppLinkPage';
 import { OnboardingPage } from './pages/OnboardingPage';
-import { WorkspacePage } from './pages/WorkspacePage';
+import { HomePage } from './pages/HomePage';
+import { ServicesPage } from './pages/ServicesPage';
+import { JobsPage } from './pages/JobsPage';
+import { ProfilePage } from './pages/ProfilePage';
+import { ProfileSectionPage } from './pages/ProfileSectionPage';
 import { RequestDetailPage } from './pages/RequestDetailPage';
 
 function normalizePath(path = '/') {
@@ -13,7 +27,26 @@ function normalizePath(path = '/') {
   return clean || '/';
 }
 
+const APP_PAGE_TITLES = {
+  '/': 'Home',
+  '/home': 'Home',
+  '/workspace': 'Home',
+  '/services': 'Services',
+  '/jobs': 'Jobs & Activity',
+  '/payments': 'Payments',
+  '/profile': 'Profile',
+  '/profile/details': 'Personal details',
+  '/profile/payouts': 'Payments',
+  '/profile/security': 'Security & clearance',
+  '/profile/legal': 'Agreement and legal',
+};
+
 export default function App() {
+  useState(() => {
+    capturePendingWhatsAppSignup();
+    capturePendingWhatsAppAccountLink();
+    return true;
+  });
   const [pathname, setPathname] = useState(() =>
     typeof window !== 'undefined' ? normalizePath(window.location.pathname) : '/',
   );
@@ -21,6 +54,8 @@ export default function App() {
   const [authReady, setAuthReady] = useState(false);
   const [authError, setAuthError] = useState('');
   const [bannerNotice, setBannerNotice] = useState('');
+  const [postAuthRedirect, setPostAuthRedirect] = useState('');
+  const pwa = usePWAInstall();
 
   useEffect(() => {
     const unsub = subscribeToAuthSession(
@@ -45,80 +80,152 @@ export default function App() {
   }, []);
 
   const navigate = useCallback((toPath) => {
-    const next = normalizePath(toPath);
-    if (window.location.pathname !== next) {
-      window.history.pushState(null, '', next);
+    const raw = String(toPath || '/');
+    const url = new URL(raw, typeof window !== 'undefined' ? window.location.origin : 'https://bakayise-uncedo-latest-helpers.web.app');
+    const nextPath = normalizePath(url.pathname);
+    const fullTarget = `${nextPath}${url.search}${url.hash}`;
+    const currentFull = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (currentFull !== fullTarget) {
+      window.history.pushState(null, '', fullTarget);
     }
-    setPathname(next);
+    setPathname(nextPath);
     window.scrollTo({ top: 0, behavior: 'auto' });
   }, []);
 
   const isOnboardingRoute = pathname === '/onboarding' || Boolean(mapPathnameToStepId(pathname));
+  const profileSectionMatch = pathname.match(/^\/profile\/(details|payouts|security|legal)$/);
+  const isProtectedAppRoute =
+    ['/home', '/workspace', '/services', '/jobs', '/payments', '/profile'].includes(pathname)
+    || Boolean(profileSectionMatch);
   const requestMatch = pathname.match(/^\/requests\/([A-Za-z0-9_-]+)$/);
 
   useEffect(() => {
-    if (authReady && (isOnboardingRoute || pathname === '/workspace' || requestMatch) && !user) {
+    if (authReady && (isOnboardingRoute || isProtectedAppRoute || requestMatch) && !user) {
+      const fullIntended = typeof window !== 'undefined'
+        ? `${normalizePath(window.location.pathname)}${window.location.search}${window.location.hash}`
+        : pathname;
+      setPostAuthRedirect(fullIntended);
       navigate('/sign-in');
     }
-  }, [authReady, isOnboardingRoute, pathname, requestMatch, navigate, user]);
+  }, [authReady, isOnboardingRoute, isProtectedAppRoute, pathname, requestMatch, navigate, user]);
+
+  let content = null;
 
   if (!authReady) {
-    return (
+    content = (
       <div className="min-h-screen bg-canvas flex items-center justify-center p-6">
         <div className="text-sm text-ink-500">Loading Uncedo Helpers…</div>
       </div>
     );
-  }
-
-  if (pathname === '/workspace' && user) {
-    return <WorkspacePage user={user} onNavigate={navigate} />;
-  }
-
-  if (requestMatch && user) {
-    return <RequestDetailPage user={user} requestId={requestMatch[1]} onNavigate={navigate} />;
-  }
-
-  if (pathname === '/whatsapp-link') {
-    return (
+  } else if (pathname === '/whatsapp-link') {
+    content = (
       <WhatsAppLinkPage
         user={user}
         onNavigate={navigate}
         onWhatsAppLinked={setBannerNotice}
       />
     );
-  }
-
-  if (pathname === '/sign-up' || pathname === '/sign-in') {
-    return (
+  } else if (pathname === '/sign-up' || pathname === '/sign-in') {
+    content = (
       <AuthPage
         initialMode={pathname === '/sign-in' ? 'signin' : 'signup'}
         user={user}
+        redirectTarget={postAuthRedirect}
+        onClearRedirect={() => setPostAuthRedirect('')}
         onNavigate={navigate}
         onWhatsAppLinked={setBannerNotice}
       />
     );
-  }
+  } else if (pathname === '/overview' || (!user && !isOnboardingRoute && !isProtectedAppRoute && !requestMatch)) {
+    content = (
+      <>
+        {authError && (
+          <div className="bg-red-50 border-b border-red-200 px-4 py-2.5 text-center text-xs text-red-800">
+            {authError}
+          </div>
+        )}
+        <LandingPage user={user} onNavigate={navigate} pwa={pwa} />
+      </>
+    );
+  } else if (user) {
+    let signedInView = null;
+    if (requestMatch) {
+      signedInView = <RequestDetailPage requestId={requestMatch[1]} onNavigate={navigate} />;
+    } else if (isOnboardingRoute) {
+      signedInView = (
+        <OnboardingPage
+          user={user}
+          pathname={pathname}
+          bannerNotice={bannerNotice}
+          onDismissBanner={() => setBannerNotice('')}
+          onNavigate={navigate}
+        />
+      );
+    } else if (pathname === '/services') {
+      signedInView = (
+        <AppShell pathname={pathname} onNavigate={navigate} pwa={pwa} title={APP_PAGE_TITLES['/services']}>
+          <ServicesPage onNavigate={navigate} />
+        </AppShell>
+      );
+    } else if (pathname === '/jobs') {
+      signedInView = (
+        <AppShell pathname={pathname} onNavigate={navigate} pwa={pwa} title={APP_PAGE_TITLES['/jobs']}>
+          <JobsPage onNavigate={navigate} />
+        </AppShell>
+      );
+    } else if (pathname === '/payments') {
+      signedInView = (
+        <AppShell pathname={pathname} onNavigate={navigate} pwa={pwa} title={APP_PAGE_TITLES['/payments']}>
+          <ProfileSectionPage section="payouts" isTopLevel onNavigate={navigate} />
+        </AppShell>
+      );
+    } else if (profileSectionMatch) {
+      const section = profileSectionMatch[1];
+      signedInView = (
+        <AppShell
+          pathname={pathname}
+          onNavigate={navigate}
+          pwa={pwa}
+          title={APP_PAGE_TITLES[pathname] || 'Profile'}
+        >
+          <ProfileSectionPage section={section} onNavigate={navigate} />
+        </AppShell>
+      );
+    } else if (pathname === '/profile') {
+      signedInView = (
+        <AppShell pathname={pathname} onNavigate={navigate} pwa={pwa} title={APP_PAGE_TITLES['/profile']}>
+          <ProfilePage onNavigate={navigate} pwa={pwa} />
+        </AppShell>
+      );
+    } else {
+      signedInView = (
+        <AppShell pathname={pathname} onNavigate={navigate} pwa={pwa} title={APP_PAGE_TITLES['/home']}>
+          <HomePage onNavigate={navigate} />
+        </AppShell>
+      );
+    }
 
-  if (isOnboardingRoute && user) {
-    return (
-      <OnboardingPage
-        user={user}
-        pathname={pathname}
-        bannerNotice={bannerNotice}
-        onDismissBanner={() => setBannerNotice('')}
-        onNavigate={navigate}
-      />
+    content = (
+      <HelperSessionProvider user={user}>
+        {signedInView}
+        <HelperOfferOverlay onNavigate={navigate} />
+      </HelperSessionProvider>
     );
   }
 
   return (
     <>
-      {authError && (
-        <div className="bg-red-50 border-b border-red-200 px-4 py-2.5 text-center text-xs text-red-800">
-          {authError}
-        </div>
-      )}
-      <LandingPage user={user} onNavigate={navigate} />
+      <OfflineIndicator />
+      {content}
+      <PWAInstallPrompt
+        isInstalled={pwa.isInstalled}
+        isIOS={pwa.isIOS}
+        hasNativePrompt={pwa.hasNativePrompt}
+        popupOpen={pwa.popupOpen}
+        showInstructions={pwa.showInstructions}
+        onInstall={pwa.promptInstall}
+        onDismiss={pwa.dismissPopup}
+      />
     </>
   );
 }

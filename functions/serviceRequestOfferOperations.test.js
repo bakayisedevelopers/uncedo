@@ -87,3 +87,99 @@ test('expired and stale WhatsApp offer references are rejected', async () => {
   const stale = await operations.respond({ requestId: 'request-0001', helperId: 'helper-1', offerToken: 'wrong', offerRevision: 3, action: 'decline' });
   assert.equal(stale.error, 'offer-no-longer-current');
 });
+
+test('stale completed activeServiceRequestId does not block accepting a new offer while an ongoing job still blocks', async () => {
+  const { data, operations } = setup();
+  data.set('serviceRequests/request-old-done', {
+    status: 'completed',
+    helperAssignment: { helperId: 'helper-1' },
+  });
+  data.set('users/helper-1', { role: 'helper', fullName: 'Helper One', activeServiceRequestId: 'request-old-done' });
+
+  const accepted = await operations.respond({
+    requestId: 'request-0001',
+    helperId: 'helper-1',
+    offerToken: 'offer-token',
+    offerRevision: 3,
+    action: 'accept',
+  });
+  assert.equal(accepted.didApply, true);
+  assert.equal(data.get('users/helper-1').activeServiceRequestId, 'request-0001');
+
+  data.set('serviceRequests/request-0002', {
+    status: 'helper_found',
+    currentOfferHelperId: 'helper-1',
+    offerToken: 'offer-token-2',
+    offerRevision: 1,
+    offerExpiresAt: Date.now() + 30_000,
+  });
+  data.set('serviceRequests/request-0001', {
+    ...data.get('serviceRequests/request-0001'),
+    status: 'work_started',
+    helperAssignment: { helperId: 'helper-1' },
+  });
+  const blocked = await operations.respond({
+    requestId: 'request-0002',
+    helperId: 'helper-1',
+    offerToken: 'offer-token-2',
+    offerRevision: 1,
+    action: 'accept',
+  });
+  assert.equal(blocked.error, 'helper-already-has-active-request');
+});
+
+test('busy_helper_fallback offer allows accepting while keeping activeServiceRequestId intact', async () => {
+  const { data, operations } = setup();
+  data.set('serviceRequests/request-active-1', {
+    status: 'work_started',
+    helperAssignment: { helperId: 'helper-1' },
+  });
+  data.set('users/helper-1', {
+    role: 'helper',
+    fullName: 'Helper One',
+    activeServiceRequestId: 'request-active-1',
+  });
+  data.set('serviceRequests/request-busy-next', {
+    status: 'helper_found',
+    offerType: 'busy_helper_fallback',
+    currentOfferHelperId: 'helper-1',
+    offerToken: 'offer-busy-1',
+    offerRevision: 2,
+    offerExpiresAt: Date.now() + 30_000,
+    lastOfferAt: Date.now() - 1000,
+    categoryId: 'cleaning',
+    serviceIds: ['house-clean'],
+  });
+
+  const accepted = await operations.respond({
+    requestId: 'request-busy-next',
+    helperId: 'helper-1',
+    offerToken: 'offer-busy-1',
+    offerRevision: 2,
+    action: 'accept',
+  });
+  assert.equal(accepted.didApply, true);
+  assert.equal(accepted.busyFallbackAccepted, true);
+  assert.equal(accepted.activeRequestId, 'request-active-1');
+  assert.equal(data.get('users/helper-1').activeServiceRequestId, 'request-active-1');
+  assert.equal(data.get('users/helper-1').queuedServiceRequestId, 'request-busy-next');
+  assert.equal(data.get('serviceRequests/request-busy-next').status, 'busy_helper_confirmation');
+  assert.equal(data.get('serviceRequests/request-busy-next').pendingBusyAssignment.helperId, 'helper-1');
+
+  data.set('serviceRequests/request-busy-third', {
+    status: 'helper_found',
+    offerType: 'busy_helper_fallback',
+    currentOfferHelperId: 'helper-1',
+    offerToken: 'offer-busy-3',
+    offerRevision: 1,
+    offerExpiresAt: Date.now() + 30_000,
+  });
+  const secondBusyBlocked = await operations.respond({
+    requestId: 'request-busy-third',
+    helperId: 'helper-1',
+    offerToken: 'offer-busy-3',
+    offerRevision: 1,
+    action: 'accept',
+  });
+  assert.equal(secondBusyBlocked.error, 'helper-already-has-queued-request');
+});

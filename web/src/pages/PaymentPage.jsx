@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, Banknote, CheckCircle2, CreditCard, Loader2, LockKeyhole, RefreshCw, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, Banknote, CheckCircle2, CreditCard, Loader2, LockKeyhole, RefreshCw, ShieldCheck, Star } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { requestPaymentFunction } from '../services/paymentService';
 
@@ -9,7 +9,13 @@ const TOKEN_STORAGE_KEY = 'uncedo:payment-session';
 function formatMoney(amount, currency = 'ZAR') {
   const value = Number(amount);
   if (!Number.isFinite(value)) return 'Amount unavailable';
-  return new Intl.NumberFormat('en-ZA', { style: 'currency', currency }).format(value);
+  const wholeAmount = Math.round(value);
+  return new Intl.NumberFormat('en-ZA', {
+    style: 'currency',
+    currency,
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  }).format(wholeAmount);
 }
 
 function makeIdempotencyKey() {
@@ -30,6 +36,11 @@ export default function PaymentPage() {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [expired, setExpired] = useState(false);
+  const [ratingScore, setRatingScore] = useState(5);
+  const [ratingComment, setRatingComment] = useState('');
+  const [ratingBusy, setRatingBusy] = useState(false);
+  const [ratingError, setRatingError] = useState('');
+  const [ratingNotice, setRatingNotice] = useState('');
 
   const request = payment || {};
   const activeAttemptId = String(payment?.activeAttemptId || '');
@@ -176,7 +187,28 @@ export default function PaymentPage() {
     if (result?.success) setSavedCardAttempt(null);
   }
 
+  async function submitHelperRating(event) {
+    event.preventDefault();
+    setRatingBusy(true);
+    setRatingError('');
+    setRatingNotice('');
+    try {
+      await requestPaymentFunction('submitServiceRatingFromPaymentSession', {
+        token,
+        score: ratingScore,
+        comment: ratingComment.trim(),
+      });
+      setRatingNotice(`Thank you for rating ${payment?.helperName || 'your helper'}!`);
+      await refresh();
+    } catch (submitError) {
+      setRatingError(submitError?.message || 'Unable to submit rating right now.');
+    } finally {
+      setRatingBusy(false);
+    }
+  }
+
   const paid = payment?.paymentStatus === 'paid';
+  const paymentFailed = ['payment_failed', 'wallet_debt_recorded'].includes(String(payment?.paymentStatus || ''));
   const inProgress = ['payment_processing', 'payment_reconciliation_required', 'initializing', 'processing'].includes(String(payment?.paymentStatus || ''));
   const cashWaiting = ['cash_selected', 'awaiting_cash_confirmation'].includes(String(payment?.paymentStatus || ''));
 
@@ -264,6 +296,73 @@ export default function PaymentPage() {
                 ) : null}
               </div>
             )}
+
+            {paymentFailed && !paid ? (
+              <Notice tone="error">Your previous payment attempt did not succeed. You can try Cash / EFT or another card above, and still rate your helper below.</Notice>
+            ) : null}
+
+            {(payment.canRateHelper || paid || paymentFailed) && payment.helperName !== undefined ? (
+              <section className="app-surface p-5 sm:p-6">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-black uppercase tracking-[0.18em] text-emerald-700">Service feedback</p>
+                    <h2 className="mt-1 text-lg font-extrabold text-zinc-950">
+                      Rate {payment.helperName || 'your helper'}
+                    </h2>
+                    <p className="mt-1 text-xs text-zinc-500">
+                      {paid
+                        ? 'Your payment is complete. Let us know how the service went.'
+                        : 'Even though the payment did not complete, you can still rate your helper experience.'}
+                    </p>
+                  </div>
+                </div>
+                {ratingError ? <div className="mt-4"><Notice tone="error">{ratingError}</Notice></div> : null}
+                {ratingNotice ? <div className="mt-4"><Notice tone="info">{ratingNotice}</Notice></div> : null}
+                {payment.hasCustomerRating ? (
+                  <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950">
+                    <div className="flex items-center gap-1.5 font-extrabold">
+                      <span>You rated {payment.helperName || 'your helper'} {payment.customerRating?.score || ratingScore}/5</span>
+                    </div>
+                    {payment.customerRating?.comment ? (
+                      <p className="mt-1 text-xs text-emerald-900">“{payment.customerRating.comment}”</p>
+                    ) : null}
+                  </div>
+                ) : payment.canRateHelper ? (
+                  <form onSubmit={submitHelperRating} className="mt-4 space-y-4">
+                    <div className="flex items-center gap-1.5">
+                      {[1, 2, 3, 4, 5].map((star) => (
+                        <button
+                          key={star}
+                          type="button"
+                          onClick={() => setRatingScore(star)}
+                          aria-label={`Rate ${star} stars`}
+                          className="rounded-lg p-1.5 hover:bg-zinc-100"
+                        >
+                          <Star
+                            size={24}
+                            className={star <= ratingScore ? 'fill-amber-400 text-amber-500' : 'text-zinc-300'}
+                          />
+                        </button>
+                      ))}
+                    </div>
+                    <input
+                      type="text"
+                      value={ratingComment}
+                      onChange={(event) => setRatingComment(event.target.value)}
+                      placeholder="Optional comment about your service experience…"
+                      className="w-full rounded-xl border border-zinc-300 px-4 py-2.5 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/15"
+                    />
+                    <button
+                      type="submit"
+                      disabled={ratingBusy}
+                      className="w-full rounded-xl bg-emerald-700 px-5 py-3 text-sm font-extrabold text-white hover:bg-emerald-800 disabled:opacity-50"
+                    >
+                      {ratingBusy ? 'Submitting rating…' : 'Submit rating'}
+                    </button>
+                  </form>
+                ) : null}
+              </section>
+            ) : null}
           </div>
         )}
       </main>

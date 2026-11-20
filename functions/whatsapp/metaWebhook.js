@@ -133,6 +133,7 @@ function normalizeStatus(status = {}, metadata = {}) {
     messageId,
     recipientId,
     status: statusValue,
+    deliveryStatus: statusValue,
     timestampMs: timestamp * 1000,
     errors: (Array.isArray(status.errors) ? status.errors : []).map((item) => ({
       code: String(item.code || '').slice(0, 80),

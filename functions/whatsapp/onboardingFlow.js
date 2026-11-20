@@ -108,7 +108,7 @@ function helperProviderTypePrompt() {
   };
 }
 
-function transitionWhatsAppOnboarding({ state = {}, buttonId = '', text = '', inboundType = 'text' } = {}) {
+function transitionWhatsAppOnboarding({ state = {}, buttonId = '', text = '', inboundType = 'text', nowMs = Date.now() } = {}) {
   const role = ['customer', 'helper'].includes(String(state.role || '').trim().toLowerCase())
     ? String(state.role).trim().toLowerCase()
     : '';
@@ -197,14 +197,57 @@ function transitionWhatsAppOnboarding({ state = {}, buttonId = '', text = '', in
   }
 
   if (current.stage === 'awaiting_account_signup') {
-    if (/^(resend|send|new) (the )?(account )?link$/i.test(input)) {
-      return { state: current, action: current.role === 'helper'
-        ? current.accountMode === 'link-existing' ? 'link-helper-account' : 'create-helper-signup-link'
-        : current.accountMode === 'link-existing' ? 'link-customer-account' : 'create-customer-signup-link' };
+    const linkActionForState = (nextState) => (nextState.role === 'helper'
+      ? (nextState.accountMode === 'link-existing' ? 'link-helper-account' : 'create-helper-signup-link')
+      : (nextState.accountMode === 'link-existing' ? 'link-customer-account' : 'create-customer-signup-link'));
+
+    if (button === WHATSAPP_ONBOARDING_BUTTONS.CREATE_HELPER_ACCOUNT || button === WHATSAPP_ONBOARDING_BUTTONS.CREATE_ACCOUNT) {
+      const nextRole = button === WHATSAPP_ONBOARDING_BUTTONS.CREATE_HELPER_ACCOUNT ? 'helper' : (current.role || 'customer');
+      const nextState = { ...current, role: nextRole, onboardingPath: nextRole, accountMode: 'account' };
+      return { state: nextState, action: linkActionForState(nextState), isResend: true };
+    }
+    if (button === WHATSAPP_ONBOARDING_BUTTONS.LINK_HELPER_ACCOUNT || button === WHATSAPP_ONBOARDING_BUTTONS.LINK_EXISTING_ACCOUNT) {
+      const nextRole = button === WHATSAPP_ONBOARDING_BUTTONS.LINK_HELPER_ACCOUNT ? 'helper' : (current.role || 'customer');
+      const nextState = { ...current, role: nextRole, onboardingPath: nextRole, accountMode: 'link-existing' };
+      return { state: nextState, action: linkActionForState(nextState), isResend: true };
+    }
+    if (current.role !== 'helper' && (button === WHATSAPP_ONBOARDING_BUTTONS.CONTINUE_AS_GUEST || /^(guest|continue as guest|stay as guest)$/i.test(input))) {
+      return {
+        state: { ...current, stage: 'awaiting_preferred_name', accountMode: 'guest' },
+        reply: 'You can continue as a guest. What name would you like Uncedo to use when speaking with you?',
+        action: 'ask-preferred-name',
+      };
+    }
+    if (/^(back|go back|switch|change|choose again|different option|options?|menu)$/i.test(input)
+      || /\b(change option|different option|switch options?|switch account|back to options)\b/i.test(input)) {
+      if (current.role === 'helper') {
+        return {
+          state: { ...current, stage: 'awaiting_helper_account_choice' },
+          ...helperAccountChoicePrompt(),
+          action: 'choose-helper-account-mode',
+        };
+      }
+      return {
+        state: { ...current, stage: 'awaiting_customer_choice' },
+        ...customerChoicePrompt(),
+        action: 'choose-customer-mode',
+      };
+    }
+
+    const linkExpired = current.signupLinkExpiresAtMs > 0 && current.signupLinkExpiresAtMs <= Number(nowMs || Date.now());
+    const explicitResendOrRestart = /^(resend|send|new|expired|hi|hello|hey|start|restart|reset|link)(\s+(please|me|again|now))?$/i.test(input)
+      || /\b(resend|re-send|send again|send a new|send new|new link|another link|fresh link|account link|signup link|expired|expire|start again|restart|try again|link again|lost link|missing link)\b/i.test(input);
+    if (linkExpired || explicitResendOrRestart) {
+      return {
+        state: current,
+        action: linkActionForState(current),
+        isResend: true,
+        wasExpired: linkExpired,
+      };
     }
     return {
       state: current,
-      reply: 'Please use the secure Uncedo account link sent in this chat. Your email remains your sign-in method; the link connects this WhatsApp conversation to your account.',
+      reply: 'Please use the secure Uncedo account link sent in this chat. Your email remains your sign-in method; the link connects this WhatsApp conversation to your account. If the link has expired or you need a fresh one, reply “resend link”.',
       action: 'await-signup-link',
     };
   }

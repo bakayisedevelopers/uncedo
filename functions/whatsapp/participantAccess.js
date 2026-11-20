@@ -1,7 +1,8 @@
 'use strict';
 
 function canAccessWhatsAppRequest({ request = {}, identity = {}, guestOwnerUid = '' } = {}) {
-  const role = String(identity.role || (identity.guestPrincipalId ? 'customer' : '')).trim().toLowerCase();
+  const rawRole = String(identity.role || '').trim().toLowerCase();
+  const role = (!rawRole || rawRole === 'guest') && identity.guestPrincipalId ? 'customer' : rawRole;
   const uid = String(identity.linkedFirebaseUid || '').trim();
   const customerId = String(request.customerId || '').trim();
   const helperId = String(request.helperAssignment?.helperId || '').trim();

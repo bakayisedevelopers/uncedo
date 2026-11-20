@@ -9,7 +9,8 @@ const {
 } = require('./serviceRequestPricing');
 
 const ACTIVE_REQUEST_STATUSES = [
-  'collecting_details', 'scheduled_pending', 'matching', 'helper_found', 'accepted',
+  'collecting_details', 'scheduled_pending', 'matching', 'helper_found',
+  'busy_helper_confirmation', 'helper_queued', 'accepted',
   'driving', 'en_route', 'buying_resources', 'arrived', 'work_started', 'no_helper_available',
 ];
 

@@ -86,6 +86,45 @@ test('matched guest account-link retries preserve their server-selected link mod
   });
   assert.equal(retry.action, 'link-customer-account');
   assert.equal(retry.state.accountMatchMode, 'auth-phone');
+  assert.equal(retry.isResend, true);
+});
+
+test('expired signup/link tokens automatically trigger a fresh link and accept natural resend/restart phrases', () => {
+  const now = 1_700_000_000_000;
+  const expiredState = {
+    stage: 'awaiting_account_signup',
+    role: 'helper',
+    accountMode: 'link-existing',
+    signupLinkExpiresAtMs: now - 1000,
+  };
+  const onAnyMessage = transitionWhatsAppOnboarding({ state: expiredState, text: 'hello?', nowMs: now });
+  assert.equal(onAnyMessage.action, 'link-helper-account');
+  assert.equal(onAnyMessage.isResend, true);
+  assert.equal(onAnyMessage.wasExpired, true);
+
+  const activeState = {
+    stage: 'awaiting_account_signup',
+    role: 'helper',
+    accountMode: 'account',
+    signupLinkExpiresAtMs: now + 60_000,
+  };
+  for (const phrase of ['Hi', 'Link expired', 'Send me a new link', 'Resend', 'Start again']) {
+    const res = transitionWhatsAppOnboarding({ state: activeState, text: phrase, nowMs: now });
+    assert.equal(res.action, 'create-helper-signup-link', `expected fresh link for "${phrase}"`);
+    assert.equal(res.isResend, true);
+  }
+
+  const switched = transitionWhatsAppOnboarding({
+    state: activeState,
+    buttonId: WHATSAPP_ONBOARDING_BUTTONS.LINK_HELPER_ACCOUNT,
+    nowMs: now,
+  });
+  assert.equal(switched.action, 'link-helper-account');
+  assert.equal(switched.state.accountMode, 'link-existing');
+
+  const backToChoice = transitionWhatsAppOnboarding({ state: activeState, text: 'switch option', nowMs: now });
+  assert.equal(backToChoice.action, 'choose-helper-account-mode');
+  assert.equal(backToChoice.state.stage, 'awaiting_helper_account_choice');
 });
 
 test('guest preferred name and home address are explicit and optional', () => {

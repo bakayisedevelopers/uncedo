@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
-import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { colors } from '../../theme/colors';
+
+const helpersAppLogo = require('../../../assets/bakayise-helpers-icon.jpg');
 
 function getSocialIconColor(iconName) {
   const name = String(iconName || '').toLowerCase();
@@ -52,6 +54,9 @@ export function AuthScaffold({
                 <Text style={[styles.backButtonText, Platform.OS === 'web' && webStyles.backButtonText]}>{backLabel}</Text>
               </Pressable>
             ) : null}
+            <View style={styles.logoFrame}>
+              <Image source={helpersAppLogo} style={styles.logoImage} resizeMode="cover" />
+            </View>
             {brandName ? <Text style={[styles.brandName, Platform.OS === 'web' && webStyles.brandName]}>{brandName}</Text> : null}
             <Text style={[styles.title, Platform.OS === 'web' && webStyles.title]}>{resolvedTitle}</Text>
             <Text style={[styles.subtitle, Platform.OS === 'web' && webStyles.subtitle]}>{resolvedSubtitle}</Text>
@@ -213,6 +218,22 @@ const styles = StyleSheet.create({
     width: '100%',
     alignSelf: 'center',
     maxWidth: 380,
+  },
+  logoFrame: {
+    width: 60,
+    height: 60,
+    borderRadius: 18,
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#e2e8e4',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    marginBottom: 12,
+  },
+  logoImage: {
+    width: 56,
+    height: 56,
   },
   brandName: {
     color: colors.brandDark,

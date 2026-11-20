@@ -9,11 +9,11 @@ const linkedHelper = { uid: 'helper-1', role: 'helper', linked: true, verified: 
 
 test('guests get profile/account lookup and service tools while linked customers and helpers also get confirmed name change and helper application tool', () => {
   const registry = createWhatsAppToolRegistry();
-  const linkedCustomerNames = ['getMyProfile', 'proposeProfileChange', 'getAvailableServices', 'sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking'];
-  const linkedHelperNames = [...linkedCustomerNames, 'applyForHelperService'];
-  assert.deepEqual(Object.keys(TOOL_DEFINITIONS), ['getMyProfile', 'checkMyAccountByWhatsAppNumber', 'proposeProfileChange', 'getAvailableServices', 'sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking', 'applyForHelperService']);
+  const linkedCustomerNames = ['getMyProfile', 'proposeProfileChange', 'getAvailableServices', 'sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking', 'cancelServiceRequest'];
+  const linkedHelperNames = ['getMyProfile', 'proposeProfileChange', 'getAvailableServices', 'sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking', 'applyForHelperService'];
+  assert.deepEqual(Object.keys(TOOL_DEFINITIONS), ['getMyProfile', 'checkMyAccountByWhatsAppNumber', 'proposeProfileChange', 'getAvailableServices', 'sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking', 'applyForHelperService', 'relayMessageToHelper', 'cancelServiceRequest']);
   const guestTools = registry.definitions({ identity: { guestPrincipalId: 'guest-1' }, authorization: { role: 'guest' } });
-  assert.deepEqual(guestTools.map((tool) => tool.name), ['getMyProfile', 'checkMyAccountByWhatsAppNumber', 'getAvailableServices', 'sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking']);
+  assert.deepEqual(guestTools.map((tool) => tool.name), ['getMyProfile', 'checkMyAccountByWhatsAppNumber', 'getAvailableServices', 'sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking', 'cancelServiceRequest']);
   assert.deepEqual(registry.definitions({ authorization: linkedCustomer }).map((tool) => tool.name), linkedCustomerNames);
   assert.deepEqual(registry.definitions({ authorization: linkedHelper }).map((tool) => tool.name), linkedHelperNames);
 
@@ -298,6 +298,105 @@ test('applyForHelperService is restricted to verified linked helpers and validat
   });
   await assert.rejects(
     badOutputRegistry.execute('applyForHelperService', {}, { role: 'helper', authorization: linkedHelper }),
+    { code: 'tool-output-invalid' },
+  );
+});
+
+test('relayMessageToHelper is exposed only with an open activeServiceRequest and validates payload', async () => {
+  let relayedArgs = null;
+  const registry = createWhatsAppToolRegistry({
+    handlers: {
+      relayMessageToHelper: async (args) => {
+        relayedArgs = args;
+        return {
+          code: 'relayed',
+          requestId: 'req_123',
+          deliveredToInAppChat: true,
+          relayedToHelperWhatsApp: false,
+        };
+      },
+    },
+  });
+
+  const closedTools = registry.definitions({
+    role: 'customer',
+    authorization: linkedCustomer,
+    activeServiceRequest: { isOpen: false },
+  });
+  assert.equal(closedTools.some((tool) => tool.name === 'relayMessageToHelper'), false);
+
+  const openTools = registry.definitions({
+    role: 'customer',
+    authorization: linkedCustomer,
+    activeServiceRequest: { isOpen: true },
+  });
+  assert.equal(openTools.some((tool) => tool.name === 'relayMessageToHelper'), true);
+
+  const res = await registry.execute(
+    'relayMessageToHelper',
+    { messageText: '  Gate code is 1234#  ', category: 'arrival' },
+    { role: 'customer', authorization: linkedCustomer },
+  );
+  assert.deepEqual(relayedArgs, { messageText: 'Gate code is 1234#', category: 'arrival' });
+  assert.equal(res.code, 'relayed');
+  assert.equal(res.deliveredToInAppChat, true);
+});
+
+test('cancelServiceRequest is exposed for guest and customer roles and validates optional requestId and output schema', async () => {
+  let receivedArgs;
+  const registry = createWhatsAppToolRegistry({
+    handlers: {
+      cancelServiceRequest: async (args) => {
+        receivedArgs = args;
+        return {
+          code: 'canceled',
+          requestId: args.requestId || 'wa_req_auto_1',
+          publicRequestReference: 'UNC-1042',
+          serviceSummary: 'Home Cleaning',
+          previousStatus: 'matching',
+          status: 'canceled',
+          cancellationAmount: 0,
+          billingRule: 'pre_assignment',
+          chargeConfirmed: true,
+          pendingReconciliation: false,
+          confirmationRequired: false,
+        };
+      },
+    },
+  });
+
+  const helperTools = registry.definitions({ role: 'helper', authorization: linkedHelper });
+  assert.equal(helperTools.some((tool) => tool.name === 'cancelServiceRequest'), false);
+
+  const guestRes = await registry.execute(
+    'cancelServiceRequest',
+    { requestId: '', reason: '' },
+    { role: 'guest', identity: { guestPrincipalId: 'guest-1' }, authorization: { role: 'guest', verified: false, linked: false } },
+  );
+  assert.deepEqual(receivedArgs, {});
+  assert.equal(guestRes.code, 'canceled');
+  assert.equal(guestRes.requestId, 'wa_req_auto_1');
+
+  const explicitRes = await registry.execute(
+    'cancelServiceRequest',
+    { requestId: 'wa_req_999', reason: 'Changed plans' },
+    { role: 'customer', authorization: linkedCustomer },
+  );
+  assert.deepEqual(receivedArgs, { requestId: 'wa_req_999', reason: 'Changed plans' });
+  assert.equal(explicitRes.requestId, 'wa_req_999');
+
+  await assert.rejects(
+    registry.execute('cancelServiceRequest', { customerId: 'other' }, { role: 'customer', authorization: linkedCustomer }),
+    /unsupported fields/,
+  );
+
+  const badRegistry = createWhatsAppToolRegistry({
+    handlers: {
+      cancelServiceRequest: async () => ({ code: 'canceled', secretToken: 'leak' }),
+    },
+  });
+  await assert.rejects(
+    badRegistry.execute('cancelServiceRequest', {}, { role: 'customer', authorization: linkedCustomer }),
     { code: 'tool-output-invalid' },
   );
 });

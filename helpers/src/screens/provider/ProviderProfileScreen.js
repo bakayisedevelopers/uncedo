@@ -8,6 +8,8 @@ import { reverseGeocodeLocation } from '../../services/nearbyCustomersMapService
 import { colors } from '../../theme/colors';
 import { formatCurrency } from '../../utils/payouts';
 
+const helpersAppLogo = require('../../../assets/bakayise-helpers-icon.jpg');
+
 function getInitials(name = '') {
   const parts = String(name || '')
     .trim()
@@ -260,7 +262,10 @@ export function ProviderProfileScreen({ navigate }) {
           <Ionicons color={colors.text} name="log-out-outline" size={18} />
           <Text style={styles.logoutText}>Log out</Text>
         </Pressable>
-        <Text style={styles.version}>App version {version}</Text>
+        <View style={styles.versionBrandRow}>
+          <Image source={helpersAppLogo} style={styles.versionLogo} resizeMode="cover" />
+          <Text style={styles.version}>Uncedo Helpers · App version {version}</Text>
+        </View>
       </View>
     </ScrollView>
   );
@@ -524,6 +529,20 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 15,
     fontWeight: '800',
+  },
+  versionBrandRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'center',
+    paddingTop: 2,
+  },
+  versionLogo: {
+    borderColor: colors.border,
+    borderRadius: 7,
+    borderWidth: 1,
+    height: 22,
+    width: 22,
   },
   version: {
     color: colors.muted,

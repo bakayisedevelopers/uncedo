@@ -6,7 +6,7 @@ const { onTaskDispatched } = require('firebase-functions/v2/tasks');
 const { logger } = require('firebase-functions');
 const admin = require('firebase-admin');
 const { Resend } = require('resend');
-const { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } = require('crypto');
+const { createHash, createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } = require('crypto');
 const h3 = require('h3-js');
 const {
   normalizeServiceCatalogEntry: normalizeMarketplaceServiceCatalogEntry,
@@ -108,6 +108,14 @@ const {
 } = require('./helperDispatchEligibility');
 const { calculateCustomerCancellationTerms, cancellationQuoteMatches } = require('./serviceRequestCancellation');
 const {
+  BUSY_CONFIRMATION_TIMEOUT_MS,
+  NO_HELPER_WINDOW_MS,
+  buildBusyHelperCustomerConfirmationMessage,
+  buildBusyHelperEtaSummary,
+  hasNoHelperWindowExpired,
+  resolveHelperSelectionWithBusyFallback,
+} = require('./busyHelperFallbackLogic');
+const {
   getServerPaymentMethod,
   getServerPaymentMethods,
   migrateLegacyPaymentMethods,
@@ -117,6 +125,7 @@ const {
 const { createOrAppendWhatsAppSupportMessage } = require('./whatsapp/supportTicketService');
 const { extractQuestionnaireAnswers, getMissingRequiredQuestions, questionnaireNeedsExtractionPass } = require('./whatsapp/serviceBookingIntake');
 const {
+  formatVerifiedWhatsAppNextQuestion,
   formatWhatsAppBookingConfirmation,
   formatWhatsAppNextQuestion,
   formatWhatsAppRequestExpiredMessage,
@@ -132,6 +141,7 @@ const {
 } = require('./whatsapp/policyConsent');
 const { formatWhatsAppText, getWhatsAppDisplayName } = require('./whatsapp/messageFormatting');
 const {
+  buildVerifiedWhatsAppServiceCarousel,
   buildWhatsAppServiceCarousel,
   formatWhatsAppPriceDetailsMessage,
   formatWhatsAppPriceGuidance,
@@ -170,6 +180,7 @@ const {
   resolveWhatsAppHelperLocationMode,
 } = require('./whatsapp/helperLocation');
 const {
+  getWhatsAppHelperBaseUrl,
   getWhatsAppSignupUrl,
   getWhatsAppAccountLinkUrl,
   getWhatsAppHelperAgreementUrl,
@@ -234,6 +245,7 @@ const {
 } = require('./whatsapp/featureFlags');
 const { canAccessWhatsAppRequest } = require('./whatsapp/participantAccess');
 const { getWhatsAppRequestForIdentity, listWhatsAppRequests } = require('./whatsapp/requestAccessService');
+const { findCustomerCancellationTarget, resolveExtraCustomerIdsForIdentity } = require('./whatsapp/customerCancellationHelper');
 const { parseWhatsAppCommand } = require('./whatsapp/commandParser');
 const { isExpectedWhatsAppRelayRecipient, isWhatsAppRelayRequestOpen } = require('./whatsapp/relayAuthorization');
 const { buildWhatsAppPaymentSummary, formatWhatsAppPaymentSummary } = require('./whatsapp/paymentSummary');
@@ -274,6 +286,24 @@ const {
   normalizeRevision,
   normalizeTimestamp,
 } = require('./serviceRequestOfferLogic');
+const {
+  HELPER_LABOR_PAYOUT_RATE,
+  PLATFORM_LABOR_SHARE_RATE,
+  SERVICE_BOOKING_FEE_CAP,
+  SERVICE_BOOKING_FEE_RATE,
+  SERVICE_DEFAULT_TRAVEL_FEE,
+  SERVICE_TRAVEL_RATE_PER_KM,
+  computeServiceBookingFee,
+  formatWholeRandDisplay,
+  getServiceBookingFee,
+  getServiceHelperPayoutBreakdown,
+  getServiceQuoteSubtotal,
+  getServiceQuoteTotal,
+  getServiceTravelFee,
+  toMoney,
+  toRand,
+  toWholeRand,
+} = require('./serviceRequestBilling');
 
 admin.initializeApp();
 
@@ -487,6 +517,8 @@ const SERVICE_REQUEST_STATUS = {
   SCHEDULED_PENDING: 'scheduled_pending',
   MATCHING: 'matching',
   HELPER_FOUND: 'helper_found',
+  BUSY_HELPER_CONFIRMATION: 'busy_helper_confirmation',
+  HELPER_QUEUED: 'helper_queued',
   ACCEPTED: 'accepted',
   EN_ROUTE: 'en_route',
   ARRIVED: 'arrived',
@@ -503,8 +535,13 @@ const ACTIVE_SERVICE_REQUEST_STATUSES = new Set([
 const PRE_ASSIGNMENT_SERVICE_REQUEST_STATUSES = new Set([
   SERVICE_REQUEST_STATUS.COLLECTING_DETAILS,
   SERVICE_REQUEST_STATUS.SCHEDULED_PENDING,
+  'scheduled',
+  'pending',
+  'offered',
   SERVICE_REQUEST_STATUS.MATCHING,
   SERVICE_REQUEST_STATUS.HELPER_FOUND,
+  SERVICE_REQUEST_STATUS.BUSY_HELPER_CONFIRMATION,
+  SERVICE_REQUEST_STATUS.HELPER_QUEUED,
   SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE,
 ]);
 const serviceRequestOfferOperations = createServiceRequestOfferOperations({
@@ -513,6 +550,8 @@ const serviceRequestOfferOperations = createServiceRequestOfferOperations({
   isHelperUserRecord,
   acceptedStatus: SERVICE_REQUEST_STATUS.ACCEPTED,
   matchingStatus: SERVICE_REQUEST_STATUS.MATCHING,
+  busyConfirmationStatus: SERVICE_REQUEST_STATUS.BUSY_HELPER_CONFIRMATION,
+  busyConfirmationTimeoutMs: BUSY_CONFIRMATION_TIMEOUT_MS,
 });
 const POST_ASSIGNMENT_SERVICE_REQUEST_STATUSES = new Set([
   SERVICE_REQUEST_STATUS.ACCEPTED,
@@ -1595,55 +1634,7 @@ function rankHelpersWithFairness(candidates = []) {
   return ordered;
 }
 
-async function getHelperQueueForServiceRequest(request = {}) {
-  const categoryId = String(request.categoryId || '').trim().toLowerCase();
-  const requestServiceIds = Array.isArray(request.serviceIds) ? request.serviceIds : [];
-  const requestOptionId = String(
-    request.selectedOptionId
-      || request.requestPayload?.selectedOptionId
-      || request.pricingSnapshot?.selectedOptionId
-      || '',
-  ).trim();
-  if (!categoryId) return [];
-
-  const [activeRequestsSnap, catalogEntries] = await Promise.all([
-    db.collection('serviceRequests')
-      .where('status', 'in', [...HELPER_BUSY_REQUEST_STATUSES])
-      .get(),
-    getLiveServiceCatalogEntries(),
-  ]);
-
-  const catalogIndex = buildActiveServiceCatalogIndex(catalogEntries);
-  const categoryToken = normalizeServiceToken(categoryId);
-  if (!catalogIndex.byCategoryId.has(categoryToken)) {
-    return [];
-  }
-
-  const requestLocation = getServiceRequestLocationSnapshot(request);
-  const dispatchCandidates = await queryHelperDispatchCandidates(categoryId, requestServiceIds, catalogIndex, requestLocation, requestOptionId);
-
-  const busyHelperIds = new Set(
-    activeRequestsSnap.docs
-      .map((item) => item.data()?.helperAssignment?.helperId)
-      .filter(Boolean),
-  );
-
-  const candidateIds = dispatchCandidates
-    .map((helper) => String(helper.helperId || helper.uid || '').trim())
-    .filter((helperId) => helperId && !busyHelperIds.has(helperId));
-
-  const helperDocsWithOfferings = await Promise.all(candidateIds.map(async (helperId) => {
-    const [userSnap, helperOfferings] = await Promise.all([
-      db.collection('users').doc(helperId).get(),
-      getHelperServiceOfferings(helperId),
-    ]);
-    return { userSnap, helperOfferings };
-  }));
-  const eligibleHelpers = helperDocsWithOfferings
-    .filter(({ userSnap }) => userSnap.exists)
-    .map(({ userSnap, helperOfferings }) => ({ helper: { uid: userSnap.id, ...userSnap.data() }, helperOfferings }))
-    .filter(({ helper, helperOfferings }) => isHelperDispatchEligible(helper, categoryId, requestServiceIds, catalogIndex, helperOfferings, requestOptionId))
-    .map(({ helper }) => helper);
+function rankEligibleHelpersForRequest(eligibleHelpers = [], requestLocation = null) {
   if (!requestLocation) {
     return rankHelpersWithFairness(eligibleHelpers);
   }
@@ -1681,6 +1672,98 @@ async function getHelperQueueForServiceRequest(request = {}) {
 
     return rankHelpersWithFairness(bandHelpers);
   });
+}
+
+async function getHelperDispatchPlanForServiceRequest(request = {}, { includeBusyFallback = true } = {}) {
+  const categoryId = String(request.categoryId || '').trim().toLowerCase();
+  const requestServiceIds = Array.isArray(request.serviceIds) ? request.serviceIds : [];
+  const requestOptionId = String(
+    request.selectedOptionId
+      || request.requestPayload?.selectedOptionId
+      || request.pricingSnapshot?.selectedOptionId
+      || '',
+  ).trim();
+  if (!categoryId) return { freeQueue: [], busyQueue: [], busyActiveRequestIdsByHelper: {} };
+
+  const [activeRequestsSnap, catalogEntries] = await Promise.all([
+    db.collection('serviceRequests')
+      .where('status', 'in', [...HELPER_BUSY_REQUEST_STATUSES])
+      .get(),
+    getLiveServiceCatalogEntries(),
+  ]);
+
+  const catalogIndex = buildActiveServiceCatalogIndex(catalogEntries);
+  const categoryToken = normalizeServiceToken(categoryId);
+  if (!catalogIndex.byCategoryId.has(categoryToken)) {
+    return { freeQueue: [], busyQueue: [], busyActiveRequestIdsByHelper: {} };
+  }
+
+  const requestLocation = getServiceRequestLocationSnapshot(request);
+  const dispatchCandidates = await queryHelperDispatchCandidates(categoryId, requestServiceIds, catalogIndex, requestLocation, requestOptionId);
+
+  const busyActiveRequestIdsByHelper = {};
+  activeRequestsSnap.docs.forEach((item) => {
+    const helperId = String(item.data()?.helperAssignment?.helperId || '').trim();
+    if (helperId && !busyActiveRequestIdsByHelper[helperId]) {
+      busyActiveRequestIdsByHelper[helperId] = item.id;
+    }
+  });
+  const busyHelperIds = new Set(Object.keys(busyActiveRequestIdsByHelper));
+
+  const candidateIds = dispatchCandidates
+    .map((helper) => String(helper.helperId || helper.uid || '').trim())
+    .filter((helperId) => helperId && !busyHelperIds.has(helperId));
+
+  const helperDocsWithOfferings = await Promise.all(candidateIds.map(async (helperId) => {
+    const [userSnap, helperOfferings] = await Promise.all([
+      db.collection('users').doc(helperId).get(),
+      getHelperServiceOfferings(helperId),
+    ]);
+    return { userSnap, helperOfferings };
+  }));
+  const eligibleHelpers = helperDocsWithOfferings
+    .filter(({ userSnap }) => userSnap.exists)
+    .map(({ userSnap, helperOfferings }) => ({ helper: { uid: userSnap.id, ...userSnap.data() }, helperOfferings }))
+    .filter(({ helper, helperOfferings }) => isHelperDispatchEligible(helper, categoryId, requestServiceIds, catalogIndex, helperOfferings, requestOptionId))
+    .map(({ helper }) => helper);
+  const freeQueue = rankEligibleHelpersForRequest(eligibleHelpers, requestLocation);
+
+  let busyQueue = [];
+  if (includeBusyFallback && busyHelperIds.size > 0) {
+    const declinedSet = new Set(getServiceRequestDeclinedHelperIds(request));
+    const excludedSet = new Set(getServiceRequestExcludedHelperIds(request));
+    const rejectedBusySet = new Set(normalizeHelperIdList(request.customerRejectedBusyHelperIds));
+    const candidateBusyIds = [...busyHelperIds].filter(
+      (helperId) => !declinedSet.has(helperId) && !excludedSet.has(helperId) && !rejectedBusySet.has(helperId),
+    );
+    if (candidateBusyIds.length > 0) {
+      const busyDocsWithOfferings = await Promise.all(candidateBusyIds.map(async (helperId) => {
+        const [userSnap, helperOfferings] = await Promise.all([
+          db.collection('users').doc(helperId).get(),
+          getHelperServiceOfferings(helperId),
+        ]);
+        return { userSnap, helperOfferings };
+      }));
+      const eligibleBusyHelpers = busyDocsWithOfferings
+        .filter(({ userSnap }) => userSnap.exists)
+        .map(({ userSnap, helperOfferings }) => ({ helper: { uid: userSnap.id, ...userSnap.data() }, helperOfferings }))
+        .filter(({ helper, helperOfferings }) => (
+          String(helper?.onlineStatus || '').trim().toLowerCase() === 'online'
+          && helper?.locationSharingEnabled !== false
+          && !String(helper?.queuedServiceRequestId || '').trim()
+          && isHelperDispatchEligible(helper, categoryId, requestServiceIds, catalogIndex, helperOfferings, requestOptionId)
+        ))
+        .map(({ helper }) => helper);
+      busyQueue = rankEligibleHelpersForRequest(eligibleBusyHelpers, requestLocation);
+    }
+  }
+
+  return { freeQueue, busyQueue, busyActiveRequestIdsByHelper };
+}
+
+async function getHelperQueueForServiceRequest(request = {}) {
+  const plan = await getHelperDispatchPlanForServiceRequest(request, { includeBusyFallback: false });
+  return plan.freeQueue;
 }
 
 function mergePreservedHelperQueue({
@@ -2047,11 +2130,31 @@ exports.persistWhatsAppConversationEvent = onDocumentCreated({
     }).catch((error) => {
       if (error?.code !== 6 && error?.code !== 'already-exists') throw error;
     });
+    const deliveryStatus = String(normalized.deliveryStatus || normalized.status || '').toLowerCase();
+    const statusErrors = Array.isArray(normalized.errors) ? normalized.errors : [];
+    if (deliveryStatus === 'failed' || statusErrors.length > 0) {
+      logger.warn('whatsapp_outbound_async_delivery_failed', {
+        eventId: normalized.eventId,
+        messageId: String(normalized.messageId || '').slice(0, 120),
+        deliveryStatus,
+        errorCodes: statusErrors.map((err) => String(err?.code || '')).filter(Boolean).slice(0, 5),
+      });
+    }
     const matchingMessages = await db.collection('whatsappMessages')
       .where('metaMessageId', '==', normalized.messageId).limit(5).get();
     for (const messageDoc of matchingMessages.docs) {
-      if (String(messageDoc.data()?.to || '') !== String(normalized.recipientId || '')) continue;
+      const messageData = messageDoc.data() || {};
+      if (String(messageData.to || '') !== String(normalized.recipientId || '')) continue;
       await applyWhatsAppDeliveryStatusToMessage(messageDoc.ref, normalized);
+      if (deliveryStatus === 'failed'
+        && messageData.type === 'interactive'
+        && String(messageData.text || '').trim()) {
+        await attemptAsyncInteractiveTextFallback({
+          messageRef: messageDoc.ref,
+          message: messageData,
+          normalizedStatus: normalized,
+        });
+      }
     }
     await eventRef.update({ status: 'persisted', processedAt: admin.firestore.FieldValue.serverTimestamp() });
     return;
@@ -2213,7 +2316,7 @@ function getWhatsAppAccountLinkBaseUrl(role) {
   }
 }
 
-async function createWhatsAppExistingAccountLink({ identityId, sourceEventId, candidate }) {
+async function createWhatsAppExistingAccountLink({ identityId, sourceEventId, candidate, forceResend = false }) {
   const identityRef = db.collection('whatsappIdentities').doc(String(identityId || ''));
   const uid = String(candidate?.uid || '').trim();
   const role = String(candidate?.role || '').trim().toLowerCase();
@@ -2234,6 +2337,7 @@ async function createWhatsAppExistingAccountLink({ identityId, sourceEventId, ca
     ? db.collection('whatsappAccountLinkChallenges').doc(previousChallengeHash)
     : null;
   const nowMs = Date.now();
+  const cooldownMs = forceResend ? 15 * 1000 : 5 * 60 * 1000;
   const outcome = await db.runTransaction(async (transaction) => {
     const [currentIdentity, profileSnapshot, userLinkSnapshot, phoneOwnerSnapshot, previousChallenge] = await Promise.all([
       transaction.get(identityRef), transaction.get(profileRef), transaction.get(userLinkRef), transaction.get(phoneOwnerRef),
@@ -2261,7 +2365,7 @@ async function createWhatsAppExistingAccountLink({ identityId, sourceEventId, ca
     const lastSentAtMs = Number(current.accountLinkChallengeSentAtMs || 0);
     const previous = previousChallenge?.data() || {};
     if (previousChallenge?.exists && isWhatsAppAccountLinkChallengeLive(previous, nowMs)
-      && nowMs - lastSentAtMs < 5 * 60 * 1000) return { code: 'recent-link-sent' };
+      && nowMs - lastSentAtMs < cooldownMs) return { code: 'recent-link-sent' };
     if (previousChallenge?.exists && previous.status === 'pending') {
       transaction.set(previousChallengeRef, { status: 'superseded', supersededAtMs: nowMs, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     }
@@ -2326,7 +2430,7 @@ async function createWhatsAppSignupLink({ identityId, role, sourceEventId, mode 
   return { url: url.toString(), tokenHash, expiresAtMs };
 }
 
-async function createWhatsAppGuestAccountLink({ identityId, sourceEventId }) {
+async function createWhatsAppGuestAccountLink({ identityId, sourceEventId, forceResend = false }) {
   if (!whatsappOnboardingEnabled()) return { code: 'disabled' };
   const identitySnapshot = await db.collection('whatsappIdentities').doc(String(identityId || '')).get();
   if (!identitySnapshot.exists) return { code: 'identity-not-found' };
@@ -2339,7 +2443,7 @@ async function createWhatsAppGuestAccountLink({ identityId, sourceEventId }) {
   const match = await lookupWhatsAppCustomerAccount(phone.phoneNumber);
   if (match.status !== 'found' || match.candidate?.role !== 'customer') return { code: match.status };
   if (match.linkMode === 'account-link') {
-    return createWhatsAppExistingAccountLink({ identityId, sourceEventId, candidate: match.candidate });
+    return createWhatsAppExistingAccountLink({ identityId, sourceEventId, candidate: match.candidate, forceResend });
   }
   if (match.linkMode === 'signin') {
     try {
@@ -2399,6 +2503,14 @@ function getWhatsAppHelperPayoutUrl() {
     return helperUrl.toString();
   } catch (_) {
     throw new HttpsError('failed-precondition', 'The helper payout verification page is not configured with a valid HTTPS URL.');
+  }
+}
+
+function getWhatsAppHelperWebBaseUrl() {
+  try {
+    return getWhatsAppHelperBaseUrl({ env: process.env });
+  } catch (_) {
+    return 'https://helpers.bakayise.com';
   }
 }
 
@@ -3269,26 +3381,108 @@ async function applyWhatsAppDeliveryStatusToMessage(messageRef, statusEvent) {
     if (!messageSnap.exists) return;
     const message = messageSnap.data() || {};
     if (!shouldApplyDeliveryStatus(message, statusEvent)) return;
+    const effectiveStatus = String(statusEvent.deliveryStatus || statusEvent.status || '').toLowerCase();
     const ticketMessageId = message.ticketId && message.replyId ? `admin_${String(message.replyId)}` : '';
     const ticketMessageRef = ticketMessageId
       ? db.collection('supportTickets').doc(String(message.ticketId)).collection('messages').doc(ticketMessageId)
       : null;
     const ticketMessageSnapshot = ticketMessageRef ? await transaction.get(ticketMessageRef) : null;
     transaction.update(messageRef, {
-      status: statusEvent.status,
-      deliveryStatus: statusEvent.status,
+      status: effectiveStatus,
+      deliveryStatus: effectiveStatus,
       statusTimestampMs: statusEvent.timestampMs,
       statusErrors: statusEvent.errors || [],
       statusUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
     if (ticketMessageSnapshot?.exists) transaction.set(ticketMessageRef, {
-      deliveryStatus: statusEvent.status,
+      deliveryStatus: effectiveStatus,
       statusTimestampMs: statusEvent.timestampMs,
       statusErrors: statusEvent.errors || [],
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     }, { merge: true });
   });
+}
+
+const ASYNC_INTERACTIVE_FALLBACK_ERROR_CODES = new Set(['131053', '131051', '131052', '131009', '132000', '135000']);
+
+async function attemptAsyncInteractiveTextFallback({ messageRef, message = {}, normalizedStatus = {} }) {
+  const errorCodes = (Array.isArray(normalizedStatus.errors) ? normalizedStatus.errors : [])
+    .map((err) => String(err?.code || '').trim())
+    .filter(Boolean);
+  if (!errorCodes.some((code) => ASYNC_INTERACTIVE_FALLBACK_ERROR_CODES.has(code))) {
+    return { sent: false, skipped: 'non_recoverable_error_code' };
+  }
+  const recipient = String(message.to || '').trim();
+  const fallbackText = formatWhatsAppText(message.text || '');
+  const identityId = String(message.identityId || '').trim();
+  if (!recipient || !fallbackText || !identityId) {
+    return { sent: false, skipped: 'missing_message_context' };
+  }
+  const conversationRef = db.collection('whatsappConversations').doc(identityId);
+  const conversationSnap = await conversationRef.get();
+  const lastInboundAtMs = Number(conversationSnap.data()?.lastInboundMessageAtMs || 0);
+  if (!isWithinCustomerServiceWindow(lastInboundAtMs)) {
+    return { sent: false, skipped: 'outside_customer_service_window' };
+  }
+  const fallbackId = stableEventId(`async-text-fallback:${messageRef.id}`);
+  const fallbackRef = db.collection('whatsappMessages').doc(fallbackId);
+  const claimed = await db.runTransaction(async (transaction) => {
+    const existing = await transaction.get(fallbackRef);
+    if (existing.exists) return false;
+    transaction.create(fallbackRef, {
+      eventId: fallbackId,
+      fallbackForMessageId: messageRef.id,
+      fallbackForMetaMessageId: String(message.metaMessageId || ''),
+      sourceEventId: String(message.sourceEventId || ''),
+      identityId,
+      phoneNumberId: String(message.phoneNumberId || ''),
+      to: recipient,
+      direction: 'outbound',
+      type: 'text',
+      text: fallbackText,
+      status: 'sending',
+      createdAtMs: Date.now(),
+      retentionExpiresAtMs: Date.now() + whatsappRetentionDays('WHATSAPP_MESSAGE_RETENTION_DAYS', 180) * 24 * 60 * 60 * 1000,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    return true;
+  });
+  if (!claimed) return { sent: false, skipped: 'already_attempted' };
+
+  try {
+    const { secrets, client } = getWhatsAppMetaClient();
+    if (String(message.phoneNumberId || '') !== secrets.phoneNumberId) {
+      throw Object.assign(new Error('WhatsApp sender number does not match configured phone number.'), { code: 'meta_sender_number_mismatch' });
+    }
+    const delivery = await client.sendText({ to: recipient, text: fallbackText, lastInboundAtMs });
+    await fallbackRef.set({
+      status: 'sent',
+      metaMessageId: delivery.messageId || null,
+      sentAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    logger.info('whatsapp_outbound_async_text_fallback_sent', {
+      fallbackId,
+      failedMessageId: messageRef.id,
+      errorCodes,
+    });
+    return { sent: true, messageId: delivery.messageId || null };
+  } catch (error) {
+    const deliveryStatus = classifyMetaDeliveryError(error);
+    await fallbackRef.set({
+      status: deliveryStatus,
+      deliveryStatus,
+      ...buildWhatsAppSendFailureDiagnostics(error),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true }).catch(() => null);
+    logger.warn('whatsapp_outbound_async_text_fallback_failed', {
+      fallbackId,
+      failedMessageId: messageRef.id,
+      errorCode: String(error?.code || 'unknown').slice(0, 80),
+    });
+    return { sent: false, errorCode: String(error?.code || 'unknown') };
+  }
 }
 
 async function reconcileWhatsAppDeliveryStatuses({ metaMessageId, recipientId, messageRef }) {
@@ -3377,6 +3571,7 @@ async function persistWhatsAppAssistantReply({ sourceEventId, identityId, identi
       to: recipient,
       direction: 'outbound',
       type: formattedInteractive ? 'interactive' : 'text',
+      interactiveType: formattedInteractive ? String(formattedInteractive.type || '') : '',
       text: formattedText,
       status: 'sending',
       createdAtMs: Date.now(),
@@ -4941,7 +5136,7 @@ function describeWhatsAppHelperReadiness(readiness = {}) {
     try {
       return getWhatsAppHelperWebOnboardingUrl();
     } catch (_) {
-      return 'https://helpers.bakayise.com/onboarding';
+      return `${getWhatsAppHelperWebBaseUrl()}/onboarding`;
     }
   })();
   return missing.length
@@ -5041,7 +5236,7 @@ async function beginWhatsAppHelperOnline({ identityId, eventId, identity, conver
   });
 
   if (result.code === 'location-required') {
-    const workspaceUrl = String(process.env.WHATSAPP_HELPER_SIGNUP_URL || 'https://helpers.bakayise.com/sign-up').replace(/\/sign-up\/?$/, '/workspace');
+    const workspaceUrl = `${getWhatsAppHelperWebBaseUrl()}/workspace`;
     await reply(`To go online and share your live device location for matching, please open your Uncedo Helpers Workspace:\n\n${workspaceUrl}`);
   } else if (result.code === 'already-online') {
     await reply('You are already online. Send “offline” when you want to stop receiving new offers.');
@@ -5429,16 +5624,50 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
       async sendServicesToUser(_args, context) {
         const entries = (await getLiveServiceCatalogEntries())
           .filter((service) => service.active === true && service.approved === true);
-        const carousel = buildWhatsAppServiceCarousel(entries);
-        if (!carousel) {
+        if (!entries.length) {
           return { code: 'no-services', sentCount: 0 };
+        }
+        const textCatalog = renderWhatsAppCatalog(entries);
+        const carousel = await buildVerifiedWhatsAppServiceCarousel(entries, { logger });
+        if (!carousel && !textCatalog) {
+          return { code: 'no-services', sentCount: 0 };
+        }
+        if (conversationRef && eventId && context.identity?.waId) {
+          try {
+            const replyResult = await persistWhatsAppAssistantReply({
+              sourceEventId: eventId,
+              identityId,
+              identity: context.identity,
+              conversationRef,
+              text: textCatalog,
+              interactive: carousel,
+              purpose: 'service_discovery_carousel',
+            });
+            if (replyResult?.stale) {
+              return { code: 'superseded', sentCount: 0 };
+            }
+            return { code: 'sent', sentCount: entries.length, persistedReply: true };
+          } catch (error) {
+            logger.warn('whatsapp_send_services_carousel_failed', {
+              errorCode: String(error?.code || 'carousel_send_failed').slice(0, 80),
+              metaCode: String(error?.metaCode || '').slice(0, 40),
+              metaSubcode: String(error?.metaSubcode || '').slice(0, 40),
+              metaDetails: String(error?.metaDetails || '').slice(0, 200),
+              metaMessage: String(error?.metaMessage || '').slice(0, 200),
+            });
+            return { code: 'carousel-fallback-ready', sentCount: entries.length };
+          }
         }
         const recipient = String(context.identity?.waId || context.recipient || '').trim();
         const lastInboundAtMs = Number(context.lastInboundAtMs || Date.now());
         if (recipient) {
           try {
             const { client } = getWhatsAppMetaClient();
-            await client.sendInteractive({ to: recipient, interactive: carousel, lastInboundAtMs });
+            if (carousel) {
+              await client.sendInteractive({ to: recipient, interactive: carousel, lastInboundAtMs });
+            } else {
+              await client.sendText({ to: recipient, text: textCatalog, lastInboundAtMs });
+            }
             return { code: 'sent', sentCount: entries.length };
           } catch (error) {
             logger.warn('whatsapp_send_services_carousel_failed', {
@@ -5948,6 +6177,309 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
           needsPhotos: submission.needsPhotos,
         };
       },
+      async cancelServiceRequest(args = {}, execContext = {}) {
+        if (!whatsappCancellationEnabled()) {
+          return { code: 'cancellation-disabled', error: 'WhatsApp cancellation is not enabled right now.' };
+        }
+        const callerIdentity = await getWhatsAppIdentityForCurrentSender(identityId, execContext.identity);
+        if (!callerIdentity) {
+          return { code: 'identity-not-authorized', error: 'Could not verify your WhatsApp identity.' };
+        }
+        const rawRole = String(callerIdentity.role || '').trim().toLowerCase();
+        if (rawRole === 'helper') {
+          return { code: 'customer-role-required', error: 'Only the customer who owns a booking can cancel it.' };
+        }
+        const targetConvRef = execContext.conversationRef || conversationRef;
+        const currentConversationSnap = targetConvRef ? await targetConvRef.get().catch(() => null) : null;
+        const currentConversation = currentConversationSnap?.exists ? (currentConversationSnap.data() || {}) : {};
+        const requestedId = String(args?.requestId || '').trim();
+        const reason = String(args?.reason || '').trim() || 'Customer requested cancellation through WhatsApp.';
+
+        const target = await findCustomerCancellationTarget({
+          db,
+          callerIdentity,
+          conversation: currentConversation,
+          requestedId,
+        });
+
+        if (target.kind === 'customer-role-required') {
+          return { code: 'customer-role-required', error: 'Only the customer who owns a booking can cancel it.' };
+        }
+        if (target.kind === 'forbidden') {
+          return { code: 'not-authorized', requestId: requestedId, error: 'You are not authorized to cancel that request.' };
+        }
+        if (target.kind === 'not-found') {
+          return { code: 'not-found', requestId: requestedId, error: 'I could not find a matching request on your account.' };
+        }
+        if (target.kind === 'no-active-request') {
+          return { code: 'no-active-request', error: 'I could not find an active non-canceled booking on your account.' };
+        }
+        if (target.kind === 'draft-only' && target.activeDraftRef) {
+          await clearWhatsAppConversationCancellationState({
+            conversationRef: targetConvRef,
+            canceledRequestId: String(target.activeDraft?.requestId || ''),
+            activeDraftRef: target.activeDraftRef,
+          });
+          return {
+            code: 'canceled',
+            requestId: String(target.activeDraft?.requestId || target.activeDraft?.id || ''),
+            publicRequestReference: '',
+            serviceSummary: String(target.activeDraft?.serviceId || 'Draft booking'),
+            previousStatus: String(target.activeDraft?.status || 'collecting'),
+            status: 'canceled',
+            cancellationAmount: 0,
+            billingRule: 'draft_cleared',
+            chargeConfirmed: true,
+            pendingReconciliation: false,
+            confirmationRequired: false,
+          };
+        }
+        if (target.kind === 'terminal' && target.request) {
+          const st = String(target.request.status || '').trim().toLowerCase();
+          return {
+            code: ['canceled', 'cancelled'].includes(st)
+              ? 'already-cancelled'
+              : st === 'completed'
+                ? 'already-completed'
+                : 'not-cancellable',
+            requestId: target.request.id,
+            publicRequestReference: String(target.request.publicRequestReference || ''),
+            serviceSummary: String(target.request.serviceSummary || target.request.subject || 'Service request'),
+            previousStatus: st,
+            status: st,
+          };
+        }
+
+        const targetRequest = target.request;
+        if (!targetRequest?.id) {
+          return { code: 'no-active-request', error: 'I could not find an active non-canceled booking on your account.' };
+        }
+        const preview = await getWhatsAppCustomerCancellationPreview({
+          identityId,
+          identity: callerIdentity,
+          requestId: targetRequest.id,
+        });
+        if (preview.code !== 'eligible') {
+          return {
+            code: preview.code,
+            requestId: targetRequest.id,
+            publicRequestReference: String(targetRequest.publicRequestReference || ''),
+            serviceSummary: String(targetRequest.serviceSummary || targetRequest.subject || 'Service request'),
+            previousStatus: String(preview.status || targetRequest.status || ''),
+            status: String(preview.status || targetRequest.status || ''),
+          };
+        }
+
+        const cancellationFee = Number(preview.cancellationAmount || 0);
+        const existingPending = currentConversation.pendingCancellation || null;
+        const hasValidPendingConfirmation = Boolean(
+          existingPending
+          && String(existingPending.identityId || '') === identityId
+          && String(existingPending.requestId || '') === preview.requestId
+          && Number(existingPending.expiresAtMs || 0) > Date.now()
+          && cancellationQuoteMatches(existingPending, preview),
+        );
+
+        if (cancellationFee > 0 && !hasValidPendingConfirmation) {
+          const pendingCancellation = {
+            identityId,
+            requestId: preview.requestId,
+            status: preview.status,
+            cancellationAmount: cancellationFee,
+            billingRule: preview.billingRule,
+            expiresAtMs: Date.now() + 5 * 60 * 1000,
+          };
+          if (targetConvRef) {
+            await targetConvRef.set({
+              pendingCancellation,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            }, { merge: true }).catch(() => null);
+          }
+          return {
+            code: 'confirmation-required',
+            requestId: preview.requestId,
+            publicRequestReference: String(targetRequest.publicRequestReference || ''),
+            serviceSummary: String(targetRequest.serviceSummary || targetRequest.subject || 'Service request'),
+            previousStatus: String(preview.status || targetRequest.status || ''),
+            status: String(preview.status || targetRequest.status || ''),
+            cancellationAmount: cancellationFee,
+            billingRule: String(preview.billingRule || ''),
+            confirmationRequired: true,
+          };
+        }
+
+        const cancelResult = await cancelCustomerServiceRequestFromWhatsApp({
+          identityId,
+          identity: callerIdentity,
+          requestId: preview.requestId,
+          expectedCancellation: { status: preview.status, cancellationAmount: cancellationFee },
+          reason,
+        });
+
+        if (cancelResult.statusCode === 200 && cancelResult.body?.success === true) {
+          const matchingDraftRef = target.activeDraftRef && (
+            !target.activeDraft?.requestId || String(target.activeDraft.requestId) === String(preview.requestId)
+          ) ? target.activeDraftRef : null;
+          await clearWhatsAppConversationCancellationState({
+            conversationRef: targetConvRef,
+            canceledRequestId: preview.requestId,
+            activeDraftRef: matchingDraftRef,
+          });
+          const recordedFee = Number(cancelResult.body.cancellation?.cancellationAmount ?? cancellationFee);
+          const pendingReconciliation = cancelResult.body.charge?.pendingReconciliation === true;
+          const chargeConfirmed = recordedFee <= 0 || cancelResult.body.charge?.ok === true;
+          return {
+            code: 'canceled',
+            requestId: preview.requestId,
+            publicRequestReference: String(targetRequest.publicRequestReference || ''),
+            serviceSummary: String(targetRequest.serviceSummary || targetRequest.subject || 'Service request'),
+            previousStatus: String(preview.status || targetRequest.status || ''),
+            status: 'canceled',
+            cancellationAmount: recordedFee,
+            billingRule: String(preview.billingRule || ''),
+            chargeConfirmed,
+            pendingReconciliation,
+            confirmationRequired: false,
+          };
+        }
+
+        if (cancelResult.statusCode === 409 && cancelResult.body?.code === 'cancellation-terms-changed') {
+          const currentPreview = cancelResult.body.cancellationPreview || preview;
+          const refreshedFee = Number(currentPreview.cancellationAmount || 0);
+          if (targetConvRef) {
+            await targetConvRef.set({
+              pendingCancellation: {
+                identityId,
+                requestId: preview.requestId,
+                status: currentPreview.status,
+                cancellationAmount: refreshedFee,
+                billingRule: currentPreview.billingRule,
+                expiresAtMs: Date.now() + 5 * 60 * 1000,
+              },
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            }, { merge: true }).catch(() => null);
+          }
+          return {
+            code: 'confirmation-required',
+            requestId: preview.requestId,
+            publicRequestReference: String(targetRequest.publicRequestReference || ''),
+            serviceSummary: String(targetRequest.serviceSummary || targetRequest.subject || 'Service request'),
+            previousStatus: String(currentPreview.status || ''),
+            status: String(currentPreview.status || ''),
+            cancellationAmount: refreshedFee,
+            billingRule: String(currentPreview.billingRule || ''),
+            confirmationRequired: true,
+          };
+        }
+
+        return {
+          code: 'failed',
+          requestId: preview.requestId,
+          publicRequestReference: String(targetRequest.publicRequestReference || ''),
+          serviceSummary: String(targetRequest.serviceSummary || targetRequest.subject || 'Service request'),
+          error: String(cancelResult.body?.message || cancelResult.body?.code || 'Unable to cancel this request right now.'),
+        };
+      },
+      async relayMessageToHelper({ messageText, category } = {}, execContext = {}) {
+        const currentConversationSnap = await conversationRef.get();
+        const currentConversation = currentConversationSnap.data() || {};
+        const requestId = String(currentConversation.activeServiceRequestId || '').trim();
+        if (!requestId) {
+          return { code: 'no-active-request' };
+        }
+        const requestRef = db.collection('serviceRequests').doc(requestId);
+        const requestSnap = await requestRef.get();
+        if (!requestSnap.exists) {
+          return { code: 'request-not-found', requestId };
+        }
+        const request = requestSnap.data() || {};
+        const helperId = String(request.helperAssignment?.helperId || '').trim();
+        if (!helperId || !isWhatsAppRelayRequestOpen(request)) {
+          return { code: 'relay-closed', requestId };
+        }
+        const callerIdentity = execContext.identity || {};
+        const senderRole = String(callerIdentity.role || (callerIdentity.guestPrincipalId ? 'customer' : '')).toLowerCase();
+        const senderUid = String(callerIdentity.linkedFirebaseUid || '').trim();
+        const customerId = String(request.customerId || '').trim();
+        const guestOwnerUid = senderRole === 'customer' && senderUid && customerId.startsWith('guest_')
+          ? String((await db.collection('whatsappGuestOwnership').doc(customerId).get()).data()?.uid || '')
+          : '';
+        if (!canAccessWhatsAppRequest({ request, identity: callerIdentity, guestOwnerUid })) {
+          return { code: 'not-authorized', requestId };
+        }
+
+        const cleanText = String(messageText || '').trim().slice(0, 4096);
+        if (!cleanText) {
+          return { code: 'empty-message', requestId };
+        }
+
+        const senderName = String(
+          request.customerName
+          || callerIdentity.profileName
+          || callerIdentity.displayName
+          || 'Customer',
+        ).trim().slice(0, 80);
+
+        const nowMs = Date.now();
+        const messageId = stableEventId(`customer-wa-msg:${requestId}:${eventId}`);
+        const messageRef = requestRef.collection('messages').doc(messageId);
+        await messageRef.set({
+          messageId,
+          requestId,
+          senderRole: 'customer',
+          senderUid: senderUid || customerId || identityId,
+          senderName,
+          text: cleanText,
+          category: String(category || 'update').slice(0, 40),
+          channel: 'whatsapp',
+          sourceEventId: eventId,
+          deliveryStatus: 'delivered',
+          createdAtMs: nowMs,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+
+        let relayedToHelperWhatsApp = false;
+        try {
+          const helperLink = await db.collection('whatsappUserLinks').doc(helperId).get();
+          const helperIdentityId = String(helperLink.data()?.identityId || '').trim();
+          if (helperIdentityId && helperIdentityId !== identityId) {
+            const [helperIdentitySnap, helperConversationSnap] = await Promise.all([
+              db.collection('whatsappIdentities').doc(helperIdentityId).get(),
+              db.collection('whatsappConversations').doc(helperIdentityId).get(),
+            ]);
+            const helperIdentity = helperIdentitySnap.data() || {};
+            const helperConversation = helperConversationSnap.data() || {};
+            const helperLastInbound = Number(helperConversation.lastInboundMessageAtMs || 0);
+            if (helperIdentitySnap.exists
+              && helperConversationSnap.exists
+              && String(helperIdentity.phoneNumberId || '') === String(callerIdentity.phoneNumberId || '')
+              && String(helperIdentity.waId || '').trim()
+              && isWithinCustomerServiceWindow(helperLastInbound, nowMs)) {
+              const { client } = getWhatsAppMetaClient();
+              await client.sendText({
+                to: helperIdentity.waId,
+                text: `💬 *${senderName}* (${request.publicRequestReference || request.subject || 'Active job'}): ${cleanText}`,
+                lastInboundAtMs: helperLastInbound,
+              });
+              relayedToHelperWhatsApp = true;
+            }
+          }
+        } catch (relayError) {
+          logger.warn('whatsapp_ai_relay_helper_whatsapp_failed', {
+            requestId,
+            helperId,
+            error: relayError?.message || 'unknown',
+          });
+        }
+
+        return {
+          code: 'relayed',
+          requestId,
+          helperName: String(request.helperAssignment?.helperName || 'your helper'),
+          deliveredToInAppChat: true,
+          relayedToHelperWhatsApp,
+        };
+      },
     },
   });
 }
@@ -6121,6 +6653,50 @@ function formatWhatsAppToolResult(toolName, result = {}) {
     return lines.join('\n');
   }
   if (toolName === 'proposeProfileChange') return `I can change your ${result.field === 'firstName' ? 'first name' : 'surname'} to “${result.value}”. Please confirm this change.`;
+  if (toolName === 'relayMessageToHelper') {
+    if (result.code === 'relayed') {
+      return `I’ve passed your message directly to ${result.helperName || 'your assigned helper'} in the Uncedo app chat.`;
+    }
+    if (result.code === 'relay-closed' || result.code === 'no-active-request') {
+      return 'There is no open active job with an assigned helper right now to pass that message to.';
+    }
+    return 'I could not deliver that message to your helper right now. Please check your booking in the Uncedo app or ask for support.';
+  }
+  if (toolName === 'cancelServiceRequest') {
+    const label = result.publicRequestReference || result.requestId || 'your request';
+    const fee = Number(result.cancellationAmount || 0);
+    if (result.code === 'canceled') {
+      if (fee <= 0) {
+        return `Your request (${label}) has been canceled. No cancellation fee applies. You can start a new booking anytime.`;
+      }
+      if (result.pendingReconciliation) {
+        return `Your request (${label}) has been canceled. The applicable fee is R${fee.toFixed(2)} ZAR, and its payment result is still being verified.`;
+      }
+      if (result.chargeConfirmed) {
+        return `Your request (${label}) has been canceled. The cancellation fee of R${fee.toFixed(2)} ZAR was confirmed as paid.`;
+      }
+      return `Your request (${label}) has been canceled. The applicable fee is R${fee.toFixed(2)} ZAR; please check payment status in the Uncedo app or contact support.`;
+    }
+    if (result.code === 'confirmation-required') {
+      return `Please confirm canceling ${result.serviceSummary || 'your active booking'} (${label}). The applicable cancellation fee is R${fee.toFixed(2)} ZAR.`;
+    }
+    if (result.code === 'already-cancelled') {
+      return `Request ${label} is already canceled.`;
+    }
+    if (result.code === 'already-completed') {
+      return `Request ${label} is already completed and cannot be canceled.`;
+    }
+    if (result.code === 'not-cancellable') {
+      return `Request ${label} cannot be canceled from its current status (${result.status || 'unknown'}).`;
+    }
+    if (result.code === 'no-active-request' || result.code === 'not-found') {
+      return 'I could not find an active non-canceled booking on your account.';
+    }
+    if (result.code === 'cancellation-disabled') {
+      return 'WhatsApp cancellation is not enabled yet. Please use the Uncedo app or contact support.';
+    }
+    return result.error || 'I could not complete the cancellation right now. Please check your request in the Uncedo app or contact support.';
+  }
   return 'I could not complete that request safely.';
 }
 
@@ -6270,10 +6846,13 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       && !String(identity.guestPrincipalId || '').trim()) {
       let accountLink;
       try {
+        const wantsResendLink = inbound.type === 'text'
+          && /\b(resend|re-send|send again|new link|expired|start again|restart|hi|hello)\b/i.test(originalUserText);
         accountLink = await createWhatsAppExistingAccountLink({
           identityId,
           sourceEventId: eventId,
           candidate: accountResolution.unverifiedCandidate,
+          forceResend: wantsResendLink,
         });
       } catch (error) {
         logger.warn('whatsapp_existing_account_link_creation_failed', {
@@ -6284,7 +6863,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       if (accountLink?.code === 'created') {
         await reply(`To securely connect this WhatsApp chat to your Uncedo account, open this one-time verification link: ${accountLink.url}\n\nIt expires in 24 hours. If this is not your account, do not continue and contact Uncedo support.`);
       } else if (accountLink?.code === 'recent-link-sent') {
-        await reply('A secure account-link was sent recently. Please use the link in that earlier message; if it has expired, send “Hi” again to request a fresh one.');
+        await reply('A secure account-link was sent just now. Please use the link in that earlier message, or reply “resend link” in a moment if you need a fresh one.');
       } else if (accountLink?.code === 'phone-already-linked' || accountLink?.code === 'account-already-linked') {
         await reply('This number or account is already connected to another WhatsApp chat. For your protection, I cannot link it here. Please contact Uncedo support.');
       } else {
@@ -6623,8 +7202,8 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
             phoneNumber: identity.whatsappPhoneNumber || `+${String(identity.waId || '')}`,
             sourceEventId: `helper-legacy-link:${eventId}`,
           });
-          await db.collection('whatsappAccountLinkChallenges').doc(challenge.challenge.uid).set(challenge.challenge);
-          const linkUrl = buildWhatsAppAccountLinkUrl(process.env.WHATSAPP_HELPER_SIGNUP_URL, challenge.token);
+          await db.collection('whatsappAccountLinkChallenges').doc(challenge.tokenHash).set(challenge.challenge);
+          const linkUrl = buildWhatsAppAccountLinkUrl(getWhatsAppAccountLinkBaseUrl('helper'), challenge.token);
           if (inbound.media) {
             await scrubWhatsAppPoliceClearanceInbound(eventId).catch(() => null);
           }
@@ -6677,11 +7256,11 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           uid: linkedHelperUid,
           role: 'helper',
           identityId: identityId,
-          phoneNumber: identity.whatsappPhoneNumber,
+          phoneNumber: identity.whatsappPhoneNumber || `+${String(identity.waId || '')}`,
           sourceEventId: `helper-link-retry:${eventId}`,
         });
-        await db.collection('whatsappAccountLinkChallenges').doc(challenge.challenge.uid).set(challenge.challenge);
-        const linkUrl = buildWhatsAppAccountLinkUrl(process.env.WHATSAPP_HELPER_SIGNUP_URL, challenge.token);
+        await db.collection('whatsappAccountLinkChallenges').doc(challenge.tokenHash).set(challenge.challenge);
+        const linkUrl = buildWhatsAppAccountLinkUrl(getWhatsAppAccountLinkBaseUrl('helper'), challenge.token);
         await reply(`I could not verify your helper account link. Please use this secure link to link your existing Uncedo helper account again to continue setup: ${linkUrl}`);
       } else if (onboardingState.stage === 'awaiting_helper_police_clearance_review') {
         await reply('Your police-clearance document is awaiting Uncedo review. I will update the helper setup status after an administrator reviews it.');
@@ -6715,6 +7294,56 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         reason: String(onboardingState.stage || ''), updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
       return;
+    }
+    if (whatsappOnboardingEnabled()
+      && (!onboardingState.stage || onboardingState.stage === 'complete')
+      && !linkedHelperUid
+      && !String(identity.guestPrincipalId || '').trim()
+      && !explicitSupportRequest) {
+      const requestedLinkRecovery = inbound.type === 'text'
+        && /\b(resend|re-send|send again|new link|account link|signup link|link expired|expired|start again|restart)\b/i.test(originalUserText);
+      const tappedOnboardingButton = [
+        WHATSAPP_ONBOARDING_BUTTONS.CUSTOMER,
+        WHATSAPP_ONBOARDING_BUTTONS.HELPER,
+        WHATSAPP_ONBOARDING_BUTTONS.CREATE_ACCOUNT,
+        WHATSAPP_ONBOARDING_BUTTONS.LINK_EXISTING_ACCOUNT,
+        WHATSAPP_ONBOARDING_BUTTONS.CREATE_HELPER_ACCOUNT,
+        WHATSAPP_ONBOARDING_BUTTONS.LINK_HELPER_ACCOUNT,
+        WHATSAPP_ONBOARDING_BUTTONS.CONTINUE_AS_GUEST,
+      ].includes(buttonId);
+      if (requestedLinkRecovery || tappedOnboardingButton) {
+        if (!onboardingState.stage || !onboardingState.role) {
+          onboardingState = {
+            ...onboardingState,
+            stage: 'awaiting_role',
+            role: '',
+            accountMode: '',
+            updatedAtMs: Date.now(),
+          };
+          await conversationRef.set({
+            whatsappOnboarding: onboardingState,
+            currentMode: 'onboarding',
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+          if (!tappedOnboardingButton) {
+            const prompt = roleSelectionPrompt();
+            await reply(prompt.text, prompt.interactive);
+            await jobRef.set({ status: 'completed', intent: 'account_onboarding', onboardingAction: 'restart-role-selection', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            return;
+          }
+        } else if (requestedLinkRecovery) {
+          onboardingState = {
+            ...onboardingState,
+            stage: onboardingState.accountMode ? 'awaiting_account_signup' : (onboardingState.role === 'helper' ? 'awaiting_helper_account_choice' : 'awaiting_customer_choice'),
+            updatedAtMs: Date.now(),
+          };
+          await conversationRef.set({
+            whatsappOnboarding: onboardingState,
+            currentMode: 'onboarding',
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+        }
+      }
     }
     if (whatsappOnboardingEnabled() && onboardingState.stage && onboardingState.stage !== 'complete') {
       if (String(onboardingState.role || '').toLowerCase() === 'helper'
@@ -6763,7 +7392,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         }, { merge: true });
         return;
       }
-      const transition = transitionWhatsAppOnboarding({ state: onboardingState, buttonId, text: originalUserText, inboundType: inbound.type });
+      const transition = transitionWhatsAppOnboarding({ state: onboardingState, buttonId, text: originalUserText, inboundType: inbound.type, nowMs: Date.now() });
       if (transition.action !== 'not-in-onboarding') {
         if (transition.homeAddress && transition.action === 'check-helper-readiness') {
           const addressSaved = await persistWhatsAppOnboardingDetails({
@@ -6783,14 +7412,19 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           && onboardingState.accountMode === 'link-existing'
           && ['profile-match', 'auth-phone'].includes(String(onboardingState.accountMatchMode || ''));
         if (matchedGuestLinkRetry) {
-          const accountLink = await createWhatsAppGuestAccountLink({ identityId, sourceEventId: eventId });
+          const accountLink = await createWhatsAppGuestAccountLink({
+            identityId,
+            sourceEventId: eventId,
+            forceResend: transition.isResend === true && !transition.wasExpired,
+          });
           if (accountLink.code === 'created') {
-            const nextState = { ...transition.state, accountMatchMode: 'profile-match' };
+            const nextState = { ...transition.state, accountMatchMode: 'profile-match', signupLinkExpiresAtMs: accountLink.expiresAtMs || 0 };
             await conversationRef.set({
               whatsappOnboarding: nextState,
               currentMode: 'onboarding',
             }, { merge: true });
-            await reply(`*Link your Uncedo account*\n\nOpen this secure link to connect the matching customer account to this WhatsApp chat: ${accountLink.url}\n\nThe link expires in 24 hours.`);
+            const lead = transition.wasExpired ? 'Your previous account link expired, so here is a fresh link.\n\n' : '';
+            await reply(`${lead}*Link your Uncedo account*\n\nOpen this secure link to connect the matching customer account to this WhatsApp chat: ${accountLink.url}\n\nThe link expires in 24 hours.`);
           } else if (accountLink.code === 'signin-link-created') {
             const nextState = {
               ...transition.state, accountMatchMode: 'auth-phone',
@@ -6801,9 +7435,10 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
               whatsappOnboarding: nextState,
               currentMode: 'onboarding',
             }, { merge: true });
-            await reply(`*Link your Uncedo account*\n\nUse this secure link to sign in to the customer account registered with this number: ${accountLink.url}\n\nAfter you sign in, the account will be linked to this chat. The link expires in 30 minutes.`);
+            const lead = transition.wasExpired ? 'Your previous account link expired, so here is a fresh link.\n\n' : '';
+            await reply(`${lead}*Link your Uncedo account*\n\nUse this secure link to sign in to the customer account registered with this number: ${accountLink.url}\n\nAfter you sign in, the account will be linked to this chat. The link expires in 30 minutes.`);
           } else if (accountLink.code === 'recent-link-sent') {
-            await reply('A secure account link was sent recently. Please use the link in that earlier message; if it has expired, send “resend account link” again shortly.');
+            await reply('A secure account link was sent just now. Please use the link in that earlier message, or reply “resend link” in a moment if you need a fresh one.');
           } else {
             await conversationRef.set({
               whatsappOnboarding: { ...transition.state, accountMode: 'guest', accountMatchMode: '', stage: 'complete' },
@@ -6812,11 +7447,17 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
             await reply('I could not safely match one customer account to this WhatsApp chat. You can ask for your profile details again to check the current options, or continue as a guest.');
           }
         } else if (transition.action === 'create-customer-signup-link' || transition.action === 'link-customer-account'
-          || transition.action === 'create-helper-signup-link' || transition.action === 'link-helper-account') {
+          || transition.action === 'create-helper-signup-link' || transition.action === 'link-helper-account'
+          || (transition.action === 'await-signup-link' && Number(onboardingState.signupLinkExpiresAtMs || 0) > 0 && Number(onboardingState.signupLinkExpiresAtMs || 0) <= Date.now())) {
           let signup = null;
+          const resolvedAction = transition.action === 'await-signup-link'
+            ? (transition.state.role === 'helper'
+              ? (transition.state.accountMode === 'link-existing' ? 'link-helper-account' : 'create-helper-signup-link')
+              : (transition.state.accountMode === 'link-existing' ? 'link-customer-account' : 'create-customer-signup-link'))
+            : transition.action;
           try {
-            const role = transition.action.includes('helper') ? 'helper' : 'customer';
-            const mode = getWhatsAppAccountSetupMode(transition.action);
+            const role = resolvedAction.includes('helper') ? 'helper' : 'customer';
+            const mode = getWhatsAppAccountSetupMode(resolvedAction);
             signup = await createWhatsAppSignupLink({ identityId, role, sourceEventId: eventId, mode });
             await conversationRef.set({
               whatsappOnboarding: { ...transition.state, signupChallengeHash: signup.tokenHash, signupLinkExpiresAtMs: signup.expiresAtMs, updatedAtMs: Date.now() },
@@ -6828,8 +7469,8 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
             await reply('I could not create the secure account link right now. Please choose the account option again or try again shortly.');
           }
           if (signup) {
-            const linkExistingAccount = transition.action.startsWith('link-');
-            const isHelperSignup = transition.action.includes('helper');
+            const linkExistingAccount = resolvedAction.startsWith('link-');
+            const isHelperSignup = resolvedAction.includes('helper');
             const purpose = linkExistingAccount
               ? 'sign in with your existing email account'
               : 'create your account using your email address';
@@ -6840,7 +7481,12 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
               : (linkExistingAccount
                 ? 'After you sign in to your existing account, you’ll return to this chat.'
                 : 'After you create your account, you’ll return to this chat.');
-            await reply(`Use this secure link to ${purpose}: ${signup.url}\n\nYour WhatsApp number is prefilled for linking. ${returnInstructions} The link expires in 30 minutes.`);
+            const lead = transition.wasExpired || transition.action === 'await-signup-link'
+              ? 'Your previous account link expired, so here is a fresh link.\n\n'
+              : transition.isResend
+                ? 'Here is a fresh secure link.\n\n'
+                : '';
+            await reply(`${lead}Use this secure link to ${purpose}: ${signup.url}\n\nYour WhatsApp number is prefilled for linking. ${returnInstructions} The link expires in 30 minutes.`);
           }
         } else if (transition.action === 'choose-customer-mode' || transition.action === 'reask-customer-mode'
           || transition.action === 'choose-helper-account-mode' || transition.action === 'reask-helper-account-mode'
@@ -6853,7 +7499,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           || transition.action === 'ask-home-address' || transition.action === 'reask-home-address'
           || transition.action === 'await-signup-link' || transition.action === 'reask-helper-services'
           || transition.action === 'reask-helper-full-name' || transition.action === 'reask-helper-business-name') {
-          await reply(transition.reply || 'Please use the secure account link already sent in this chat.');
+          await reply(transition.reply || 'Please use the secure account link already sent in this chat. If it has expired, reply “resend link”.');
         } else if (transition.action === 'save-preferred-name'
           || transition.action === 'save-helper-full-name' || transition.action === 'save-helper-provider-type'
           || transition.action === 'save-helper-business-name'
@@ -7158,7 +7804,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
             pendingCashPayment: { identityId, requestId: pending.requestId, attemptId: begun.attempt.attemptId, amount: Number(begun.attempt.amount), expiresAtMs: Date.now() + 20 * 60 * 1000 },
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           }, { merge: true });
-          await reply(`Pay R${Number(begun.attempt.amount).toFixed(2)} directly to your assigned helper by cash, EFT or bank transfer. When you have paid, tap “I have paid”. The payment is not confirmed until your helper verifies receipt.`, {
+          await reply(`Pay R${formatWholeRandDisplay(begun.attempt.amount)} directly to your assigned helper by cash, EFT or bank transfer. When you have paid, tap “I have paid”. The payment is not confirmed until your helper verifies receipt.`, {
             type: 'button', body: { text: 'Tell Uncedo after you pay the assigned helper directly.' }, action: { buttons: [
               { type: 'reply', reply: { id: `wa_cash_paid_${begun.attempt.attemptId}`, title: 'I have paid' } },
               { type: 'reply', reply: { id: 'wa_payment_cancel', title: 'Cancel' } },
@@ -7170,17 +7816,78 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         if (session.code === 'created') {
           const paymentUrl = `${String(process.env.CUSTOMER_PAYMENT_URL || 'https://uncedo.bakayise.com/payment').replace(/\/$/, '')}?token=${encodeURIComponent(session.token)}`;
           await conversationRef.set({ pendingPaymentSelection: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-          await reply(`Pay R${Number(context.amount).toFixed(2)} securely by card using this request-specific Uncedo payment link: ${paymentUrl}\nThe link expires in 20 minutes.`);
+          await reply(`Pay R${formatWholeRandDisplay(context.amount)} securely by card using this request-specific Uncedo payment link: ${paymentUrl}\nThe link expires in 20 minutes.`);
         } else await reply('I could not create a payment link for this request. Please try again or contact support.');
       } else if (context.cards.length) {
         await conversationRef.set({ pendingPaymentSelection: { ...pending, selectingSavedCard: true }, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         await reply('Choose a saved card. I will show the amount and ask you to confirm before any charge is attempted.', {
-          type: 'list', body: { text: `Request ${pending.requestId} · R${Number(context.amount).toFixed(2)} ZAR` }, action: { button: 'Choose card', sections: [{ title: 'Saved cards', rows: context.cards.slice(0, 10).map((card) => ({ id: `wa_saved_card_${card.id}`, title: `${card.brand} •••• ${card.last4}`.slice(0, 24), description: card.isDefault ? 'Default payment card' : 'Saved payment card' })) }] },
+          type: 'list', body: { text: `Request ${pending.requestId} · R${formatWholeRandDisplay(context.amount)} ZAR` }, action: { button: 'Choose card', sections: [{ title: 'Saved cards', rows: context.cards.slice(0, 10).map((card) => ({ id: `wa_saved_card_${card.id}`, title: `${card.brand} •••• ${card.last4}`.slice(0, 24), description: card.isDefault ? 'Default payment card' : 'Saved payment card' })) }] },
         });
       } else {
-        await reply('There are no eligible saved cards linked to this WhatsApp identity. Choose Cash or New card instead.');
+        await conversationRef.set({
+          pendingPaymentSelection: { identityId, requestId: pending.requestId, amount: context.amount, expiresAtMs: Date.now() + 10 * 60 * 1000 },
+          currentMode: 'payment',
+          currentIntent: 'payment_method_selection',
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        await reply(`There are no eligible saved cards linked to this WhatsApp identity. Would you like to pay R${formatWholeRandDisplay(context.amount)} ZAR using another method?`, {
+          type: 'button',
+          body: { text: `No saved card available. Choose how to pay R${formatWholeRandDisplay(context.amount)} ZAR:` },
+          action: {
+            buttons: [
+              { type: 'reply', reply: { id: 'wa_payment_cash', title: 'Cash / transfer' } },
+              { type: 'reply', reply: { id: 'wa_payment_card', title: 'New card' } },
+            ],
+          },
+        });
       }
       await jobRef.set({ status: 'completed', intent: 'payment_selection', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    const ratingListChoice = String(inbound.interactive?.listId || '').match(/^wa_rate_([A-Za-z0-9_-]{6,128})_([1-5])$/);
+    if (ratingListChoice) {
+      const targetRequestId = ratingListChoice[1];
+      const score = Number(ratingListChoice[2]);
+      const access = await getWhatsAppRequestForIdentity({ db, identity, requestId: targetRequestId });
+      if (access.code !== 'found') {
+        await reply('I could not verify that service request for rating.');
+      } else {
+        const targetRequest = access.request || {};
+        const helperName = String(targetRequest.helperAssignment?.helperName || 'your helper').trim();
+        try {
+          const ratingResult = await submitServiceRequestRating({
+            db,
+            admin,
+            requestId: targetRequest.id,
+            raterUserId: String(targetRequest.customerId || ''),
+            score,
+            comment: '',
+          });
+          await recalculateMembership({
+            db,
+            admin,
+            userId: ratingResult.ratedUserId,
+            accountType: ACCOUNT_TYPES.HELPER,
+          }).catch(() => null);
+          for (const serviceId of ratingResult.expandedServiceIds || []) {
+            await recalculateMastery({ db, admin, helperId: ratingResult.ratedUserId, serviceId }).catch(() => null);
+          }
+          await conversationRef.set({
+            pendingRatingComment: {
+              identityId,
+              requestId: targetRequest.id,
+              score,
+              helperName,
+              expiresAtMs: Date.now() + 10 * 60 * 1000,
+            },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+          await reply(`Thank you for rating *${helperName}* ${score}/5! If you would like to add a brief comment about your experience, reply with your comment now.`);
+        } catch (ratingError) {
+          await reply(ratingError?.message || 'Unable to save your rating right now.');
+        }
+      }
+      await jobRef.set({ status: 'completed', intent: 'customer_rating', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
     }
     const savedCardChoice = String(inbound.interactive?.listId || '').match(/^wa_saved_card_([A-Za-z0-9_-]{1,128})$/);
@@ -7194,7 +7901,23 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       const context = await getWhatsAppPaymentContext({ identityId, identity, requestId: pending.requestId });
       const card = context.cards?.find((item) => item.id === savedCardChoice[1]);
       if (!card || !context.ownerUid || context.ownerUid !== String(identity.linkedFirebaseUid || '')) {
-        await reply('A saved card is available only after this WhatsApp identity is linked to the customer account that owns it.');
+        await conversationRef.set({
+          pendingSavedCardPayment: admin.firestore.FieldValue.delete(),
+          pendingPaymentSelection: { identityId, requestId: pending.requestId, amount: Number(context.amount || pending.amount || 0), expiresAtMs: Date.now() + 10 * 60 * 1000 },
+          currentMode: 'payment',
+          currentIntent: 'payment_method_selection',
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        await reply('Could not verify that saved card for your account. No charge was made. Would you like to try paying using another method?', {
+          type: 'button',
+          body: { text: 'Could not verify that saved card. Would you like to pay with Cash or a New card?' },
+          action: {
+            buttons: [
+              { type: 'reply', reply: { id: 'wa_payment_cash', title: 'Cash / transfer' } },
+              { type: 'reply', reply: { id: 'wa_payment_card', title: 'New card' } },
+            ],
+          },
+        });
         await jobRef.set({ status: 'completed', intent: 'saved_card_unavailable', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         return;
       }
@@ -7202,14 +7925,34 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       const resolved = session.code === 'created' ? await resolveServicePaymentSession({ db, token: session.token }) : null;
       const begun = resolved?.code === 'available' ? await beginServicePaymentAttempt({ db, admin, sessionRef: resolved.sessionRef, session: resolved.session, method: 'saved_card', selectedCardId: card.id, idempotencyKey: `wa-saved-card:${eventId}` }) : { action: session.code };
       if (!['created', 'existing'].includes(begun.action)) {
-        await reply('Another payment is active or this request is no longer payable. No saved-card charge was made.');
+        if (context.code === 'available' && context.amount > 0) {
+          await conversationRef.set({
+            pendingSavedCardPayment: admin.firestore.FieldValue.delete(),
+            pendingPaymentSelection: { identityId, requestId: pending.requestId, amount: Number(context.amount), expiresAtMs: Date.now() + 10 * 60 * 1000 },
+            currentMode: 'payment',
+            currentIntent: 'payment_method_selection',
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+          await reply('Unable to start saved-card payment. No charge was made. Would you like to pay using another method?', {
+            type: 'button',
+            body: { text: 'Saved card could not be used. Would you like to pay using Cash or a New card?' },
+            action: {
+              buttons: [
+                { type: 'reply', reply: { id: 'wa_payment_cash', title: 'Cash / transfer' } },
+                { type: 'reply', reply: { id: 'wa_payment_card', title: 'New card' } },
+              ],
+            },
+          });
+        } else {
+          await reply('Another payment is active or this request is no longer payable. No saved-card charge was made.');
+        }
       } else {
         await conversationRef.set({
           pendingPaymentSelection: admin.firestore.FieldValue.delete(),
           pendingSavedCardPayment: { identityId, requestId: pending.requestId, attemptId: begun.attempt.attemptId, expiresAtMs: Date.now() + 10 * 60 * 1000 },
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         }, { merge: true });
-        await reply(`Please review before paying: request ${pending.requestId}, R${Number(begun.attempt.amount).toFixed(2)} ZAR, ${card.brand} ending ${card.last4}. This will charge the saved card only after you confirm.`, {
+        await reply(`Please review before paying: request ${pending.requestId}, R${formatWholeRandDisplay(begun.attempt.amount)} ZAR, ${card.brand} ending ${card.last4}. This will charge the saved card only after you confirm.`, {
           type: 'button', body: { text: 'Confirm this saved-card charge?' }, action: { buttons: [
             { type: 'reply', reply: { id: `wa_saved_confirm_${begun.attempt.attemptId}`, title: 'Confirm payment' } },
             { type: 'reply', reply: { id: 'wa_saved_cancel', title: 'Cancel' } },
@@ -7221,28 +7964,149 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     }
     const savedCardConfirm = buttonId.match(/^wa_saved_confirm_([a-f0-9]{40})$/i);
     if (savedCardConfirm || buttonId === 'wa_saved_cancel' || buttonId === 'wa_payment_cancel') {
-      const pending = conversation.pendingSavedCardPayment || conversation.pendingCashPayment || {};
+      const pending = buttonId === 'wa_payment_cancel'
+        ? (conversation.pendingCashPayment || {})
+        : (conversation.pendingSavedCardPayment || conversation.pendingCashPayment || {});
+      const offerAlternativePaymentPrompt = async ({ requestId: targetRequestId, introMessage, bodyText }) => {
+        const refreshedContext = targetRequestId
+          ? await getWhatsAppPaymentContext({ identityId, identity, requestId: targetRequestId }).catch(() => null)
+          : null;
+        if (refreshedContext?.code === 'available' && Number(refreshedContext.amount || 0) > 0) {
+          await conversationRef.set({
+            pendingSavedCardPayment: admin.firestore.FieldValue.delete(),
+            pendingCashPayment: admin.firestore.FieldValue.delete(),
+            pendingPaymentSelection: {
+              identityId,
+              requestId: targetRequestId,
+              amount: Number(refreshedContext.amount),
+              expiresAtMs: Date.now() + 10 * 60 * 1000,
+            },
+            currentMode: 'payment',
+            currentIntent: 'payment_method_selection',
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+          await reply(`${introMessage}\n\nWould you like to pay R${formatWholeRandDisplay(refreshedContext.amount)} ZAR using another method?`, {
+            type: 'button',
+            body: { text: bodyText || `${introMessage}\n\nTry paying with another method (R${formatWholeRandDisplay(refreshedContext.amount)} ZAR):` },
+            action: {
+              buttons: [
+                { type: 'reply', reply: { id: 'wa_payment_cash', title: 'Cash / transfer' } },
+                { type: 'reply', reply: { id: 'wa_payment_card', title: 'New card' } },
+              ],
+            },
+          });
+          return true;
+        }
+        await conversationRef.set({
+          pendingSavedCardPayment: admin.firestore.FieldValue.delete(),
+          pendingCashPayment: admin.firestore.FieldValue.delete(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        await reply(
+          refreshedContext?.code === 'already-paid'
+            ? 'This request has already been paid.'
+            : `${introMessage} Send “payment methods” to review your payment options.`,
+        );
+        return false;
+      };
+
       if (buttonId !== 'wa_saved_cancel' && buttonId !== 'wa_payment_cancel'
         && (pending.identityId !== identityId || pending.attemptId !== savedCardConfirm?.[1] || Number(pending.expiresAtMs || 0) <= Date.now())) {
-        await reply('That payment confirmation expired. No card was charged. Send “payment methods” to review the current balance.');
+        if (pending.requestId && pending.attemptId) {
+          await cancelSavedCardPaymentConfirmation({
+            db,
+            admin,
+            requestId: pending.requestId,
+            customerId: String(identity.linkedFirebaseUid || identity.guestPrincipalId || ''),
+            attemptId: pending.attemptId,
+          }).catch(() => null);
+        }
+        await offerAlternativePaymentPrompt({
+          requestId: pending.requestId,
+          introMessage: 'That payment confirmation expired. No card was charged.',
+          bodyText: 'That payment confirmation expired. No card was charged. Choose another payment method:',
+        });
       } else if (buttonId === 'wa_saved_cancel') {
-        await conversationRef.set({ pendingSavedCardPayment: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-        await reply('No saved-card charge was made.');
+        if (pending.requestId && pending.attemptId) {
+          const cancelContext = await getWhatsAppPaymentContext({
+            identityId,
+            identity,
+            requestId: pending.requestId,
+            allowAwaitingCustomerConfirmation: true,
+          }).catch(() => null);
+          await cancelSavedCardPaymentConfirmation({
+            db,
+            admin,
+            requestId: pending.requestId,
+            customerId: String(cancelContext?.request?.customerId || identity.linkedFirebaseUid || identity.guestPrincipalId || ''),
+            attemptId: pending.attemptId,
+          }).catch(() => null);
+        }
+        await offerAlternativePaymentPrompt({
+          requestId: pending.requestId,
+          introMessage: 'No saved-card charge was made.',
+          bodyText: 'No saved-card charge was made. Would you like to try paying using another method?',
+        });
       } else if (buttonId === 'wa_payment_cancel') {
+        if (pending.requestId && pending.attemptId) {
+          const cancelContext = await getWhatsAppPaymentContext({
+            identityId,
+            identity,
+            requestId: pending.requestId,
+          }).catch(() => null);
+          await cancelCashPaymentSelection({
+            db,
+            admin,
+            requestId: pending.requestId,
+            customerId: String(cancelContext?.request?.customerId || identity.linkedFirebaseUid || identity.guestPrincipalId || ''),
+            attemptId: pending.attemptId,
+          }).catch(() => null);
+        }
         await conversationRef.set({ pendingCashPayment: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-        await reply('No payment was reported.');
+        await reply('No payment was reported. Send “pay” whenever you are ready to choose a payment method.');
       } else {
-        const context = await getWhatsAppPaymentContext({ identityId, identity, requestId: pending.requestId });
+        const context = await getWhatsAppPaymentContext({
+          identityId,
+          identity,
+          requestId: pending.requestId,
+          allowAwaitingCustomerConfirmation: true,
+        });
         const selectedAttemptSnap = await db.collection(PAYMENT_OPERATIONS).doc(pending.requestId).collection('attempts').doc(pending.attemptId).get();
         const selectedCardId = String(selectedAttemptSnap.data()?.selectedCardId || '');
         const card = context.ownerUid
           ? await getServerPaymentMethod({ db, admin, uid: context.ownerUid, methodId: selectedCardId })
           : null;
         if (!card || context.ownerUid !== String(identity.linkedFirebaseUid || '') || !['available'].includes(context.code)) {
-          await reply('I could not verify the linked saved card or current request. No charge was made.');
+          await cancelSavedCardPaymentConfirmation({
+            db,
+            admin,
+            requestId: pending.requestId,
+            customerId: String(context.request?.customerId || identity.linkedFirebaseUid || identity.guestPrincipalId || ''),
+            attemptId: pending.attemptId,
+          }).catch(() => null);
+          await offerAlternativePaymentPrompt({
+            requestId: pending.requestId,
+            introMessage: 'I could not verify the linked saved card or current request. No charge was made.',
+            bodyText: 'I could not verify the linked saved card or current request. No charge was made. Try paying using another method:',
+          });
         } else {
           let paystackSecretKey = '';
-          try { paystackSecretKey = getPaymentsSecrets().PAYSTACK_SECRET_KEY; } catch { await reply('Saved-card payments are temporarily unavailable. No charge was initiated.'); }
+          try {
+            paystackSecretKey = getPaymentsSecrets().PAYSTACK_SECRET_KEY;
+          } catch {
+            await cancelSavedCardPaymentConfirmation({
+              db,
+              admin,
+              requestId: pending.requestId,
+              customerId: String(context.request?.customerId || identity.linkedFirebaseUid || identity.guestPrincipalId || ''),
+              attemptId: pending.attemptId,
+            }).catch(() => null);
+            await offerAlternativePaymentPrompt({
+              requestId: pending.requestId,
+              introMessage: 'Saved-card payments are temporarily unavailable. No charge was initiated.',
+              bodyText: 'Saved-card payments are unavailable right now. No charge was made. Choose another payment method:',
+            });
+          }
           if (paystackSecretKey) {
             const reference = getRequestPaymentReference(pending.requestId, pending.attemptId);
             const claim = await claimSavedCardPayment({ db, admin, requestId: pending.requestId, attemptId: pending.attemptId, gatewayReference: reference });
@@ -7256,13 +8120,38 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
               });
               const result = await settleRequestPayment({ db, admin, requestId: pending.requestId, attemptId: pending.attemptId, outcome: outcome.outcome, gatewayTransactionId: outcome.transaction?.id ? String(outcome.transaction.id) : '', gatewayReference: reference, providerStatus: outcome.transaction?.status || outcome.outcome, walletEnabled: helperWalletEnabled() });
               if (['settled', 'already-paid'].includes(result.action)) await issuePaidRequestPostEffects({ requestId: pending.requestId, paymentResult: result });
-              await reply(result.action === 'settled' || result.action === 'already-paid'
-                ? `Payment confirmed. Receipt ${result.receiptId || 'recorded'}.`
-                : result.action === 'failed' ? 'Paystack confirmed that the saved-card payment failed. You can try a different method.' : 'Paystack has not confirmed the result yet. I will not retry the charge while it is uncertain.');
-            } else await reply(claim.action === 'already-paid' ? 'This request has already been paid.' : 'This payment confirmation is no longer active. No new charge was started.');
+              if (result.action === 'settled' || result.action === 'already-paid') {
+                await conversationRef.set({ pendingSavedCardPayment: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+                await reply(`Payment confirmed. Receipt ${result.receiptId || 'recorded'}.`);
+              } else if (result.action === 'failed') {
+                await offerAlternativePaymentPrompt({
+                  requestId: pending.requestId,
+                  introMessage: 'Paystack confirmed that the saved-card payment failed. No charge succeeded.',
+                  bodyText: 'Saved-card payment failed. Would you like to try paying with Cash or a New card?',
+                });
+              } else {
+                await conversationRef.set({ pendingSavedCardPayment: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+                await reply('Paystack has not confirmed the result yet. I will not retry the charge while it is uncertain.');
+              }
+            } else if (claim.action === 'already-paid') {
+              await conversationRef.set({ pendingSavedCardPayment: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+              await reply('This request has already been paid.');
+            } else {
+              await cancelSavedCardPaymentConfirmation({
+                db,
+                admin,
+                requestId: pending.requestId,
+                customerId: String(context.request?.customerId || identity.linkedFirebaseUid || identity.guestPrincipalId || ''),
+                attemptId: pending.attemptId,
+              }).catch(() => null);
+              await offerAlternativePaymentPrompt({
+                requestId: pending.requestId,
+                introMessage: 'This payment confirmation is no longer active. No new charge was started.',
+                bodyText: 'This saved-card confirmation expired. Would you like to pay using another method?',
+              });
+            }
           }
         }
-        await conversationRef.set({ pendingSavedCardPayment: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       }
       await jobRef.set({ status: 'completed', intent: 'saved_card_payment', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
@@ -7417,26 +8306,41 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           offeredAtMs: outcome.offerStartedAtMs,
           closedAtMs: Date.now(),
           responseMinutes: Math.max(0, Number(((Date.now() - outcome.offerStartedAtMs) / 60000).toFixed(2))),
-          sourceStatus: action === 'accept' ? 'accepted' : 'matching',
+          sourceStatus: action === 'accept' ? (outcome.busyFallbackAccepted ? 'busy_helper_confirmation' : 'accepted') : 'matching',
         }).catch((error) => logger.warn('whatsapp_helper_offer_stats_failed', { requestId: offerAction.requestId, error: error.message }));
       }
-      const replyText = outcome.error
-        ? outcome.error === 'offer-expired'
-          ? 'This helper offer has expired. Uncedo will continue matching the request.'
-          : outcome.error === 'helper-already-has-active-request'
-            ? 'You already have an active service request, so this offer was not accepted.'
-            : 'This helper offer is no longer available.'
-        : action === 'accept'
-          ? `You accepted the service offer. The request is now assigned to you.\n\nOpen it in Uncedo Helpers to drive, update status, and message the customer:\nhttps://helpers.bakayise.com/requests/${offerAction.requestId}`
-          : 'You declined the service offer. Uncedo will look for the next eligible helper.';
-      await reply(replyText);
-      if (!outcome.error && action === 'accept') {
-        await conversationRef.set({
-          currentMode: 'provider_relay',
-          currentIntent: 'provider_relay',
-          activeServiceRequestId: offerAction.requestId,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        }, { merge: true });
+      if (!outcome.error && action === 'accept' && outcome.busyFallbackAccepted) {
+        const refreshedSnap = await db.collection('serviceRequests').doc(offerAction.requestId).get();
+        const refreshedRequest = refreshedSnap.exists ? refreshedSnap.data() || {} : {};
+        await finalizeBusyFallbackAcceptanceEffects({
+          requestId: offerAction.requestId,
+          request: refreshedRequest,
+          helperId: identity.linkedFirebaseUid,
+          helperName: outcome.helperName || 'Your helper',
+          activeRequestId: outcome.activeRequestId || '',
+        }).catch((err) => logger.warn('whatsapp_busy_fallback_effects_failed', { requestId: offerAction.requestId, error: err?.message }));
+        await reply('You accepted this queued offer while finishing your current job. We have sent your estimated finish and arrival times to the customer to confirm waiting.');
+      } else {
+        const replyText = outcome.error
+          ? outcome.error === 'offer-expired'
+            ? 'This helper offer has expired. Uncedo will continue matching the request.'
+            : outcome.error === 'helper-already-has-active-request'
+              ? 'You already have an active service request, so this offer was not accepted.'
+              : outcome.error === 'helper-already-has-queued-request'
+                ? 'You already have a queued next request waiting, so this offer was not accepted.'
+                : 'This helper offer is no longer available.'
+          : action === 'accept'
+            ? `You accepted the service offer. The request is now assigned to you.\n\nOpen it in Uncedo Helpers to drive, update status, and message the customer:\n${getWhatsAppHelperWebBaseUrl()}/requests/${offerAction.requestId}`
+            : 'You declined the service offer. Uncedo will look for the next eligible helper.';
+        await reply(replyText);
+        if (!outcome.error && action === 'accept') {
+          await conversationRef.set({
+            currentMode: 'provider_relay',
+            currentIntent: 'provider_relay',
+            activeServiceRequestId: offerAction.requestId,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+        }
       }
       await actionRef.set({
         lastResponseEventId: eventId,
@@ -7445,6 +8349,30 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         lastResponseError: outcome.error || null,
       }, { merge: true });
       await jobRef.set({ status: 'completed', intent: 'helper_offer', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    const busyChoiceButtonMatch = buttonId.match(/^wa_busy_(confirm|search)_([A-Za-z0-9_-]{6,128})$/i);
+    if (busyChoiceButtonMatch) {
+      const choice = busyChoiceButtonMatch[1].toLowerCase();
+      const targetRequestId = busyChoiceButtonMatch[2];
+      const principalUid = String(identity.linkedFirebaseUid || identity.guestPrincipalId || '').trim();
+      const result = await handleCustomerBusyHelperChoice({
+        requestId: targetRequestId,
+        choice,
+        actorUid: principalUid,
+        conversationRef,
+      });
+      if (result.code === 'confirmed_queued') {
+        await reply(`Confirmed! *${result.helperName}* will head straight to you as soon as they finish their current job. We will notify you as soon as they are on their way.`);
+      } else if (result.code === 'confirmed_accepted') {
+        await reply(`Great news — *${result.helperName}* just finished their previous job and is now assigned to your request!`);
+      } else if (result.code === 'searching_continued') {
+        await reply('No problem! We are continuing to search for another available helper for your request.');
+      } else {
+        await reply('That helper wait confirmation is no longer active. We are checking the latest status of your request.');
+      }
+      await jobRef.set({ status: 'completed', intent: `busy_helper_${choice}`, requestId: targetRequestId, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
     }
 
@@ -7491,7 +8419,43 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       await jobRef.set({ status: 'completed', intent: 'cash_payment_report', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
     }
+    const pendingBusyChoice = conversation.pendingBusyHelperChoice || null;
+    if (inbound.type === 'text'
+      && pendingBusyChoice
+      && pendingBusyChoice.identityId === identityId
+      && Number(pendingBusyChoice.expiresAtMs || 0) > Date.now()
+      && commandText) {
+      const wantsWait = /^(?:yes|yeah|yep|ok|okay|sure|wait|i(?:'|’| )?ll wait|fine|confirm|accept)$/i.test(commandText);
+      const wantsSearch = /^(?:no|nah|nope|search|keep searching|continue searching|another|find another|next)$/i.test(commandText);
+      if (wantsWait || wantsSearch) {
+        const choice = wantsWait ? 'confirm' : 'search';
+        const principalUid = String(identity.linkedFirebaseUid || identity.guestPrincipalId || '').trim();
+        const result = await handleCustomerBusyHelperChoice({
+          requestId: pendingBusyChoice.requestId,
+          choice,
+          actorUid: principalUid,
+          conversationRef,
+        });
+        if (result.code === 'confirmed_queued') {
+          await reply(`Confirmed! *${result.helperName}* will head straight to you as soon as they finish their current job. We will notify you as soon as they are on their way.`);
+        } else if (result.code === 'confirmed_accepted') {
+          await reply(`Great news — *${result.helperName}* just finished their previous job and is now assigned to your request!`);
+        } else if (result.code === 'searching_continued') {
+          await reply('No problem! We are continuing to search for another available helper for your request.');
+        } else {
+          await reply('That helper wait confirmation is no longer active. We are checking the latest status of your request.');
+        }
+        await jobRef.set({ status: 'completed', intent: `busy_helper_${choice}_text`, requestId: pendingBusyChoice.requestId, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+    }
     const command = parseWhatsAppCommand(commandText);
+    if (command?.type === 'cancellation_abort' && conversation.pendingCancellation) {
+      await conversationRef.set({ pendingCancellation: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      await reply('The request has not been canceled.');
+      await jobRef.set({ status: 'completed', intent: 'cancellation_aborted', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
     if (command?.type === 'payment_initiation') {
       if (!whatsappPaymentsEnabled()) {
         await reply('WhatsApp payment options are not enabled yet. You can still ask “payment status” to check a recorded result.');
@@ -7504,17 +8468,35 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         await jobRef.set({ status: 'completed', intent: 'payment_help', reason: 'customer_role_required', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         return;
       }
+      const loadPayableContext = async (targetId) => {
+        let ctx = await getWhatsAppPaymentContext({ identityId, identity, requestId: targetId });
+        if (ctx.code === 'awaiting_customer_confirmation' && ctx.paymentOperation?.activeAttemptId) {
+          await cancelSavedCardPaymentConfirmation({
+            db,
+            admin,
+            requestId: ctx.request.id,
+            customerId: String(ctx.request.customerId || ''),
+            attemptId: String(ctx.paymentOperation.activeAttemptId),
+          }).catch(() => null);
+          await conversationRef.set({
+            pendingSavedCardPayment: admin.firestore.FieldValue.delete(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true }).catch(() => null);
+          ctx = await getWhatsAppPaymentContext({ identityId, identity, requestId: targetId });
+        }
+        return ctx;
+      };
       let candidates = [];
       const directRequestId = String(conversation.activeServiceRequestId || '').trim();
       if (directRequestId) {
-        const context = await getWhatsAppPaymentContext({ identityId, identity, requestId: directRequestId });
+        const context = await loadPayableContext(directRequestId);
         if (context.code === 'available') candidates = [context];
       }
       if (!candidates.length) {
         const history = await listWhatsAppRequests({ db, identity, perPrincipalLimit: 25, resultLimit: 8 });
         for (const item of history) {
           if (String(item.status || '').toLowerCase() !== 'completed') continue;
-          const context = await getWhatsAppPaymentContext({ identityId, identity, requestId: item.id });
+          const context = await loadPayableContext(item.id);
           if (context.code === 'available') candidates.push(context);
         }
       }
@@ -7533,10 +8515,38 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         { type: 'reply', reply: { id: 'wa_payment_card', title: 'New card' } },
         ...(context.cards.length ? [{ type: 'reply', reply: { id: 'wa_payment_saved', title: 'Saved card' } }] : []),
       ];
-      await reply(`Choose how to pay for request ${context.request.publicRequestReference || context.request.id}. Amount due: R${Number(context.amount).toFixed(2)} ZAR.`, {
+      await reply(`Choose how to pay for request ${context.request.publicRequestReference || context.request.id}. Amount due: R${formatWholeRandDisplay(context.amount)} ZAR.`, {
         type: 'button', body: { text: 'Choose a payment method. Saved-card payment always requires a separate confirmation.' }, action: { buttons: methodButtons },
       });
       await jobRef.set({ status: 'completed', intent: 'payment_method_selection', requestId: context.request.id, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+
+    const pendingRating = conversation.pendingRatingComment || null;
+    if (inbound.type === 'text'
+      && pendingRating
+      && pendingRating.identityId === identityId
+      && Number(pendingRating.expiresAtMs || 0) > Date.now()
+      && commandText
+      && !command
+      && !/^(?:hi|hello|hey|book|request|cancel|status|receipt|history|menu|pay|payment|help|assistant|\/assistant|talk to helper|message helper|yes|no|back)\b/i.test(commandText)) {
+      const access = await getWhatsAppRequestForIdentity({ db, identity, requestId: pendingRating.requestId });
+      if (access.code === 'found') {
+        await submitServiceRequestRating({
+          db,
+          admin,
+          requestId: access.request.id,
+          raterUserId: String(access.request.customerId || ''),
+          score: pendingRating.score,
+          comment: commandText,
+        }).catch(() => null);
+      }
+      await conversationRef.set({
+        pendingRatingComment: admin.firestore.FieldValue.delete(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      await reply(`Thank you! Your comment has been added to your ${pendingRating.score}/5 rating for *${pendingRating.helperName || 'your helper'}*.`);
+      await jobRef.set({ status: 'completed', intent: 'customer_rating_comment', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
     }
 
@@ -8340,6 +9350,25 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       geminiModel: String(process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite').trim(),
       ...whatsappGeminiVertexConfig(),
     });
+    let activeRelayRequestContext = null;
+    const candidateActiveRequestId = String(conversation.activeServiceRequestId || '').trim();
+    if (candidateActiveRequestId) {
+      const activeReqSnap = await db.collection('serviceRequests').doc(candidateActiveRequestId).get().catch(() => null);
+      if (activeReqSnap?.exists) {
+        const activeReqData = activeReqSnap.data() || {};
+        const helperIdAssigned = String(activeReqData.helperAssignment?.helperId || '').trim();
+        if (helperIdAssigned && isWhatsAppRelayRequestOpen(activeReqData)) {
+          activeRelayRequestContext = {
+            requestId: activeReqSnap.id,
+            status: String(activeReqData.status || ''),
+            serviceSummary: String(activeReqData.serviceSummary || activeReqData.subject || 'Service request'),
+            helperName: String(activeReqData.helperAssignment?.helperName || 'Assigned helper'),
+            isOpen: true,
+          };
+        }
+      }
+    }
+
     const toolPrincipal = await resolveWhatsAppToolAuthorization(identityId, identity);
     const toolIdentity = toolPrincipal.identity || identity;
     const toolAuthorization = toolPrincipal.authorization;
@@ -8347,7 +9376,11 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       identityId, conversationRef, eventId,
       guestAccountMatch: accountResolution.guestAccountMatch || null,
     });
-    const rawAvailableTools = toolRegistry.definitions({ identity: toolIdentity, authorization: toolAuthorization });
+    const rawAvailableTools = toolRegistry.definitions({
+      identity: toolIdentity,
+      authorization: toolAuthorization,
+      activeServiceRequest: activeRelayRequestContext,
+    });
     const isLearnMoreAction = inbound.actionChoice?.type === 'service_information';
     const availableTools = isLearnMoreAction
       ? rawAvailableTools.filter((tool) => tool.name !== 'initiateServiceBooking')
@@ -8369,6 +9402,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           : (!activeDraft && activeHelperServiceApp?.stage === 'selecting_options')
             ? 'provider_support'
             : conversation.currentIntent,
+        activeServiceRequest: activeRelayRequestContext,
         selectedServiceId: activeDraft?.serviceId || (!activeDraft && activeHelperServiceApp?.stage === 'selecting_options' ? (activeHelperServiceApp.serviceId || '') : ''),
         selectedOptionId: draftSelectedOption?.id || activeDraft?.selectedOptionId || '',
         selectedOptionTitle: draftSelectedOption?.title || activeDraft?.selectedOptionTitle || '',
@@ -8431,6 +9465,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           role: toolAuthorization.role,
           recipient: String(toolIdentity.waId || '').trim(),
           lastInboundAtMs: Number(conversation.lastInboundMessageAtMs || Date.now()),
+          activeServiceRequest: activeRelayRequestContext,
         },
       )),
       afterTool: async (observation) => {
@@ -8469,7 +9504,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       intentResult.intent = 'service_information';
       intentResult.serviceId = inbound.actionChoice.serviceId;
       intentResult.confidence = 1.0;
-    } else if (activeDraft && activeDraft.status === 'collecting' && conversation.currentMode === 'booking_intake') {
+    } else if (activeDraft && activeDraft.status === 'collecting' && conversation.currentMode === 'booking_intake' && !activeRelayRequestContext?.isOpen) {
       if (![
         'human_escalation',
         'cancellation',
@@ -8520,7 +9555,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       return;
     }
     const hasCompletedServiceTool = executedToolResults.some(
-      (item) => ['sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking', 'applyForHelperService'].includes(item.toolName)
+      (item) => ['sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking', 'applyForHelperService', 'relayMessageToHelper', 'cancelServiceRequest'].includes(item.toolName)
         && item.result && !item.errorCode && !['not-found', 'missing-query'].includes(item.result?.code),
     );
     if (agentOutcome.status === 'tool-preflight-failed'
@@ -8554,29 +9589,33 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       await jobRef.set({ responseGeneration: 'safe_fallback', responseFallbackCode: String(error?.code || 'invalid_response').slice(0, 80), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     }
 
-    const carouselAlreadySent = executedToolResults.some(
+    const carouselToolResult = executedToolResults.find(
       (item) => item.toolName === 'sendServicesToUser' && item.result?.code === 'sent',
     );
+    const carouselAlreadySent = Boolean(carouselToolResult);
+    const carouselPersistedReply = carouselToolResult?.result?.persistedReply === true;
     const completeCarouselAlreadySent = async () => {
-      await db.runTransaction(async (transaction) => {
-        const snap = await transaction.get(conversationRef);
-        const current = snap.data() || {};
-        const memory = appendBoundedConversationTurn({
-          recentHistory: current.recentHistory,
-          conversationSummary: current.conversationSummary || {},
-          turn: {
-            role: 'assistant',
-            text: '✨ Sent interactive Uncedo services carousel.',
-            timestampMs: Date.now(),
-          },
-        });
-        transaction.set(conversationRef, {
-          recentHistory: memory.recentHistory,
-          conversationSummary: memory.conversationSummary,
-          lastMessageAtMs: Date.now(),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        }, { merge: true });
-      }).catch(() => null);
+      if (!carouselPersistedReply) {
+        await db.runTransaction(async (transaction) => {
+          const snap = await transaction.get(conversationRef);
+          const current = snap.data() || {};
+          const memory = appendBoundedConversationTurn({
+            recentHistory: current.recentHistory,
+            conversationSummary: current.conversationSummary || {},
+            turn: {
+              role: 'assistant',
+              text: '✨ Sent interactive Uncedo services carousel.',
+              timestampMs: Date.now(),
+            },
+          });
+          transaction.set(conversationRef, {
+            recentHistory: memory.recentHistory,
+            conversationSummary: memory.conversationSummary,
+            lastMessageAtMs: Date.now(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+        }).catch(() => null);
+      }
       await jobRef.set({
         phase: 'outbound_completed',
         outboundAttempted: true,
@@ -8596,7 +9635,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         await completeCarouselAlreadySent();
         return;
       }
-      const carousel = buildWhatsAppServiceCarousel(catalog);
+      const carousel = await buildVerifiedWhatsAppServiceCarousel(catalog, { logger });
       const textCatalog = renderWhatsAppCatalog(catalog, { includePricing: explicitlyAsksPricing });
       await reply(textCatalog, carousel);
       await jobRef.set({ status: 'completed', intent: intentResult.intent, toolCallCount: agentOutcome.toolCallCount, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
@@ -8618,7 +9657,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           await completeCarouselAlreadySent();
           return;
         }
-        const carousel = buildWhatsAppServiceCarousel(catalog);
+        const carousel = await buildVerifiedWhatsAppServiceCarousel(catalog, { logger });
         await reply(renderWhatsAppCatalog(catalog, { includePricing: explicitlyAsksPricing }), carousel);
       } else if (intentResult.intent === 'price_enquiry' || explicitlyAsksPricing) {
         await conversationRef.set({
@@ -8784,6 +9823,122 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
             { type: 'reply', reply: { id: `wa_profile_cancel_${profileProposal.proposalId}`, title: 'Cancel' } },
           ] },
         });
+      } else if (intentResult.intent === 'cancellation'
+        || executedToolResults.some((item) => item.toolName === 'cancelServiceRequest' && item.result && !item.errorCode)) {
+        const cancelToolObservation = [...executedToolResults]
+          .reverse()
+          .find((item) => item.toolName === 'cancelServiceRequest' && item.result && !item.errorCode)
+          ?.result || null;
+        if (cancelToolObservation) {
+          if (cancelToolObservation.code === 'confirmation-required') {
+            const feeLine = Number(cancelToolObservation.cancellationAmount || 0) > 0
+              ? `The applicable cancellation fee is *R${Number(cancelToolObservation.cancellationAmount).toFixed(2)} ZAR*.`
+              : 'There is *no cancellation fee* at this stage.';
+            const refLabel = cancelToolObservation.publicRequestReference || cancelToolObservation.requestId;
+            const cancelPrompt = `Would you like to cancel your active booking${refLabel ? ` (${refLabel})` : ''}?\n\n${feeLine}`;
+            await reply(cancelPrompt, {
+              type: 'button',
+              body: { text: cancelPrompt.slice(0, 1024) },
+              action: {
+                buttons: [
+                  { type: 'reply', reply: { id: 'wa_cancel_confirm', title: 'Confirm cancel' } },
+                  { type: 'reply', reply: { id: 'wa_cancel_abort', title: 'Keep booking' } },
+                ],
+              },
+            });
+          } else {
+            await reply(responseText || formatWhatsAppToolResult('cancelServiceRequest', cancelToolObservation));
+          }
+        } else if (!whatsappCancellationEnabled()) {
+          await reply('WhatsApp cancellation is not enabled yet. Please use the Uncedo app or contact support.');
+        } else {
+          const target = await findCustomerCancellationTarget({
+            db,
+            callerIdentity: toolIdentity,
+            conversation,
+          });
+          if (target.kind === 'draft-only' && target.activeDraftRef) {
+            await clearWhatsAppConversationCancellationState({
+              conversationRef,
+              canceledRequestId: String(target.activeDraft?.requestId || ''),
+              activeDraftRef: target.activeDraftRef,
+            });
+            await reply('Your active booking draft has been canceled. You can start a new booking anytime.');
+          } else if (target.kind !== 'eligible' || !target.request?.id) {
+            await reply('I could not find an active cancellable booking on your account. Send “booking history” to review your bookings.');
+          } else {
+            const preview = await getWhatsAppCustomerCancellationPreview({
+              identityId,
+              identity: toolIdentity,
+              requestId: target.request.id,
+            });
+            if (preview.code !== 'eligible') {
+              await reply(preview.code === 'already-cancelled'
+                ? 'This booking has already been canceled.'
+                : 'This booking cannot be canceled from its current status. Please contact Uncedo support for help.');
+            } else if (Number(preview.cancellationAmount || 0) <= 0) {
+              const cancelResult = await cancelCustomerServiceRequestFromWhatsApp({
+                identityId,
+                identity: toolIdentity,
+                requestId: preview.requestId,
+                expectedCancellation: { status: preview.status, cancellationAmount: 0 },
+              });
+              if (cancelResult.statusCode === 200 && cancelResult.body?.success === true) {
+                const matchingDraftRef = target.activeDraftRef && (
+                  !target.activeDraft?.requestId || String(target.activeDraft.requestId) === String(preview.requestId)
+                ) ? target.activeDraftRef : null;
+                await clearWhatsAppConversationCancellationState({
+                  conversationRef,
+                  canceledRequestId: preview.requestId,
+                  activeDraftRef: matchingDraftRef,
+                });
+                const refLabel = target.request.publicRequestReference || preview.requestId;
+                await reply(`Your request (${refLabel}) has been canceled. No cancellation fee was recorded. You can start a new booking anytime.`);
+              } else {
+                await reply('I could not complete the cancellation. Please check your booking in the Uncedo app or contact support.');
+              }
+            } else {
+              const pendingCancellation = {
+                identityId,
+                requestId: preview.requestId,
+                status: preview.status,
+                cancellationAmount: preview.cancellationAmount,
+                billingRule: preview.billingRule,
+                expiresAtMs: Date.now() + 5 * 60 * 1000,
+              };
+              await conversationRef.set({
+                pendingCancellation,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              }, { merge: true });
+              const feeLine = `The applicable cancellation fee is *R${Number(preview.cancellationAmount).toFixed(2)} ZAR*.`;
+              const cancelPrompt = `Would you like to cancel your active booking?\n\n${feeLine}`;
+              await reply(cancelPrompt, {
+                type: 'button',
+                body: { text: cancelPrompt.slice(0, 1024) },
+                action: {
+                  buttons: [
+                    { type: 'reply', reply: { id: 'wa_cancel_confirm', title: 'Confirm cancel' } },
+                    { type: 'reply', reply: { id: 'wa_cancel_abort', title: 'Keep booking' } },
+                  ],
+                },
+              });
+            }
+          }
+        }
+      } else if (intentResult.intent === 'human_escalation') {
+        if (!whatsappSupportEnabled()) {
+          await reply('Human support escalation on WhatsApp is not enabled yet. Please contact Uncedo support in the app.');
+        } else {
+          const ticket = await createOrAppendWhatsAppSupportMessage({
+            db, admin, identityId, conversationRef, eventId,
+            principalId: identity.linkedFirebaseUid || identity.guestPrincipalId || '',
+            linkedUid: identity.linkedFirebaseUid || '',
+            role: identity.role || (identity.guestPrincipalId ? 'customer' : 'unknown'),
+            requestId: conversation.activeServiceRequestId || '',
+            inbound,
+          });
+          await reply(`I’ve escalated this to Uncedo human support (Ticket *${ticket.ticketId}*). A support agent will review your message and assist you shortly.`);
+        }
       } else await reply(responseText);
       await jobRef.set({
         status: 'completed', intent: intentResult.intent,
@@ -9079,7 +10234,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         const nextQ = missingQuestions[0];
         const nextQIndex = applicableRequiredOrMissing.findIndex((q) => q.id === nextQ.id);
         const totalRequired = applicableRequiredOrMissing.length;
-        questionResult = formatWhatsAppNextQuestion({
+        questionResult = await formatVerifiedWhatsAppNextQuestion({
           service,
           selectedOption,
           question: nextQ,
@@ -9087,6 +10242,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           total: totalRequired || 1,
           answers: validation.answers,
           hasSavedHomeAddress,
+          logger,
         });
       } else if (targetIsAnotherAddress && (!effectiveLocation || !effectiveLocation.address)) {
         questionResult = {
@@ -9346,7 +10502,10 @@ exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{reques
 
   const requestId = event.params.requestId;
   const requestRef = db.collection('serviceRequests').doc(requestId);
-  const candidateQueue = await getHelperQueueForServiceRequest(afterData);
+  const dispatchPlan = await getHelperDispatchPlanForServiceRequest(afterData, { includeBusyFallback: true });
+  const candidateQueue = dispatchPlan.freeQueue;
+
+  let expiredDuringSyncData = null;
 
   await db.runTransaction(async (transaction) => {
     const snap = await transaction.get(requestRef);
@@ -9355,6 +10514,24 @@ exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{reques
     const now = Date.now();
 
     if (!ACTIVE_SERVICE_REQUEST_STATUSES.has(request.status) || request?.helperAssignment?.helperId) {
+      return;
+    }
+
+    if (request.status === SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE && hasNoHelperWindowExpired(request, now)) {
+      transaction.update(requestRef, {
+        status: SERVICE_REQUEST_STATUS.EXPIRED,
+        statusDetail: 'Service request expired. No helpers were available within 5 minutes.',
+        expiredAt: admin.firestore.FieldValue.serverTimestamp(),
+        expiredAtMs: now,
+        expiredReason: 'no_helper_available_5min_timeout',
+        currentOfferHelperId: null,
+        offerToken: null,
+        offerExpiresAt: null,
+        offerType: null,
+        offerBusyActiveRequestId: null,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      expiredDuringSyncData = { ...request, status: SERVICE_REQUEST_STATUS.EXPIRED, expiredAtMs: now };
       return;
     }
 
@@ -9373,14 +10550,21 @@ exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{reques
       return;
     }
 
-    const selection = resolveNextServiceHelperSelection(request, candidateQueue, now);
+    const freeSelection = resolveNextServiceHelperSelection(request, candidateQueue, now);
+    const selection = resolveHelperSelectionWithBusyFallback({
+      request,
+      freeSelection,
+      busyCandidateQueue: dispatchPlan.busyQueue,
+    });
     const { queue, selectedHelperId } = selection;
 
     logger.info('service_request_lifecycle_selection', {
       requestId,
       requestStatus: String(request.status || '').toLowerCase(),
       candidateQueueSize: Array.isArray(candidateQueue) ? candidateQueue.length : 0,
+      busyQueueSize: Array.isArray(dispatchPlan.busyQueue) ? dispatchPlan.busyQueue.length : 0,
       selectedHelperId: selectedHelperId || null,
+      offerType: selection.offerType || 'standard',
       selectedQueueSize: Array.isArray(queue) ? queue.length : 0,
       excludedHelperIds: selection.excludedHelperIds || [],
       resetExcludedHelperIds: Boolean(selection.resetExcludedHelperIds),
@@ -9389,23 +10573,47 @@ exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{reques
     });
 
     if (!selectedHelperId) {
-      if (request.status !== SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE) {
-        logger.info('service_request_lifecycle_no_helper_available', {
-          requestId,
-          helperQueueSize: Array.isArray(queue) ? queue.length : 0,
-          excludedHelperIds: selection.excludedHelperIds || [],
-          traceLabel: 'functions:syncServiceRequestLifecycle:noHelperAvailable',
-        });
+      if (hasNoHelperWindowExpired(request, now)) {
         transaction.update(requestRef, {
-          status: SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE,
-          statusDetail: 'No helpers are currently available for this request.',
+          status: SERVICE_REQUEST_STATUS.EXPIRED,
+          statusDetail: 'Service request expired. No helpers were available within 5 minutes.',
+          expiredAt: admin.firestore.FieldValue.serverTimestamp(),
+          expiredAtMs: now,
+          expiredReason: 'no_helper_available_5min_timeout',
           helperQueue: queue,
           currentOfferHelperId: null,
           offerExpiresAt: null,
           offerToken: null,
+          offerType: null,
+          offerBusyActiveRequestId: null,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        expiredDuringSyncData = { ...request, status: SERVICE_REQUEST_STATUS.EXPIRED, expiredAtMs: now };
+        return;
+      }
+      if (request.status !== SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE) {
+        const noHelperWindowExpiresAtMs = Number(request.noHelperWindowExpiresAtMs || 0) || (now + NO_HELPER_WINDOW_MS);
+        logger.info('service_request_lifecycle_no_helper_available', {
+          requestId,
+          helperQueueSize: Array.isArray(queue) ? queue.length : 0,
+          excludedHelperIds: selection.excludedHelperIds || [],
+          noHelperWindowExpiresAtMs,
+          traceLabel: 'functions:syncServiceRequestLifecycle:noHelperAvailable',
+        });
+        transaction.update(requestRef, {
+          status: SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE,
+          statusDetail: 'No helpers are currently available. Still searching for 5 minutes as helpers come online.',
+          helperQueue: queue,
+          busyHelperQueue: [],
+          currentOfferHelperId: null,
+          offerExpiresAt: null,
+          offerToken: null,
+          offerType: null,
+          offerBusyActiveRequestId: null,
           offerCycleExcludedHelperIds: selection.excludedHelperIds,
           declinedHelperIds: getServiceRequestDeclinedHelperIds(request),
-          matchingStartedAtMs: getRequestMatchingStartedAtMs(request) || Date.now(),
+          matchingStartedAtMs: getRequestMatchingStartedAtMs(request) || now,
+          noHelperWindowExpiresAtMs,
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
       }
@@ -9415,30 +10623,43 @@ exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{reques
     const selectedHelperRef = db.collection('users').doc(selectedHelperId);
     const offerRevision = nextOfferRevision(request);
     const offerToken = randomUUID();
+    const isBusyFallback = selection.isBusyFallback === true;
+    const offerBusyActiveRequestId = isBusyFallback
+      ? String(dispatchPlan.busyActiveRequestIdsByHelper?.[selectedHelperId] || '').trim() || null
+      : null;
 
     logger.info('service_request_lifecycle_offer_written', {
       requestId,
       selectedHelperId,
+      offerType: selection.offerType || 'standard',
+      isBusyFallback,
       helperQueueSize: Array.isArray(queue) ? queue.length : 0,
       offerRevision,
       offerExpiresAt: now + OFFER_TIMEOUT_MS,
-      statusDetail: selection.reofferAfterCooldown
-        ? 'Retrying the available helper after cooldown.'
-        : 'Helper notified. Waiting for acceptance.',
+      statusDetail: isBusyFallback
+        ? 'Offering request to a busy helper finishing a nearby job.'
+        : selection.reofferAfterCooldown
+          ? 'Retrying the available helper after cooldown.'
+          : 'Helper notified. Waiting for acceptance.',
       traceLabel: 'functions:syncServiceRequestLifecycle:offerWritten',
     });
 
     transaction.update(requestRef, {
       status: SERVICE_REQUEST_STATUS.HELPER_FOUND,
-      statusDetail: selection.reofferAfterCooldown
-        ? 'Retrying the available helper after cooldown.'
-        : 'Helper notified. Waiting for acceptance.',
+      statusDetail: isBusyFallback
+        ? 'Offering request to a busy helper finishing a nearby job.'
+        : selection.reofferAfterCooldown
+          ? 'Retrying the available helper after cooldown.'
+          : 'Helper notified. Waiting for acceptance.',
       helperQueue: queue,
+      busyHelperQueue: selection.busyQueue || [],
       currentOfferHelperId: selectedHelperId,
       offerExpiresAt: now + OFFER_TIMEOUT_MS,
       lastOfferAt: now,
       offerRevision,
       offerToken,
+      offerType: isBusyFallback ? 'busy_helper_fallback' : 'standard',
+      offerBusyActiveRequestId,
       offerCycleExcludedHelperIds: selection.resetExcludedHelperIds ? [] : selection.excludedHelperIds,
       declinedHelperIds: getServiceRequestDeclinedHelperIds(request),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -9452,6 +10673,19 @@ exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{reques
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     }, { merge: true });
   });
+
+  if (expiredDuringSyncData) {
+    await sendWhatsAppCustomerRequestExpiredNotification({ requestId, request: expiredDuringSyncData })
+      .catch((err) => logger.warn('whatsapp_expiry_notify_error', { requestId, error: err?.message }));
+    await createUserNotification({
+      userId: expiredDuringSyncData.customerId || null,
+      title: 'Request expired',
+      message: 'No helper was available for your request. Please try again later.',
+      type: 'matching_update',
+      requestId,
+      targetPath: `/customer/requests/${requestId}`,
+    }).catch(() => null);
+  }
 });
 
 exports.scheduleServiceRequestOfferExpiryOnServiceRequestWrite = onDocumentWritten({
@@ -9541,6 +10775,8 @@ exports.expireServiceRequestOffer = onTaskDispatched({
       currentOfferHelperId: null,
       offerExpiresAt: null,
       offerToken: null,
+      offerType: null,
+      offerBusyActiveRequestId: null,
       offerCycleExcludedHelperIds,
       lastOfferResponse: {
         helperId,
@@ -9583,6 +10819,463 @@ exports.expireServiceRequestOffer = onTaskDispatched({
   });
 });
 
+async function resolveCustomerWhatsAppTarget(request = {}) {
+  let recipientPhone = '';
+  let lastInboundAtMs = Date.now();
+  let identityId = String(request.originIdentityId || '').trim();
+
+  if (identityId) {
+    const identSnap = await db.collection('whatsappIdentities').doc(identityId).get().catch(() => null);
+    if (identSnap && identSnap.exists) {
+      const data = identSnap.data() || {};
+      recipientPhone = data.phoneNumber || data.waId || '';
+      if (data.lastInboundAtMs) lastInboundAtMs = Number(data.lastInboundAtMs);
+    }
+  }
+
+  if (!identityId && request.customerId) {
+    const byUidSnap = await db.collection('whatsappIdentities').where('linkedFirebaseUid', '==', request.customerId).limit(1).get().catch(() => null);
+    if (byUidSnap && !byUidSnap.empty) {
+      identityId = byUidSnap.docs[0].id;
+      const data = byUidSnap.docs[0].data() || {};
+      recipientPhone = recipientPhone || data.phoneNumber || data.waId || '';
+      if (data.lastInboundAtMs) lastInboundAtMs = Number(data.lastInboundAtMs);
+    } else {
+      const byGuestSnap = await db.collection('whatsappIdentities').where('guestPrincipalId', '==', request.customerId).limit(1).get().catch(() => null);
+      if (byGuestSnap && !byGuestSnap.empty) {
+        identityId = byGuestSnap.docs[0].id;
+        const data = byGuestSnap.docs[0].data() || {};
+        recipientPhone = recipientPhone || data.phoneNumber || data.waId || '';
+        if (data.lastInboundAtMs) lastInboundAtMs = Number(data.lastInboundAtMs);
+      }
+    }
+  }
+
+  if (!recipientPhone) {
+    recipientPhone = request.customerWhatsappNumber || request.customerPhone || request.requestPayload?.customerPhone || '';
+  }
+
+  if (!recipientPhone && request.customerId) {
+    const userSnap = await db.collection('users').doc(request.customerId).get().catch(() => null);
+    if (userSnap && userSnap.exists) {
+      const user = userSnap.data() || {};
+      recipientPhone = user.whatsappPhoneNumber || user.phoneNumber || '';
+    }
+  }
+
+  if (identityId) {
+    const convSnap = await db.collection('whatsappConversations').doc(identityId).get().catch(() => null);
+    if (convSnap?.exists) {
+      const convInbound = Number(convSnap.data()?.lastInboundMessageAtMs || 0);
+      if (convInbound > 0) lastInboundAtMs = convInbound;
+    }
+  }
+
+  const cleanRecipient = String(recipientPhone || '').replace(/[^0-9]/g, '');
+  return {
+    identityId,
+    cleanRecipient,
+    lastInboundAtMs,
+  };
+}
+
+async function sendHelperDirectWhatsAppMessage({ helperId, text }) {
+  if (!helperId || !text || !whatsappNotificationsEnabled() || !whatsappMessagingEnabled()) return false;
+  const secrets = getWhatsAppSecrets();
+  if (!secrets.accessToken || !secrets.phoneNumberId || !secrets.graphApiVersion) return false;
+  const linkSnap = await db.collection('whatsappUserLinks').doc(helperId).get().catch(() => null);
+  const identityId = linkSnap?.exists ? String(linkSnap.data()?.identityId || '').trim() : '';
+  if (!identityId) return false;
+  const [identitySnap, convSnap] = await Promise.all([
+    db.collection('whatsappIdentities').doc(identityId).get().catch(() => null),
+    db.collection('whatsappConversations').doc(identityId).get().catch(() => null),
+  ]);
+  if (!identitySnap?.exists) return false;
+  const identity = identitySnap.data() || {};
+  const conversation = convSnap?.exists ? convSnap.data() || {} : {};
+  const lastInboundAtMs = Number(conversation.lastInboundMessageAtMs || identity.lastInboundAtMs || 0);
+  const recipient = String(identity.waId || '').replace(/[^0-9]/g, '');
+  if (!recipient || String(identity.phoneNumberId || '') !== secrets.phoneNumberId) return false;
+  if (!isWithinCustomerServiceWindow(lastInboundAtMs, Date.now())) return false;
+  if (!isWhatsAppRecipientAllowed(recipient, process.env)) return false;
+
+  const client = createMetaWhatsAppClient({
+    accessToken: secrets.accessToken,
+    phoneNumberId: secrets.phoneNumberId,
+    graphApiVersion: secrets.graphApiVersion,
+    approvedTemplateNames: secrets.approvedTemplateNames,
+    requestTimeoutMs: process.env.WHATSAPP_META_SEND_TIMEOUT_MS,
+    isRecipientAllowed: (to) => isWhatsAppRecipientAllowed(to, process.env),
+  });
+  await client.sendText({ to: recipient, text: formatWhatsAppText(text), lastInboundAtMs, now: Date.now() }).catch(() => null);
+  return true;
+}
+
+async function finalizeBusyFallbackAcceptanceEffects({
+  requestId,
+  request = {},
+  helperId,
+  helperName = 'Your helper',
+  activeRequestId = '',
+}) {
+  const safeActiveId = String(activeRequestId || request?.pendingBusyAssignment?.activeRequestId || '').trim();
+  const [activeReqSnap, trackingSnap, helperSnap] = await Promise.all([
+    safeActiveId ? db.collection('serviceRequests').doc(safeActiveId).get().catch(() => null) : Promise.resolve(null),
+    safeActiveId ? admin.database().ref(`liveTracking/serviceRequests/${safeActiveId}`).get().catch(() => null) : Promise.resolve(null),
+    helperId ? db.collection('users').doc(helperId).get().catch(() => null) : Promise.resolve(null),
+  ]);
+  const activeRequest = activeReqSnap?.exists ? activeReqSnap.data() || {} : {};
+  const tracking = trackingSnap?.exists() ? trackingSnap.val() || {} : {};
+  const helperData = helperSnap?.exists ? helperSnap.data() || {} : {};
+
+  const origin = getServiceRequestLocationSnapshot(activeRequest) || getLiveLocationSnapshot(helperData);
+  const destination = getServiceRequestLocationSnapshot(request);
+  let travelDurationSeconds = 900;
+  if (origin && destination) {
+    const route = await computeDrivingRouteEtaWithFallback(origin, destination).catch(() => null);
+    if (route && Number(route.durationSeconds) > 0) {
+      travelDurationSeconds = Number(route.durationSeconds);
+    }
+  }
+
+  const etaSummary = buildBusyHelperEtaSummary({
+    activeRequest,
+    tracking,
+    travelDurationSeconds,
+    now: Date.now(),
+  });
+
+  await db.collection('serviceRequests').doc(requestId).set({
+    pendingBusyAssignment: {
+      ...(request.pendingBusyAssignment || {}),
+      helperId,
+      helperName,
+      activeRequestId: safeActiveId,
+      etaSummary,
+    },
+    statusDetail: `${helperName} is finishing another job (~${etaSummary.finishCurrentMinutes} min) and can arrive in ~${etaSummary.totalArrivalMinutes} min (${etaSummary.arrivalClockTime}). Waiting for customer confirmation.`,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true }).catch(() => null);
+
+  if (request.customerId) {
+    await createUserNotificationOnce({
+      notificationId: `busy_helper_found_${requestId}_${helperId}`,
+      userId: request.customerId,
+      title: 'Helper found (finishing another job)',
+      message: `${helperName} accepted your request and is finishing another job (~${etaSummary.finishCurrentMinutes} min, est. arrival ${etaSummary.arrivalClockTime}). Reply on WhatsApp to confirm or keep searching.`,
+      type: 'matching_update',
+      requestId,
+      targetPath: `/customer/requests/${requestId}`,
+      metadata: { helperId, etaSummary },
+    }).catch(() => null);
+  }
+
+  if (!whatsappMessagingEnabled()) return etaSummary;
+  const secrets = getWhatsAppSecrets();
+  if (!secrets.accessToken || !secrets.phoneNumberId || !secrets.graphApiVersion) return etaSummary;
+  const target = await resolveCustomerWhatsAppTarget(request);
+  if (!target.cleanRecipient || target.cleanRecipient.length < 8 || !isWhatsAppRecipientAllowed(target.cleanRecipient, process.env)) {
+    return etaSummary;
+  }
+
+  const { text, interactiveBody } = buildBusyHelperCustomerConfirmationMessage({
+    request,
+    helperName,
+    etaSummary,
+  });
+
+  const client = createMetaWhatsAppClient({
+    accessToken: secrets.accessToken,
+    phoneNumberId: secrets.phoneNumberId,
+    graphApiVersion: secrets.graphApiVersion,
+    approvedTemplateNames: secrets.approvedTemplateNames,
+    requestTimeoutMs: process.env.WHATSAPP_META_SEND_TIMEOUT_MS,
+    isRecipientAllowed: (to) => isWhatsAppRecipientAllowed(to, process.env),
+  });
+
+  const inWindow = isWithinCustomerServiceWindow(target.lastInboundAtMs, Date.now());
+  if (inWindow) {
+    await client.sendInteractive({
+      to: target.cleanRecipient,
+      lastInboundAtMs: target.lastInboundAtMs,
+      interactive: {
+        type: 'button',
+        body: { text: formatWhatsAppText(interactiveBody) },
+        action: {
+          buttons: [
+            { type: 'reply', reply: { id: `wa_busy_confirm_${requestId}`, title: "Yes, I'll wait" } },
+            { type: 'reply', reply: { id: `wa_busy_search_${requestId}`, title: 'Keep searching' } },
+          ],
+        },
+      },
+    }).catch(async () => client.sendText({
+      to: target.cleanRecipient,
+      text: formatWhatsAppText(`${text}\n\nReply *YES* to wait or *KEEP SEARCHING* to look for another helper.`),
+      lastInboundAtMs: target.lastInboundAtMs,
+      now: Date.now(),
+    }).catch(() => null));
+  }
+
+  if (target.identityId) {
+    await db.collection('whatsappConversations').doc(target.identityId).set({
+      pendingBusyHelperChoice: {
+        identityId: target.identityId,
+        requestId,
+        helperId,
+        helperName,
+        expiresAtMs: Date.now() + BUSY_CONFIRMATION_TIMEOUT_MS,
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true }).catch(() => null);
+  }
+
+  return etaSummary;
+}
+
+async function handleCustomerBusyHelperChoice({
+  requestId,
+  choice,
+  actorUid = '',
+  conversationRef = null,
+} = {}) {
+  const safeRequestId = String(requestId || '').trim();
+  const normalizedChoice = String(choice || '').trim().toLowerCase();
+  if (!safeRequestId || !['confirm', 'search'].includes(normalizedChoice)) {
+    return { code: 'invalid-choice' };
+  }
+
+  const requestRef = db.collection('serviceRequests').doc(safeRequestId);
+  const outcome = await db.runTransaction(async (transaction) => {
+    const reqSnap = await transaction.get(requestRef);
+    if (!reqSnap.exists) return { code: 'request-not-found' };
+    const request = reqSnap.data() || {};
+    if (actorUid && String(request.customerId || '').trim() !== actorUid) {
+      if (!(await isCustomerRequestPrincipalOwnedByUid(actorUid, request.customerId))) {
+        return { code: 'forbidden' };
+      }
+    }
+    const status = String(request.status || '').trim().toLowerCase();
+    if (status !== SERVICE_REQUEST_STATUS.BUSY_HELPER_CONFIRMATION || !request.pendingBusyAssignment?.helperId) {
+      return { code: 'not-awaiting-confirmation', status };
+    }
+
+    const pending = request.pendingBusyAssignment;
+    const helperId = String(pending.helperId || '').trim();
+    const helperName = String(pending.helperName || 'Your helper').trim();
+    const helperRef = db.collection('users').doc(helperId);
+    const activeRequestId = String(pending.activeRequestId || '').trim();
+    const [helperSnap, activeSnap] = await Promise.all([
+      transaction.get(helperRef),
+      activeRequestId ? transaction.get(db.collection('serviceRequests').doc(activeRequestId)) : Promise.resolve(null),
+    ]);
+    const activeData = activeSnap?.exists ? activeSnap.data() || {} : null;
+    const activeStatus = String(activeData?.status || '').trim().toLowerCase();
+    const helperStillBusy = Boolean(
+      activeSnap?.exists
+      && String(activeData?.helperAssignment?.helperId || '').trim() === helperId
+      && HELPER_BUSY_REQUEST_STATUSES.has(activeStatus),
+    );
+    const now = Date.now();
+
+    if (normalizedChoice === 'confirm') {
+      const baseAssignment = {
+        helperId,
+        helperName,
+        helperEmail: pending.helperEmail || '',
+        helperPhone: pending.helperPhone || '',
+        helperPhoto: pending.helperPhoto || '',
+        categoryId: request.categoryId || '',
+        serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
+      };
+      if (helperStillBusy) {
+        transaction.update(requestRef, {
+          status: SERVICE_REQUEST_STATUS.HELPER_QUEUED,
+          statusDetail: `${helperName} is finishing their current job and will head to you next.`,
+          helperAssignment: {
+            ...baseAssignment,
+            queued: true,
+            confirmedByCustomerAt: new Date(now).toISOString(),
+          },
+          queuedFromActiveRequestId: activeRequestId,
+          queuedEtaSummary: pending.etaSummary || null,
+          pendingBusyAssignment: null,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        transaction.set(helperRef, {
+          queuedServiceRequestId: safeRequestId,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        return { code: 'confirmed_queued', helperId, helperName, request };
+      }
+
+      transaction.update(requestRef, {
+        status: SERVICE_REQUEST_STATUS.ACCEPTED,
+        statusDetail: 'Helper finished previous job and is preparing to travel.',
+        helperAssignment: {
+          ...baseAssignment,
+          acceptedAt: new Date(now).toISOString(),
+        },
+        pendingBusyAssignment: null,
+        offerType: null,
+        offerBusyActiveRequestId: null,
+        queuedEtaSummary: pending.etaSummary || null,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      const helperUpdate = {
+        activeServiceRequestId: safeRequestId,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+      if (String(helperSnap.data()?.queuedServiceRequestId || '').trim() === safeRequestId) {
+        helperUpdate.queuedServiceRequestId = admin.firestore.FieldValue.delete();
+      }
+      transaction.set(helperRef, helperUpdate, { merge: true });
+      return { code: 'confirmed_accepted', helperId, helperName, request };
+    }
+
+    const rejectedBusyIds = [...new Set([
+      ...(Array.isArray(request.customerRejectedBusyHelperIds) ? request.customerRejectedBusyHelperIds : []),
+      helperId,
+    ].map((id) => String(id || '').trim()).filter(Boolean))];
+    const excludedIds = [...new Set([
+      ...(Array.isArray(request.offerCycleExcludedHelperIds) ? request.offerCycleExcludedHelperIds : []),
+      helperId,
+    ].map((id) => String(id || '').trim()).filter(Boolean))];
+    const nextQueue = (Array.isArray(request.helperQueue) ? request.helperQueue : []).filter((id) => String(id || '').trim() !== helperId);
+    const nextBusyQueue = (Array.isArray(request.busyHelperQueue) ? request.busyHelperQueue : []).filter((id) => String(id || '').trim() !== helperId);
+
+    transaction.update(requestRef, {
+      status: SERVICE_REQUEST_STATUS.MATCHING,
+      statusDetail: 'Customer chose to continue searching for another helper.',
+      pendingBusyAssignment: null,
+      offerType: null,
+      offerBusyActiveRequestId: null,
+      helperQueue: nextQueue,
+      busyHelperQueue: nextBusyQueue,
+      customerRejectedBusyHelperIds: rejectedBusyIds,
+      offerCycleExcludedHelperIds: excludedIds,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    if (String(helperSnap.data()?.queuedServiceRequestId || '').trim() === safeRequestId) {
+      transaction.set(helperRef, {
+        queuedServiceRequestId: admin.firestore.FieldValue.delete(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+    }
+    return { code: 'searching_continued', helperId, helperName, request };
+  });
+
+  if (conversationRef) {
+    await conversationRef.set({
+      pendingBusyHelperChoice: admin.firestore.FieldValue.delete(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true }).catch(() => null);
+  }
+
+  if (outcome.helperId) {
+    const serviceName = String(outcome.request?.serviceSummary || outcome.request?.subject || 'Service request').trim();
+    if (outcome.code === 'confirmed_queued') {
+      await Promise.all([
+        createUserNotificationOnce({
+          notificationId: `busy_choice_confirm_${safeRequestId}_${outcome.helperId}`,
+          userId: outcome.helperId,
+          title: 'Next job confirmed by customer',
+          message: `The customer agreed to wait for your ${serviceName} job after your current job.`,
+          type: 'offer_accepted',
+          requestId: safeRequestId,
+          targetPath: `/requests/${safeRequestId}`,
+        }).catch(() => null),
+        sendHelperDirectWhatsAppMessage({
+          helperId: outcome.helperId,
+          text: `✅ The customer confirmed they will wait for you on *${serviceName}*. Finish your current job first — we will activate this job automatically right after.\n${getWhatsAppHelperWebBaseUrl()}/requests/${safeRequestId}`,
+        }).catch(() => null),
+      ]);
+    } else if (outcome.code === 'confirmed_accepted') {
+      await Promise.all([
+        createUserNotificationOnce({
+          notificationId: `busy_choice_accepted_${safeRequestId}_${outcome.helperId}`,
+          userId: outcome.helperId,
+          title: 'Queued job is now active',
+          message: `Your ${serviceName} job is now active. Open it in Uncedo Helpers to head to the customer.`,
+          type: 'offer_accepted',
+          requestId: safeRequestId,
+          targetPath: `/requests/${safeRequestId}`,
+        }).catch(() => null),
+        sendHelperDirectWhatsAppMessage({
+          helperId: outcome.helperId,
+          text: `🚗 The customer confirmed and your *${serviceName}* job is now active! Open it in Helpers Web:\n${getWhatsAppHelperWebBaseUrl()}/requests/${safeRequestId}`,
+        }).catch(() => null),
+      ]);
+    } else if (outcome.code === 'searching_continued') {
+      await Promise.all([
+        createUserNotificationOnce({
+          notificationId: `busy_choice_declined_${safeRequestId}_${outcome.helperId}`,
+          userId: outcome.helperId,
+          title: 'Customer kept searching',
+          message: `The customer for ${serviceName} chose to keep searching for an immediately available helper.`,
+          type: 'matching_update',
+          requestId: safeRequestId,
+          targetPath: `/jobs`,
+        }).catch(() => null),
+        sendHelperDirectWhatsAppMessage({
+          helperId: outcome.helperId,
+          text: `ℹ️ The customer for *${serviceName}* chose to keep searching for another helper right now.`,
+        }).catch(() => null),
+      ]);
+    }
+  }
+
+  return outcome;
+}
+
+exports.scheduleBusyHelperConfirmationExpiryOnWrite = onDocumentWritten({
+  document: 'serviceRequests/{requestId}',
+  ...HALF_CPU_OPTIONS,
+}, async (event) => {
+  const before = event.data.before.exists ? event.data.before.data() : null;
+  const after = event.data.after.exists ? event.data.after.data() : null;
+  if (!after || String(after.status || '').toLowerCase() !== SERVICE_REQUEST_STATUS.BUSY_HELPER_CONFIRMATION) return;
+  if (before && String(before.status || '').toLowerCase() === SERVICE_REQUEST_STATUS.BUSY_HELPER_CONFIRMATION) return;
+
+  const requestId = String(event.params.requestId || '').trim();
+  const helperId = String(after.pendingBusyAssignment?.helperId || '').trim();
+  const expiresAtMs = Number(after.pendingBusyAssignment?.confirmationExpiresAtMs || (Date.now() + BUSY_CONFIRMATION_TIMEOUT_MS));
+  if (!requestId || !helperId) return;
+
+  const delaySeconds = Math.max(5, Math.ceil((expiresAtMs - Date.now()) / 1000) + 1);
+  const taskId = `busy-confirm-expiry_${createHash('sha256').update(`${requestId}:${helperId}:${expiresAtMs}`).digest('hex').slice(0, 32)}`;
+  try {
+    await getFunctions().taskQueue('expireBusyHelperConfirmation').enqueue({
+      requestId,
+      helperId,
+      expiresAtMs,
+    }, {
+      id: taskId,
+      scheduleDelaySeconds: delaySeconds,
+      dispatchDeadlineSeconds: 30,
+    });
+  } catch (error) {
+    if (!String(error?.code || '').includes('task-already-exists')) {
+      logger.warn('busy_confirmation_expiry_schedule_failed', { requestId, error: error?.message });
+    }
+  }
+});
+
+exports.expireBusyHelperConfirmation = onTaskDispatched({
+  retryConfig: { maxAttempts: 3, minBackoffSeconds: 5, maxBackoffSeconds: 60 },
+  rateLimits: { maxConcurrentDispatches: 30, maxDispatchesPerSecond: 10 },
+  ...HALF_CPU_OPTIONS,
+}, async (event) => {
+  const requestId = String(event.data?.requestId || '').trim();
+  const helperId = String(event.data?.helperId || '').trim();
+  if (!requestId || !helperId) return;
+
+  const result = await handleCustomerBusyHelperChoice({
+    requestId,
+    choice: 'search',
+  });
+  logger.info('busy_helper_confirmation_expiry_processed', { requestId, helperId, code: result.code });
+});
+
 async function sendWhatsAppCustomerRequestExpiredNotification({ requestId, request }) {
   if (!whatsappMessagingEnabled()) {
     logger.info('whatsapp_expiry_notification_skipped_disabled', { requestId });
@@ -9594,47 +11287,9 @@ async function sendWhatsAppCustomerRequestExpiredNotification({ requestId, reque
     return;
   }
 
-  let recipientPhone = '';
-  let lastInboundAtMs = Date.now();
-
-  if (request.originIdentityId) {
-    const identSnap = await db.collection('whatsappIdentities').doc(request.originIdentityId).get().catch(() => null);
-    if (identSnap && identSnap.exists) {
-      const data = identSnap.data() || {};
-      recipientPhone = data.phoneNumber || data.waId || '';
-      if (data.lastInboundAtMs) lastInboundAtMs = Number(data.lastInboundAtMs);
-    }
-  }
-
-  if (!recipientPhone) {
-    recipientPhone = request.customerWhatsappNumber || request.customerPhone || request.requestPayload?.customerPhone || '';
-  }
-
-  if (!recipientPhone && request.customerId) {
-    const byUidSnap = await db.collection('whatsappIdentities').where('linkedFirebaseUid', '==', request.customerId).limit(1).get().catch(() => null);
-    if (byUidSnap && !byUidSnap.empty) {
-      const data = byUidSnap.docs[0].data() || {};
-      recipientPhone = data.phoneNumber || data.waId || '';
-      if (data.lastInboundAtMs) lastInboundAtMs = Number(data.lastInboundAtMs);
-    } else {
-      const byGuestSnap = await db.collection('whatsappIdentities').where('guestPrincipalId', '==', request.customerId).limit(1).get().catch(() => null);
-      if (byGuestSnap && !byGuestSnap.empty) {
-        const data = byGuestSnap.docs[0].data() || {};
-        recipientPhone = data.phoneNumber || data.waId || '';
-        if (data.lastInboundAtMs) lastInboundAtMs = Number(data.lastInboundAtMs);
-      }
-    }
-  }
-
-  if (!recipientPhone && request.customerId) {
-    const userSnap = await db.collection('users').doc(request.customerId).get().catch(() => null);
-    if (userSnap && userSnap.exists) {
-      const user = userSnap.data() || {};
-      recipientPhone = user.whatsappPhoneNumber || user.phoneNumber || '';
-    }
-  }
-
-  const cleanRecipient = String(recipientPhone || '').replace(/[^0-9]/g, '');
+  const target = await resolveCustomerWhatsAppTarget(request);
+  const cleanRecipient = target.cleanRecipient;
+  const lastInboundAtMs = target.lastInboundAtMs;
   if (!cleanRecipient || cleanRecipient.length < 8 || cleanRecipient.length > 15) {
     logger.warn('whatsapp_expiry_notification_no_recipient', { requestId, customerId: request.customerId });
     return;
@@ -9703,13 +11358,15 @@ exports.scheduleServiceRequestExpiryOnNoHelperWrite = onDocumentWritten({
   if (!requestId) return;
 
   const now = Date.now();
-  const delaySeconds = 300; // 5 minutes
-  const taskId = `no-helper-expiry_${createHash('sha256').update(`${requestId}:${now}`).digest('hex').slice(0, 32)}`;
+  const expiresAtMs = Number(after.noHelperWindowExpiresAtMs || 0) || (now + NO_HELPER_WINDOW_MS);
+  const delaySeconds = Math.max(0, Math.ceil((expiresAtMs - now) / 1000) + 1);
+  const taskId = `no-helper-expiry_${createHash('sha256').update(`${requestId}:${expiresAtMs}`).digest('hex').slice(0, 32)}`;
 
   try {
     await getFunctions().taskQueue('expireServiceRequestOnNoHelperAvailable').enqueue({
       requestId,
       scheduledAtMs: now,
+      expiresAtMs,
     }, {
       id: taskId,
       scheduleDelaySeconds: delaySeconds,
@@ -9719,6 +11376,7 @@ exports.scheduleServiceRequestExpiryOnNoHelperWrite = onDocumentWritten({
     logger.info('service_request_no_helper_expiry_task_scheduled', {
       requestId,
       delaySeconds,
+      expiresAtMs,
       taskId,
     });
   } catch (error) {
@@ -9768,6 +11426,11 @@ exports.expireServiceRequestOnNoHelperAvailable = onTaskDispatched({
     }
 
     const now = Date.now();
+    const expectedWindowExpiresAtMs = Number(input.expiresAtMs || request.noHelperWindowExpiresAtMs || 0);
+    if (expectedWindowExpiresAtMs > now + 2000) {
+      logger.info('service_request_no_helper_expiry_not_due_yet', { requestId, expectedWindowExpiresAtMs, now });
+      return;
+    }
     transaction.update(requestRef, {
       status: SERVICE_REQUEST_STATUS.EXPIRED,
       statusDetail: 'Service request expired. No helpers were available within 5 minutes.',
@@ -9777,6 +11440,8 @@ exports.expireServiceRequestOnNoHelperAvailable = onTaskDispatched({
       currentOfferHelperId: null,
       offerToken: null,
       offerExpiresAt: null,
+      offerType: null,
+      offerBusyActiveRequestId: null,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
@@ -9902,7 +11567,11 @@ exports.notifyWhatsAppHelperOfferOnServiceRequestWrite = onDocumentWritten({
 
   const bodySummary = String(after.serviceSummary || after.subject || 'Uncedo service request').trim().slice(0, 500);
   const indicativeTotal = toRand(after.pricingSnapshot?.total ?? after.pricingSnapshot?.finalAmount ?? 0);
-  const requestWebUrl = `https://helpers.bakayise.com/requests/${requestId}`;
+  const requestWebUrl = `${getWhatsAppHelperWebBaseUrl()}/requests/${requestId}`;
+  const isBusyFallbackOffer = String(after.offerType || '').trim().toLowerCase() === 'busy_helper_fallback';
+  const interactiveOfferText = isBusyFallbackOffer
+    ? `🔔 Next Uncedo Job Offer (After Your Current Job)\n\n• Service: ${bodySummary}\n• Estimate: ${formatMoney(indicativeTotal)}\n\nAccept to queue this job after you finish your current request, or open Helpers Web:\n${requestWebUrl}`
+    : `🔔 New Uncedo Service Offer\n\n• Service: ${bodySummary}\n• Estimate: ${formatMoney(indicativeTotal)}\n\nRespond here or open in Helpers Web:\n${requestWebUrl}`;
   try {
     const client = createMetaWhatsAppClient({
       accessToken: secrets.accessToken,
@@ -9912,7 +11581,7 @@ exports.notifyWhatsAppHelperOfferOnServiceRequestWrite = onDocumentWritten({
       requestTimeoutMs: process.env.WHATSAPP_META_SEND_TIMEOUT_MS,
       isRecipientAllowed: (recipient) => isWhatsAppRecipientAllowed(recipient, process.env),
     });
-    const delivery = hasApprovedTemplate
+    const delivery = hasApprovedTemplate && !isBusyFallbackOffer
       ? await client.sendTemplate({
           to: recipient,
           name: templateName,
@@ -9930,7 +11599,7 @@ exports.notifyWhatsAppHelperOfferOnServiceRequestWrite = onDocumentWritten({
           interactive: {
             type: 'button',
             body: {
-              text: `🔔 New Uncedo Service Offer\n\n• Service: ${bodySummary}\n• Estimate: ${formatMoney(indicativeTotal)}\n\nRespond here or open in Helpers Web:\n${requestWebUrl}`,
+              text: interactiveOfferText,
             },
             action: {
               buttons: [
@@ -9954,7 +11623,7 @@ exports.notifyWhatsAppHelperOfferOnServiceRequestWrite = onDocumentWritten({
   }
 });
 
-exports.respondToServiceRequestOffer = onRequest({ cors: true }, async (req, res) => {
+exports.respondToServiceRequestOffer = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 60 }, async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, message: 'Method not allowed.' });
     return;
@@ -9972,6 +11641,13 @@ exports.respondToServiceRequestOffer = onRequest({ cors: true }, async (req, res
   const offerRevision = normalizeRevision(req.body?.offerRevision);
   const action = String(req.body?.action || '').trim().toLowerCase();
   if (!requestId || !offerToken || !offerRevision || !['accept', 'decline'].includes(action)) {
+    logger.warn('service_request_offer_response_invalid_payload', {
+      uid: decoded.uid,
+      requestId: requestId || null,
+      hasOfferToken: Boolean(offerToken),
+      offerRevision,
+      action: action || null,
+    });
     res.status(400).json({ success: false, message: 'A valid offer action is required.' });
     return;
   }
@@ -9984,6 +11660,13 @@ exports.respondToServiceRequestOffer = onRequest({ cors: true }, async (req, res
     });
 
     if (operation.error) {
+      logger.warn('service_request_offer_response_rejected', {
+        requestId,
+        helperId,
+        action,
+        offerRevision,
+        error: operation.error,
+      });
       const status = operation.error === 'request-not-found' ? 404 : operation.error === 'helper-account-required' ? 403 : 409;
       res.status(status).json({ success: false, message: operation.error === 'request-not-found'
         ? 'Service request not found.'
@@ -9991,9 +11674,11 @@ exports.respondToServiceRequestOffer = onRequest({ cors: true }, async (req, res
           ? 'A helper account is required to respond to this offer.'
           : operation.error === 'helper-already-has-active-request'
             ? 'You already have an active service request.'
-            : operation.error === 'offer-expired'
-              ? 'This helper offer has expired.'
-              : 'This helper offer is no longer current.' });
+            : operation.error === 'helper-already-has-queued-request'
+              ? 'You already have a queued next request waiting.'
+              : operation.error === 'offer-expired'
+                ? 'This helper offer has expired.'
+                : 'This helper offer is no longer current.' });
       return;
     }
 
@@ -10008,14 +11693,31 @@ exports.respondToServiceRequestOffer = onRequest({ cors: true }, async (req, res
         offeredAtMs: operation.offerStartedAtMs,
         closedAtMs: Date.now(),
         responseMinutes: Math.max(0, Number(((Date.now() - operation.offerStartedAtMs) / 60000).toFixed(2))),
-        sourceStatus: action === 'accept' ? 'accepted' : 'matching',
+        sourceStatus: action === 'accept' ? (operation.busyFallbackAccepted ? 'busy_helper_confirmation' : 'accepted') : 'matching',
       }).catch((error) => logger.warn('helper_offer_response_stats_failed', { requestId, helperId, error: error.message }));
+    }
+
+    let etaSummary = null;
+    if (operation.didApply && action === 'accept' && operation.busyFallbackAccepted) {
+      const snapAfter = await requestRef.get();
+      etaSummary = await finalizeBusyFallbackAcceptanceEffects({
+        requestId,
+        request: snapAfter.exists ? snapAfter.data() || {} : {},
+        helperId,
+        helperName: operation.helperName || 'Your helper',
+        activeRequestId: operation.activeRequestId || '',
+      }).catch((error) => {
+        logger.warn('busy_fallback_acceptance_effects_failed', { requestId, helperId, error: error?.message });
+        return null;
+      });
     }
 
     const refreshed = await requestRef.get();
     res.status(200).json({
       success: true,
       idempotent: Boolean(operation.idempotent),
+      busyFallbackAccepted: Boolean(operation.busyFallbackAccepted),
+      etaSummary,
       request: refreshed.exists ? { id: refreshed.id, ...refreshed.data() } : null,
     });
   } catch (error) {
@@ -10029,7 +11731,7 @@ exports.respondToServiceRequestOffer = onRequest({ cors: true }, async (req, res
   }
 });
 
-exports.updateHelperServiceRequest = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
+exports.updateHelperServiceRequest = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 60 }, async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, message: 'Method not allowed.' });
     return;
@@ -10045,6 +11747,7 @@ exports.updateHelperServiceRequest = onRequest({ cors: true, ...HALF_CPU_OPTIONS
   const action = String(req.body?.action || 'transition').trim().toLowerCase();
   const nextStatus = String(req.body?.status || '').trim().toLowerCase();
   const reason = String(req.body?.reason || '').trim().slice(0, 500);
+  const suppliedArrivalPin = String(req.body?.arrivalPin ?? req.body?.pin ?? '').replace(/\D+/g, '').trim();
   if (!requestId || !['transition', 'cancel'].includes(action) || (action === 'transition' && !nextStatus)) {
     res.status(400).json({ success: false, message: 'A valid service request action is required.' });
     return;
@@ -10066,9 +11769,31 @@ exports.updateHelperServiceRequest = onRequest({ cors: true, ...HALF_CPU_OPTIONS
         return { error: 'helper-account-required', status: 403 };
       }
       const request = requestSnap.data() || {};
-      const helper = helperSnap.data() || {};
       if (String(request?.helperAssignment?.helperId || '') !== helperId) {
         return { error: 'not-assigned-helper', status: 403 };
+      }
+      const financialOperation = financialOperationSnap.exists ? financialOperationSnap.data() || {} : null;
+      const currentStatusLower = String(request.status || '').toLowerCase();
+      if (action === 'cancel'
+        && currentStatusLower === SERVICE_REQUEST_STATUS.CANCELED
+        && financialOperation?.operationType === 'helper_cancellation') {
+        transaction.set(helperRef, {
+          activeServiceRequestId: null,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        transaction.set(db.collection('helperDispatchIndex').doc(helperId), {
+          activeServiceRequestId: null,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        return {
+          changed: false,
+          alreadyCanceled: true,
+          canceledFromStatus: currentStatusLower,
+          customerId: String(request.customerId || ''),
+          subject: String(request.serviceSummary || request.subject || 'Service request'),
+          helperName: String(request.helperAssignment?.helperName || helperSnap.data()?.fullName || 'Your helper'),
+          canceledNowMs: Number(request.canceledAtMs || Date.now()),
+        };
       }
       if (financialOperationSnap.exists) {
         return { error: 'financial-operation-already-claimed', status: 409 };
@@ -10076,18 +11801,29 @@ exports.updateHelperServiceRequest = onRequest({ cors: true, ...HALF_CPU_OPTIONS
 
       if (action === 'cancel') {
         const cancelableStatuses = new Set(['accepted', 'driving', 'en_route', 'buying_resources', 'arrived', 'work_started']);
-        if (!cancelableStatuses.has(String(request.status || '').toLowerCase())) {
+        if (!cancelableStatuses.has(currentStatusLower)) {
           return { error: 'request-not-cancelable', status: 409 };
         }
+        const cancelNowMs = Date.now();
         transaction.update(requestRef, {
           status: SERVICE_REQUEST_STATUS.CANCELED,
           statusDetail: 'Helper canceled the session.',
           canceledBy: 'helper',
           canceledReason: reason,
           canceledAt: admin.firestore.FieldValue.serverTimestamp(),
+          canceledAtMs: cancelNowMs,
+          endedAt: cancelNowMs,
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           financialOperationId: serviceFinancialOperationId(requestId),
         });
+        if (['arrived', 'work_started'].includes(currentStatusLower)) {
+          transaction.set(requestRef.collection('private').doc('arrivalPin'), {
+            pin: admin.firestore.FieldValue.delete(),
+            invalidatedAtMs: cancelNowMs,
+            invalidatedReason: 'helper_canceled',
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+        }
         transaction.create(financialOperationRef, {
           operationId: serviceFinancialOperationId(requestId),
           requestId,
@@ -10097,14 +11833,27 @@ exports.updateHelperServiceRequest = onRequest({ cors: true, ...HALF_CPU_OPTIONS
           paymentStatus: 'not_applicable',
           paymentSettled: true,
           settlementApplied: true,
-          createdAtMs: Date.now(),
-          updatedAtMs: Date.now(),
+          canceledFromStatus: currentStatusLower,
+          createdAtMs: cancelNowMs,
+          updatedAtMs: cancelNowMs,
         });
         transaction.set(helperRef, {
           activeServiceRequestId: null,
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         }, { merge: true });
-        return { changed: true };
+        transaction.set(db.collection('helperDispatchIndex').doc(helperId), {
+          activeServiceRequestId: null,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        return {
+          changed: true,
+          didCancel: true,
+          canceledFromStatus: currentStatusLower,
+          customerId: String(request.customerId || ''),
+          subject: String(request.serviceSummary || request.subject || 'Service request'),
+          helperName: String(request.helperAssignment?.helperName || helperSnap.data()?.fullName || 'Your helper'),
+          canceledNowMs: cancelNowMs,
+        };
       }
 
       if (nextStatus === 'completed') {
@@ -10117,7 +11866,7 @@ exports.updateHelperServiceRequest = onRequest({ cors: true, ...HALF_CPU_OPTIONS
         en_route: 'Helper is on the way.',
         driving: 'Helper is driving to your location.',
         buying_resources: 'Helper stopped to buy resources before arrival.',
-        arrived: 'Helper has arrived.',
+        arrived: 'Helper has arrived. Customer PIN verification required to start work.',
         work_started: 'The job is now in progress.',
         completed: 'Service completed.',
       };
@@ -10126,7 +11875,52 @@ exports.updateHelperServiceRequest = onRequest({ cors: true, ...HALF_CPU_OPTIONS
         statusDetail: statusDetails[nextStatus],
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       };
-      if (nextStatus === 'arrived') updates.arrivedAt = admin.firestore.FieldValue.serverTimestamp();
+      if (nextStatus === 'arrived') {
+        const arrivalPin = String(randomInt(100000, 1000000));
+        const pinHash = createHash('sha256').update(`${requestId}:${arrivalPin}`).digest('hex');
+        const pinNowMs = Date.now();
+        updates.arrivedAt = admin.firestore.FieldValue.serverTimestamp();
+        updates.arrivalVerification = {
+          required: true,
+          pinLength: 6,
+          pinHash,
+          generatedAtMs: pinNowMs,
+          verified: false,
+          verifiedAtMs: null,
+          attempts: 0,
+        };
+        transaction.set(requestRef.collection('private').doc('arrivalPin'), {
+          pin: arrivalPin,
+          pinHash,
+          requestId,
+          helperId,
+          customerId: String(request.customerId || ''),
+          generatedAtMs: pinNowMs,
+          verified: false,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+      if (decision.currentStatus === 'arrived' && nextStatus === 'work_started' && request.arrivalVerification?.required === true) {
+        if (!/^\d{6}$/.test(suppliedArrivalPin)) {
+          return { error: 'arrival-pin-required', status: 400 };
+        }
+        const expectedHashHex = String(request.arrivalVerification?.pinHash || '').trim();
+        const actualHashHex = createHash('sha256').update(`${requestId}:${suppliedArrivalPin}`).digest('hex');
+        const expectedBuf = expectedHashHex ? Buffer.from(expectedHashHex, 'hex') : Buffer.alloc(0);
+        const actualBuf = Buffer.from(actualHashHex, 'hex');
+        if (!expectedHashHex || expectedBuf.length !== actualBuf.length || !timingSafeEqual(expectedBuf, actualBuf)) {
+          return { error: 'invalid-arrival-pin', status: 403, incrementPinAttempt: true };
+        }
+        const verifiedNowMs = Date.now();
+        updates['arrivalVerification.verified'] = true;
+        updates['arrivalVerification.verifiedAtMs'] = verifiedNowMs;
+        transaction.set(requestRef.collection('private').doc('arrivalPin'), {
+          pin: admin.firestore.FieldValue.delete(),
+          verified: true,
+          verifiedAtMs: verifiedNowMs,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+      }
       if (nextStatus === 'work_started') updates.workStartedAt = admin.firestore.FieldValue.serverTimestamp();
       transaction.update(requestRef, updates);
 
@@ -10140,6 +11934,12 @@ exports.updateHelperServiceRequest = onRequest({ cors: true, ...HALF_CPU_OPTIONS
     });
 
     if (result.error) {
+      if (result.incrementPinAttempt) {
+        await requestRef.update({
+          'arrivalVerification.attempts': admin.firestore.FieldValue.increment(1),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }).catch(() => null);
+      }
       const messages = {
         'request-not-found': 'Service request not found.',
         'helper-account-required': 'A helper account is required for this action.',
@@ -10149,9 +11949,42 @@ exports.updateHelperServiceRequest = onRequest({ cors: true, ...HALF_CPU_OPTIONS
         'billing-finalization-required': 'Complete this request through the billing finalization flow.',
         'invalid-current-status': 'This service request is not active.',
         'invalid-status-transition': 'That service request status change is not allowed.',
+        'arrival-pin-required': 'Enter the 6-digit numbers-only PIN from the customer to start the job.',
+        'invalid-arrival-pin': 'Incorrect 6-digit arrival PIN. Please ask the customer to verify the PIN sent to their WhatsApp.',
       };
-      res.status(result.status).json({ success: false, message: messages[result.error] || 'This service request action is not allowed.' });
+      res.status(result.status).json({
+        success: false,
+        code: result.error,
+        message: messages[result.error] || 'This service request action is not allowed.',
+      });
       return;
+    }
+    if (result.didCancel || result.alreadyCanceled) {
+      const closedAtMs = Number(result.canceledNowMs || Date.now());
+      await Promise.all([
+        admin.database().ref(`liveTracking/serviceRequests/${requestId}`).update({
+          status: SERVICE_REQUEST_STATUS.CANCELED,
+          closedReason: 'helper_canceled',
+          closedAtMs,
+          updatedAtMs: closedAtMs,
+        }).catch(() => null),
+        result.customerId
+          ? createUserNotificationOnce({
+            notificationId: `helper_cancel_${requestId}_${helperId}`,
+            userId: result.customerId,
+            title: 'Service canceled by helper',
+            message: `${result.helperName || 'Your helper'} canceled the ${result.subject || 'service'} session.${reason ? ` Reason: ${reason}` : ''}`,
+            type: 'service_canceled',
+            requestId,
+            targetPath: `/customer/requests/${requestId}`,
+            metadata: { canceledBy: 'helper', canceledFromStatus: result.canceledFromStatus || '' },
+          }).catch(() => null)
+          : Promise.resolve(),
+        syncHelperDispatchIndexById(helperId).catch(() => null),
+        computeHelperDerivedStats(helperId).catch(() => null),
+      ]);
+      await promoteNextQueuedServiceRequestForHelper({ helperId, closedRequestId: requestId })
+        .catch((err) => logger.warn('promote_queued_after_helper_cancel_failed', { helperId, requestId, error: err?.message }));
     }
     const refreshed = await requestRef.get();
     res.status(200).json({ success: true, request: refreshed.exists ? { id: refreshed.id, ...refreshed.data() } : null });
@@ -10166,8 +11999,130 @@ exports.updateHelperServiceRequest = onRequest({ cors: true, ...HALF_CPU_OPTIONS
   }
 });
 
+async function promoteNextQueuedServiceRequestForHelper({ helperId, closedRequestId = '' } = {}) {
+  const safeHelperId = String(helperId || '').trim();
+  if (!safeHelperId) return { promoted: false };
+  const helperRef = db.collection('users').doc(safeHelperId);
+  const now = Date.now();
+
+  const outcome = await db.runTransaction(async (transaction) => {
+    const helperSnap = await transaction.get(helperRef);
+    if (!helperSnap.exists) return { promoted: false };
+    const helper = helperSnap.data() || {};
+    const isOnline = String(helper.onlineStatus || '').trim().toLowerCase() === 'online';
+    const currentActiveId = String(helper.activeServiceRequestId || '').trim();
+    if (currentActiveId && currentActiveId !== closedRequestId) {
+      const otherSnap = await transaction.get(db.collection('serviceRequests').doc(currentActiveId));
+      const otherStatus = String(otherSnap.data()?.status || '').trim().toLowerCase();
+      if (otherSnap.exists && HELPER_BUSY_REQUEST_STATUSES.has(otherStatus)) {
+        return { promoted: false, stillBusy: true };
+      }
+    }
+
+    const queuedRequestId = String(helper.queuedServiceRequestId || '').trim();
+    if (!queuedRequestId) {
+      return { promoted: false, isOnline };
+    }
+
+    const queuedRef = db.collection('serviceRequests').doc(queuedRequestId);
+    const queuedSnap = await transaction.get(queuedRef);
+    if (!queuedSnap.exists) {
+      transaction.set(helperRef, {
+        queuedServiceRequestId: admin.firestore.FieldValue.delete(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      return { promoted: false, isOnline };
+    }
+
+    const queued = queuedSnap.data() || {};
+    const queuedStatus = String(queued.status || '').trim().toLowerCase();
+    if (queuedStatus === SERVICE_REQUEST_STATUS.BUSY_HELPER_CONFIRMATION) {
+      return { promoted: false, waitingCustomerConfirmation: true, isOnline };
+    }
+
+    if (queuedStatus !== SERVICE_REQUEST_STATUS.HELPER_QUEUED) {
+      transaction.set(helperRef, {
+        queuedServiceRequestId: admin.firestore.FieldValue.delete(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      return { promoted: false, isOnline };
+    }
+
+    const helperName = String(
+      queued.helperAssignment?.helperName
+        || helper.fullName
+        || helper.displayName
+        || 'Your helper',
+    ).trim();
+    transaction.update(queuedRef, {
+      status: SERVICE_REQUEST_STATUS.ACCEPTED,
+      statusDetail: `${helperName} finished their previous job and is now preparing to travel.`,
+      offerType: null,
+      offerBusyActiveRequestId: null,
+      pendingBusyAssignment: null,
+      helperAssignment: {
+        ...(queued.helperAssignment || {}),
+        helperId: safeHelperId,
+        helperName,
+        queued: false,
+        acceptedAt: new Date(now).toISOString(),
+        promotedAtMs: now,
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    transaction.set(helperRef, {
+      activeServiceRequestId: queuedRequestId,
+      queuedServiceRequestId: admin.firestore.FieldValue.delete(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    transaction.set(db.collection('helperDispatchIndex').doc(safeHelperId), {
+      activeServiceRequestId: queuedRequestId,
+      available: false,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    return {
+      promoted: true,
+      promotedRequestId: queuedRequestId,
+      queuedRequest: queued,
+      helperName,
+    };
+  });
+
+  if (outcome.promoted) {
+    const serviceName = String(outcome.queuedRequest?.serviceSummary || outcome.queuedRequest?.subject || 'your queued job').trim();
+    const requestUrl = `${getWhatsAppHelperWebBaseUrl()}/requests/${outcome.promotedRequestId}`;
+    await Promise.all([
+      createUserNotificationOnce({
+        notificationId: `queued_promoted_${outcome.promotedRequestId}_${safeHelperId}`,
+        userId: safeHelperId,
+        title: 'Queued job is now active',
+        message: `Your previous job closed. ${serviceName} is now your active job.`,
+        type: 'job_activated',
+        requestId: outcome.promotedRequestId,
+        targetPath: `/requests/${outcome.promotedRequestId}`,
+      }).catch(() => null),
+      sendHelperDirectWhatsAppMessage({
+        helperId: safeHelperId,
+        text: `🚗 Your previous job is finished, so your queued job (*${serviceName}*) is now active!\n\nOpen it in Helpers Web:\n${requestUrl}`,
+      }).catch(() => null),
+    ]);
+    return outcome;
+  }
+
+  if (!outcome.waitingCustomerConfirmation && !outcome.stillBusy && outcome.isOnline) {
+    const refreshedHelper = await helperRef.get().catch(() => null);
+    if (refreshedHelper?.exists) {
+      await triggerPendingRequestsForAvailableHelper(safeHelperId, refreshedHelper.data() || {})
+        .catch((err) => logger.warn('trigger_pending_after_close_failed', { helperId: safeHelperId, error: err?.message }));
+    }
+  }
+  return outcome;
+}
+
 exports.syncServiceRequestAssignmentState = onDocumentWritten({
   document: 'serviceRequests/{requestId}',
+  maxInstances: 2,
   ...HALF_CPU_OPTIONS,
 }, async (event) => {
   const before = event.data.before.exists ? event.data.before.data() : null;
@@ -10263,18 +12218,41 @@ exports.syncServiceRequestAssignmentState = onDocumentWritten({
       afterStatus,
       traceLabel: 'functions:syncServiceRequestAssignmentState:clear',
     });
-    await db.collection('users').doc(helperId).set({
-      activeServiceRequestId: admin.firestore.FieldValue.delete(),
+    const closedAtMs = Date.now();
+    const closedReason = afterStatus === SERVICE_REQUEST_STATUS.CANCELED
+      ? (String(after.canceledBy || '').toLowerCase() === 'helper' ? 'helper_canceled' : 'customer_canceled')
+      : afterStatus;
+    const currentHelperSnap = await db.collection('users').doc(helperId).get().catch(() => null);
+    const helperUpdates = {
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
+    };
+    if (String(currentHelperSnap?.data()?.activeServiceRequestId || '').trim() === requestId) {
+      helperUpdates.activeServiceRequestId = admin.firestore.FieldValue.delete();
+    }
+    if (String(currentHelperSnap?.data()?.queuedServiceRequestId || '').trim() === requestId) {
+      helperUpdates.queuedServiceRequestId = admin.firestore.FieldValue.delete();
+    }
+    await Promise.all([
+      db.collection('users').doc(helperId).set(helperUpdates, { merge: true }),
+      admin.database().ref(`liveTracking/serviceRequests/${requestId}`).update({
+        status: afterStatus,
+        closedReason,
+        closedAtMs,
+        updatedAtMs: closedAtMs,
+      }).catch(() => null),
+    ]);
     await syncHelperDispatchIndexById(helperId);
+    if (String(beforeStatus || '') !== SERVICE_REQUEST_STATUS.HELPER_QUEUED) {
+      await promoteNextQueuedServiceRequestForHelper({ helperId, closedRequestId: requestId })
+        .catch((err) => logger.warn('promote_queued_on_assignment_clear_failed', { helperId, requestId, error: err?.message }));
+    }
   }
 
   if (afterStatus === SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE && beforeStatus !== SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE) {
     await createUserNotification({
       userId: after.customerId || before?.customerId || null,
-      title: 'No helpers available',
-      message: 'No helper is currently available for this request right now.',
+      title: 'Searching for available helper',
+      message: 'All nearby helpers are currently busy. We will keep listening for the next 5 minutes as helpers come online or finish jobs.',
       type: 'matching_update',
       requestId,
       targetPath: `/customer/requests/${requestId}`,
@@ -10528,7 +12506,7 @@ exports.notifyWhatsAppHelperServiceModeration = onDocumentCreated({
       }, { merge: true });
     }
   }
-  const onboardingUrl = 'https://helpers.bakayise.com/onboarding';
+  const onboardingUrl = `${getWhatsAppHelperWebBaseUrl()}/onboarding`;
   const text = action === 'approved'
     ? (readyAfterApproval
       ? `Update on your ${serviceName} service application: Uncedo has approved it, and your helper profile is now fully verified! Send “online” here when you are ready to start accepting requests.`
@@ -10690,7 +12668,7 @@ async function isAdminAuthorizationHeader(req) {
   }
 }
 
-exports.rebuildHelperDispatchIndex = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
+exports.rebuildHelperDispatchIndex = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS }, async (req, res) => {
   if (!(await isAdminAuthorizationHeader(req))) {
     res.status(403).json({ ok: false, error: 'Admin authorization required.' });
     return;
@@ -10716,7 +12694,7 @@ exports.rebuildHelperDispatchIndex = onRequest({ cors: true, ...HALF_CPU_OPTIONS
   res.json({ ok: true, ...counts });
 });
 
-exports.getCustomerNearbyHelpers = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 20 }, async (req, res) => {
+exports.getCustomerNearbyHelpers = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 20 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   const token = getBearerToken(req);
   const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
@@ -10765,22 +12743,22 @@ exports.getMyOfferedTutorSummary = onCall({ maxInstances: 5, ...HALF_CPU_OPTIONS
   return buildPublicTutorSummary(tutor, classRequest.tutorName);
 });
 
-exports.syncHelperQueueOnHelperOnline = onDocumentWritten('users/{uid}', async (event) => {
-  const before = event.data.before.exists ? event.data.before.data() : null;
-  const after = event.data.after.exists ? event.data.after.data() : null;
-  if (!after || !isHelperUserRecord(after)) return;
+async function triggerPendingRequestsForAvailableHelper(helperId, helperData = null) {
+  const safeHelperId = String(helperId || '').trim();
+  if (!safeHelperId) return;
+  const helper = helperData || (await db.collection('users').doc(safeHelperId).get()).data() || null;
+  if (!helper || !isHelperUserRecord(helper)) return;
+  if (String(helper.onlineStatus || '').toLowerCase() !== 'online') return;
+  if (String(helper.activeServiceRequestId || '').trim()) return;
+  if (String(helper.queuedServiceRequestId || '').trim()) return;
 
-  const wasOnline = String(before?.onlineStatus || '').toLowerCase() === 'online';
-  const isOnline = String(after.onlineStatus || '').toLowerCase() === 'online';
-  if (wasOnline || !isOnline) return;
-  await writeHelperDispatchIndexFromUser(event.params.uid, after);
-  if (String(after.activeServiceRequestId || '').trim()) return;
+  await writeHelperDispatchIndexFromUser(safeHelperId, helper);
 
   const requestsSnap = await db.collection('serviceRequests')
     .where('status', 'in', [
+      SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE,
       SERVICE_REQUEST_STATUS.MATCHING,
       SERVICE_REQUEST_STATUS.HELPER_FOUND,
-      SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE,
     ])
     .get();
 
@@ -10788,16 +12766,29 @@ exports.syncHelperQueueOnHelperOnline = onDocumentWritten('users/{uid}', async (
 
   const catalogEntries = await getLiveServiceCatalogEntries();
   const catalogIndex = buildActiveServiceCatalogIndex(catalogEntries);
+  const helperOfferings = await getHelperServiceOfferings(safeHelperId);
+  const now = Date.now();
+
   const candidateRequests = requestsSnap.docs
     .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }))
     .filter((request) => !request?.helperAssignment?.helperId)
-    .sort((left, right) => (
-      getRequestMatchingStartedAtMs(left) - getRequestMatchingStartedAtMs(right)
-      || normalizeMillis(left.createdAt) - normalizeMillis(right.createdAt)
-      || normalizeMillis(left.updatedAt) - normalizeMillis(right.updatedAt)
-    ));
+    .filter((request) => !(String(request.status || '').toLowerCase() === SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE && hasNoHelperWindowExpired(request, now)))
+    .sort((left, right) => {
+      const leftNoHelper = String(left.status || '').toLowerCase() === SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE ? 0 : 1;
+      const rightNoHelper = String(right.status || '').toLowerCase() === SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE ? 0 : 1;
+      return leftNoHelper - rightNoHelper
+        || getRequestMatchingStartedAtMs(left) - getRequestMatchingStartedAtMs(right)
+        || normalizeMillis(left.createdAt) - normalizeMillis(right.createdAt)
+        || normalizeMillis(left.updatedAt) - normalizeMillis(right.updatedAt);
+    });
 
   for (const request of candidateRequests) {
+    const declinedSet = new Set(getServiceRequestDeclinedHelperIds(request));
+    const rejectedBusySet = new Set(normalizeHelperIdList(request.customerRejectedBusyHelperIds));
+    if (declinedSet.has(safeHelperId) || rejectedBusySet.has(safeHelperId)) {
+      continue;
+    }
+
     const categoryId = String(request.categoryId || '').trim();
     const requestServiceIds = Array.isArray(request.serviceIds) ? request.serviceIds : [];
     const requestOptionId = String(
@@ -10806,33 +12797,38 @@ exports.syncHelperQueueOnHelperOnline = onDocumentWritten('users/{uid}', async (
         || request.pricingSnapshot?.selectedOptionId
         || '',
     ).trim();
-    const helperOfferings = await getHelperServiceOfferings(event.params.uid);
-    if (!isHelperDispatchEligible(after, categoryId, requestServiceIds, catalogIndex, helperOfferings, requestOptionId)) {
+    if (!isHelperDispatchEligible(helper, categoryId, requestServiceIds, catalogIndex, helperOfferings, requestOptionId)) {
       continue;
     }
 
     const candidateQueue = await getHelperQueueForServiceRequest(request);
-    if (!candidateQueue.includes(event.params.uid)) {
+    if (!candidateQueue.includes(safeHelperId)) {
       continue;
     }
 
+    const requestStatusLower = String(request.status || '').toLowerCase();
+    const isWakingFromNoHelper = requestStatusLower === SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE;
+
     logger.info('helper_online_queue_candidate_match', {
-      helperId: event.params.uid,
+      helperId: safeHelperId,
       requestId: request.id,
-      requestStatus: String(request.status || '').toLowerCase(),
+      requestStatus: requestStatusLower,
+      isWakingFromNoHelper,
       candidateQueueSize: Array.isArray(candidateQueue) ? candidateQueue.length : 0,
       preservedQueueSize: Array.isArray(request.helperQueue) ? request.helperQueue.length : 0,
       traceLabel: 'functions:syncHelperQueueOnHelperOnline:candidateMatch',
     });
 
     const requestRef = db.collection('serviceRequests').doc(request.id);
-    const currentQueue = mergePreservedHelperQueue({
-      preservedQueue: request.helperQueue,
-      rebuiltQueue: candidateQueue,
-    });
+    const currentQueue = isWakingFromNoHelper
+      ? [safeHelperId, ...candidateQueue.filter((id) => id !== safeHelperId)]
+      : mergePreservedHelperQueue({
+        preservedQueue: request.helperQueue,
+        rebuiltQueue: candidateQueue,
+      });
     const queueChanged = currentQueue.length !== (Array.isArray(request.helperQueue) ? request.helperQueue.length : 0)
-      || currentQueue.some((helperId, index) => helperId !== (Array.isArray(request.helperQueue) ? request.helperQueue[index] : undefined));
-    if (!queueChanged) {
+      || currentQueue.some((id, index) => id !== (Array.isArray(request.helperQueue) ? request.helperQueue[index] : undefined));
+    if (!isWakingFromNoHelper && !queueChanged) {
       continue;
     }
 
@@ -10848,11 +12844,17 @@ exports.syncHelperQueueOnHelperOnline = onDocumentWritten('users/{uid}', async (
       if (current?.helperAssignment?.helperId) {
         return;
       }
+      if (currentStatus === SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE && hasNoHelperWindowExpired(current, Date.now())) {
+        return;
+      }
 
-      const nextQueue = mergePreservedHelperQueue({
+      const mergedQueue = mergePreservedHelperQueue({
         preservedQueue: current.helperQueue,
         rebuiltQueue: candidateQueue,
       });
+      const nextQueue = currentStatus === SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE
+        ? [safeHelperId, ...mergedQueue.filter((id) => id !== safeHelperId)]
+        : mergedQueue;
       const nextUpdates = {
         helperQueue: nextQueue,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -10860,10 +12862,13 @@ exports.syncHelperQueueOnHelperOnline = onDocumentWritten('users/{uid}', async (
 
       if (currentStatus === SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE) {
         nextUpdates.status = SERVICE_REQUEST_STATUS.MATCHING;
-        nextUpdates.statusDetail = 'A helper became available. Matching the next helper.';
+        nextUpdates.statusDetail = 'A helper became available. Offering your request now.';
         nextUpdates.currentOfferHelperId = null;
         nextUpdates.offerExpiresAt = null;
         nextUpdates.offerToken = null;
+        nextUpdates.offerType = null;
+        nextUpdates.offerBusyActiveRequestId = null;
+        nextUpdates.offerCycleExcludedHelperIds = getServiceRequestExcludedHelperIds(current).filter((id) => id !== safeHelperId);
         nextUpdates.matchingStartedAtMs = getRequestMatchingStartedAtMs(current) || Date.now();
       } else if (currentStatus === SERVICE_REQUEST_STATUS.MATCHING && !current.currentOfferHelperId) {
         nextUpdates.matchingStartedAtMs = getRequestMatchingStartedAtMs(current) || Date.now();
@@ -10873,7 +12878,7 @@ exports.syncHelperQueueOnHelperOnline = onDocumentWritten('users/{uid}', async (
     });
 
     logger.info('helper_online_queue_request_updated', {
-      helperId: event.params.uid,
+      helperId: safeHelperId,
       requestId: request.id,
       nextStatus: String((request.status === SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE ? SERVICE_REQUEST_STATUS.MATCHING : request.status) || '').toLowerCase(),
       traceLabel: 'functions:syncHelperQueueOnHelperOnline:requestUpdated',
@@ -10881,6 +12886,27 @@ exports.syncHelperQueueOnHelperOnline = onDocumentWritten('users/{uid}', async (
 
     break;
   }
+}
+
+exports.syncHelperQueueOnHelperOnline = onDocumentWritten('users/{uid}', async (event) => {
+  const before = event.data.before.exists ? event.data.before.data() : null;
+  const after = event.data.after.exists ? event.data.after.data() : null;
+  if (!after || !isHelperUserRecord(after)) return;
+
+  const wasOnline = String(before?.onlineStatus || '').toLowerCase() === 'online';
+  const isOnline = String(after.onlineStatus || '').toLowerCase() === 'online';
+  if (!isOnline) return;
+
+  const wasFresh = Boolean(before && isHelperLocationFresh(getLiveLocationSnapshot(before)));
+  const isNowFresh = isHelperLocationFresh(getLiveLocationSnapshot(after));
+  const wasBusy = Boolean(String(before?.activeServiceRequestId || '').trim());
+  const isNowBusy = Boolean(String(after.activeServiceRequestId || '').trim());
+  const becameAvailable = (!wasOnline && isOnline)
+    || (wasOnline && !wasFresh && isNowFresh)
+    || (wasOnline && wasBusy && !isNowBusy);
+  if (!becameAvailable) return;
+
+  await triggerPendingRequestsForAvailableHelper(event.params.uid, after);
 });
 
 exports.sendWelcomeEmailOnUserCreate = onDocumentCreated('users/{uid}', async (event) => {
@@ -11175,148 +13201,8 @@ function capitalizeTopic(value = '') {
   return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 }
 
-function toMoney(value) {
-  const numeric = Number(value || 0);
-  if (!Number.isFinite(numeric) || numeric <= 0) return 0;
-  return Number(numeric.toFixed(6));
-}
-
-function toRand(value) {
-  return Number(toMoney(value).toFixed(2));
-}
-
-const SERVICE_BOOKING_FEE_RATE = 0.01;
-const SERVICE_BOOKING_FEE_CAP = 5;
-const SERVICE_TRAVEL_RATE_PER_KM = 4;
-const SERVICE_DEFAULT_TRAVEL_FEE = 35;
-const HELPER_LABOR_PAYOUT_RATE = 0.75;
-const PLATFORM_LABOR_SHARE_RATE = 0.25;
-
-function computeServiceBookingFee(baseAmount = 0) {
-  return toRand(Math.min(SERVICE_BOOKING_FEE_CAP, Math.max(0, Number(baseAmount || 0)) * SERVICE_BOOKING_FEE_RATE));
-}
-
-function getServiceTravelFee(request = {}) {
-  return toRand(
-    request?.pricingSnapshot?.travelFee
-    || request?.requestPayload?.pricingSnapshot?.travelFee
-    || SERVICE_DEFAULT_TRAVEL_FEE,
-  );
-}
-
-function getServiceQuoteSubtotal(request = {}) {
-  const explicitSubtotal = Number(
-    request?.pricingSnapshot?.subtotal
-    || request?.requestPayload?.pricingSnapshot?.subtotal
-    || 0,
-  );
-  if (explicitSubtotal > 0) {
-    return toRand(explicitSubtotal);
-  }
-
-  const total = Number(
-    request?.pricingSnapshot?.total
-    || request?.requestPayload?.pricingSnapshot?.total
-    || 0,
-  );
-  const travelFee = getServiceTravelFee(request);
-  return toRand(Math.max(0, total - travelFee));
-}
-
-function getServiceBookingFee(request = {}) {
-  const baseAmount = getServiceQuoteSubtotal(request) + getServiceTravelFee(request);
-  return computeServiceBookingFee(baseAmount);
-}
-
-function getServiceHelperPayoutBreakdown(request = {}, options = {}) {
-  const closureType = String(options.closureType || 'completed').trim().toLowerCase();
-  const waitingCost = toRand(options.waitingCost || 0);
-  const travelledKm = Math.max(0, Number(options.travelledKm || 0));
-  const bookingFee = toRand(
-    options.bookingFeeAmount
-    ?? options.bookingFee
-    ?? getServiceBookingFee(request),
-  );
-  const baseTravelFee = toRand(
-    options.travelFeeAmount
-    ?? options.travelFee
-    ?? getServiceTravelFee(request),
-  );
-  const laborAmount = toRand(getServiceQuoteSubtotal(request) + waitingCost);
-
-  if (closureType === 'completed') {
-    const helperLaborAmount = toRand(laborAmount * HELPER_LABOR_PAYOUT_RATE);
-    const platformLaborAmount = toRand(laborAmount * PLATFORM_LABOR_SHARE_RATE);
-    const helperTravelAmount = baseTravelFee;
-    const helperAmount = toRand(helperLaborAmount + helperTravelAmount);
-    const platformBookingAmount = bookingFee;
-    const platformAmount = toRand(platformLaborAmount + platformBookingAmount);
-    const customerChargeAmount = toRand(laborAmount + helperTravelAmount + platformBookingAmount);
-
-    return {
-      version: 'service_request_v1',
-      closureType: 'completed',
-      payoutRule: 'labor_split_plus_travel_and_booking_fee',
-      helperAmount,
-      helperLaborAmount,
-      helperTravelAmount,
-      platformAmount,
-      platformLaborAmount,
-      platformBookingAmount,
-      laborAmount,
-      travelAmount: helperTravelAmount,
-      bookingFeeAmount: platformBookingAmount,
-      waitingCost,
-      travelledKm: Number(travelledKm.toFixed(2)),
-      customerChargeAmount,
-    };
-  }
-
-  const billingRule = String(options.billingRule || 'booking_fee_only').trim().toLowerCase();
-  let helperTravelAmount = 0;
-  let platformBookingAmount = 0;
-  let payoutRule = billingRule;
-
-  switch (billingRule) {
-    case 'travelled_distance_plus_booking_fee':
-      helperTravelAmount = toRand(travelledKm * SERVICE_TRAVEL_RATE_PER_KM);
-      platformBookingAmount = bookingFee;
-      payoutRule = 'travelled_distance_plus_booking_fee';
-      break;
-    case 'travel_fee_plus_booking_fee':
-      helperTravelAmount = baseTravelFee;
-      platformBookingAmount = bookingFee;
-      payoutRule = 'travel_fee_plus_booking_fee';
-      break;
-    case 'booking_fee_only':
-    default:
-      helperTravelAmount = 0;
-      platformBookingAmount = bookingFee;
-      payoutRule = 'booking_fee_only';
-      break;
-  }
-
-  const helperAmount = toRand(helperTravelAmount);
-  const platformAmount = toRand(platformBookingAmount);
-
-  return {
-    version: 'service_request_v1',
-    closureType: 'canceled',
-    payoutRule,
-    helperAmount,
-    helperLaborAmount: 0,
-    helperTravelAmount,
-    platformAmount,
-    platformLaborAmount: 0,
-    platformBookingAmount,
-    laborAmount: 0,
-    travelAmount: helperTravelAmount,
-    bookingFeeAmount: platformBookingAmount,
-    waitingCost: 0,
-    travelledKm: Number(travelledKm.toFixed(2)),
-    customerChargeAmount: toRand(helperAmount + platformAmount),
-  };
-}
+// Billing helpers (toMoney, toRand, getServiceTravelFee, getServiceQuoteSubtotal,
+// getServiceBookingFee, getServiceHelperPayoutBreakdown) imported from ./serviceRequestBilling.js
 
 function assertRequiredSecrets(groupName, secrets, requiredKeys) {
   const missingKeys = requiredKeys.filter((key) => !secrets[key]);
@@ -12004,6 +13890,161 @@ exports.completeWhatsAppHelperPayout = onCall({ maxInstances: 2, ...HALF_CPU_OPT
   return { success: true, code: 'progressed', returnUrl: getWhatsAppBusinessReturnUrl() };
 });
 
+exports.inspectWhatsAppSignupLink = onCall({
+  maxInstances: 5,
+  ...HALF_CPU_OPTIONS,
+  memory: '256MiB',
+  timeoutSeconds: 20,
+}, async (request) => {
+  const uid = String(request.auth?.uid || '').trim();
+  const token = String(request.data?.token || '').trim();
+  if (!/^[A-Za-z0-9_-]{40,60}$/.test(token)) {
+    return { status: 'invalid', expired: true, eligible: false };
+  }
+  if (!whatsappOnboardingEnabled()) {
+    throw new HttpsError('failed-precondition', 'WhatsApp account onboarding is not enabled.');
+  }
+
+  const tokenHash = createHash('sha256').update(token).digest('hex');
+  const challengeSnap = await db.collection('whatsappSignupChallenges').doc(tokenHash).get();
+  if (!challengeSnap.exists) {
+    return { status: 'invalid', expired: true, eligible: false };
+  }
+  const challenge = challengeSnap.data() || {};
+  const role = String(challenge.role || '').trim().toLowerCase();
+  const entryMode = String(challenge.entryMode || 'signup').toLowerCase() === 'signin' ? 'signin' : 'signup';
+  if (!['customer', 'helper'].includes(role)) {
+    return { status: 'invalid', expired: true, eligible: false };
+  }
+
+  const identityId = String(challenge.identityId || '').trim();
+  const identitySnap = identityId ? await db.collection('whatsappIdentities').doc(identityId).get() : null;
+  if (!identitySnap?.exists) {
+    return { status: 'invalid', expired: true, eligible: false };
+  }
+  const identity = identitySnap.data() || {};
+  let identityPhone = '';
+  try {
+    identityPhone = normalizeWhatsAppIdentityPhone(`+${String(identity.waId || '')}`).phoneNumber;
+  } catch (_) {
+    identityPhone = '';
+  }
+
+  if (challenge.status === 'used') {
+    if (uid && String(challenge.usedByUid || '') === uid) {
+      return {
+        status: 'already-linked-to-you',
+        eligible: false,
+        expired: false,
+        phoneNumber: identityPhone,
+        role,
+        entryMode,
+      };
+    }
+    return { status: 'used', expired: true, eligible: false, phoneNumber: identityPhone, role, entryMode };
+  }
+
+  if (Number(challenge.expiresAtMs || 0) <= Date.now()) {
+    return { status: 'expired', expired: true, eligible: false, phoneNumber: identityPhone, role, entryMode };
+  }
+
+  if (!uid) {
+    return { status: 'unauthenticated', eligible: true, expired: false, phoneNumber: identityPhone, role, entryMode };
+  }
+
+  const phoneHash = identityPhone ? createHash('sha256').update(identityPhone).digest('hex') : '';
+  const [profileSnap, userLinkSnap, phoneOwnerSnap, authRecord] = await Promise.all([
+    db.collection('users').doc(uid).get(),
+    db.collection('whatsappUserLinks').doc(uid).get(),
+    phoneHash ? db.collection('whatsappPhoneOwnership').doc(phoneHash).get() : Promise.resolve(null),
+    admin.auth().getUser(uid).catch(() => null),
+  ]);
+  const profile = profileSnap.exists ? profileSnap.data() || {} : {};
+  const accountName = String(profile.fullName || profile.displayName || authRecord?.displayName || '').trim();
+  const accountEmail = String(profile.email || authRecord?.email || '').trim();
+
+  if (profileSnap.exists && !profileAllowsRole(profile, role)) {
+    return {
+      status: 'role-mismatch',
+      eligible: false,
+      expired: false,
+      phoneNumber: identityPhone,
+      role,
+      entryMode,
+      accountName,
+      accountEmail,
+    };
+  }
+
+  const existingProfilePhoneRaw = String(profile.whatsappPhoneNumber || '').trim();
+  let existingProfilePhone = '';
+  try {
+    existingProfilePhone = existingProfilePhoneRaw
+      ? normalizeWhatsAppIdentityPhone(existingProfilePhoneRaw).phoneNumber
+      : '';
+  } catch (_) {
+    existingProfilePhone = existingProfilePhoneRaw;
+  }
+
+  const userLink = userLinkSnap.exists ? userLinkSnap.data() || {} : null;
+  if ((userLink && String(userLink.identityId || '') !== identityId)
+    || (existingProfilePhone && identityPhone && existingProfilePhone !== identityPhone)) {
+    return {
+      status: 'account-linked-elsewhere',
+      linkedToAnotherNumber: true,
+      eligible: false,
+      expired: false,
+      phoneNumber: identityPhone,
+      currentLinkedPhone: existingProfilePhone || '',
+      role,
+      entryMode,
+      accountName,
+      accountEmail,
+    };
+  }
+
+  const phoneOwnerUid = String(phoneOwnerSnap?.data()?.uid || '').trim();
+  if ((identity.linkedFirebaseUid && String(identity.linkedFirebaseUid) !== uid)
+    || (phoneOwnerUid && phoneOwnerUid !== uid)) {
+    return {
+      status: 'identity-linked-elsewhere',
+      identityLinkedElsewhere: true,
+      eligible: false,
+      expired: false,
+      phoneNumber: identityPhone,
+      role,
+      entryMode,
+      accountName,
+      accountEmail,
+    };
+  }
+
+  if (String(identity.linkedFirebaseUid || '') === uid
+    && userLink && String(userLink.identityId || '') === identityId) {
+    return {
+      status: 'already-linked-to-you',
+      eligible: false,
+      expired: false,
+      phoneNumber: identityPhone,
+      role,
+      entryMode,
+      accountName,
+      accountEmail,
+    };
+  }
+
+  return {
+    status: 'ready-to-confirm',
+    eligible: true,
+    expired: false,
+    phoneNumber: identityPhone,
+    role,
+    entryMode,
+    accountName,
+    accountEmail,
+  };
+});
+
 exports.completeWhatsAppSignupLink = onCall({
   maxInstances: 3,
   ...HALF_CPU_OPTIONS,
@@ -12119,19 +14160,34 @@ exports.completeWhatsAppSignupLink = onCall({
       throw error;
     }
     if (!['linked', 'already-linked'].includes(linked.code)) {
+      await db.runTransaction(async (transaction) => {
+        const currentSnap = await transaction.get(challengeRef);
+        const current = currentSnap.data() || {};
+        if (currentSnap.exists && current.status === 'claimed' && String(current.claimedUid || '') === uid) {
+          transaction.set(challengeRef, {
+            claimedUid: null,
+            status: 'pending',
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+        }
+      }).catch(() => null);
       logger.warn('whatsapp_signup_link_conflict', {
         actorHash,
         identityHash: whatsappDiagnosticHash(challenge.identityId),
         conflictCode: String(linked.code || 'unknown').slice(0, 80),
       });
       const conflictMessages = {
-        'identity-linked-elsewhere': 'This WhatsApp chat is still linked to a different Uncedo account. Deleting a Firebase Auth user does not automatically unlink its WhatsApp history. Contact support to review the old link safely.',
-        'account-linked-elsewhere': 'This Uncedo account is already linked to a different WhatsApp chat. Contact support to review the existing link safely.',
-        'guest-history-linked-elsewhere': 'This WhatsApp conversation history is linked to another Uncedo account. Contact support to review the existing link safely.',
-        'whatsapp-number-linked-elsewhere': 'This WhatsApp number is reserved by another Uncedo account. Contact support to review the existing link safely.',
-        'account-whatsapp-already-set': 'This Uncedo account already has a different WhatsApp number linked. Contact support to change it safely.',
+        'identity-linked-elsewhere': 'This WhatsApp number is already linked to a different Uncedo account. Log in with that account or contact support to change the link.',
+        'account-linked-elsewhere': 'This Uncedo account is already linked to another WhatsApp number.',
+        'guest-history-linked-elsewhere': 'This WhatsApp conversation history is linked to another Uncedo account.',
+        'whatsapp-number-linked-elsewhere': 'This WhatsApp number is already linked to another Uncedo account.',
+        'account-whatsapp-already-set': 'This Uncedo account is already linked to another WhatsApp number.',
       };
-      throw new HttpsError('already-exists', conflictMessages[linked.code] || 'This WhatsApp identity is linked to another Uncedo account. Contact support to review it safely.');
+      throw new HttpsError(
+        'already-exists',
+        conflictMessages[linked.code] || 'This WhatsApp identity is linked to another Uncedo account.',
+        { conflictCode: String(linked.code || 'conflict') },
+      );
     }
     logger.info('whatsapp_signup_link_committed', {
       actorHash, identityHash: whatsappDiagnosticHash(challenge.identityId), result: linked.code,
@@ -12172,15 +14228,17 @@ exports.completeWhatsAppSignupLink = onCall({
   if (whatsappMessagingEnabled()) {
     try {
       const conversationRef = db.collection('whatsappConversations').doc(String(challenge.identityId));
-      const currentConversation = await conversationRef.get();
-      const sourceEventId = String(currentConversation.data()?.lastInboundEventId || challenge.sourceEventId || '');
       const currentIdentity = await db.collection('whatsappIdentities').doc(String(challenge.identityId)).get();
-      if (sourceEventId && currentIdentity.exists) {
-        const confirmationText = challenge.role === 'helper'
-          ? (challenge.entryMode === 'signin'
-            ? `Your Uncedo helper account is now linked to this WhatsApp number.\n\nComplete your helper onboarding in our web application here: ${helperOnboardingUrl}\n\nOnce your profile and verification are approved, send “online” here to start receiving job offers.`
-            : `Your Uncedo helper account has been created and linked to this WhatsApp number!\n\nComplete your helper onboarding in our web application here: ${helperOnboardingUrl}\n\nYour progress is saved at every step. Once your profile and verification are approved, send “online” here to start receiving job offers.`)
-          : 'Your Uncedo account is linked to this WhatsApp number. What name would you like us to use when speaking with you?';
+      if (currentIdentity.exists) {
+        let confirmationText = 'Your Uncedo account is linked to this WhatsApp number. What name would you like us to use when speaking with you?';
+        if (challenge.role === 'helper') {
+          const readiness = await getWhatsAppHelperReadiness(uid).catch(() => null);
+          confirmationText = readiness?.readyByCurrentAppRules
+            ? `Your Uncedo helper account is now linked to this WhatsApp number and verified. Send “online” here when you are ready to receive job offers.`
+            : (challenge.entryMode === 'signin'
+              ? `Your Uncedo helper account is now linked to this WhatsApp number.\n\nComplete your helper onboarding in our web application here: ${helperOnboardingUrl}\n\nOnce your profile and verification are approved, send “online” here to start receiving job offers.`
+              : `Your Uncedo helper account has been created and linked to this WhatsApp number!\n\nComplete your helper onboarding in our web application here: ${helperOnboardingUrl}\n\nYour progress is saved at every step. Once your profile and verification are approved, send “online” here to start receiving job offers.`);
+        }
         const result = await persistWhatsAppAssistantReply({
           sourceEventId: `signup-link:${tokenHash}`,
           identityId: String(challenge.identityId),
@@ -12197,6 +14255,123 @@ exports.completeWhatsAppSignupLink = onCall({
     }
   }
   return { linked: true, role: challenge.role, returnUrl, onboardingUrl: helperOnboardingUrl, confirmationSent };
+});
+
+exports.resendWhatsAppSignupLink = onCall({
+  maxInstances: 3,
+  ...HALF_CPU_OPTIONS,
+  memory: '256MiB',
+  timeoutSeconds: 30,
+}, async (request) => {
+  const token = String(request.data?.token || '').trim();
+  if (!/^[A-Za-z0-9_-]{40,60}$/.test(token)) {
+    throw new HttpsError('invalid-argument', 'The WhatsApp link token is invalid.');
+  }
+  if (!whatsappOnboardingEnabled()) {
+    throw new HttpsError('failed-precondition', 'WhatsApp account onboarding is not enabled.');
+  }
+  const returnUrl = getWhatsAppBusinessReturnUrl();
+  const tokenHash = createHash('sha256').update(token).digest('hex');
+  const challengeRef = db.collection('whatsappSignupChallenges').doc(tokenHash);
+  const challengeSnap = await challengeRef.get();
+  if (!challengeSnap.exists) {
+    throw new HttpsError('not-found', 'This WhatsApp signup link could not be found. Send "Resend link" in WhatsApp to start again.');
+  }
+  const challenge = challengeSnap.data() || {};
+  const identityId = String(challenge.identityId || '').trim();
+  const role = String(challenge.role || '').trim().toLowerCase();
+  const entryMode = String(challenge.entryMode || 'signup').toLowerCase() === 'signin' ? 'signin' : 'signup';
+  if (!identityId || !['customer', 'helper'].includes(role)) {
+    throw new HttpsError('failed-precondition', 'This WhatsApp link is incomplete. Send "Resend link" in WhatsApp.');
+  }
+  if (challenge.status === 'used') {
+    throw new HttpsError('already-exists', 'This WhatsApp link has already been used.');
+  }
+
+  const [identitySnap, conversationSnap] = await Promise.all([
+    db.collection('whatsappIdentities').doc(identityId).get(),
+    db.collection('whatsappConversations').doc(identityId).get(),
+  ]);
+  if (!identitySnap.exists) {
+    throw new HttpsError('not-found', 'The WhatsApp conversation could not be found. Send "Hi" in WhatsApp to start again.');
+  }
+  const identity = identitySnap.data() || {};
+  if (identity.linkedFirebaseUid) {
+    throw new HttpsError('already-exists', 'This WhatsApp chat is already linked to an Uncedo account.');
+  }
+  const conversation = conversationSnap.data() || {};
+  const existingOnboarding = conversation.whatsappOnboarding || {};
+  const lastWebResendAtMs = Number(existingOnboarding.lastWebResendAtMs || 0);
+  if (lastWebResendAtMs > 0 && Date.now() - lastWebResendAtMs < 30 * 1000) {
+    throw new HttpsError('resource-exhausted', 'A new link was just sent to WhatsApp. Please check your WhatsApp chat or wait 30 seconds.');
+  }
+
+  if (!whatsappMessagingEnabled()) {
+    return { sent: false, reason: 'messaging_disabled', returnUrl };
+  }
+
+  const signup = await createWhatsAppSignupLink({
+    identityId,
+    role,
+    sourceEventId: `web-resend:${tokenHash}`,
+    mode: entryMode,
+    requireAuthPhoneMatch: challenge.requireAuthPhoneMatch === true,
+    bootstrapCustomerProfile: challenge.bootstrapCustomerProfile === true,
+  });
+
+  const conversationRef = db.collection('whatsappConversations').doc(identityId);
+  const nowMs = Date.now();
+  await conversationRef.set({
+    whatsappOnboarding: {
+      ...existingOnboarding,
+      role,
+      onboardingPath: role,
+      accountMode: entryMode === 'signin' ? 'link-existing' : 'account',
+      stage: 'awaiting_account_signup',
+      signupChallengeHash: signup.tokenHash,
+      signupLinkExpiresAtMs: signup.expiresAtMs,
+      lastWebResendAtMs: nowMs,
+      updatedAtMs: nowMs,
+    },
+    currentMode: 'onboarding',
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  const purpose = entryMode === 'signin'
+    ? 'sign in with your existing email account'
+    : 'create your account using your email address';
+  const returnInstructions = role === 'helper'
+    ? (entryMode === 'signin'
+      ? 'After you sign in, you will receive a confirmation and a link to complete your helper onboarding on the web application.'
+      : 'After you create your account, you will receive a confirmation and continue directly to your helper onboarding on the web application.')
+    : (entryMode === 'signin'
+      ? 'After you sign in to your existing account, you’ll return to this chat.'
+      : 'After you create your account, you’ll return to this chat.');
+
+  let sent = false;
+  let reason = 'send_failed';
+  try {
+    const sendResult = await persistWhatsAppAssistantReply({
+      sourceEventId: `signup-web-resend:${signup.tokenHash}`,
+      identityId,
+      identity,
+      conversationRef,
+      text: `Here is a fresh secure link to ${purpose}: ${signup.url}\n\nYour WhatsApp number is prefilled for linking. ${returnInstructions} The link expires in 30 minutes.`,
+      purpose: 'account_signup_resend',
+      requireCurrentInbound: false,
+    });
+    sent = sendResult?.sent === true;
+    reason = sent ? 'sent' : String(sendResult?.reason || 'window_closed');
+  } catch (error) {
+    logger.info('whatsapp_signup_web_resend_failed', {
+      identityIdHash: whatsappDiagnosticHash(identityId),
+      errorCode: String(error?.code || 'send_failed').slice(0, 80),
+    });
+    sent = false;
+    reason = String(error?.code || 'window_closed');
+  }
+
+  return { sent, reason, returnUrl };
 });
 
 exports.completeWhatsAppAccountLink = onCall({
@@ -13237,8 +15412,10 @@ exports.setWhatsAppNotificationPreference = onCall({ maxInstances: 2, ...HALF_CP
 const WHATSAPP_STATUS_NOTIFICATION_CONFIG = {
   matching: { key: 'BOOKING_CONFIRMED', description: 'Your booking is confirmed and Uncedo is looking for a helper.' },
   accepted: { key: 'HELPER_ASSIGNED', description: 'A helper accepted your service request.' },
-  driving: { key: 'HELPER_ON_THE_WAY', description: 'Your helper is travelling to your service location.' },
+  driving: { key: 'HELPER_ON_THE_WAY', description: 'Your helper is driving to your service location.' },
   en_route: { key: 'HELPER_ON_THE_WAY', description: 'Your helper is on the way.' },
+  buying_resources: { key: 'HELPER_BUYING_RESOURCES', description: 'Your helper stopped to buy the required resources before arriving.' },
+  arrived: { key: 'HELPER_ARRIVED', description: 'Your helper has arrived at your location.' },
   work_started: { key: 'SERVICE_STARTED', description: 'Your service has started.' },
   completed: { key: 'SERVICE_COMPLETED', description: 'Your service is complete. Payment may be required.' },
   canceled: { key: 'BOOKING_CANCELED', description: 'Your service request was canceled.' },
@@ -13281,6 +15458,78 @@ async function syncWhatsAppRelayModeForRequestTransition({ after, status, before
   }
 }
 
+function buildWhatsAppLifecycleText({ after, status, beforeStatus, paymentChanged, eventRole, arrivalPin = '' }) {
+  const serviceName = String(after.serviceSummary || after.subject || 'your Uncedo service').trim();
+  const helperName = String(after.helperAssignment?.helperName || 'Your helper').trim();
+  const refCode = String(after.publicRequestReference || after.requestReference || '').trim();
+  const refPrefix = refCode ? `[*${refCode}*] ` : '';
+  const totalAmount = Number(after.totalAmount ?? after.pricingSnapshot?.finalAmount ?? after.pricingSnapshot?.total ?? 0);
+  const wholeTotalDisplay = formatWholeRandDisplay(totalAmount);
+  const paymentStatus = String(after.paymentStatus || '').toLowerCase();
+
+  if (eventRole === 'helper') {
+    if (status === 'canceled' && String(after.canceledBy || '').toLowerCase() === 'customer') {
+      return `${refPrefix}❌ The customer canceled the *${serviceName}* request.`;
+    }
+    if (paymentChanged && paymentStatus === 'paid') {
+      return `${refPrefix}✅ Payment of *R${wholeTotalDisplay} ZAR* for *${serviceName}* has been confirmed.`;
+    }
+    return '';
+  }
+
+  if (beforeStatus !== status) {
+    if (status === 'matching') {
+      return `${refPrefix}🔍 We received your *${serviceName}* request and are finding a nearby helper.`;
+    }
+    if (status === 'accepted') {
+      return beforeStatus === 'helper_queued'
+        ? `${refPrefix}✅ *${helperName}* finished their previous job and is now preparing to head your way for *${serviceName}*!`
+        : `${refPrefix}✅ *${helperName}* accepted your *${serviceName}* request and is preparing to head your way.`;
+    }
+    if (status === 'driving' || status === 'en_route') {
+      return beforeStatus === 'buying_resources'
+        ? `${refPrefix}🚗 *${helperName}* has finished collecting resources and is now driving to your location for *${serviceName}*.`
+        : `${refPrefix}🚗 *${helperName}* is now driving to your location for *${serviceName}*.`;
+    }
+    if (status === 'buying_resources') {
+      return `${refPrefix}🛒 *${helperName}* stopped to buy the resources needed for *${serviceName}* before arriving at your location.`;
+    }
+    if (status === 'arrived') {
+      return arrivalPin
+        ? `${refPrefix}📍 *${helperName}* has arrived at your location!\n\n🔐 *Arrival PIN: ${arrivalPin}*\nShare this 6-digit PIN with ${helperName} so they can confirm they found you and start the job.`
+        : `${refPrefix}📍 *${helperName}* has arrived at your location for *${serviceName}*.`;
+    }
+    if (status === 'work_started') {
+      return `${refPrefix}🛠️ *${helperName}* verified your arrival PIN and started working on *${serviceName}*.`;
+    }
+    if (status === 'completed') {
+      if (paymentStatus === 'paid') {
+        return `${refPrefix}🎉 Your *${serviceName}* service is complete! Payment of *R${wholeTotalDisplay} ZAR* is settled. Thank you for choosing Uncedo.`;
+      }
+      return `${refPrefix}🎉 Your *${serviceName}* service is complete!\n\n💰 Amount due: *R${wholeTotalDisplay} ZAR*\n💳 Reply *pay* to choose *Cash / EFT* or *Card* payment.`;
+    }
+    if (status === 'canceled') {
+      const canceledBy = String(after.canceledBy || '').toLowerCase();
+      const reasonNote = after.canceledReason ? `\nReason: ${String(after.canceledReason).slice(0, 140)}` : '';
+      return canceledBy === 'helper'
+        ? `${refPrefix}❌ *${helperName}* canceled your *${serviceName}* request.${reasonNote}`
+        : `${refPrefix}❌ Your *${serviceName}* request has been canceled.`;
+    }
+  }
+
+  if (paymentChanged) {
+    if (paymentStatus === 'paid') {
+      return `${refPrefix}✅ Payment of *R${wholeTotalDisplay} ZAR* for *${serviceName}* is confirmed. Thank you!`;
+    }
+    if (['payment_failed', 'wallet_debt_recorded'].includes(paymentStatus)) {
+      if (eventRole === 'helper') return '';
+      return `${refPrefix}⚠️ Your payment of *R${wholeTotalDisplay} ZAR* for *${serviceName}* was not completed. Reply *pay* anytime to try Cash / EFT or another card.`;
+    }
+    return `${refPrefix}💳 Payment of *R${wholeTotalDisplay} ZAR* is required for *${serviceName}*. Reply *pay* to choose *Cash / EFT* or *Card*.`;
+  }
+  return '';
+}
+
 exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
   document: 'serviceRequests/{requestId}', maxInstances: 2, ...HALF_CPU_OPTIONS,
 }, async (event) => {
@@ -13295,11 +15544,21 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
   });
   if (!whatsappNotificationsEnabled() || !whatsappMessagingEnabled()) return;
   const statusEvent = beforeStatus !== status ? WHATSAPP_STATUS_NOTIFICATION_CONFIG[status] : null;
-  const paymentChanged = before && String(before.paymentStatus || '') !== String(after.paymentStatus || '')
-    && ['paid', 'unpaid', 'payment_reconciliation_required'].includes(String(after.paymentStatus || '').toLowerCase());
+  const afterPaymentStatus = String(after.paymentStatus || '').toLowerCase();
+  const paymentChanged = Boolean(before)
+    && String(before.paymentStatus || '') !== String(after.paymentStatus || '')
+    && ['paid', 'unpaid', 'payment_reconciliation_required', 'payment_failed', 'wallet_debt_recorded'].includes(afterPaymentStatus);
   const eventConfig = statusEvent || (paymentChanged ? {
-    key: String(after.paymentStatus || '').toLowerCase() === 'paid' ? 'PAYMENT_CONFIRMED' : 'PAYMENT_REQUIRED',
-    description: String(after.paymentStatus || '').toLowerCase() === 'paid' ? 'Payment for your service was confirmed.' : 'Payment is required for your service request.',
+    key: afterPaymentStatus === 'paid'
+      ? 'PAYMENT_CONFIRMED'
+      : ['payment_failed', 'wallet_debt_recorded'].includes(afterPaymentStatus)
+        ? 'PAYMENT_FAILED'
+        : 'PAYMENT_REQUIRED',
+    description: afterPaymentStatus === 'paid'
+      ? 'Payment for your service was confirmed.'
+      : ['payment_failed', 'wallet_debt_recorded'].includes(afterPaymentStatus)
+        ? 'Payment for your service was not completed.'
+        : 'Payment is required for your service request.',
   } : null);
   if (!eventConfig || status === 'helper_found') return;
 
@@ -13310,7 +15569,7 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
     const link = await db.collection('whatsappUserLinks').doc(String(after.customerId)).get();
     if (link.exists) identities.push({ identityId: String(link.data()?.identityId || ''), eventRole: 'customer' });
   }
-  if (status === 'accepted' || ['driving', 'en_route', 'work_started', 'completed'].includes(status)) {
+  if (status === 'canceled' || paymentChanged) {
     const helperId = String(after.helperAssignment?.helperId || '').trim();
     if (helperId) {
       const link = await db.collection('whatsappUserLinks').doc(helperId).get();
@@ -13318,22 +15577,82 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
     }
   }
 
+  let arrivalPin = '';
+  if (status === 'arrived' && beforeStatus !== 'arrived') {
+    const pinSnap = await db.collection('serviceRequests').doc(requestId).collection('private').doc('arrivalPin').get().catch(() => null);
+    if (pinSnap?.exists) {
+      arrivalPin = String(pinSnap.data()?.pin || '').trim();
+    }
+  }
+
   const secrets = getWhatsAppSecrets();
+  if (!secrets.accessToken || !secrets.phoneNumberId || !secrets.graphApiVersion) return;
   const templateName = String(process.env[`WHATSAPP_TEMPLATE_${eventConfig.key}_NAME`] || '').trim();
   const languageCode = String(process.env[`WHATSAPP_TEMPLATE_${eventConfig.key}_LANGUAGE`] || '').trim();
-  if (!templateName || !languageCode || !secrets.approvedTemplateNames.includes(templateName)
-    || !secrets.accessToken || !secrets.phoneNumberId || !secrets.graphApiVersion) return;
+  const templateAvailable = Boolean(templateName && languageCode && secrets.approvedTemplateNames.includes(templateName));
   const client = createMetaWhatsAppClient({ accessToken: secrets.accessToken, phoneNumberId: secrets.phoneNumberId, graphApiVersion: secrets.graphApiVersion, approvedTemplateNames: secrets.approvedTemplateNames, requestTimeoutMs: process.env.WHATSAPP_META_SEND_TIMEOUT_MS, isRecipientAllowed: (recipient) => isWhatsAppRecipientAllowed(recipient, process.env) });
+  const eventKey = String(event.id || '').trim() || `${status}:${String(after.paymentStatus || '')}`;
 
   for (const recipient of identities) {
     if (!recipient.identityId) continue;
+    const messageBody = buildWhatsAppLifecycleText({
+      after,
+      status,
+      beforeStatus,
+      paymentChanged,
+      eventRole: recipient.eventRole,
+      arrivalPin: recipient.eventRole === 'customer' ? arrivalPin : '',
+    });
+    if (!messageBody) continue;
+
     const identityRef = db.collection('whatsappIdentities').doc(recipient.identityId);
-    const identitySnap = await identityRef.get();
+    const conversationRef = db.collection('whatsappConversations').doc(recipient.identityId);
+    const [identitySnap, conversationSnap] = await Promise.all([identityRef.get(), conversationRef.get()]);
     if (!identitySnap.exists) continue;
     const identity = identitySnap.data() || {};
-    if (identity.phoneNumberId !== secrets.phoneNumberId
-      || !(Number(identity.whatsappNotificationsConsentAtMs || 0) > 0 || identity.whatsappNotificationsEnabled === true)) continue;
-    const notificationId = stableEventId(`lifecycle:${requestId}:${status}:${String(after.paymentStatus || '')}:${recipient.identityId}`);
+    const conversation = conversationSnap.exists ? conversationSnap.data() || {} : {};
+    if (identity.phoneNumberId !== secrets.phoneNumberId || !identity.waId) continue;
+    if (identity.whatsappNotificationsEnabled === false) continue;
+
+    const lastInboundAtMs = Number(conversation.lastInboundMessageAtMs || 0);
+    const inServiceWindow = isWithinCustomerServiceWindow(lastInboundAtMs);
+    const optedIn = Number(identity.whatsappNotificationsConsentAtMs || 0) > 0 || identity.whatsappNotificationsEnabled === true;
+    const isCustomerActiveBooking = recipient.eventRole === 'customer' && inServiceWindow;
+    if (!isCustomerActiveBooking && !optedIn) continue;
+    if (!inServiceWindow && !templateAvailable) continue;
+
+    const shouldPromptCustomerRating = inServiceWindow
+      && recipient.eventRole === 'customer'
+      && paymentChanged
+      && ['paid', 'payment_failed', 'wallet_debt_recorded'].includes(afterPaymentStatus)
+      && Boolean(after.helperAssignment?.helperId)
+      && !after.ratings?.customer
+      && !after.customerRatedHelper;
+    const sendMode = inServiceWindow ? (shouldPromptCustomerRating ? 'interactive' : 'text') : 'template';
+    const helperDisplayName = String(after.helperAssignment?.helperName || 'your helper').trim() || 'your helper';
+    const ratingInteractive = shouldPromptCustomerRating ? {
+      type: 'list',
+      body: {
+        text: formatWhatsAppText(`${messageBody}\n\nHow was your experience with *${helperDisplayName}*? Tap *Rate helper* below to rate (1–5 stars).`).slice(0, 1000),
+      },
+      action: {
+        button: 'Rate helper',
+        sections: [
+          {
+            title: 'Rate your helper',
+            rows: [
+              { id: `wa_rate_${requestId}_5`, title: '5 Stars - Excellent', description: 'Outstanding service' },
+              { id: `wa_rate_${requestId}_4`, title: '4 Stars - Good', description: 'Great experience' },
+              { id: `wa_rate_${requestId}_3`, title: '3 Stars - Okay', description: 'Satisfactory service' },
+              { id: `wa_rate_${requestId}_2`, title: '2 Stars - Fair', description: 'Needs improvement' },
+              { id: `wa_rate_${requestId}_1`, title: '1 Star - Poor', description: 'Unsatisfactory experience' },
+            ],
+          },
+        ],
+      },
+    } : null;
+
+    const notificationId = stableEventId(`lifecycle:${requestId}:${eventKey}:${recipient.identityId}`);
     const outboundRef = db.collection('whatsappMessages').doc(notificationId);
     const claimed = await db.runTransaction(async (transaction) => {
       const [outboundSnap, currentRequestSnap] = await Promise.all([transaction.get(outboundRef), transaction.get(db.collection('serviceRequests').doc(requestId))]);
@@ -13342,8 +15661,9 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
       if (String(current.status || '').toLowerCase() !== status || String(current.paymentStatus || '') !== String(after.paymentStatus || '')) return false;
       transaction.create(outboundRef, {
         eventId: notificationId, identityId: recipient.identityId, requestId, phoneNumberId: secrets.phoneNumberId,
-        to: identity.waId, direction: 'outbound', type: 'template', status: 'sending',
-        templateName, createdAtMs: Date.now(),
+        to: identity.waId, direction: 'outbound', type: sendMode, status: 'sending',
+        ...(sendMode === 'template' ? { templateName } : { text: messageBody }),
+        createdAtMs: Date.now(),
         retentionExpiresAtMs: Date.now() + whatsappRetentionDays('WHATSAPP_MESSAGE_RETENTION_DAYS', 180) * 24 * 60 * 60 * 1000,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
@@ -13351,15 +15671,40 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
     });
     if (!claimed) continue;
     try {
-      const delivery = await client.sendTemplate({
-        to: identity.waId, name: templateName, languageCode,
-        components: buildServiceUpdateTemplateComponents({
-          service: String(after.serviceSummary || after.subject || 'Uncedo service').slice(0, 180),
-          update: String(eventConfig.description).slice(0, 240),
-        }),
-      });
+      const delivery = sendMode === 'interactive' && ratingInteractive
+        ? await client.sendInteractive({ to: identity.waId, interactive: ratingInteractive, lastInboundAtMs })
+        : sendMode === 'text'
+          ? await client.sendText({ to: identity.waId, text: messageBody, lastInboundAtMs })
+          : await client.sendTemplate({
+              to: identity.waId, name: templateName, languageCode,
+              components: buildServiceUpdateTemplateComponents({
+                service: String(after.serviceSummary || after.subject || 'Uncedo service').slice(0, 180),
+                update: String(messageBody || eventConfig.description).slice(0, 240),
+              }),
+            });
       await outboundRef.set({ status: 'sent', metaMessageId: delivery.messageId || null, sentAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       await reconcileWhatsAppDeliveryStatuses({ metaMessageId: delivery.messageId, recipientId: identity.waId, messageRef: outboundRef });
+      if (sendMode !== 'template') {
+        await db.runTransaction(async (transaction) => {
+          const convSnap = await transaction.get(conversationRef);
+          const currentConv = convSnap.exists ? convSnap.data() || {} : {};
+          const memory = appendBoundedConversationTurn({
+            recentHistory: currentConv.recentHistory,
+            conversationSummary: currentConv.conversationSummary || {},
+            turn: {
+              role: 'assistant',
+              text: messageBody,
+              timestampMs: Date.now(),
+            },
+          });
+          transaction.set(conversationRef, {
+            recentHistory: memory.recentHistory,
+            conversationSummary: memory.conversationSummary,
+            lastMessageAtMs: Date.now(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+        }).catch(() => null);
+      }
     } catch (error) {
       const deliveryStatus = classifyMetaDeliveryError(error);
       await outboundRef.set({ status: deliveryStatus, deliveryStatus, errorCode: String(error?.code || 'meta_delivery_unknown').slice(0, 100), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
@@ -14085,10 +16430,17 @@ function paymentSessionPublicPayload(resolved) {
   const request = resolved.request || {};
   const operation = resolved.paymentOperation || {};
   const methods = ['cash', 'paystack_checkout'];
+  const paymentState = String(resolved.paymentStatus || '').toLowerCase();
+  const helperId = String(request.helperAssignment?.helperId || '').trim();
+  const customerRating = request.ratings?.customer || null;
+  const canRateHelper = Boolean(
+    helperId && ['paid', 'payment_failed', 'wallet_debt_recorded'].includes(paymentState),
+  );
   return {
     success: true,
     requestReference: String(request.publicRequestReference || request.requestReference || request.id || ''),
     service: String(request.subject || request.serviceName || 'Uncedo service'),
+    helperName: String(request.helperAssignment?.helperName || '').trim(),
     amount: Number(resolved.amount || 0),
     currency: 'ZAR',
     paymentStatus: resolved.paymentStatus,
@@ -14097,6 +16449,12 @@ function paymentSessionPublicPayload(resolved) {
     activeAttemptId: String(operation.activeAttemptId || ''),
     paymentMethod: String(operation.method || ''),
     receiptId: String(operation.receiptId || request.paymentReceiptId || ''),
+    canRateHelper,
+    hasCustomerRating: Boolean(customerRating || request.customerRatedHelper),
+    customerRating: customerRating ? {
+      score: Number(customerRating.score || 0),
+      comment: String(customerRating.comment || ''),
+    } : null,
   };
 }
 
@@ -14172,7 +16530,7 @@ async function verifyAndSettleRequestPayment({ requestId, attemptId, reference, 
   return { ...result, verification };
 }
 
-exports.createServicePaymentSession = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+exports.createServicePaymentSession = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
   const user = await getOptionalPaymentCaller(req);
@@ -14194,7 +16552,7 @@ exports.createServicePaymentSession = onRequest({ cors: true, maxInstances: 5, .
   return res.status(200).json({ success: true, url: `${baseUrl}?token=${encodeURIComponent(session.token)}`, expiresAtMs: session.expiresAtMs });
 });
 
-exports.getServicePaymentSession = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
+exports.getServicePaymentSession = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   const token = String(req.body?.token || '').trim();
   const result = await resolveServicePaymentSession({ db, token });
@@ -14246,7 +16604,7 @@ exports.getServicePaymentSession = onRequest({ cors: true, maxInstances: 5, ...H
   return res.status(200).json(payload);
 });
 
-exports.revokeServicePaymentSession = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
+exports.revokeServicePaymentSession = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   const user = await getOptionalPaymentCaller(req);
   if (!user?.uid) return res.status(401).json({ success: false, message: 'Unauthorized.' });
@@ -14258,7 +16616,7 @@ exports.revokeServicePaymentSession = onRequest({ cors: true, maxInstances: 5, .
   return res.status(result.action === 'revoked' ? 200 : 409).json({ success: result.action === 'revoked' });
 });
 
-exports.startServicePaystackCheckout = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+exports.startServicePaystackCheckout = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
   let paystackSecretKey = '';
@@ -14321,7 +16679,7 @@ exports.startServicePaystackCheckout = onRequest({ cors: true, maxInstances: 5, 
   }
 });
 
-exports.verifyServicePaystackCheckout = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+exports.verifyServicePaystackCheckout = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   const token = String(req.body?.token || '').trim();
   const reference = String(req.body?.reference || '').trim();
@@ -14341,7 +16699,7 @@ exports.verifyServicePaystackCheckout = onRequest({ cors: true, maxInstances: 5,
   return res.status(200).json({ success: true, status, receipt: status === 'paid' ? safePaymentReceipt({ requestId: updated.request.id, operation: updated.paymentOperation, request: updated.request }) : null });
 });
 
-exports.requestCashServicePayment = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+exports.requestCashServicePayment = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
   const caller = await getOptionalPaymentCaller(req);
@@ -14359,7 +16717,7 @@ exports.requestCashServicePayment = onRequest({ cors: true, maxInstances: 5, ...
   return res.status(200).json({ success: true, requestId, amount: Number(begun.attempt.amount), status: begun.attempt.status, attemptId: begun.attempt.attemptId });
 });
 
-exports.selectCashPaymentFromSession = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 20 }, async (req, res) => {
+exports.selectCashPaymentFromSession = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS, timeoutSeconds: 20 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
   const token = String(req.body?.token || '').trim();
@@ -14370,7 +16728,7 @@ exports.selectCashPaymentFromSession = onRequest({ cors: true, maxInstances: 5, 
   return res.status(200).json({ success: true, requestId: resolved.session.requestId, amount: Number(begun.attempt.amount), status: begun.attempt.status, attemptId: begun.attempt.attemptId });
 });
 
-exports.cancelCashPaymentSelection = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 20 }, async (req, res) => {
+exports.cancelCashPaymentSelection = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS, timeoutSeconds: 20 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
   const caller = await getOptionalPaymentCaller(req);
@@ -14388,7 +16746,7 @@ exports.cancelCashPaymentSelection = onRequest({ cors: true, maxInstances: 5, ..
   return res.status(result.action === 'cancelled' ? 200 : 409).json({ success: result.action === 'cancelled', code: result.action });
 });
 
-exports.reportCashServicePayment = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
+exports.reportCashServicePayment = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
   const caller = await getOptionalPaymentCaller(req);
@@ -14409,7 +16767,7 @@ exports.reportCashServicePayment = onRequest({ cors: true, maxInstances: 5, ...H
   return res.status(['reported', 'already-reported'].includes(result.action) ? 200 : 409).json({ success: ['reported', 'already-reported'].includes(result.action), code: result.action });
 });
 
-exports.respondToCashServicePayment = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+exports.respondToCashServicePayment = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
   const caller = await getOptionalPaymentCaller(req);
@@ -14425,7 +16783,7 @@ exports.respondToCashServicePayment = onRequest({ cors: true, maxInstances: 5, .
   return res.status(result.action === 'settled' || result.action === 'rejected' ? 200 : 409).json({ success: result.action === 'settled' || result.action === 'rejected', code: result.action, receiptId: result.receiptId || null });
 });
 
-exports.getHelperCashPaymentConfirmations = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 20 }, async (req, res) => {
+exports.getHelperCashPaymentConfirmations = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 20 }, async (req, res) => {
   if (req.method !== 'GET') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
   const caller = await getOptionalPaymentCaller(req);
@@ -14477,7 +16835,7 @@ async function authenticateHelperWalletCaller(req, res) {
   return decoded.uid;
 }
 
-exports.getHelperWallet = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
+exports.getHelperWallet = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
   if (req.method !== 'GET') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   const helperId = await authenticateHelperWalletCaller(req, res);
   if (!helperId) return;
@@ -14493,7 +16851,7 @@ exports.getHelperWallet = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_O
   });
 });
 
-exports.getHelperWalletTransactions = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
+exports.getHelperWalletTransactions = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
   if (req.method !== 'GET') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   const helperId = await authenticateHelperWalletCaller(req, res);
   if (!helperId) return;
@@ -14521,7 +16879,7 @@ exports.getHelperWalletTransactions = onRequest({ cors: true, maxInstances: 5, .
   return res.status(200).json({ success: true, transactions });
 });
 
-exports.prepareSavedCardServicePayment = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+exports.prepareSavedCardServicePayment = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
   const caller = await getOptionalPaymentCaller(req);
@@ -14551,7 +16909,7 @@ exports.prepareSavedCardServicePayment = onRequest({ cors: true, maxInstances: 5
   return res.status(200).json({ success: true, requestId, amount: Number(begun.attempt.amount), attemptId: begun.attempt.attemptId, status: begun.attempt.status, card: { id: card.id, brand: String(card.brand || 'Card'), last4: String(card.last4 || '').slice(-4) } });
 });
 
-exports.confirmSavedCardServicePayment = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+exports.confirmSavedCardServicePayment = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
   if (req.body?.confirmed !== true) return res.status(400).json({ success: false, code: 'explicit-confirmation-required', message: 'Confirm this saved-card payment before it can be charged.' });
@@ -14589,7 +16947,7 @@ exports.confirmSavedCardServicePayment = onRequest({ cors: true, maxInstances: 5
   return res.status(200).json({ success: ['settled', 'already-paid'].includes(settled.action), status: settled.action === 'settled' || settled.action === 'already-paid' ? 'paid' : settled.action === 'failed' ? 'payment_failed' : 'payment_reconciliation_required', receiptId: settled.receiptId || null });
 });
 
-exports.cancelSavedCardPaymentConfirmation = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 20 }, async (req, res) => {
+exports.cancelSavedCardPaymentConfirmation = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS, timeoutSeconds: 20 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
   const caller = await getOptionalPaymentCaller(req);
@@ -14601,7 +16959,7 @@ exports.cancelSavedCardPaymentConfirmation = onRequest({ cors: true, maxInstance
   return res.status(result.action === 'cancelled' ? 200 : 409).json({ success: result.action === 'cancelled', code: result.action });
 });
 
-exports.getServicePaymentReceipt = onRequest({ cors: true, maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
+exports.getServicePaymentReceipt = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   const token = String(req.body?.token || '').trim();
   const requestId = String(req.body?.requestId || '').trim();
@@ -14627,7 +16985,7 @@ exports.getServicePaymentReceipt = onRequest({ cors: true, maxInstances: 5, ...H
   return res.status(200).json({ success: true, receipt });
 });
 
-exports.paystackServicePaymentWebhook = onRequest({ cors: false, maxInstances: 3, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+exports.paystackServicePaymentWebhook = onRequest({ cors: false, invoker: 'public', maxInstances: 3, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).send('Method not allowed');
   let secret;
   try { secret = getPaymentsSecrets().PAYSTACK_SECRET_KEY; } catch { return res.status(503).send('Payment provider unavailable'); }
@@ -14665,7 +17023,7 @@ exports.paystackServicePaymentWebhook = onRequest({ cors: false, maxInstances: 3
   }
 });
 
-exports.submitServiceRequestRating = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
+exports.submitServiceRequestRating = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 60 }, async (req, res) => {
   if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
   const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
   if (!decoded?.uid) { res.status(401).json({ success: false, message: 'Unauthorized request.' }); return; }
@@ -14679,6 +17037,51 @@ exports.submitServiceRequestRating = onRequest({ cors: true, ...HALF_CPU_OPTIONS
     }
     res.status(200).json({ success: true, rating: result });
   } catch (error) { logger.warn('rating_validation_failed', { uid: decoded.uid, error: error.message }); res.status(400).json({ success: false, message: error.message }); }
+});
+
+exports.submitServiceRatingFromPaymentSession = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 60 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  const token = String(req.body?.token || '').trim();
+  const resolved = await resolveServicePaymentSession({ db, token });
+  if (resolved.code !== 'available') {
+    return res.status(resolved.code === 'expired' ? 410 : 404).json({
+      success: false,
+      code: resolved.code,
+      message: resolved.code === 'expired' ? 'This payment link has expired.' : 'This payment link is unavailable.',
+    });
+  }
+  const paymentState = String(resolved.paymentStatus || '').toLowerCase();
+  if (!['paid', 'payment_failed', 'wallet_debt_recorded'].includes(paymentState)) {
+    return res.status(409).json({
+      success: false,
+      code: 'rating-not-ready',
+      message: 'Ratings open after payment completes or if a payment attempt fails.',
+    });
+  }
+  const customerId = String(resolved.request?.customerId || '').trim();
+  if (!customerId) {
+    return res.status(400).json({ success: false, message: 'Customer reference is unavailable for this request.' });
+  }
+  try {
+    const result = await submitServiceRequestRating({
+      db,
+      admin,
+      requestId: resolved.request.id,
+      raterUserId: customerId,
+      score: req.body?.score,
+      comment: req.body?.comment || '',
+    });
+    await recalculateMembership({ db, admin, userId: result.ratedUserId, accountType: ACCOUNT_TYPES.HELPER }).catch(() => null);
+    for (const serviceId of result.expandedServiceIds || []) {
+      await recalculateMastery({ db, admin, helperId: result.ratedUserId, serviceId }).catch(() => null);
+    }
+    res.set('Cache-Control', 'no-store, private');
+    res.set('Referrer-Policy', 'no-referrer');
+    return res.status(200).json({ success: true, rating: result });
+  } catch (error) {
+    logger.warn('payment_session_rating_failed', { requestId: resolved.request.id, error: error.message });
+    return res.status(400).json({ success: false, message: error.message || 'Unable to save rating.' });
+  }
 });
 
 exports.expireRewardPoints = onSchedule('every 24 hours', async () => processExpiredCustomerPoints({ db, admin, limit: 200 }));
@@ -14941,7 +17344,7 @@ async function initiatePaystackTransfer({ paystackSecretKey, amount, recipientCo
   return payload?.data || {};
 }
 
-exports.getHelperPayoutBanks = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
+exports.getHelperPayoutBanks = onRequest({ cors: true, invoker: 'public', ...HALF_CPU_OPTIONS }, async (req, res) => {
   if (!['GET', 'POST'].includes(req.method)) {
     res.status(405).json({ success: false, message: 'Method not allowed' });
     return;
@@ -14982,7 +17385,7 @@ exports.getHelperPayoutBanks = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, as
   }
 });
 
-exports.verifyHelperPayout = onRequest({ cors: true }, async (req, res) => {
+exports.verifyHelperPayout = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, message: 'Method not allowed' });
     return;
@@ -15250,6 +17653,8 @@ async function runServiceFinancialPostEffects(operationRef) {
         requestId,
         targetPath: `/provider/jobs/${requestId}`,
       }).catch((error) => logger.warn('service_completion_helper_notification_failed', { requestId, error: error.message }));
+      await promoteNextQueuedServiceRequestForHelper({ helperId, closedRequestId: requestId })
+        .catch((error) => logger.warn('promote_queued_after_completion_failed', { requestId, helperId, error: error?.message }));
     }
   } else if (operation.operationType === 'customer_cancellation') {
     const cancellation = settlementData.cancellation || {};
@@ -15303,6 +17708,8 @@ async function runServiceFinancialPostEffects(operationRef) {
         requestId,
         targetPath: `/provider/jobs/${requestId}`,
       }).catch((error) => logger.warn('service_cancellation_helper_notification_failed', { requestId, error: error.message }));
+      await promoteNextQueuedServiceRequestForHelper({ helperId, closedRequestId: requestId })
+        .catch((error) => logger.warn('promote_queued_after_customer_cancel_failed', { requestId, helperId, error: error?.message }));
     }
   }
 
@@ -15326,10 +17733,16 @@ async function isCustomerRequestPrincipalOwnedByUid(uid, customerId) {
   if (!normalizedUid || !normalizedCustomerId) return false;
   if (normalizedUid === normalizedCustomerId) return true;
   const ownerSnap = await db.collection('whatsappGuestOwnership').doc(normalizedCustomerId).get().catch(() => null);
-  return Boolean(ownerSnap?.exists && String(ownerSnap.data()?.uid || '') === normalizedUid);
+  if (ownerSnap?.exists && String(ownerSnap.data()?.uid || '') === normalizedUid) return true;
+  if (normalizedCustomerId.startsWith('guest_')) {
+    const userSnap = await db.collection('users').doc(normalizedUid).get().catch(() => null);
+    const guestIds = Array.isArray(userSnap?.data()?.whatsappGuestPrincipalIds) ? userSnap.data().whatsappGuestPrincipalIds : [];
+    if (guestIds.map((id) => String(id || '').trim()).includes(normalizedCustomerId)) return true;
+  }
+  return false;
 }
 
-exports.finalizeServiceRequestBilling = onRequest({ cors: true, cpu: 0.5, memory: '256MiB' }, async (req, res) => {
+exports.finalizeServiceRequestBilling = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 60 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
   const token = getBearerToken(req);
   const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
@@ -15366,18 +17779,25 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, cpu: 0.5, memory
     const endedAt = Date.now();
     const arrivedAtMs = timestampToMillis(request.arrivedAt || request.helperAssignment?.arrivedAt);
     const workStartedAtMs = timestampToMillis(request.workStartedAt || request.helperAssignment?.workStartedAt);
+    const quoteTotal = getServiceQuoteTotal(request);
     let waitingMinutes = 0;
     let waitingCost = 0;
     if (arrivedAtMs && workStartedAtMs && workStartedAtMs > arrivedAtMs) {
       waitingMinutes = Number(((workStartedAtMs - arrivedAtMs) / 60000).toFixed(2));
-      if (waitingMinutes > 2) waitingCost = Math.round(waitingMinutes - 2) * 1.00;
+      if (quoteTotal <= 0 && waitingMinutes > 2) waitingCost = Math.round(waitingMinutes - 2);
     }
-    const quoteTotal = toRand(request.pricingSnapshot?.total ?? request.pricingSnapshot?.totalAmount ?? request.pricingSnapshot?.finalAmount ?? request.pricingSnapshot?.finalPrice ?? 0);
     const subtotal = getServiceQuoteSubtotal(request);
     const travelFee = getServiceTravelFee(request);
     const bookingFee = getServiceBookingFee(request);
-    const helperPayoutBreakdown = getServiceHelperPayoutBreakdown(request, { closureType: 'completed', waitingCost, travelFeeAmount: travelFee, bookingFeeAmount: bookingFee });
-    const totalAmount = helperPayoutBreakdown.customerChargeAmount || toRand(quoteTotal + waitingCost + bookingFee);
+    const helperPayoutBreakdown = getServiceHelperPayoutBreakdown(request, {
+      closureType: 'completed',
+      waitingCost,
+      travelFeeAmount: travelFee,
+      bookingFeeAmount: bookingFee,
+    });
+    const totalAmount = quoteTotal > 0
+      ? toWholeRand(quoteTotal)
+      : toWholeRand(helperPayoutBreakdown.customerChargeAmount);
     const redemptionId = String(request.serviceCreditRedemptionId || '').trim();
     let serviceCreditAmount = 0;
     let serviceCreditPoints = 0;
@@ -15396,9 +17816,9 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, cpu: 0.5, memory
       const maxCreditRand = randCap > 0 ? Math.min(percentageCap, randCap) : percentageCap;
       const maximumPoints = Math.floor((maxCreditRand * pointsPerRand) / redemptionIncrement) * redemptionIncrement;
       serviceCreditPoints = Math.max(0, Math.min(Number(redemption.points || 0), maximumPoints));
-      serviceCreditAmount = toRand(serviceCreditPoints / pointsPerRand);
+      serviceCreditAmount = toWholeRand(serviceCreditPoints / pointsPerRand);
     }
-    cashChargeAmount = toRand(Math.max(0, totalAmount - serviceCreditAmount));
+    cashChargeAmount = toWholeRand(Math.max(0, totalAmount - serviceCreditAmount));
     if (!deferCompletionPayment) {
       const customerSnap = await db.collection('users').doc(request.customerId).get();
       customerData = customerSnap.data() || {};
@@ -15666,10 +18086,57 @@ async function getWhatsAppIdentityForCurrentSender(identityId, eventIdentity) {
   return currentIdentity;
 }
 
+async function clearWhatsAppConversationCancellationState({
+  conversationRef,
+  canceledRequestId = '',
+  activeDraftRef = null,
+} = {}) {
+  if (!conversationRef) return;
+  await db.runTransaction(async (transaction) => {
+    const currentConversation = await transaction.get(conversationRef);
+    const current = currentConversation.data() || {};
+    const draftSnap = activeDraftRef ? await transaction.get(activeDraftRef) : null;
+    const patch = {
+      pendingCancellation: admin.firestore.FieldValue.delete(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+    if (canceledRequestId && String(current.activeServiceRequestId || '') === String(canceledRequestId)) {
+      patch.activeServiceRequestId = null;
+    }
+    if (activeDraftRef && draftSnap?.exists) {
+      const draftData = draftSnap.data() || {};
+      const draftMatchesRequest = !canceledRequestId
+        || !draftData.requestId
+        || String(draftData.requestId) === String(canceledRequestId);
+      if (draftMatchesRequest) {
+        transaction.set(activeDraftRef, {
+          status: 'canceled',
+          canceledAtMs: Date.now(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        if (String(current.activeDraftId || '') === activeDraftRef.id) {
+          patch.activeDraftId = null;
+        }
+      }
+    }
+    if (['booking_intake', 'quote_pending', 'active_booking'].includes(String(current.currentMode || '').toLowerCase())) {
+      patch.currentMode = 'assistant';
+      patch.currentIntent = 'cancellation';
+    }
+    transaction.set(conversationRef, patch, { merge: true });
+  }).catch(() => null);
+}
+
 async function getWhatsAppCustomerCancellationPreview({ identityId, identity, requestId }) {
   const currentIdentity = await getWhatsAppIdentityForCurrentSender(identityId, identity);
   if (!currentIdentity) return { code: 'identity-not-found' };
-  const access = await getWhatsAppRequestForIdentity({ db, identity: currentIdentity, requestId });
+  const extraCustomerIds = await resolveExtraCustomerIdsForIdentity({ db, callerIdentity: currentIdentity });
+  const access = await getWhatsAppRequestForIdentity({
+    db,
+    identity: { ...currentIdentity, role: currentIdentity.role === 'helper' ? 'helper' : 'customer' },
+    extraCustomerIds,
+    requestId,
+  });
   if (access.code !== 'found') return { code: access.code };
   const requestRef = db.collection('serviceRequests').doc(access.request.id);
   const terms = await getCustomerCancellationTerms(requestRef, access.request);
@@ -15732,6 +18199,7 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
       });
     }
     if (isPreAssignmentServiceRequestStatus(status)) {
+      const queuedHelperId = String(request.pendingBusyAssignment?.helperId || request.helperAssignment?.helperId || '').trim();
       const cancellation = {
         requestId,
         helperId: '',
@@ -15759,7 +18227,13 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
           canceledBy: 'customer',
           canceledReason,
           helperAssignment: null,
+          pendingBusyAssignment: null,
+          offerType: null,
+          offerBusyActiveRequestId: null,
+          queuedEtaSummary: null,
+          queuedFromActiveRequestId: null,
           helperQueue: [],
+          busyHelperQueue: [],
           currentOfferHelperId: null,
           offerExpiresAt: null,
           offerToken: null,
@@ -15771,6 +18245,25 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
           cancellationFeeAmount: 0,
         },
       };
+      if (queuedHelperId) {
+        const qHelperRef = db.collection('users').doc(queuedHelperId);
+        const qHelperSnap = await qHelperRef.get().catch(() => null);
+        if (qHelperSnap?.exists && String(qHelperSnap.data()?.queuedServiceRequestId || '').trim() === requestId) {
+          await qHelperRef.set({
+            queuedServiceRequestId: admin.firestore.FieldValue.delete(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true }).catch(() => null);
+        }
+        await createUserNotificationOnce({
+          notificationId: `queued_cancel_${requestId}_${queuedHelperId}`,
+          userId: queuedHelperId,
+          title: 'Queued job canceled',
+          message: `${request.customerName || 'The customer'} canceled their queued ${request.serviceSummary || request.subject || 'service'} request.`,
+          type: 'job_canceled',
+          requestId,
+          targetPath: `/jobs`,
+        }).catch(() => null);
+      }
     } else {
       if (!isPostAssignmentServiceRequestStatus(status)) {
         return res.status(409).json({ success: false, message: 'This request cannot be canceled from its current state.' });
@@ -15924,7 +18417,7 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
   }
 }
 
-exports.billCustomerServiceCancellation = onRequest({ cors: true, cpu: 0.5, memory: '256MiB' }, async (req, res) => (
+exports.billCustomerServiceCancellation = onRequest({ cors: true, invoker: 'public', maxInstances: 2, cpu: 0.5, memory: '256MiB' }, async (req, res) => (
   handleCustomerServiceCancellation(req, res)
 ));
 
@@ -15932,7 +18425,8 @@ async function cancelCustomerServiceRequestFromWhatsApp({ identityId, identity, 
   if (!whatsappCancellationEnabled()) return { statusCode: 503, body: { success: false, code: 'whatsapp-cancellation-disabled' } };
   const currentIdentity = await getWhatsAppIdentityForCurrentSender(identityId, identity);
   if (!currentIdentity) return { statusCode: 403, body: { success: false, code: 'identity-not-authorized' } };
-  const role = String(currentIdentity.role || (currentIdentity.guestPrincipalId ? 'customer' : '')).trim().toLowerCase();
+  const rawRole = String(currentIdentity.role || '').trim().toLowerCase();
+  const role = (!rawRole || rawRole === 'guest') && currentIdentity.guestPrincipalId ? 'customer' : rawRole;
   if (role !== 'customer') return { statusCode: 403, body: { success: false, code: 'customer-role-required' } };
   const principalUid = String(currentIdentity.linkedFirebaseUid || currentIdentity.guestPrincipalId || '').trim();
   if (!principalUid) return { statusCode: 403, body: { success: false, code: 'customer-identity-required' } };
@@ -15950,7 +18444,7 @@ async function cancelCustomerServiceRequestFromWhatsApp({ identityId, identity, 
   return { statusCode, body: body || { success: false, code: 'empty-cancellation-response' } };
 }
 
-async function getWhatsAppPaymentContext({ identityId, identity, requestId } = {}) {
+async function getWhatsAppPaymentContext({ identityId, identity, requestId, allowAwaitingCustomerConfirmation = false } = {}) {
   if (!whatsappPaymentsEnabled()) return { code: 'disabled' };
   const currentIdentity = await getWhatsAppIdentityForCurrentSender(identityId, identity);
   if (!currentIdentity) return { code: 'identity-not-authorized' };
@@ -15969,7 +18463,10 @@ async function getWhatsAppPaymentContext({ identityId, identity, requestId } = {
   const amount = getFinalPayableAmount(request, legacyOperation);
   if (state === 'paid') return { code: 'already-paid', identity: currentIdentity, request, paymentOperation, legacyOperation };
   if (request.status !== 'completed' || amount === null) return { code: 'not-payable', identity: currentIdentity, request };
-  if (['payment_processing', 'awaiting_cash_confirmation', 'awaiting_customer_confirmation', 'payment_reconciliation_required'].includes(state)) return { code: state, identity: currentIdentity, request, paymentOperation };
+  const blockedStates = allowAwaitingCustomerConfirmation
+    ? ['payment_processing', 'awaiting_cash_confirmation', 'payment_reconciliation_required']
+    : ['payment_processing', 'awaiting_cash_confirmation', 'awaiting_customer_confirmation', 'payment_reconciliation_required'];
+  if (blockedStates.includes(state)) return { code: state, identity: currentIdentity, request, paymentOperation };
   let ownerUid = String(currentIdentity.linkedFirebaseUid || '');
   if (String(request.customerId || '').startsWith('guest_')) {
     const owner = await db.collection('whatsappGuestOwnership').doc(request.customerId).get().catch(() => null);
@@ -16022,11 +18519,11 @@ async function notifyCashPaymentToHelper({ requestId, attemptId, helperId, amoun
     notificationId: `cash_payment_${requestId}_${attemptId}_helper`,
     userId: helperId,
     title: 'Confirm customer payment',
-    message: `A customer reports paying R${Number(amount || 0).toFixed(2)} directly for request ${requestId}. Confirm only if you received it.`,
+    message: `A customer reports paying R${formatWholeRandDisplay(amount)} directly for request ${requestId}. Confirm only if you received it.`,
     type: 'cash_payment_confirmation',
     requestId,
     targetPath: '/provider/cash-payments',
-    metadata: { requestId, attemptId, amount: Number(amount || 0), currency: 'ZAR' },
+    metadata: { requestId, attemptId, amount: toWholeRand(amount), currency: 'ZAR' },
   }).catch(() => null);
   if (!whatsappPaymentsEnabled()) return;
   const identities = await db.collection('whatsappIdentities').where('linkedFirebaseUid', '==', helperId).limit(5).get().catch(() => null);
@@ -16043,7 +18540,7 @@ async function notifyCashPaymentToHelper({ requestId, attemptId, helperId, amoun
     const conversationRef = db.collection('whatsappConversations').doc(identityDoc.id);
     const conversation = (await conversationRef.get().catch(() => null))?.data() || {};
     const lastInboundAtMs = Number(conversation.lastInboundMessageAtMs || 0);
-    const body = `A customer reports paying R${Number(amount || 0).toFixed(2)} for request ${requestId}. Confirm receipt only if you received this payment.`;
+    const body = `A customer reports paying R${formatWholeRandDisplay(amount)} for request ${requestId}. Confirm receipt only if you received this payment.`;
     try {
       const configured = getWhatsAppSecrets();
       if (String(identity.phoneNumberId || '') !== configured.phoneNumberId) continue;
@@ -16094,7 +18591,7 @@ async function notifyCashPaymentToHelper({ requestId, attemptId, helperId, amoun
               languageCode,
               components: buildCashConfirmationTemplateComponents({
                 requestReference: requestId,
-                amountText: `R${Number(amount || 0).toFixed(2)}`,
+                amountText: `R${formatWholeRandDisplay(amount)}`,
               }),
             });
             await outboundRef.set({ status: 'sent', metaMessageId: delivery.messageId || null, sentAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
@@ -16885,8 +19382,13 @@ exports.updateWebHelperLiveLocation = onCall({ maxInstances: 5, ...HALF_CPU_OPTI
     throw new HttpsError('permission-denied', 'A helper account is required.');
   }
 
+  const existingHelper = snap.data() || {};
+  const existingOnlineStatus = String(existingHelper.onlineStatus || '').trim().toLowerCase();
   const data = request.data || {};
   const requestedOnlineStatus = String(data.onlineStatus || '').trim().toLowerCase();
+  const syncOnly = data.syncOnly === true;
+  const preserveOnlineStatus = data.preserveOnlineStatus === true;
+
   if (requestedOnlineStatus === 'offline') {
     await userRef.set({
       onlineStatus: 'offline',
@@ -16906,6 +19408,11 @@ exports.updateWebHelperLiveLocation = onCall({ maxInstances: 5, ...HALF_CPU_OPTI
     return { success: true, onlineStatus: 'offline' };
   }
 
+  // Never allow a passive live-tracking ping to bounce an offline helper back online
+  if (syncOnly && requestedOnlineStatus !== 'online' && existingOnlineStatus !== 'online') {
+    return { success: true, onlineStatus: existingOnlineStatus || 'offline', skippedOfflineSync: true };
+  }
+
   const lat = Number(data.latitude);
   const lon = Number(data.longitude);
   if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
@@ -16914,48 +19421,67 @@ exports.updateWebHelperLiveLocation = onCall({ maxInstances: 5, ...HALF_CPU_OPTI
 
   const nowMs = Date.now();
   const rounded = (val) => Number(val.toFixed(6));
+  const cleanLiveAddress = String(data.liveAddress || '').trim().slice(0, 240);
+  const cleanLiveCity = String(data.city || '').trim().slice(0, 100);
+  const existingAddress = String(existingHelper?.liveLocation?.address || '').trim();
+  const existingCity = String(existingHelper?.liveLocation?.city || '').trim();
+
   const location = {
     latitude: rounded(lat),
     longitude: rounded(lon),
     accuracy: Number.isFinite(Number(data.accuracy)) ? Number(data.accuracy) : null,
     heading: Number.isFinite(Number(data.heading)) ? Number(data.heading) : null,
     speed: Number.isFinite(Number(data.speed)) ? Number(data.speed) : null,
+    address: cleanLiveAddress || existingAddress || null,
+    city: cleanLiveCity || existingCity || null,
     source: 'web_app',
     updatedAtMs: nowMs,
   };
 
   const geohash = encodeGeohash(location.latitude, location.longitude);
   const h3Cell = getH3CellForLocation(location);
-  const shiftExpiresAtMs = nowMs + 8 * 60 * 60 * 1000;
+  const shouldGoOnline = !preserveOnlineStatus && (requestedOnlineStatus === 'online' || existingOnlineStatus === 'online');
+  const effectiveOnlineStatus = shouldGoOnline ? 'online' : (existingOnlineStatus || 'offline');
+  const shiftExpiresAtMs = shouldGoOnline ? nowMs + 8 * 60 * 60 * 1000 : (existingHelper.shiftExpiresAtMs || null);
 
   await db.runTransaction(async (transaction) => {
-    transaction.set(userRef, {
-      onlineStatus: 'online',
-      locationSharingEnabled: true,
+    const updatePayload = {
       liveLocation: location,
       geohash,
       h3Cell,
-      shiftStartedAtMs: nowMs,
-      shiftExpiresAtMs,
-      appVisibilityState: 'visible',
-      lastAppVisibleAtMs: nowMs,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
+    };
+    if (cleanLiveCity) {
+      updatePayload.city = cleanLiveCity;
+    }
+    if (shouldGoOnline) {
+      updatePayload.onlineStatus = 'online';
+      updatePayload.locationSharingEnabled = true;
+      updatePayload.shiftStartedAtMs = existingHelper.onlineStatus === 'online' && existingHelper.shiftStartedAtMs
+        ? existingHelper.shiftStartedAtMs
+        : nowMs;
+      updatePayload.shiftExpiresAtMs = shiftExpiresAtMs;
+      updatePayload.appVisibilityState = 'visible';
+      updatePayload.lastAppVisibleAtMs = nowMs;
+    }
+    transaction.set(userRef, updatePayload, { merge: true });
   });
 
   await syncHelperDispatchIndexById(uid).catch((error) => logger.warn('web_helper_location_dispatch_sync_failed', { uid, error: error.message }));
-  try {
-    await admin.database().ref(`liveTracking/helpers/${uid}`).set({
-      ...location,
-      online: true,
-      shiftExpiresAtMs,
-      updatedAtMs: nowMs,
-    });
-  } catch (err) {
-    logger.warn('rtdb_helper_tracking_sync_failed', { uid, error: err.message });
+  if (shouldGoOnline) {
+    try {
+      await admin.database().ref(`liveTracking/helpers/${uid}`).set({
+        ...location,
+        online: true,
+        shiftExpiresAtMs,
+        updatedAtMs: nowMs,
+      });
+    } catch (err) {
+      logger.warn('rtdb_helper_tracking_sync_failed', { uid, error: err.message });
+    }
   }
 
-  return { success: true, onlineStatus: 'online', liveLocation: location, shiftExpiresAtMs };
+  return { success: true, onlineStatus: effectiveOnlineStatus, liveLocation: location, shiftExpiresAtMs };
 });
 
 exports.reportHelperAppVisibility = onCall({ maxInstances: 3, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 25 }, async (request) => {
@@ -16993,9 +19519,10 @@ exports.reportHelperAppVisibility = onCall({ maxInstances: 3, ...HALF_CPU_OPTION
           const identity = identitySnap.data() || {};
           const secrets = getWhatsAppSecrets();
           const activeRequestId = String(helper.activeServiceRequestId || '').trim();
+          const helperBaseUrl = getWhatsAppHelperWebBaseUrl();
           const returnUrl = activeRequestId
-            ? `https://helpers.bakayise.com/requests/${activeRequestId}`
-            : `https://helpers.bakayise.com/workspace`;
+            ? `${helperBaseUrl}/requests/${activeRequestId}`
+            : `${helperBaseUrl}/workspace`;
 
           if (identity.waId && identity.phoneNumberId === secrets.phoneNumberId && secrets.accessToken) {
             try {
@@ -17024,7 +19551,7 @@ exports.reportHelperAppVisibility = onCall({ maxInstances: 3, ...HALF_CPU_OPTION
   return { success: true, visibilityState };
 });
 
-exports.sendHelperRequestMessage = onCall({ maxInstances: 5, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+exports.sendHelperRequestMessage = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
   const uid = String(request.auth?.uid || '').trim();
   if (!uid) throw new HttpsError('unauthenticated', 'You must be signed in.');
   const requestId = String(request.data?.requestId || '').trim();
@@ -17068,7 +19595,8 @@ exports.sendHelperRequestMessage = onCall({ maxInstances: 5, ...HALF_CPU_OPTIONS
 
   if (recipientIdentityId) {
     const identitySnap = await db.collection('whatsappIdentities').doc(recipientIdentityId).get();
-    const convSnap = await db.collection('whatsappConversations').doc(recipientIdentityId).get();
+    const convRef = db.collection('whatsappConversations').doc(recipientIdentityId);
+    const convSnap = await convRef.get();
     if (identitySnap.exists && convSnap.exists) {
       const identity = identitySnap.data() || {};
       const conversation = convSnap.data() || {};
@@ -17083,15 +19611,42 @@ exports.sendHelperRequestMessage = onCall({ maxInstances: 5, ...HALF_CPU_OPTIONS
             approvedTemplateNames: secrets.approvedTemplateNames,
             isRecipientAllowed: (recipient) => isWhatsAppRecipientAllowed(recipient, process.env),
           });
-          const delivery = isWithinCustomerServiceWindow(lastInbound, nowMs)
-            ? await client.sendText({ to: identity.waId, text, lastInboundAtMs: lastInbound })
-            : await client.sendTemplate({
-                to: identity.waId,
-                name: String(process.env.WHATSAPP_TEMPLATE_SERVICE_STARTED_NAME || '').trim(),
-                languageCode: String(process.env.WHATSAPP_TEMPLATE_SERVICE_STARTED_LANGUAGE || 'en').trim(),
-                components: [{ type: 'body', parameters: [{ type: 'text', text: 'Uncedo Helper' }, { type: 'text', text: text.slice(0, 150) }] }],
+          const templateName = String(process.env.WHATSAPP_TEMPLATE_SERVICE_STARTED_NAME || '').trim();
+          const languageCode = String(process.env.WHATSAPP_TEMPLATE_SERVICE_STARTED_LANGUAGE || 'en').trim();
+          const inWindow = isWithinCustomerServiceWindow(lastInbound, nowMs);
+          if (!inWindow && (!templateName || !secrets.approvedTemplateNames.includes(templateName))) {
+            deliveryStatus = 'window_closed';
+            await messageRef.set({ deliveryStatus, errorCode: 'customer_service_window_closed', updatedAt: now }, { merge: true });
+          } else {
+            const delivery = inWindow
+              ? await client.sendText({ to: identity.waId, text, lastInboundAtMs: lastInbound })
+              : await client.sendTemplate({
+                  to: identity.waId,
+                  name: templateName,
+                  languageCode,
+                  components: [{ type: 'body', parameters: [{ type: 'text', text: 'Uncedo Helper' }, { type: 'text', text: text.slice(0, 150) }] }],
+                });
+            await messageRef.set({ deliveryStatus: 'sent', metaMessageId: delivery.messageId || null, updatedAt: now }, { merge: true });
+            await db.runTransaction(async (transaction) => {
+              const latestConv = await transaction.get(convRef);
+              const latestData = latestConv.exists ? latestConv.data() || {} : {};
+              const memory = appendBoundedConversationTurn({
+                recentHistory: latestData.recentHistory,
+                conversationSummary: latestData.conversationSummary || {},
+                turn: {
+                  role: 'assistant',
+                  text: `[Helper message sent to customer]: ${text}`,
+                  timestampMs: nowMs,
+                },
               });
-          await messageRef.set({ deliveryStatus: 'sent', metaMessageId: delivery.messageId || null, updatedAt: now }, { merge: true });
+              transaction.set(convRef, {
+                recentHistory: memory.recentHistory,
+                conversationSummary: memory.conversationSummary,
+                lastMessageAtMs: nowMs,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              }, { merge: true });
+            }).catch(() => null);
+          }
         } catch (err) {
           deliveryStatus = classifyMetaDeliveryError(err);
           await messageRef.set({ deliveryStatus, errorCode: err.message?.slice(0, 80), updatedAt: now }, { merge: true });

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ArrowRight, ArrowUpRight, Check } from 'lucide-react';
+import { ArrowRight, ArrowUpRight, Check, Download } from 'lucide-react';
 import heroCraftImg from '../assets/images/hero_helper_craft_1794749285703.jpg';
 import showcaseImg from '../assets/images/partner_work_showcase_1794749286598.jpg';
 import { ONBOARDING_STEPS } from '../utils/onboardingSteps';
@@ -28,7 +28,7 @@ const PREPARATION_ITEMS = [
   },
 ];
 
-export function LandingPage({ user, onNavigate }) {
+export function LandingPage({ user, onNavigate, pwa }) {
   const [heroLoaded, setHeroLoaded] = useState(true);
   const [showcaseLoaded, setShowcaseLoaded] = useState(true);
 
@@ -36,16 +36,22 @@ export function LandingPage({ user, onNavigate }) {
     <div className="min-h-screen flex flex-col bg-canvas text-ink-900">
       {/* 3-Zone Top Bar Contract */}
       <header className="sticky top-0 z-30 border-b border-border bg-surface/95 backdrop-blur">
-        <div className="max-w-7xl mx-auto px-4 sm:px-8 h-16 flex items-center justify-between gap-8">
+        <div className="max-w-7xl mx-auto px-4 sm:px-8 h-16 flex items-center justify-between gap-4 sm:gap-8">
           <a
             href="/"
             onClick={(e) => {
               e.preventDefault();
               onNavigate('/');
             }}
-            className="font-display font-bold text-lg tracking-tight text-ink-900 whitespace-nowrap shrink-0"
+            className="flex items-center gap-2.5 font-display font-bold text-lg tracking-tight text-ink-900 whitespace-nowrap shrink-0"
           >
-            Uncedo Helpers
+            <img
+              src="/helpers-logo-192.png"
+              alt="Uncedo Helpers"
+              referrerPolicy="no-referrer"
+              className="h-9 w-9 rounded-xl border border-border object-cover bg-white shrink-0"
+            />
+            <span>Uncedo Helpers</span>
           </a>
 
           <nav className="hidden md:flex items-center gap-7 text-sm font-medium text-ink-500">
@@ -70,13 +76,23 @@ export function LandingPage({ user, onNavigate }) {
             </a>
           </nav>
 
-          <div className="shrink-0">
+          <div className="flex items-center gap-2 shrink-0">
+            {pwa && !pwa.isInstalled && (
+              <button
+                type="button"
+                onClick={pwa.openInstallPopup}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-surface hover:bg-well text-xs font-semibold text-ink-800 whitespace-nowrap"
+              >
+                <Download className="h-3.5 w-3.5 text-tealbrand-700" />
+                <span className="hidden sm:inline">Install App</span>
+              </button>
+            )}
             <button
               type="button"
-              onClick={() => onNavigate(user ? '/onboarding' : '/sign-up')}
+              onClick={() => onNavigate(user ? '/home' : '/sign-up')}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-tealbrand-600 hover:bg-tealbrand-700 text-sm font-semibold text-white transition-colors whitespace-nowrap shrink-0"
             >
-              {user ? 'Continue Onboarding' : 'Start Application'}
+              {user ? 'Open App' : 'Start Application'}
               <ArrowRight className="h-4 w-4" />
             </button>
           </div>

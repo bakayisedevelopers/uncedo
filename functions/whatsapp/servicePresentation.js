@@ -36,6 +36,12 @@ function getConfiguredServicePriceRange(service = {}) {
 const DEFAULT_SERVICE_PLACEHOLDER_IMAGE = 'https://uncedo.bakayise.com/logo.png';
 const MAX_INTERACTIVE_BODY_CHARS = 1024;
 const UNSUPPORTED_WHATSAPP_IMAGE_EXT_RE = /\.(?:webp|svg|gif|avif)(?:$|[?#])/i;
+const VALID_WHATSAPP_IMAGE_MIME_RE = /^image\/(?:jpeg|jpg|png)$/i;
+const MAX_WHATSAPP_CAROUSEL_IMAGE_BYTES = 5 * 1024 * 1024;
+const DEFAULT_IMAGE_VERIFY_TIMEOUT_MS = 2500;
+const POSITIVE_IMAGE_CACHE_TTL_MS = 5 * 60 * 1000;
+const NEGATIVE_IMAGE_CACHE_TTL_MS = 60 * 1000;
+const verifiedImageUrlCache = new Map();
 
 function isSupportedWhatsAppImageUrl(value) {
   const url = String(value || '').trim();
@@ -44,17 +50,163 @@ function isSupportedWhatsAppImageUrl(value) {
   return true;
 }
 
-function selectWhatsAppCarouselImageUrl(service = {}, placeholderImage = DEFAULT_SERVICE_PLACEHOLDER_IMAGE) {
-  const candidates = [
+function isValidWhatsAppImageContentType(contentType = '') {
+  const normalized = String(contentType || '').split(';')[0].trim().toLowerCase();
+  return VALID_WHATSAPP_IMAGE_MIME_RE.test(normalized);
+}
+
+function collectServiceCarouselImageCandidates(service = {}) {
+  const raw = [
     ...(Array.isArray(service.images) ? service.images.map((item) => item?.uri || item?.url || item) : []),
     service.imageUri,
     service.imageUrl,
     ...(Array.isArray(service.options) ? service.options.map((opt) => opt?.imageUrl || opt?.imageUri) : []),
   ];
-  for (const candidate of candidates) {
-    if (isSupportedWhatsAppImageUrl(candidate)) return String(candidate).trim();
+  const seen = new Set();
+  const candidates = [];
+  for (const item of raw) {
+    const trimmed = String(item || '').trim();
+    if (!trimmed || seen.has(trimmed) || !isSupportedWhatsAppImageUrl(trimmed)) continue;
+    seen.add(trimmed);
+    candidates.push(trimmed);
   }
-  return placeholderImage;
+  return candidates;
+}
+
+function selectWhatsAppCarouselImageUrl(service = {}, placeholderImage = DEFAULT_SERVICE_PLACEHOLDER_IMAGE) {
+  const candidates = collectServiceCarouselImageCandidates(service);
+  return candidates[0] || placeholderImage;
+}
+
+function evaluateImageResponse(response, maxBytes = MAX_WHATSAPP_CAROUSEL_IMAGE_BYTES) {
+  if (!response || !response.ok) {
+    return {
+      ok: false,
+      status: Number(response?.status || 0),
+      reason: `http_${Number(response?.status || 0)}`,
+    };
+  }
+  const contentType = String(response.headers?.get?.('content-type') || '').trim();
+  if (!isValidWhatsAppImageContentType(contentType)) {
+    return {
+      ok: false,
+      status: Number(response.status || 200),
+      contentType,
+      reason: 'unsupported_content_type',
+    };
+  }
+  const rawLength = response.headers?.get?.('content-length');
+  const contentLength = rawLength !== null && rawLength !== undefined && rawLength !== '' ? Number(rawLength) : NaN;
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    return {
+      ok: false,
+      status: Number(response.status || 200),
+      contentType,
+      contentLength,
+      reason: 'exceeds_max_bytes',
+    };
+  }
+  return {
+    ok: true,
+    status: Number(response.status || 200),
+    contentType: contentType.split(';')[0].trim().toLowerCase(),
+    contentLength: Number.isFinite(contentLength) ? contentLength : null,
+  };
+}
+
+async function verifyWhatsAppImageUrl(
+  url,
+  {
+    fetchImpl = fetch,
+    timeoutMs = DEFAULT_IMAGE_VERIFY_TIMEOUT_MS,
+    maxBytes = MAX_WHATSAPP_CAROUSEL_IMAGE_BYTES,
+    useCache = fetchImpl === fetch,
+    now = Date.now(),
+  } = {},
+) {
+  const normalizedUrl = String(url || '').trim();
+  if (!isSupportedWhatsAppImageUrl(normalizedUrl)) {
+    return { ok: false, status: 0, reason: 'invalid_url' };
+  }
+  if (useCache) {
+    const cached = verifiedImageUrlCache.get(normalizedUrl);
+    if (cached && cached.expiresAtMs > now) {
+      return cached.result;
+    }
+  }
+  let result;
+  try {
+    let response = await fetchImpl(normalizedUrl, {
+      method: 'HEAD',
+      redirect: 'follow',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (response && (response.status === 405 || response.status === 501)) {
+      response.body?.cancel?.().catch?.(() => {});
+      response = await fetchImpl(normalizedUrl, {
+        method: 'GET',
+        headers: { Range: 'bytes=0-0' },
+        redirect: 'follow',
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    }
+    response?.body?.cancel?.().catch?.(() => {});
+    result = evaluateImageResponse(response, maxBytes);
+  } catch (error) {
+    result = {
+      ok: false,
+      status: 0,
+      reason: error?.name === 'TimeoutError' || error?.name === 'AbortError' ? 'timeout' : 'fetch_error',
+    };
+  }
+  if (useCache) {
+    const ttlMs = result.ok ? POSITIVE_IMAGE_CACHE_TTL_MS : NEGATIVE_IMAGE_CACHE_TTL_MS;
+    verifiedImageUrlCache.set(normalizedUrl, {
+      result,
+      expiresAtMs: now + ttlMs,
+    });
+  }
+  return result;
+}
+
+async function resolveVerifiedWhatsAppImageMap(
+  urls = [],
+  {
+    fetchImpl = fetch,
+    timeoutMs = DEFAULT_IMAGE_VERIFY_TIMEOUT_MS,
+    maxBytes = MAX_WHATSAPP_CAROUSEL_IMAGE_BYTES,
+    useCache = fetchImpl === fetch,
+  } = {},
+) {
+  const uniqueUrls = [...new Set(
+    (Array.isArray(urls) ? urls : [])
+      .map((u) => String(u || '').trim())
+      .filter((u) => isSupportedWhatsAppImageUrl(u)),
+  )];
+  const results = await Promise.all(
+    uniqueUrls.map(async (url) => [
+      url,
+      await verifyWhatsAppImageUrl(url, { fetchImpl, timeoutMs, maxBytes, useCache }),
+    ]),
+  );
+  return new Map(results);
+}
+
+function selectVerifiedWhatsAppCarouselImageUrl(
+  service = {},
+  verifiedMap = new Map(),
+  placeholderImage = DEFAULT_SERVICE_PLACEHOLDER_IMAGE,
+) {
+  const candidates = collectServiceCarouselImageCandidates(service);
+  for (const candidate of candidates) {
+    if (verifiedMap.get(candidate)?.ok === true) return candidate;
+  }
+  const safePlaceholder = String(placeholderImage || '').trim();
+  if (isSupportedWhatsAppImageUrl(safePlaceholder)) {
+    const placeholderCheck = verifiedMap.get(safePlaceholder);
+    if (!placeholderCheck || placeholderCheck.ok === true) return safePlaceholder;
+  }
+  return '';
 }
 
 function truncateCleanly(value, maxLength) {
@@ -125,6 +277,70 @@ function buildWhatsAppServiceCarousel(services = [], { placeholderImage = DEFAUL
       cards,
     },
   };
+}
+
+async function buildVerifiedWhatsAppServiceCarousel(
+  services = [],
+  {
+    placeholderImage = DEFAULT_SERVICE_PLACEHOLDER_IMAGE,
+    fetchImpl = fetch,
+    timeoutMs = DEFAULT_IMAGE_VERIFY_TIMEOUT_MS,
+    logger = null,
+    useCache = fetchImpl === fetch,
+  } = {},
+) {
+  const available = (Array.isArray(services) ? services : [])
+    .filter((service) => String(service?.label || '').trim());
+  if (available.length < 2) return null;
+
+  const topServices = available.slice(0, 10);
+  const allCandidates = topServices.flatMap((service) => collectServiceCarouselImageCandidates(service));
+  if (isSupportedWhatsAppImageUrl(placeholderImage)) {
+    allCandidates.push(String(placeholderImage).trim());
+  }
+  const verifiedMap = await resolveVerifiedWhatsAppImageMap(allCandidates, {
+    fetchImpl,
+    timeoutMs,
+    useCache,
+  });
+
+  const brokenUrls = [];
+  const sanitizedServices = [];
+  for (const service of topServices) {
+    const candidates = collectServiceCarouselImageCandidates(service);
+    for (const candidate of candidates) {
+      const check = verifiedMap.get(candidate);
+      if (check && !check.ok) {
+        brokenUrls.push({
+          serviceId: String(service.id || ''),
+          reason: check.reason,
+          status: check.status || 0,
+        });
+      }
+    }
+    const chosenImageUrl = selectVerifiedWhatsAppCarouselImageUrl(service, verifiedMap, placeholderImage);
+    if (!chosenImageUrl) {
+      logger?.warn?.('whatsapp_carousel_no_reachable_image_fallback_text', {
+        serviceId: String(service.id || ''),
+      });
+      return null;
+    }
+    sanitizedServices.push({
+      ...service,
+      images: [{ uri: chosenImageUrl }],
+      imageUri: chosenImageUrl,
+      imageUrl: chosenImageUrl,
+    });
+  }
+
+  if (brokenUrls.length > 0) {
+    logger?.warn?.('whatsapp_carousel_broken_image_skipped', {
+      brokenCount: brokenUrls.length,
+      brokenUrls: brokenUrls.slice(0, 10),
+    });
+  }
+
+  return buildWhatsAppServiceCarousel(sanitizedServices, { placeholderImage });
 }
 
 function formatWhatsAppServiceList(services = [], { includePricing = false } = {}) {
@@ -243,7 +459,10 @@ module.exports = {
   MAX_INTERACTIVE_BODY_CHARS,
   MAX_SERVICE_LIST_CHARS,
   MAX_SERVICE_LIST_ITEMS,
+  MAX_WHATSAPP_CAROUSEL_IMAGE_BYTES,
+  buildVerifiedWhatsAppServiceCarousel,
   buildWhatsAppServiceCarousel,
+  collectServiceCarouselImageCandidates,
   formatWhatsAppPriceDetailsMessage,
   formatWhatsAppPriceGuidance,
   formatWhatsAppServiceDetailsMessage,
@@ -251,5 +470,9 @@ module.exports = {
   getConfiguredServicePriceRange,
   isPriceQuestion,
   isSupportedWhatsAppImageUrl,
+  isValidWhatsAppImageContentType,
+  resolveVerifiedWhatsAppImageMap,
+  selectVerifiedWhatsAppCarouselImageUrl,
   selectWhatsAppCarouselImageUrl,
+  verifyWhatsAppImageUrl,
 };

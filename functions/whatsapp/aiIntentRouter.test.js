@@ -342,3 +342,59 @@ test('intent router accepts applyForHelperService with provider_support intent a
   assert.match(prompt, /helper_service_application/);
 });
 
+test('intent router accepts relayMessageToHelper with provider_relay intent and exposes activeServiceRequest context', () => {
+  const normalized = normalizeModelResult({
+    intent: 'provider_relay',
+    serviceId: '',
+    confidence: 0.94,
+    extractedAnswers: {},
+    toolName: 'relayMessageToHelper',
+    toolArgumentsJson: '{"messageText":"The gate code is 4580","category":"directions"}',
+  }, ['cleaning']);
+  assert.equal(normalized.intent, 'provider_relay');
+  assert.equal(normalized.toolName, 'relayMessageToHelper');
+  assert.deepEqual(normalized.toolArguments, {
+    messageText: 'The gate code is 4580',
+    category: 'directions',
+  });
+
+  const prompt = buildPrompt({
+    message: { text: 'The gate code is 4580' },
+    conversationState: {
+      mode: 'provider_relay',
+      intent: 'provider_relay',
+      activeServiceRequest: {
+        requestId: 'req_1',
+        status: 'driving',
+        serviceSummary: 'Home Cleaning',
+        helperName: 'Thabo',
+        isOpen: true,
+      },
+    },
+    availableTools: [{ name: 'relayMessageToHelper', description: 'Forward to helper.' }],
+  });
+  assert.match(prompt, /"allowedToolNames":\["","relayMessageToHelper"\]/);
+  assert.match(prompt, /"activeServiceRequest":\{/);
+  assert.match(prompt, /relayMessageToHelper/);
+});
+
+test('intent router accepts cancelServiceRequest with cancellation intent and includes cancellation guidance', () => {
+  const normalized = normalizeModelResult({
+    intent: 'cancellation',
+    serviceId: '',
+    confidence: 0.97,
+    extractedAnswers: {},
+    toolName: 'cancelServiceRequest',
+    toolArgumentsJson: '{"requestId":"wa_req_123"}',
+  });
+  assert.equal(normalized.intent, 'cancellation');
+  assert.equal(normalized.toolName, 'cancelServiceRequest');
+  assert.deepEqual(normalized.toolArguments, { requestId: 'wa_req_123' });
+
+  const prompt = buildPrompt({
+    message: { text: 'I want to cancel the request' },
+    availableTools: [{ name: 'cancelServiceRequest', description: 'Cancel an active request.' }],
+  });
+  assert.match(prompt, /"allowedToolNames":\["","cancelServiceRequest"\]/);
+  assert.match(prompt, /cancelServiceRequest/);
+});

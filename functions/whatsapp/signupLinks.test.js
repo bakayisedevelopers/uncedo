@@ -3,15 +3,17 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  getWhatsAppHelperBaseUrl,
   getWhatsAppSignupUrl,
   getWhatsAppAccountLinkUrl,
   getWhatsAppHelperAgreementUrl,
   getWhatsAppHelperOnboardingUrl,
 } = require('./signupLinks');
 
-test('WhatsApp signup links use the customer and helper custom domains', () => {
+test('WhatsApp signup links use the customer and new helper web app domains', () => {
   assert.equal(getWhatsAppSignupUrl({ role: 'customer' }).toString(), 'https://uncedo.bakayise.com/sign-up?source=whatsapp');
   assert.equal(getWhatsAppSignupUrl({ role: 'helper' }).toString(), 'https://helpers.bakayise.com/sign-up?source=whatsapp');
+  assert.equal(getWhatsAppHelperBaseUrl(), 'https://helpers.bakayise.com');
 });
 
 test('existing-account WhatsApp links use sign-in on the role-specific domain', () => {
@@ -19,12 +21,12 @@ test('existing-account WhatsApp links use sign-in on the role-specific domain', 
   assert.equal(getWhatsAppSignupUrl({ role: 'helper', mode: 'signin' }).toString(), 'https://helpers.bakayise.com/sign-in?source=whatsapp');
 });
 
-test('WhatsApp account verification pages use the role-specific custom domain', () => {
+test('WhatsApp account verification pages use the role-specific domain', () => {
   assert.equal(getWhatsAppAccountLinkUrl({ role: 'customer' }).toString(), 'https://uncedo.bakayise.com/whatsapp-link');
   assert.equal(getWhatsAppAccountLinkUrl({ role: 'helper' }).toString(), 'https://helpers.bakayise.com/whatsapp-link');
 });
 
-test('WhatsApp helper agreement and onboarding use the helper custom domain', () => {
+test('WhatsApp helper agreement and onboarding use the new helper web app domain', () => {
   assert.equal(getWhatsAppHelperAgreementUrl(), 'https://helpers.bakayise.com/sign-agreement');
   assert.equal(getWhatsAppHelperOnboardingUrl(), 'https://helpers.bakayise.com/onboarding');
   assert.equal(

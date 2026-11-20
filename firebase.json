@@ -190,6 +190,28 @@
               "value": "nosniff"
             }
           ]
+        },
+        {
+          "source": "/sw.js",
+          "headers": [
+            {
+              "key": "Cache-Control",
+              "value": "no-cache, no-store, must-revalidate"
+            }
+          ]
+        },
+        {
+          "source": "/manifest.webmanifest",
+          "headers": [
+            {
+              "key": "Content-Type",
+              "value": "application/manifest+json"
+            },
+            {
+              "key": "Cache-Control",
+              "value": "no-cache, max-age=0, must-revalidate"
+            }
+          ]
         }
       ],
       "rewrites": [
@@ -202,7 +224,43 @@
           "destination": "/app.html"
         },
         {
+          "source": "/home",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/workspace",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/services",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/jobs",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/payments",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/profile",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/profile/**",
+          "destination": "/app.html"
+        },
+        {
           "source": "/onboarding",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/police-clearance",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/verification",
           "destination": "/app.html"
         },
         {

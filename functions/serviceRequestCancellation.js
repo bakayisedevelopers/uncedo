@@ -3,8 +3,13 @@
 const PRE_ASSIGNMENT_STATUSES = new Set([
   'collecting_details',
   'scheduled_pending',
+  'scheduled',
+  'pending',
+  'offered',
   'matching',
   'helper_found',
+  'busy_helper_confirmation',
+  'helper_queued',
   'no_helper_available',
 ]);
 
@@ -16,6 +21,11 @@ const POST_ASSIGNMENT_STATUSES = new Set([
   'arrived',
   'work_started',
 ]);
+
+function isCustomerCancellableStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  return PRE_ASSIGNMENT_STATUSES.has(normalized) || POST_ASSIGNMENT_STATUSES.has(normalized);
+}
 
 function calculateCustomerCancellationTerms({
   request = {},
@@ -92,4 +102,5 @@ module.exports = {
   PRE_ASSIGNMENT_STATUSES,
   calculateCustomerCancellationTerms,
   cancellationQuoteMatches,
+  isCustomerCancellableStatus,
 };

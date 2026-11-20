@@ -218,6 +218,17 @@ export async function signOutHelperAccount() {
   await authModule.signOut(auth);
 }
 
+export async function inspectWhatsAppSignupLink(token) {
+  const safeToken = String(token || '').trim();
+  if (!/^[A-Za-z0-9_-]{40,60}$/.test(safeToken)) {
+    return { status: 'invalid', expired: true, eligible: false };
+  }
+  const { functions, httpsCallable } = getFirebaseClients();
+  const call = httpsCallable(functions, 'inspectWhatsAppSignupLink');
+  const res = await call({ token: safeToken });
+  return res.data || {};
+}
+
 export async function completeWhatsAppSignupLink(token) {
   const safeToken = String(token || '').trim();
   if (!/^[A-Za-z0-9_-]{40,60}$/.test(safeToken)) {
@@ -225,6 +236,17 @@ export async function completeWhatsAppSignupLink(token) {
   }
   const { functions, httpsCallable } = getFirebaseClients();
   const call = httpsCallable(functions, 'completeWhatsAppSignupLink');
+  const res = await call({ token: safeToken });
+  return res.data || {};
+}
+
+export async function resendWhatsAppSignupLink(token) {
+  const safeToken = String(token || '').trim();
+  if (!/^[A-Za-z0-9_-]{40,60}$/.test(safeToken)) {
+    throw new Error('This WhatsApp link token is invalid. Send "Resend link" in your Uncedo WhatsApp chat.');
+  }
+  const { functions, httpsCallable } = getFirebaseClients();
+  const call = httpsCallable(functions, 'resendWhatsAppSignupLink');
   const res = await call({ token: safeToken });
   return res.data || {};
 }
@@ -594,6 +616,38 @@ export async function verifyHelperPayout(payout) {
   return callPayoutEndpoint('verifyHelperPayout', { body: { payout } });
 }
 
+export async function getHelperWalletSnapshot() {
+  const { auth } = getFirebaseClients();
+  const token = await auth.currentUser?.getIdToken();
+  if (!token) {
+    return {
+      wallet: { availableMinor: 0, reservedMinor: 0, outstandingCommissionMinor: 0, currency: 'ZAR' },
+      nextPayoutEstimateMinor: 0,
+      transactions: [],
+    };
+  }
+  const fetchJson = async (fnName) => {
+    const res = await fetch(getFunctionEndpoint(fnName), {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const payload = await res.json().catch(() => null);
+    if (!res.ok || payload?.success !== true) {
+      throw new Error(payload?.message || `Unable to load ${fnName}.`);
+    }
+    return payload;
+  };
+  const [summary, history] = await Promise.all([
+    fetchJson('getHelperWallet'),
+    fetchJson('getHelperWalletTransactions'),
+  ]);
+  return {
+    wallet: summary.wallet || { availableMinor: 0, reservedMinor: 0, outstandingCommissionMinor: 0, currency: 'ZAR' },
+    nextPayoutEstimateMinor: Math.max(0, Number(summary.nextPayoutEstimateMinor || 0)),
+    transactions: Array.isArray(history.transactions) ? history.transactions : [],
+  };
+}
+
 export async function syncMyHelperVerificationStatus() {
   const { functions, httpsCallable } = getFirebaseClients();
   const call = httpsCallable(functions, 'syncMyHelperVerificationStatus');
@@ -625,52 +679,270 @@ export async function sendHelperRequestMessage({ requestId, text }) {
 export async function respondToServiceRequestOfferApi({ requestId, offerToken, offerRevision, action }) {
   const { auth } = getFirebaseClients();
   const token = await auth.currentUser?.getIdToken();
-  const endpoint = getFunctionEndpoint('respondToServiceRequestOffer');
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify({ requestId, offerToken, offerRevision, action }),
-  });
-  const text = await response.text();
-  const data = text ? JSON.parse(text) : {};
-  if (!response.ok || data?.success === false) {
-    throw new Error(data?.message || 'Unable to process offer response.');
+  if (!token) {
+    throw new Error('You must be signed in to respond to this offer.');
   }
-  return data;
+  const endpoint = getFunctionEndpoint('respondToServiceRequestOffer');
+  return fetchJsonWithRetry(
+    endpoint,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ requestId, offerToken, offerRevision, action }),
+    },
+    { defaultErrorMessage: 'Unable to process offer response.' },
+  );
 }
 
-export async function updateHelperServiceRequestApi({ requestId, action, status, reason }) {
+async function fetchJsonWithRetry(url, fetchOptions, { retries = 2, defaultErrorMessage = 'Request failed right now.' } = {}) {
+  let lastNetworkError = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      const response = await fetch(url, fetchOptions);
+      if ([502, 503, 504].includes(response.status) && attempt < retries) {
+        await new Promise((resolve) => setTimeout(resolve, 600 * (attempt + 1)));
+        continue;
+      }
+      const text = await response.text();
+      let data = {};
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = { message: response.ok ? 'Invalid response from server.' : `${defaultErrorMessage} (${response.status})` };
+        }
+      }
+      if (!response.ok || data?.success === false) {
+        throw new Error(data?.message || defaultErrorMessage);
+      }
+      return data;
+    } catch (err) {
+      const isNetworkError = err instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(String(err?.message || ''));
+      if (isNetworkError && attempt < retries) {
+        lastNetworkError = err;
+        await new Promise((resolve) => setTimeout(resolve, 600 * (attempt + 1)));
+        continue;
+      }
+      if (isNetworkError) {
+        throw new Error('Unable to reach Uncedo servers right now. Please check your connection and try again.');
+      }
+      throw err;
+    }
+  }
+  throw lastNetworkError || new Error(defaultErrorMessage);
+}
+
+export async function updateHelperServiceRequestApi({ requestId, action, status, reason, arrivalPin }) {
   const { auth } = getFirebaseClients();
   const token = await auth.currentUser?.getIdToken();
+  if (!token) {
+    throw new Error('You must be signed in to update this job.');
+  }
   const endpoint = getFunctionEndpoint('updateHelperServiceRequest');
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  const payload = { requestId, action, status, reason };
+  if (arrivalPin !== undefined && arrivalPin !== null && String(arrivalPin).trim() !== '') {
+    payload.arrivalPin = String(arrivalPin).replace(/\D+/g, '').trim();
+  }
+  return fetchJsonWithRetry(
+    endpoint,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
     },
-    body: JSON.stringify({ requestId, action, status, reason }),
+    { defaultErrorMessage: 'Unable to update service request.' },
+  );
+}
+
+export async function uploadCompletionProofPhotos({ helperId, requestId, files = [] }) {
+  if (!helperId || !requestId || !files.length) return [];
+  const uploads = [];
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
+    const safeName = String(file?.name || `job-proof-${index + 1}.jpg`).replace(/[^a-zA-Z0-9._-]/g, '_');
+    const uploaded = await uploadHelperFile({
+      uid: helperId,
+      file,
+      pathPrefix: 'helper-completion-proof',
+      objectPath: `helper-completion-proof/${helperId}/${requestId}/${Date.now()}-${index + 1}-${safeName}`,
+    });
+    uploads.push(uploaded);
+  }
+  const { db, firestoreModule } = getFirebaseClients();
+  await firestoreModule.updateDoc(firestoreModule.doc(db, 'serviceRequests', requestId), {
+    completionProofAttachments: uploads,
+    completionProofCount: uploads.length,
+    completionProofCapturedAt: firestoreModule.serverTimestamp(),
+    updatedAt: firestoreModule.serverTimestamp(),
+  });
+  return uploads;
+}
+
+export async function finalizeServiceRequestBillingApi({ requestId, retryConfirmedFailure = false }) {
+  const { auth } = getFirebaseClients();
+  const token = await auth.currentUser?.getIdToken();
+  if (!token) throw new Error('You must be signed in to complete this job.');
+  return fetchJsonWithRetry(
+    getFunctionEndpoint('finalizeServiceRequestBilling'),
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ requestId, retryConfirmedFailure }),
+    },
+    { defaultErrorMessage: 'Unable to finalize service billing right now.' },
+  );
+}
+
+export async function getHelperCashPaymentConfirmationsApi() {
+  const { auth } = getFirebaseClients();
+  const token = await auth.currentUser?.getIdToken();
+  if (!token) return [];
+  const response = await fetch(getFunctionEndpoint('getHelperCashPaymentConfirmations'), {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
   });
   const text = await response.text();
-  const data = text ? JSON.parse(text) : {};
-  if (!response.ok && !data?.success) {
-    throw new Error(data?.message || 'Unable to update service request.');
+  const payload = text ? JSON.parse(text) : {};
+  if (!response.ok || payload?.success !== true) {
+    throw new Error(payload?.message || 'Unable to load pending cash confirmations.');
   }
-  return data;
+  return Array.isArray(payload.confirmations) ? payload.confirmations : [];
+}
+
+export async function respondToCashServicePaymentApi({ requestId, attemptId, action }) {
+  const { auth } = getFirebaseClients();
+  const token = await auth.currentUser?.getIdToken();
+  if (!token) throw new Error('You must be signed in to confirm cash payments.');
+  return fetchJsonWithRetry(
+    getFunctionEndpoint('respondToCashServicePayment'),
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ requestId, attemptId, action }),
+    },
+    { defaultErrorMessage: 'Unable to update cash payment status.' },
+  );
+}
+
+export function subscribeToServicePaymentOperation(requestId, callback) {
+  if (!requestId) {
+    callback(null);
+    return () => {};
+  }
+  const { db, firestoreModule } = getFirebaseClients();
+  return firestoreModule.onSnapshot(
+    firestoreModule.doc(db, 'servicePaymentOperations', requestId),
+    (snap) => callback(snap.exists() ? { id: snap.id, ...snap.data() } : null),
+    () => callback(null),
+  );
+}
+
+export async function submitServiceRequestRatingApi({ requestId, score, comment = '' }) {
+  const { auth } = getFirebaseClients();
+  const token = await auth.currentUser?.getIdToken();
+  if (!token) throw new Error('You must be signed in to submit a rating.');
+  const normalizedScore = Math.max(1, Math.min(5, Math.round(Number(score || 0))));
+  return fetchJsonWithRetry(
+    getFunctionEndpoint('submitServiceRequestRating'),
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        requestId,
+        score: normalizedScore,
+        comment: String(comment || '').trim(),
+      }),
+    },
+    { defaultErrorMessage: 'Unable to submit rating.' },
+  );
+}
+
+export function normalizeTimestampMs(value) {
+  if (!value) return 0;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  if (typeof value?.toMillis === 'function') return value.toMillis();
+  if (typeof value?.seconds === 'number') return value.seconds * 1000;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+export function mapServiceRequestToOffer(request) {
+  if (!request?.id) return null;
+  const timingPreference = String(request?.requestPayload?.timingPreference || 'now').trim().toLowerCase();
+  const scheduledForText = String(request?.requestPayload?.scheduledForText || '').trim();
+  const payoutEstimate =
+    Number(
+      request.pricingSnapshot?.total
+        ?? request.pricingSnapshot?.totalAmount
+        ?? request.pricingSnapshot?.finalPrice
+        ?? request.pricingSnapshot?.finalAmount
+        ?? request.pricingSnapshot?.basePrice
+        ?? 0,
+    ) || 0;
+
+  return {
+    ...request,
+    id: request.id,
+    requestId: request.id,
+    title: request.topic || request.subject || request.serviceSummary || 'Service request',
+    description: request.description || request.serviceSummary || 'A customer is requesting help.',
+    customerName: request.customerName || 'Customer',
+    payoutEstimate,
+    offerExpiresAt: normalizeTimestampMs(request.offerExpiresAt),
+    lastOfferAt: normalizeTimestampMs(request.lastOfferAt),
+    offerToken: String(request.offerToken || ''),
+    offerRevision: Number(request.offerRevision || 0),
+    offerType: String(request.offerType || ''),
+    offerBusyActiveRequestId: String(request.offerBusyActiveRequestId || ''),
+    queuedEtaSummary: request.queuedEtaSummary || null,
+    pendingBusyAssignment: request.pendingBusyAssignment || null,
+    area:
+      request.requestPayload?.serviceAddress
+      || request.requestPayload?.address
+      || request.serviceAddress
+      || 'Location pending',
+    timingPreference,
+    scheduledForText,
+  };
 }
 
 export function subscribeToPendingHelperOffers(helperId, callback) {
+  if (!helperId) {
+    callback([]);
+    return () => {};
+  }
   const { db, firestoreModule } = getFirebaseClients();
   const q = firestoreModule.query(
     firestoreModule.collection(db, 'serviceRequests'),
-    firestoreModule.where('status', '==', 'helper_found'),
     firestoreModule.where('currentOfferHelperId', '==', helperId),
   );
   return firestoreModule.onSnapshot(q, (snap) => {
-    const offers = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    const now = Date.now();
+    const offers = snap.docs
+      .map((d) => ({ id: d.id, ...d.data() }))
+      .filter((item) => String(item.status || '').toLowerCase() === 'helper_found')
+      .filter((item) => {
+        const exp = normalizeTimestampMs(item.offerExpiresAt);
+        return !exp || exp > now;
+      })
+      .sort((left, right) => normalizeTimestampMs(right.updatedAt) - normalizeTimestampMs(left.updatedAt))
+      .map(mapServiceRequestToOffer)
+      .filter(Boolean);
     callback(offers);
   }, () => callback([]));
 }
@@ -693,3 +965,29 @@ export function subscribeToRequestMessages(requestId, callback) {
     callback(msgs);
   }, () => callback([]));
 }
+
+export function subscribeToHelperServiceRequests(helperId, callback, onError) {
+  if (!helperId) {
+    callback([]);
+    return () => {};
+  }
+  const { db, firestoreModule } = getFirebaseClients();
+  const q = firestoreModule.query(
+    firestoreModule.collection(db, 'serviceRequests'),
+    firestoreModule.where('helperAssignment.helperId', '==', helperId),
+    firestoreModule.orderBy('createdAt', 'desc'),
+    firestoreModule.limit(30),
+  );
+  return firestoreModule.onSnapshot(
+    q,
+    (snap) => {
+      const requests = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      callback(requests);
+    },
+    (err) => {
+      onError?.(err);
+      callback([]);
+    },
+  );
+}
+

@@ -5,6 +5,8 @@ const REQUEST_STATUS_LABELS = Object.freeze({
   scheduled_pending: 'scheduled and waiting for matching',
   matching: 'being matched with a helper',
   helper_found: 'waiting for a helper to respond',
+  busy_helper_confirmation: 'waiting for your confirmation on an available busy helper',
+  helper_queued: 'queued with a helper finishing their current job',
   no_helper_available: 'waiting for another matching attempt',
   accepted: 'assigned to a helper',
   driving: 'with your helper travelling to the service location',
