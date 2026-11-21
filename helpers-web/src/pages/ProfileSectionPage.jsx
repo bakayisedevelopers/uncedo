@@ -101,7 +101,7 @@ export function ProfileSectionPage({ section = 'details', isTopLevel = false, on
       await Promise.all([loadCashConfirmations(), refreshWallet()]);
       setCashFeedback(
         action === 'confirm'
-          ? `Confirmed R${Number(item.amount || 0).toFixed(2)} cash/EFT payment for ${item.service}.`
+          ? `Confirmed R${Number(item.amount || 0).toFixed(2)} cash payment for ${item.service}.`
           : `Marked payment as not received for ${item.service}. Customer can re-select a payment method.`,
       );
     } catch (err) {
@@ -242,13 +242,13 @@ export function ProfileSectionPage({ section = 'details', isTopLevel = false, on
             )}
           </section>
 
-          {/* Pending Cash/EFT Confirmations */}
+          {/* Pending Cash Confirmations */}
           {(cashConfirmations.length > 0 || cashFeedback) && (
             <section className="rounded-[24px] border border-amber-300 bg-amber-50/70 p-5 sm:p-6 space-y-3">
               <div className="flex items-center gap-2 text-amber-900">
                 <Banknote className="h-4 w-4 text-amber-700" />
                 <h2 className="font-display text-lg font-extrabold">
-                  Cash / EFT Confirmations ({cashConfirmations.length})
+                  Cash Confirmations ({cashConfirmations.length})
                 </h2>
               </div>
               {cashFeedback && (

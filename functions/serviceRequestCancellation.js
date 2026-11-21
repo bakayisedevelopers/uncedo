@@ -13,6 +13,10 @@ const PRE_ASSIGNMENT_STATUSES = new Set([
   'no_helper_available',
 ]);
 
+const ZERO_FEE_POST_ASSIGNMENT_STATUSES = new Set([
+  'accepted',
+]);
+
 const POST_ASSIGNMENT_STATUSES = new Set([
   'accepted',
   'driving',
@@ -55,9 +59,25 @@ function calculateCustomerCancellationTerms({
       },
     };
   }
+  if (ZERO_FEE_POST_ASSIGNMENT_STATUSES.has(status)) {
+    return {
+      code: 'eligible',
+      status,
+      billingRule: 'accepted_before_travel',
+      cancellationAmount: 0,
+      cancellationDistanceKm: 0,
+      travelCharge: 0,
+      helperPayoutBreakdown: {
+        helperAmount: 0,
+        platformAmount: 0,
+        customerChargeAmount: 0,
+      },
+    };
+  }
   if (!POST_ASSIGNMENT_STATUSES.has(status)) return { code: 'not-cancellable', status };
   if (typeof payoutBreakdown !== 'function') throw new Error('Cancellation payout calculator is required.');
 
+  const integerBookingFee = Math.round(Math.max(0, Number(bookingFee || 0)));
   const distanceKm = Math.max(0, Number(distanceTravelledMeters || 0) / 1000);
   let billingRule = 'booking_fee_only';
   let travelCharge = 0;
@@ -73,7 +93,7 @@ function calculateCustomerCancellationTerms({
     billingRule,
     travelledKm: distanceKm,
     travelFeeAmount: billingRule === 'travelled_distance_plus_booking_fee' ? travelCharge : travelFee,
-    bookingFeeAmount: bookingFee,
+    bookingFeeAmount: integerBookingFee,
   });
   const cancellationAmount = Math.max(0, toMoney(breakdown?.customerChargeAmount || 0));
   return {

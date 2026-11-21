@@ -52,7 +52,7 @@ function formatPaymentStatusLabel(paymentStatus = '') {
   const normalized = String(paymentStatus || 'unpaid').toLowerCase();
   const labels = {
     paid: 'Paid & Settled',
-    cash_selected: 'Cash / EFT Selected',
+    cash_selected: 'Cash Selected',
     awaiting_cash_confirmation: 'Awaiting Your Cash Confirmation',
     payment_processing: 'Card Payment Processing',
     awaiting_customer_confirmation: 'Awaiting Customer Card Confirmation',
@@ -182,7 +182,7 @@ export function RequestDetailPage({ requestId, onNavigate }) {
         if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
       });
       setProofFiles([]);
-      setActionNotice('Job completed! The customer has been notified on WhatsApp to complete payment (Cash / EFT or Card).');
+      setActionNotice('Job completed! The customer has been notified on WhatsApp to pay with Cash or Card.');
     } catch (err) {
       setActionError(err?.message || 'Unable to complete service job right now.');
     } finally {
@@ -203,7 +203,7 @@ export function RequestDetailPage({ requestId, onNavigate }) {
       await respondToCashServicePaymentApi({ requestId, attemptId, action });
       setActionNotice(
         action === 'confirm'
-          ? 'Cash / EFT payment confirmed and job settled.'
+          ? 'Cash payment confirmed and job settled.'
           : 'Marked as not received. The customer has been asked to choose another payment method.',
       );
     } catch (err) {
@@ -718,7 +718,7 @@ export function RequestDetailPage({ requestId, onNavigate }) {
                   <div className="rounded-lg border border-border bg-tealbrand-50/40 p-3.5 flex items-start gap-2.5 text-xs text-ink-700 min-w-0">
                     <CreditCard className="h-4 w-4 text-tealbrand-700 mt-0.5 shrink-0" />
                     <span className="min-w-0 flex-1 break-words">
-                      The customer has received their invoice via WhatsApp and can now choose <strong>Cash / EFT</strong> or <strong>Card (Paystack)</strong>.
+                      The customer has received their invoice via WhatsApp and can now choose <strong>Pay with Cash</strong> or <strong>Pay with Card</strong>.
                     </span>
                   </div>
                 )}
@@ -727,7 +727,7 @@ export function RequestDetailPage({ requestId, onNavigate }) {
                   <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-3.5 flex items-start gap-2.5 text-xs text-amber-900 min-w-0">
                     <Banknote className="h-4 w-4 text-amber-700 mt-0.5 shrink-0" />
                     <span className="min-w-0 flex-1 break-words">
-                      Customer selected <strong>Cash / EFT</strong>. Once they hand over payment or mark it paid, you will be able to confirm receipt right here.
+                      Customer selected <strong>Cash</strong>. Once they hand over payment or mark it paid, you will be able to confirm receipt right here.
                     </span>
                   </div>
                 )}
@@ -738,7 +738,7 @@ export function RequestDetailPage({ requestId, onNavigate }) {
                       <Banknote className="h-4 w-4 text-amber-700 mt-0.5 shrink-0" />
                       <div className="space-y-0.5 min-w-0 flex-1">
                         <div className="text-xs font-bold text-amber-950">
-                          Confirm Cash / EFT Receipt
+                          Confirm Cash Receipt
                         </div>
                         <p className="text-xs text-amber-900 break-words">
                           The customer reported paying{' '}
@@ -786,7 +786,7 @@ export function RequestDetailPage({ requestId, onNavigate }) {
                     <CheckCircle2 className="h-4 w-4 text-emerald-700 mt-0.5 shrink-0" />
                     <div className="space-y-0.5 min-w-0 flex-1">
                       <div className="font-bold">
-                        Settled via {paymentMethod === 'cash' ? 'Cash / EFT' : 'Card (Paystack)'}
+                        Settled via {paymentMethod === 'cash' ? 'Cash' : 'Card (Paystack)'}
                       </div>
                       {paymentOperation?.receiptId && (
                         <div className="text-[11px] text-emerald-800 [overflow-wrap:anywhere]">

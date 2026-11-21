@@ -23,20 +23,41 @@ function normalizeMinorAmount(value) {
   return Math.round(amount * 100);
 }
 
+function isCanceledStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  return normalized === 'canceled' || normalized === 'cancelled';
+}
+
+function isRequestPayableStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  return normalized === 'completed' || isCanceledStatus(normalized);
+}
+
 function getFinalPayableAmount(request = {}, legacyOperation = null) {
   const requestStatus = String(request.status || '').trim().toLowerCase();
-  if (requestStatus !== 'completed') return null;
-  const legacyType = String(legacyOperation?.operationType || '');
-  const legacyAmount = Number(legacyOperation?.amountMinor);
-  const amount = legacyType === 'completion' && Number.isFinite(legacyAmount)
-    ? legacyAmount / 100
-    : Number(request.pricingSnapshot?.cashChargeAmount
-      ?? request.totalAmount
-      ?? request.pricingSnapshot?.finalAmount
-      ?? request.pricingSnapshot?.totalAmount
-      ?? NaN);
-  if (!Number.isFinite(amount) || amount < 0) return null;
-  return Math.round(amount * 100) / 100;
+  if (requestStatus === 'completed') {
+    const legacyType = String(legacyOperation?.operationType || '');
+    const legacyAmount = Number(legacyOperation?.amountMinor);
+    const amount = legacyType === 'completion' && Number.isFinite(legacyAmount)
+      ? legacyAmount / 100
+      : Number(request.pricingSnapshot?.cashChargeAmount
+        ?? request.totalAmount
+        ?? request.pricingSnapshot?.finalAmount
+        ?? request.pricingSnapshot?.totalAmount
+        ?? NaN);
+    if (!Number.isFinite(amount) || amount < 0) return null;
+    return Math.round(amount * 100) / 100;
+  }
+  if (isCanceledStatus(requestStatus)) {
+    const legacyType = String(legacyOperation?.operationType || '');
+    const legacyAmount = Number(legacyOperation?.amountMinor);
+    const amount = legacyType === 'customer_cancellation' && Number.isFinite(legacyAmount)
+      ? legacyAmount / 100
+      : Number(request.cancellationFeeAmount ?? request.pricingSnapshot?.cancellationAmount ?? NaN);
+    if (!Number.isFinite(amount) || amount <= 0) return null;
+    return Math.round(amount * 100) / 100;
+  }
+  return null;
 }
 
 function paymentStateForRequest(request = {}, paymentOperation = null, legacyOperation = null) {
@@ -49,6 +70,8 @@ function paymentStateForRequest(request = {}, paymentOperation = null, legacyOpe
   }
   const status = String(request.paymentStatus || '').toLowerCase();
   if (['wallet_debt_recorded', 'payment_failed', 'payment_cancelled', 'payment_expired'].includes(status)) return status;
+  if (String(paymentOperation?.status || '').toLowerCase() === 'wallet_debt_recorded'
+    || String(legacyOperation?.status || '').toLowerCase() === 'settled_failed') return 'wallet_debt_recorded';
   return 'unpaid';
 }
 
@@ -60,7 +83,7 @@ function safePaymentReceipt({ requestId, operation, request }) {
     requestReference: String(request?.publicRequestReference || request?.requestReference || requestId || ''),
     requestId: String(requestId || ''),
     service: String(request?.subject || request?.serviceName || 'Uncedo service'),
-    amount: Number(settlement.amount ?? operation?.amount ?? request?.totalAmount ?? 0),
+    amount: Number(settlement.amount ?? operation?.amount ?? request?.totalAmount ?? request?.cancellationFeeAmount ?? 0),
     currency: 'ZAR',
     method: String(settlement.method || operation?.method || request?.paymentMethod || ''),
     paidAtMs: Number(settlement.paidAtMs || operation?.settledAtMs || 0),
@@ -83,13 +106,16 @@ async function createServicePaymentSession({ db, requestId, customerId, principa
     if (!requestSnap.exists) return { code: 'not-found' };
     const request = requestSnap.data() || {};
     if (String(request.customerId || '') !== normalizedCustomerId) return { code: 'not-owner' };
-    if (String(request.status || '').toLowerCase() !== 'completed') return { code: 'not-payable' };
+    const requestStatus = String(request.status || '').toLowerCase();
+    if (!isRequestPayableStatus(requestStatus)) return { code: 'not-payable' };
     const legacy = legacySnap.exists ? legacySnap.data() || {} : null;
     const amount = getFinalPayableAmount(request, legacy);
-    if (amount === null) return { code: 'amount-unavailable' };
+    if (amount === null) return { code: requestStatus === 'completed' ? 'amount-unavailable' : 'not-payable' };
     if (amount <= 0) return { code: 'not-payable' };
     if (paymentStateForRequest(request, null, legacy) === 'paid') return { code: 'already-paid' };
     if (paymentStateForRequest(request, null, legacy) === 'payment_processing') return { code: 'payment-processing' };
+    const ttlMs = Math.max(60_000, Math.min(Number(expiresInMs) || 20 * 60 * 1000, 24 * 60 * 60 * 1000));
+    const computedExpiresAtMs = now + ttlMs;
     transaction.create(sessionRef, {
       sessionId: tokenHash,
       requestId: normalizedRequestId,
@@ -99,11 +125,11 @@ async function createServicePaymentSession({ db, requestId, customerId, principa
       amountMinor: normalizeMinorAmount(amount),
       currency: 'ZAR',
       status: 'active',
-      expiresAtMs: now + Math.max(60_000, Math.min(Number(expiresInMs) || 20 * 60 * 1000, 60 * 60 * 1000)),
+      expiresAtMs: computedExpiresAtMs,
       createdAtMs: now,
       updatedAtMs: now,
     });
-    return { code: 'created', amount, expiresAtMs: now + Math.max(60_000, Math.min(Number(expiresInMs) || 20 * 60 * 1000, 60 * 60 * 1000)) };
+    return { code: 'created', amount, expiresAtMs: computedExpiresAtMs };
   });
   return { ...outcome, ...(outcome.code === 'created' ? { token, sessionId: tokenHash } : {}) };
 }
@@ -127,9 +153,10 @@ async function resolveServicePaymentSession({ db, token, now = Date.now() }) {
   const request = { id: requestSnap.id, ...(requestSnap.data() || {}) };
   const legacy = legacySnap.exists ? legacySnap.data() || {} : null;
   const paymentOperation = paymentSnap.exists ? paymentSnap.data() || {} : null;
+  const requestStatus = String(request.status || '').toLowerCase();
+  if (!isRequestPayableStatus(requestStatus)) return { code: 'not-payable' };
   const amount = getFinalPayableAmount(request, legacy);
-  if (String(request.status || '').toLowerCase() !== 'completed') return { code: 'not-payable' };
-  if (amount === null) return { code: 'amount-unavailable' };
+  if (amount === null) return { code: requestStatus === 'completed' ? 'amount-unavailable' : 'not-payable' };
   return {
     code: 'available',
     sessionRef: sessionSnap.ref,
@@ -165,7 +192,9 @@ async function beginServicePaymentAttempt({ db, admin, sessionRef, session, meth
     if (!requestSnap.exists) return { action: 'not-found' };
     const request = requestSnap.data() || {};
     if (String(request.customerId || '') !== String(session.customerId || '')) return { action: 'not-owner' };
-    if (String(request.status || '').toLowerCase() !== 'completed') return { action: 'not-payable' };
+    const requestStatus = String(request.status || '').toLowerCase();
+    if (!isRequestPayableStatus(requestStatus)) return { action: 'not-payable' };
+    if (isCanceledStatus(requestStatus) && normalizedMethod === 'cash') return { action: 'method-not-allowed' };
     const legacy = legacySnap.exists ? legacySnap.data() || {} : null;
     const existing = paymentSnap.exists ? paymentSnap.data() || {} : null;
     const state = paymentStateForRequest(request, existing, legacy);
@@ -235,8 +264,8 @@ async function claimSavedCardPayment({ db, admin, requestId, attemptId, gatewayR
     const request = requestSnap.data() || {};
     const payment = paymentSnap.data() || {};
     const attempt = attemptSnap.data() || {};
-    if (String(request.status || '').toLowerCase() !== 'completed') return { action: 'not-payable' };
-    if (payment.status === 'paid' || request.paymentStatus === 'paid') return { action: 'already-paid', receiptId: payment.receiptId || request.paymentReceiptId || null, amount: payment.amount || request.totalAmount || 0, method: payment.method || request.paymentMethod || '' };
+    if (!isRequestPayableStatus(request.status)) return { action: 'not-payable' };
+    if (payment.status === 'paid' || request.paymentStatus === 'paid') return { action: 'already-paid', receiptId: payment.receiptId || request.paymentReceiptId || null, amount: payment.amount || request.totalAmount || request.cancellationFeeAmount || 0, method: payment.method || request.paymentMethod || '' };
     if (payment.activeAttemptId !== attemptId || attempt.method !== 'saved_card') return { action: 'stale-attempt' };
     if (referenceSnap.exists && String(referenceSnap.data()?.attemptId || '') !== attemptId) return { action: 'reference-conflict' };
     if (attempt.status === 'processing' || attempt.status === 'payment_reconciliation_required') return { action: 'reconcile', attempt, request, attemptRef };
@@ -295,6 +324,12 @@ async function reportCashPayment({ db, admin, requestId, customerId, attemptId, 
   });
 }
 
+function hasOutstandingWalletDebt(legacy = null, payment = null) {
+  const legacyOutstanding = Boolean(legacy?.walletDebtOutstanding || (legacy?.debtApplied && !legacy?.debtReversed));
+  const paymentOutstanding = Boolean(payment?.walletDebtOutstanding || (payment?.debtApplied && !payment?.debtReversed));
+  return legacyOutstanding || paymentOutstanding;
+}
+
 async function cancelCashPaymentSelection({ db, admin, requestId, customerId, attemptId, now = Date.now() }) {
   const requestRef = db.collection('serviceRequests').doc(String(requestId || ''));
   const paymentRef = db.collection(PAYMENT_OPERATIONS).doc(String(requestId || ''));
@@ -313,7 +348,9 @@ async function cancelCashPaymentSelection({ db, admin, requestId, customerId, at
     if (payment.status === 'paid') return { action: 'already-paid' };
     if (payment.activeAttemptId !== attemptId || attempt.method !== 'cash' || attempt.status !== 'cash_selected') return { action: 'cash-already-reported-or-stale' };
     const legacy = legacySnap.exists ? legacySnap.data() || {} : null;
-    const priorState = String(legacy?.status || '') === 'settled_failed' ? 'wallet_debt_recorded' : 'unpaid';
+    const priorState = (String(legacy?.status || '') === 'settled_failed' || hasOutstandingWalletDebt(legacy, payment))
+      ? 'wallet_debt_recorded'
+      : 'unpaid';
     transaction.set(attemptRef, { status: 'cancelled_by_customer', cancelledAtMs: now, updatedAtMs: now }, { merge: true });
     transaction.set(paymentRef, { status: priorState, method: null, activeAttemptId: null, updatedAtMs: now }, { merge: true });
     transaction.update(requestRef, { paymentStatus: priorState, paymentMethod: null, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
@@ -335,11 +372,13 @@ async function cancelSavedCardPaymentConfirmation({ db, admin, requestId, custom
     const payment = paymentSnap.data() || {};
     const attempt = attemptSnap.data() || {};
     if (String(request.customerId || '') !== String(customerId || '')) return { action: 'not-owner' };
-    if (String(request.status || '').toLowerCase() !== 'completed') return { action: 'not-payable' };
+    if (!isRequestPayableStatus(request.status)) return { action: 'not-payable' };
     if (payment.status === 'paid') return { action: 'already-paid' };
     if (payment.activeAttemptId !== attemptId || attempt.method !== 'saved_card' || attempt.status !== 'awaiting_customer_confirmation') return { action: 'confirmation-already-submitted-or-stale' };
     const legacy = legacySnap.exists ? legacySnap.data() || {} : null;
-    const priorState = String(legacy?.status || '') === 'settled_failed' ? 'wallet_debt_recorded' : 'unpaid';
+    const priorState = (String(legacy?.status || '') === 'settled_failed' || hasOutstandingWalletDebt(legacy, payment))
+      ? 'wallet_debt_recorded'
+      : 'unpaid';
     transaction.set(attemptRef, { status: 'cancelled_by_customer', cancelledAtMs: now, updatedAtMs: now }, { merge: true });
     transaction.set(paymentRef, { status: priorState, method: null, selectedCardId: null, activeAttemptId: null, updatedAtMs: now }, { merge: true });
     transaction.update(requestRef, { paymentStatus: priorState, paymentMethod: null, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
@@ -362,7 +401,9 @@ async function rejectCashPayment({ db, admin, requestId, helperId, attemptId, no
     if (String(request.status || '').toLowerCase() !== 'completed') return { action: 'not-payable' };
     if (payment.activeAttemptId !== attemptId || attempt.status !== 'awaiting_cash_confirmation') return { action: 'stale-attempt' };
     const legacy = legacySnap.exists ? legacySnap.data() || {} : null;
-    const priorState = String(legacy?.status || '') === 'settled_failed' ? 'wallet_debt_recorded' : 'unpaid';
+    const priorState = (String(legacy?.status || '') === 'settled_failed' || hasOutstandingWalletDebt(legacy, payment))
+      ? 'wallet_debt_recorded'
+      : 'unpaid';
     transaction.set(attemptRef, { status: 'cash_rejected', helperRejectedAtMs: now, updatedAtMs: now }, { merge: true });
     transaction.set(paymentRef, { status: priorState, activeAttemptId: null, updatedAtMs: now }, { merge: true });
     transaction.update(requestRef, { paymentStatus: priorState, paymentMethod: null, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
@@ -398,7 +439,10 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
     const payment = paymentSnap.data() || {};
     const attempt = attemptSnap.data() || {};
     const legacy = legacySnap.exists ? legacySnap.data() || {} : null;
-    if (String(request.status || '').toLowerCase() !== 'completed') return { action: 'not-payable' };
+    const requestStatus = String(request.status || '').toLowerCase();
+    const isCanceled = isCanceledStatus(requestStatus);
+    if (!isRequestPayableStatus(requestStatus)) return { action: 'not-payable' };
+    if (isCanceled && attempt.method === 'cash') return { action: 'method-not-allowed' };
     if (payment.status === 'paid' || request.paymentStatus === 'paid') return { action: 'already-paid' };
     if (payment.activeAttemptId !== attemptId) return { action: 'stale-attempt' };
     if (attempt.method === 'cash' && attempt.status !== 'awaiting_cash_confirmation') return { action: 'invalid-state' };
@@ -411,18 +455,87 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
     }
     if (outcome !== 'success' && outcome !== 'failed_confirmed') return { action: 'invalid-outcome' };
     if (outcome === 'failed_confirmed') {
-      const failureState = legacy?.status === 'settled_failed' ? 'wallet_debt_recorded' : 'payment_failed';
+      const amount = Number(attempt.amount || 0);
+      const customerId = String(request.customerId || '').trim();
+      const customerRef = customerId ? db.collection('users').doc(customerId) : null;
+      const alreadyHasDebt = legacy?.status === 'settled_failed' || hasOutstandingWalletDebt(legacy, payment);
+      const shouldApplyWalletDebt = Boolean(customerRef && amount > 0 && !alreadyHasDebt);
+      const debtLedgerRef = db.collection(PAYMENT_LEDGER).doc(`payment_debt_${digest(`${requestId}:${attemptId}`).slice(0, 40)}`);
+      const [customerSnap, debtLedgerSnap] = shouldApplyWalletDebt
+        ? await Promise.all([transaction.get(customerRef), transaction.get(debtLedgerRef)])
+        : [null, null];
+
+      let walletDebtAppliedNow = false;
+      if (shouldApplyWalletDebt && (!debtLedgerSnap || !debtLedgerSnap.exists)) {
+        const customer = customerSnap?.data() || {};
+        const wallet = customer.wallet || { balance: 0, currency: 'ZAR' };
+        const oldBalance = Number(wallet.balance || 0);
+        const newBalance = Number((oldBalance - amount).toFixed(2));
+        transaction.create(debtLedgerRef, {
+          entryId: debtLedgerRef.id,
+          operationId: String(legacy?.operationId || `payment_${requestId}`),
+          requestId,
+          userId: customerId,
+          entryType: 'service_charge_debt',
+          amount,
+          currency: 'ZAR',
+          balanceBefore: oldBalance,
+          balanceAfter: newBalance,
+          gatewayReference: String(gatewayReference || '') || null,
+          sourcePaymentAttemptId: attemptId,
+          createdAtMs: now,
+        });
+        transaction.set(customerRef, {
+          ...(customerId.startsWith('guest_') && !customerSnap?.exists ? {
+            uid: customerId,
+            isGuest: true,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          } : {}),
+          wallet: {
+            ...wallet,
+            balance: newBalance,
+            currency: wallet.currency || 'ZAR',
+            updatedAt: new Date(now).toISOString(),
+          },
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        walletDebtAppliedNow = true;
+      }
+
+      const failureState = (shouldApplyWalletDebt || alreadyHasDebt) ? 'wallet_debt_recorded' : 'payment_failed';
+      const totalDebtOutstanding = failureState === 'wallet_debt_recorded';
+      const recordedDebtAmount = totalDebtOutstanding ? (Number(payment?.walletDebtAmount || legacy?.amount || 0) || amount) : 0;
       transaction.set(attemptRef, { status: 'payment_failed', providerStatus: String(providerStatus || 'failed'), gatewayReference: String(gatewayReference || ''), updatedAtMs: now }, { merge: true });
-      transaction.set(paymentRef, { status: failureState, activeAttemptId: null, updatedAtMs: now }, { merge: true });
+      transaction.set(paymentRef, {
+        status: failureState,
+        activeAttemptId: null,
+        walletDebtOutstanding: totalDebtOutstanding,
+        debtApplied: Boolean(payment?.debtApplied || walletDebtAppliedNow),
+        ...(totalDebtOutstanding ? { walletDebtAmount: recordedDebtAmount } : {}),
+        updatedAtMs: now,
+      }, { merge: true });
+      if (legacySnap.exists && totalDebtOutstanding) {
+        transaction.set(legacyRef, {
+          status: 'settled_failed',
+          finalOutcome: 'failed_confirmed',
+          paymentStatus: 'wallet_debt_recorded',
+          paymentSettled: false,
+          outcomeDetermined: true,
+          settlementApplied: true,
+          walletDebtOutstanding: true,
+          debtApplied: Boolean(legacy?.debtApplied || walletDebtAppliedNow),
+          updatedAtMs: now,
+        }, { merge: true });
+      }
       transaction.update(requestRef, { paymentStatus: failureState, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-      return { action: 'failed', failureState };
+      return { action: 'failed', failureState, walletDebtApplied: walletDebtAppliedNow, walletDebtOutstanding: totalDebtOutstanding, amount, customerId };
     }
     if (attempt.method === 'cash' && (!helperId || String(request.helperAssignment?.helperId || '') !== String(helperId))) return { action: 'not-assigned-helper' };
-    const customerId = String(request.customerId || '');
+    const customerId = String(request.customerId || '').trim();
     const customerRef = customerId ? db.collection('users').doc(customerId) : null;
     let customerSnap = null;
     let wallet = null;
-    const debtOutstanding = Boolean(legacy?.walletDebtOutstanding || (legacy?.debtApplied && !legacy?.debtReversed));
+    const debtOutstanding = hasOutstandingWalletDebt(legacy, payment);
     const reversalRef = db.collection(PAYMENT_LEDGER).doc(`payment_debt_reversal_${digest(`${requestId}:${attemptId}`).slice(0, 40)}`);
     const reversalSnap = debtOutstanding ? await transaction.get(reversalRef) : null;
     if (debtOutstanding && customerRef) {
@@ -430,6 +543,7 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
       wallet = customerSnap.data()?.wallet || { balance: 0, currency: 'ZAR' };
     }
     const amount = Number(attempt.amount || 0);
+    const reversalAmount = Number(legacy?.amount || payment?.walletDebtAmount || amount || 0);
     const paymentMethod = String(attempt.method || '');
     const receiptId = `UNC-${digest(`${requestId}:${attemptId}`).slice(0, 16).toUpperCase()}`;
     const isCash = paymentMethod === 'cash';
@@ -438,7 +552,7 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
     const useHelperWallet = walletEnabled || Number(request.helperWalletAccountingVersion) === 1;
     let cashCommission = { applied: false, recoveredMinor: 0, outstandingMinor: 0 };
     const commissionMinor = Math.round(Number(breakdown.platformAmount || 0) * 100);
-    if (isCash && useHelperWallet && commissionMinor > 0) {
+    if (isCash && !isCanceled && useHelperWallet && commissionMinor > 0) {
       cashCommission = await applyCashCommissionInTransaction({
         transaction, db, helperId: helperIdForCash, requestId, commissionMinor, now,
       });
@@ -461,23 +575,38 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
         createdAtMs: now,
       });
     }
-    if (debtOutstanding && customerRef && customerSnap?.exists) {
-      const oldBalance = Number(wallet?.balance || 0);
-      const newBalance = Number((oldBalance + amount).toFixed(2));
-      if (!reversalSnap.exists) {
-        transaction.create(reversalRef, {
-          entryId: reversalRef.id, operationId: legacy.operationId, requestId, userId: customerId,
-          entryType: 'service_charge_debt_reversal', amount, currency: 'ZAR',
-          balanceBefore: oldBalance, balanceAfter: newBalance, sourcePaymentAttemptId: attemptId, createdAtMs: now,
-        });
-        transaction.set(customerRef, { wallet: { ...wallet, balance: newBalance, currency: wallet.currency || 'ZAR', updatedAt: new Date(now).toISOString() }, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-      }
-    }
     const canonicalOperationId = String(legacy?.operationId || `service_${digest(requestId).slice(0, 40)}`);
+    const reversedDebtNow = Boolean(debtOutstanding && customerRef && customerSnap?.exists && reversalAmount > 0 && !reversalSnap?.exists);
+    if (reversedDebtNow) {
+      const oldBalance = Number(wallet?.balance || 0);
+      const newBalance = Number((oldBalance + reversalAmount).toFixed(2));
+      transaction.create(reversalRef, {
+        entryId: reversalRef.id,
+        operationId: canonicalOperationId,
+        requestId,
+        userId: customerId,
+        entryType: 'service_charge_debt_reversal',
+        amount: reversalAmount,
+        currency: 'ZAR',
+        balanceBefore: oldBalance,
+        balanceAfter: newBalance,
+        sourcePaymentAttemptId: attemptId,
+        createdAtMs: now,
+      });
+      transaction.set(customerRef, {
+        wallet: {
+          ...wallet,
+          balance: newBalance,
+          currency: wallet.currency || 'ZAR',
+          updatedAt: new Date(now).toISOString(),
+        },
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+    }
     const canonicalOperationPatch = {
       operationId: canonicalOperationId,
       requestId,
-      operationType: 'completion',
+      operationType: String(legacy?.operationType || (isCanceled ? 'customer_cancellation' : 'completion')),
       status: 'settled_success',
       finalOutcome: 'success',
       finalOutcomeSource: 'request_payment',
@@ -486,8 +615,8 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
       outcomeDetermined: true,
       settlementApplied: true,
       walletDebtOutstanding: false,
-      debtApplied: Boolean(legacy?.debtApplied),
-      debtReversed: Boolean(legacy?.debtReversed || (debtOutstanding && customerSnap?.exists)),
+      debtApplied: Boolean(legacy?.debtApplied || payment?.debtApplied),
+      debtReversed: Boolean(legacy?.debtReversed || payment?.debtReversed || (debtOutstanding && customerSnap?.exists)),
       ...(Number.isFinite(Number(legacy?.amountMinor)) ? {} : { amount, amountMinor: Math.round(amount * 100), currency: 'ZAR' }),
       alternatePaymentMethod: paymentMethod,
       alternatePaymentReference: String(gatewayReference || '') || null,
@@ -497,7 +626,7 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
     };
     if (legacySnap.exists) transaction.set(legacyRef, canonicalOperationPatch, { merge: true });
     else transaction.create(legacyRef, { ...canonicalOperationPatch, createdAtMs: now });
-    if (isCash && !useHelperWallet && Number(breakdown.platformAmount || 0) > 0) {
+    if (isCash && !isCanceled && !useHelperWallet && Number(breakdown.platformAmount || 0) > 0) {
       const policyReviewRef = db.collection('financialPolicyReviews').doc(`direct_cash_${digest(requestId).slice(0, 40)}`);
       transaction.set(policyReviewRef, {
         reviewId: policyReviewRef.id,
@@ -543,13 +672,19 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
       receiptId, settledAtMs: now, updatedAtMs: now,
     }, { merge: true });
     transaction.set(paymentRef, {
-      status: 'paid', method: paymentMethod, activeAttemptId: attemptId, receiptId,
+      status: 'paid',
+      method: paymentMethod,
+      activeAttemptId: attemptId,
+      receiptId,
+      walletDebtOutstanding: false,
+      debtApplied: Boolean(payment?.debtApplied || debtOutstanding),
+      debtReversed: Boolean(payment?.debtReversed || (debtOutstanding && customerSnap?.exists)),
       settlement: { receiptId, amount, method: paymentMethod, paidAtMs: now, gatewayReference: String(gatewayReference || '') },
       gatewayReference: String(gatewayReference || '') || null, gatewayTransactionId: String(gatewayTransactionId || '') || null,
       settledAtMs: now, updatedAtMs: now,
       ...(isCash ? { platformCommissionReviewRequired: !useHelperWallet && Number(breakdown.platformAmount || 0) > 0 } : {}),
     }, { merge: true });
-    return { action: 'settled', receiptId, amount, method: paymentMethod, customerId, helperId: String(request.helperAssignment?.helperId || '') };
+    return { action: 'settled', receiptId, amount, method: paymentMethod, customerId, helperId: String(request.helperAssignment?.helperId || ''), requestStatus, debtReversed: Boolean(reversedDebtNow) };
   });
 }
 

@@ -267,3 +267,154 @@ test('session resolves to the current server amount and cannot outlive its expir
   assert.equal(resolved.amount, 91.25);
   assert.equal((await resolveServicePaymentSession({ db, token: created.token, now: created.expiresAtMs + 1 })).code, 'expired');
 });
+
+test('canceled requests with cancellation fees allow card payments only and block cash', async () => {
+  const db = new MemoryDb({
+    'serviceRequests/rq_cancel_fee': {
+      customerId: 'guest_whatsapp_1',
+      status: 'canceled',
+      cancellationFeeAmount: 55,
+      paymentStatus: 'wallet_debt_recorded',
+    },
+    'users/guest_whatsapp_1': { uid: 'guest_whatsapp_1', isGuest: true, wallet: { balance: -55, currency: 'ZAR' } },
+  });
+  const created = await createServicePaymentSession({
+    db,
+    requestId: 'rq_cancel_fee',
+    customerId: 'guest_whatsapp_1',
+    principalId: 'guest_whatsapp_1',
+    principalType: 'whatsapp_guest',
+    now: 1_000,
+    expiresInMs: 12 * 60 * 60 * 1000,
+  });
+  assert.equal(created.code, 'created');
+  assert.equal(created.amount, 55);
+  assert.equal(created.expiresAtMs, 1_000 + 12 * 60 * 60 * 1000);
+
+  const resolved = await resolveServicePaymentSession({ db, token: created.token, now: 2_000 });
+  assert.equal(resolved.code, 'available');
+  assert.equal(resolved.paymentStatus, 'wallet_debt_recorded');
+
+  const cashBlocked = await beginServicePaymentAttempt({
+    db,
+    admin,
+    sessionRef: resolved.sessionRef,
+    session: resolved.session,
+    method: 'cash',
+    idempotencyKey: 'cash-try',
+    now: 2_001,
+  });
+  assert.equal(cashBlocked.action, 'method-not-allowed');
+
+  const cardBegun = await beginServicePaymentAttempt({
+    db,
+    admin,
+    sessionRef: resolved.sessionRef,
+    session: resolved.session,
+    method: 'paystack_checkout',
+    idempotencyKey: 'card-try',
+    now: 2_002,
+  });
+  assert.equal(cardBegun.action, 'created');
+  assert.equal(cardBegun.attempt.amount, 55);
+});
+
+test('explicit payment failure deducts guest wallet once and card retry settlement reverses the debt cleanly', async () => {
+  const reqId = 'rq_guest_fail';
+  const legacyOpId = `service_${createHash('sha256').update(reqId).digest('hex').slice(0, 40)}`;
+  const db = new MemoryDb({
+    [`serviceRequests/${reqId}`]: { customerId: 'guest_999', status: 'completed', paymentStatus: 'unpaid', totalAmount: 220 },
+    [`servicePaymentOperations/${reqId}`]: { status: 'payment_processing', activeAttemptId: 'attempt-fail-1' },
+    [`servicePaymentOperations/${reqId}/attempts/attempt-fail-1`]: { method: 'paystack_checkout', status: 'processing', amount: 220, amountMinor: 22000, customerId: 'guest_999' },
+    [`financialOperations/${legacyOpId}`]: { operationId: legacyOpId, operationType: 'completion', status: 'settled_no_charge', finalOutcome: 'no_charge', paymentStatus: 'unpaid', amount: 220, amountMinor: 22000, debtApplied: false, walletDebtOutstanding: false },
+  });
+
+  const failedFirst = await settleRequestPayment({
+    db,
+    admin,
+    requestId: reqId,
+    attemptId: 'attempt-fail-1',
+    outcome: 'failed_confirmed',
+    gatewayReference: 'ref-fail-1',
+    providerStatus: 'failed',
+    now: 5_000,
+  });
+  assert.equal(failedFirst.action, 'failed');
+  assert.equal(failedFirst.failureState, 'wallet_debt_recorded');
+  assert.equal(failedFirst.walletDebtApplied, true);
+  assert.equal(failedFirst.walletDebtOutstanding, true);
+
+  const guestUserAfterFail = (await db.collection('users').doc('guest_999').get()).data();
+  assert.equal(guestUserAfterFail.isGuest, true);
+  assert.equal(guestUserAfterFail.wallet.balance, -220);
+
+  // Second explicit attempt fails again -> must NOT double-deduct wallet
+  const sessionCreated = await createServicePaymentSession({
+    db,
+    requestId: reqId,
+    customerId: 'guest_999',
+    principalId: 'guest_999',
+    principalType: 'whatsapp_guest',
+    now: 6_000,
+  });
+  assert.equal(sessionCreated.code, 'created');
+  const sessionResolved = await resolveServicePaymentSession({ db, token: sessionCreated.token, now: 6_001 });
+  const retryBegun = await beginServicePaymentAttempt({
+    db,
+    admin,
+    sessionRef: sessionResolved.sessionRef,
+    session: sessionResolved.session,
+    method: 'paystack_checkout',
+    idempotencyKey: 'retry-fail-2',
+    now: 6_002,
+  });
+  await db.collection('servicePaymentOperations').doc(reqId).collection('attempts').doc(retryBegun.attempt.attemptId).get();
+  // Move attempt to processing via MemoryDb set
+  await db.runTransaction(async (tx) => {
+    tx.set(db.collection('servicePaymentOperations').doc(reqId).collection('attempts').doc(retryBegun.attempt.attemptId), { status: 'processing' }, { merge: true });
+  });
+  const failedSecond = await settleRequestPayment({
+    db,
+    admin,
+    requestId: reqId,
+    attemptId: retryBegun.attempt.attemptId,
+    outcome: 'failed_confirmed',
+    gatewayReference: 'ref-fail-2',
+    providerStatus: 'failed',
+    now: 7_000,
+  });
+  assert.equal(failedSecond.walletDebtApplied, false);
+  assert.equal((await db.collection('users').doc('guest_999').get()).data().wallet.balance, -220);
+
+  // Third attempt succeeds -> wallet debt is reversed back to 0
+  const successBegun = await beginServicePaymentAttempt({
+    db,
+    admin,
+    sessionRef: sessionResolved.sessionRef,
+    session: sessionResolved.session,
+    method: 'paystack_checkout',
+    idempotencyKey: 'retry-success-3',
+    now: 8_000,
+  });
+  await db.runTransaction(async (tx) => {
+    tx.set(db.collection('servicePaymentOperations').doc(reqId).collection('attempts').doc(successBegun.attempt.attemptId), { status: 'processing' }, { merge: true });
+  });
+  const succeeded = await settleRequestPayment({
+    db,
+    admin,
+    requestId: reqId,
+    attemptId: successBegun.attempt.attemptId,
+    outcome: 'success',
+    gatewayReference: 'ref-success-3',
+    gatewayTransactionId: 'tx-3',
+    providerStatus: 'success',
+    now: 9_000,
+  });
+  assert.equal(succeeded.action, 'settled');
+  assert.equal(succeeded.debtReversed, true);
+  assert.equal((await db.collection('users').doc('guest_999').get()).data().wallet.balance, 0);
+  const debtEntries = [...db.records.entries()].filter(([path, val]) => path.startsWith('financialLedger/') && val.entryType === 'service_charge_debt');
+  const reversalEntries = [...db.records.entries()].filter(([path, val]) => path.startsWith('financialLedger/') && val.entryType === 'service_charge_debt_reversal');
+  assert.equal(debtEntries.length, 1);
+  assert.equal(reversalEntries.length, 1);
+});

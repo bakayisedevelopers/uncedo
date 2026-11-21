@@ -461,6 +461,11 @@ async function settleServiceFinancialOperation({
         createdAtMs: now,
       });
       transaction.set(customerRef, {
+        ...(customerId.startsWith('guest_') && !customerSnap?.exists ? {
+          uid: customerId,
+          isGuest: true,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        } : {}),
         wallet: {
           ...wallet,
           balance: nextBalance,

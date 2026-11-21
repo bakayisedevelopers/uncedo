@@ -697,13 +697,22 @@ export async function respondToServiceRequestOfferApi({ requestId, offerToken, o
   );
 }
 
-async function fetchJsonWithRetry(url, fetchOptions, { retries = 2, defaultErrorMessage = 'Request failed right now.' } = {}) {
+async function fetchJsonWithRetry(
+  url,
+  fetchOptions,
+  {
+    retries = 3,
+    defaultErrorMessage = 'Request failed right now.',
+    networkErrorMessage = 'Uncedo servers are temporarily busy. Please wait a moment and try again.',
+  } = {},
+) {
   let lastNetworkError = null;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
       const response = await fetch(url, fetchOptions);
       if ([502, 503, 504].includes(response.status) && attempt < retries) {
-        await new Promise((resolve) => setTimeout(resolve, 600 * (attempt + 1)));
+        const delayMs = 1200 * (attempt + 1) + Math.floor(Math.random() * 400);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
         continue;
       }
       const text = await response.text();
@@ -723,11 +732,17 @@ async function fetchJsonWithRetry(url, fetchOptions, { retries = 2, defaultError
       const isNetworkError = err instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(String(err?.message || ''));
       if (isNetworkError && attempt < retries) {
         lastNetworkError = err;
-        await new Promise((resolve) => setTimeout(resolve, 600 * (attempt + 1)));
+        const delayMs = 1200 * (attempt + 1) + Math.floor(Math.random() * 400);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
         continue;
       }
       if (isNetworkError) {
-        throw new Error('Unable to reach Uncedo servers right now. Please check your connection and try again.');
+        const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+        throw new Error(
+          offline
+            ? 'Unable to reach Uncedo servers right now. Please check your connection and try again.'
+            : networkErrorMessage,
+        );
       }
       throw err;
     }
@@ -798,7 +813,11 @@ export async function finalizeServiceRequestBillingApi({ requestId, retryConfirm
       },
       body: JSON.stringify({ requestId, retryConfirmedFailure }),
     },
-    { defaultErrorMessage: 'Unable to finalize service billing right now.' },
+    {
+      retries: 3,
+      defaultErrorMessage: 'Unable to finalize service billing right now.',
+      networkErrorMessage: 'Uncedo billing servers are temporarily busy. Please wait a moment and try again.',
+    },
   );
 }
 

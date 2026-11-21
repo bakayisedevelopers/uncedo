@@ -21,15 +21,22 @@ test('pre-assignment cancellation has no charge and post-assignment terms follow
     helperPayoutBreakdown: { helperAmount: 0, platformAmount: 0, customerChargeAmount: 0 },
   });
 
+  assert.deepEqual(calculateCustomerCancellationTerms({ request: { status: 'accepted' }, bookingFee: 5, travelFee: 35 }), {
+    code: 'eligible', status: 'accepted', billingRule: 'accepted_before_travel', cancellationAmount: 0,
+    cancellationDistanceKm: 0, travelCharge: 0,
+    helperPayoutBreakdown: { helperAmount: 0, platformAmount: 0, customerChargeAmount: 0 },
+  });
+
   const driving = calculateCustomerCancellationTerms({
     request: { status: 'driving' },
     distanceTravelledMeters: 2750,
-    bookingFee: 5,
+    bookingFee: 4.6,
     travelFee: 35,
     payoutBreakdown: samplePayout,
   });
   assert.equal(driving.billingRule, 'travelled_distance_plus_booking_fee');
   assert.equal(driving.cancellationDistanceKm, 2.75);
+  assert.equal(driving.helperPayoutBreakdown.platformAmount, 5);
   assert.equal(driving.cancellationAmount, 16);
 
   const arrived = calculateCustomerCancellationTerms({

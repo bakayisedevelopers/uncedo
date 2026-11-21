@@ -464,7 +464,7 @@ function computeStoredHelperPayoutBreakdown(request = {}) {
       closureType: 'completed',
       waitingCost: Number(request.waitingCost || request?.pricingSnapshot?.waitingCost || 0),
       travelFeeAmount: getServiceTravelFee(request),
-      bookingFeeAmount: Number(request?.pricingSnapshot?.bookingFee || getServiceBookingFee(request)),
+      bookingFeeAmount: toWholeRand(request?.pricingSnapshot?.bookingFee ?? getServiceBookingFee(request)),
     });
   }
 
@@ -478,7 +478,7 @@ function computeStoredHelperPayoutBreakdown(request = {}) {
         || request?.pricingSnapshot?.travelFee
         || getServiceTravelFee(request),
       ),
-      bookingFeeAmount: Number(request?.pricingSnapshot?.bookingFee || getServiceBookingFee(request)),
+      bookingFeeAmount: toWholeRand(request?.pricingSnapshot?.bookingFee ?? getServiceBookingFee(request)),
     });
   }
 
@@ -7793,6 +7793,11 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         return;
       }
       if (buttonId === 'wa_payment_cash') {
+        if (context.isCanceled) {
+          await reply('Cancellation fees must be paid by card. Tap “Pay with Card” or open your payment link.');
+          await jobRef.set({ status: 'completed', intent: 'payment_selection', reason: 'cash_not_allowed_for_cancellation', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          return;
+        }
         const session = await createWhatsAppPaymentSession(context);
         const resolved = session.code === 'created' ? await resolveServicePaymentSession({ db, token: session.token }) : null;
         const begun = resolved?.code === 'available' ? await beginServicePaymentAttempt({ db, admin, sessionRef: resolved.sessionRef, session: resolved.session, method: 'cash', idempotencyKey: `wa-cash-select:${eventId}` }) : { action: session.code };
@@ -7804,8 +7809,8 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
             pendingCashPayment: { identityId, requestId: pending.requestId, attemptId: begun.attempt.attemptId, amount: Number(begun.attempt.amount), expiresAtMs: Date.now() + 20 * 60 * 1000 },
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           }, { merge: true });
-          await reply(`Pay R${formatWholeRandDisplay(begun.attempt.amount)} directly to your assigned helper by cash, EFT or bank transfer. When you have paid, tap “I have paid”. The payment is not confirmed until your helper verifies receipt.`, {
-            type: 'button', body: { text: 'Tell Uncedo after you pay the assigned helper directly.' }, action: { buttons: [
+          await reply(`Pay R${formatWholeRandDisplay(begun.attempt.amount)} directly to your assigned helper in cash. When you have paid, tap “I have paid”. The payment is not confirmed until your helper verifies receipt.`, {
+            type: 'button', body: { text: 'Tell Uncedo after you pay the assigned helper in cash.' }, action: { buttons: [
               { type: 'reply', reply: { id: `wa_cash_paid_${begun.attempt.attemptId}`, title: 'I have paid' } },
               { type: 'reply', reply: { id: 'wa_payment_cancel', title: 'Cancel' } },
             ] },
@@ -7830,14 +7835,17 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           currentIntent: 'payment_method_selection',
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         }, { merge: true });
-        await reply(`There are no eligible saved cards linked to this WhatsApp identity. Would you like to pay R${formatWholeRandDisplay(context.amount)} ZAR using another method?`, {
+        const fallbackButtons = context.isCanceled
+          ? [{ type: 'reply', reply: { id: 'wa_payment_card', title: 'Pay with Card' } }]
+          : [
+              { type: 'reply', reply: { id: 'wa_payment_cash', title: 'Pay with Cash' } },
+              { type: 'reply', reply: { id: 'wa_payment_card', title: 'Pay with Card' } },
+            ];
+        await reply(`There are no eligible saved cards linked to this WhatsApp identity. How would you like to pay R${formatWholeRandDisplay(context.amount)} ZAR?`, {
           type: 'button',
-          body: { text: `No saved card available. Choose how to pay R${formatWholeRandDisplay(context.amount)} ZAR:` },
+          body: { text: `No saved card available. Pay R${formatWholeRandDisplay(context.amount)} ZAR:` },
           action: {
-            buttons: [
-              { type: 'reply', reply: { id: 'wa_payment_cash', title: 'Cash / transfer' } },
-              { type: 'reply', reply: { id: 'wa_payment_card', title: 'New card' } },
-            ],
+            buttons: fallbackButtons,
           },
         });
       }
@@ -7908,15 +7916,16 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           currentIntent: 'payment_method_selection',
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         }, { merge: true });
-        await reply('Could not verify that saved card for your account. No charge was made. Would you like to try paying using another method?', {
+        const buttons = context.isCanceled
+          ? [{ type: 'reply', reply: { id: 'wa_payment_card', title: 'Pay with Card' } }]
+          : [
+              { type: 'reply', reply: { id: 'wa_payment_cash', title: 'Pay with Cash' } },
+              { type: 'reply', reply: { id: 'wa_payment_card', title: 'Pay with Card' } },
+            ];
+        await reply('Could not verify that saved card for your account. No charge was made. Choose another way to pay:', {
           type: 'button',
-          body: { text: 'Could not verify that saved card. Would you like to pay with Cash or a New card?' },
-          action: {
-            buttons: [
-              { type: 'reply', reply: { id: 'wa_payment_cash', title: 'Cash / transfer' } },
-              { type: 'reply', reply: { id: 'wa_payment_card', title: 'New card' } },
-            ],
-          },
+          body: { text: context.isCanceled ? 'Could not verify that saved card. Pay using a card:' : 'Could not verify that saved card. Pay with Cash or Card?' },
+          action: { buttons },
         });
         await jobRef.set({ status: 'completed', intent: 'saved_card_unavailable', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         return;
@@ -7933,15 +7942,16 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
             currentIntent: 'payment_method_selection',
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           }, { merge: true });
-          await reply('Unable to start saved-card payment. No charge was made. Would you like to pay using another method?', {
+          const buttons = context.isCanceled
+            ? [{ type: 'reply', reply: { id: 'wa_payment_card', title: 'Pay with Card' } }]
+            : [
+                { type: 'reply', reply: { id: 'wa_payment_cash', title: 'Pay with Cash' } },
+                { type: 'reply', reply: { id: 'wa_payment_card', title: 'Pay with Card' } },
+              ];
+          await reply('Unable to start saved-card payment. No charge was made. Choose another way to pay:', {
             type: 'button',
-            body: { text: 'Saved card could not be used. Would you like to pay using Cash or a New card?' },
-            action: {
-              buttons: [
-                { type: 'reply', reply: { id: 'wa_payment_cash', title: 'Cash / transfer' } },
-                { type: 'reply', reply: { id: 'wa_payment_card', title: 'New card' } },
-              ],
-            },
+            body: { text: context.isCanceled ? 'Saved card could not be used. Pay with a new card:' : 'Saved card could not be used. Choose Pay with Cash or Pay with Card:' },
+            action: { buttons },
           });
         } else {
           await reply('Another payment is active or this request is no longer payable. No saved-card charge was made.');
@@ -7985,14 +7995,17 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
             currentIntent: 'payment_method_selection',
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           }, { merge: true });
-          await reply(`${introMessage}\n\nWould you like to pay R${formatWholeRandDisplay(refreshedContext.amount)} ZAR using another method?`, {
+          const fallbackButtons = refreshedContext.isCanceled
+            ? [{ type: 'reply', reply: { id: 'wa_payment_card', title: 'Pay with Card' } }]
+            : [
+                { type: 'reply', reply: { id: 'wa_payment_cash', title: 'Pay with Cash' } },
+                { type: 'reply', reply: { id: 'wa_payment_card', title: 'Pay with Card' } },
+              ];
+          await reply(`${introMessage}\n\nHow would you like to pay R${formatWholeRandDisplay(refreshedContext.amount)} ZAR?`, {
             type: 'button',
-            body: { text: bodyText || `${introMessage}\n\nTry paying with another method (R${formatWholeRandDisplay(refreshedContext.amount)} ZAR):` },
+            body: { text: bodyText || `${introMessage}\n\nPay R${formatWholeRandDisplay(refreshedContext.amount)} ZAR:` },
             action: {
-              buttons: [
-                { type: 'reply', reply: { id: 'wa_payment_cash', title: 'Cash / transfer' } },
-                { type: 'reply', reply: { id: 'wa_payment_card', title: 'New card' } },
-              ],
+              buttons: fallbackButtons,
             },
           });
           return true;
@@ -8120,14 +8133,21 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
               });
               const result = await settleRequestPayment({ db, admin, requestId: pending.requestId, attemptId: pending.attemptId, outcome: outcome.outcome, gatewayTransactionId: outcome.transaction?.id ? String(outcome.transaction.id) : '', gatewayReference: reference, providerStatus: outcome.transaction?.status || outcome.outcome, walletEnabled: helperWalletEnabled() });
               if (['settled', 'already-paid'].includes(result.action)) await issuePaidRequestPostEffects({ requestId: pending.requestId, paymentResult: result });
+              else if (result.action === 'failed' && result.failureState === 'wallet_debt_recorded') {
+                await issueFailedRequestPaymentPostEffects({ requestId: pending.requestId, attemptId: pending.attemptId, paymentResult: result }).catch(() => null);
+              }
               if (result.action === 'settled' || result.action === 'already-paid') {
                 await conversationRef.set({ pendingSavedCardPayment: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
                 await reply(`Payment confirmed. Receipt ${result.receiptId || 'recorded'}.`);
               } else if (result.action === 'failed') {
                 await offerAlternativePaymentPrompt({
                   requestId: pending.requestId,
-                  introMessage: 'Paystack confirmed that the saved-card payment failed. No charge succeeded.',
-                  bodyText: 'Saved-card payment failed. Would you like to try paying with Cash or a New card?',
+                  introMessage: result.walletDebtApplied
+                    ? `Your saved-card payment failed, so R${formatWholeRandDisplay(result.amount)} ZAR has been deducted from your wallet.`
+                    : 'Your saved-card payment failed.',
+                  bodyText: context.isCanceled
+                    ? 'Saved-card payment failed and the amount was deducted from your wallet. Please pay with a new card:'
+                    : 'Saved-card payment failed and the amount was deducted from your wallet. Choose Pay with Cash or Pay with Card:',
                 });
               } else {
                 await conversationRef.set({ pendingSavedCardPayment: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
@@ -8495,15 +8515,15 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       if (!candidates.length) {
         const history = await listWhatsAppRequests({ db, identity, perPrincipalLimit: 25, resultLimit: 8 });
         for (const item of history) {
-          if (String(item.status || '').toLowerCase() !== 'completed') continue;
+          if (!['completed', 'canceled', 'cancelled'].includes(String(item.status || '').toLowerCase())) continue;
           const context = await loadPayableContext(item.id);
-          if (context.code === 'available') candidates.push(context);
+          if (context.code === 'available' && Number(context.amount || 0) > 0) candidates.push(context);
         }
       }
       if (candidates.length !== 1) {
         await reply(candidates.length > 1
-          ? 'You have more than one unpaid completed request. Send “payment status request <reference>” and use the reference from your booking history, or open the request-specific payment link in the Uncedo app.'
-          : 'I could not find an unpaid completed request linked to this WhatsApp identity. Send “booking history” or “payment status” for help.');
+          ? 'You have more than one unpaid request. Send “payment status request <reference>” and use the reference from your booking history, or open the request-specific payment link in the Uncedo app.'
+          : 'I could not find an unpaid request linked to this WhatsApp identity. Send “booking history” or “payment status” for help.');
         await jobRef.set({ status: 'completed', intent: 'payment_help', reason: candidates.length > 1 ? 'request_selection_required' : 'no_payable_request', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         return;
       }
@@ -8511,12 +8531,12 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       const pendingPaymentSelection = { identityId, requestId: context.request.id, amount: context.amount, expiresAtMs: Date.now() + 10 * 60 * 1000 };
       await conversationRef.set({ pendingPaymentSelection, currentMode: 'payment', currentIntent: 'payment_method_selection', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       const methodButtons = [
-        { type: 'reply', reply: { id: 'wa_payment_cash', title: 'Cash / transfer' } },
-        { type: 'reply', reply: { id: 'wa_payment_card', title: 'New card' } },
+        ...(context.isCanceled ? [] : [{ type: 'reply', reply: { id: 'wa_payment_cash', title: 'Pay with Cash' } }]),
+        { type: 'reply', reply: { id: 'wa_payment_card', title: 'Pay with Card' } },
         ...(context.cards.length ? [{ type: 'reply', reply: { id: 'wa_payment_saved', title: 'Saved card' } }] : []),
       ];
       await reply(`Choose how to pay for request ${context.request.publicRequestReference || context.request.id}. Amount due: R${formatWholeRandDisplay(context.amount)} ZAR.`, {
-        type: 'button', body: { text: 'Choose a payment method. Saved-card payment always requires a separate confirmation.' }, action: { buttons: methodButtons },
+        type: 'button', body: { text: context.isCanceled ? 'Cancellation fees must be paid by card.' : 'Choose Pay with Cash or Pay with Card.' }, action: { buttons: methodButtons },
       });
       await jobRef.set({ status: 'completed', intent: 'payment_method_selection', requestId: context.request.id, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
@@ -10483,7 +10503,11 @@ exports.retryWhatsAppAssistantJob = onCall({ maxInstances: 2, ...HALF_CPU_OPTION
   return { queued: outcome.code === 'queued', duplicate: outcome.code === 'already-retried', retryJobId: outcome.retryJobId };
 });
 
-exports.syncServiceRequestLifecycle = onDocumentWritten('serviceRequests/{requestId}', async (event) => {
+exports.syncServiceRequestLifecycle = onDocumentWritten({
+  document: 'serviceRequests/{requestId}',
+  maxInstances: 2,
+  ...HALF_CPU_OPTIONS,
+}, async (event) => {
   const afterData = event.data.after.exists ? event.data.after.data() : null;
   if (!afterData) return;
 
@@ -12888,7 +12912,11 @@ async function triggerPendingRequestsForAvailableHelper(helperId, helperData = n
   }
 }
 
-exports.syncHelperQueueOnHelperOnline = onDocumentWritten('users/{uid}', async (event) => {
+exports.syncHelperQueueOnHelperOnline = onDocumentWritten({
+  document: 'users/{uid}',
+  maxInstances: 2,
+  ...HALF_CPU_OPTIONS,
+}, async (event) => {
   const before = event.data.before.exists ? event.data.before.data() : null;
   const after = event.data.after.exists ? event.data.after.data() : null;
   if (!after || !isHelperUserRecord(after)) return;
@@ -15421,16 +15449,48 @@ const WHATSAPP_STATUS_NOTIFICATION_CONFIG = {
   canceled: { key: 'BOOKING_CANCELED', description: 'Your service request was canceled.' },
 };
 
+async function resolveCustomerWhatsAppIdentityId({ customerId = '', request = {} } = {}) {
+  const directIdentityId = String(request?.originIdentityId || '').trim();
+  if (directIdentityId) return directIdentityId;
+  const normalizedCustomerId = String(customerId || request?.customerId || '').trim();
+  if (!normalizedCustomerId) return '';
+  if (!normalizedCustomerId.startsWith('guest_')) {
+    const link = await db.collection('whatsappUserLinks').doc(normalizedCustomerId).get().catch(() => null);
+    if (link?.exists) return String(link.data()?.identityId || '').trim();
+  }
+  const guestQuery = await db.collection('whatsappIdentities')
+    .where('guestPrincipalId', '==', normalizedCustomerId)
+    .limit(1)
+    .get()
+    .catch(() => null);
+  return String(guestQuery?.docs?.[0]?.id || '').trim();
+}
+
+async function buildRequestPaymentLink({ requestId, request = {}, expiresInMs = 24 * 60 * 60 * 1000 } = {}) {
+  const safeRequestId = String(requestId || '').trim();
+  const customerId = String(request?.customerId || '').trim();
+  if (!safeRequestId || !customerId) return '';
+  const session = await createServicePaymentSession({
+    db,
+    requestId: safeRequestId,
+    customerId,
+    principalId: customerId,
+    principalType: customerId.startsWith('guest_') ? 'whatsapp_guest' : 'firebase_uid',
+    expiresInMs,
+  }).catch(() => null);
+  if (session?.code !== 'created' || !session?.token) return '';
+  const baseUrl = String(process.env.CUSTOMER_PAYMENT_URL || 'https://uncedo.bakayise.com/payment').trim().replace(/\/$/, '');
+  return `${baseUrl}?token=${encodeURIComponent(session.token)}`;
+}
+
 async function syncWhatsAppRelayModeForRequestTransition({ after, status, beforeStatus, requestId }) {
   if (!['accepted', 'completed', 'canceled', 'expired', 'no_helper_available'].includes(status) || status === beforeStatus) return;
   const identities = [];
-  const customerId = String(after.customerId || '').trim();
-  const originIdentityId = String(after.originIdentityId || '').trim();
-  if (originIdentityId) identities.push(originIdentityId);
-  else if (customerId && !customerId.startsWith('guest_')) {
-    const link = await db.collection('whatsappUserLinks').doc(customerId).get();
-    if (link.exists) identities.push(String(link.data()?.identityId || '').trim());
-  }
+  const customerIdentityId = await resolveCustomerWhatsAppIdentityId({
+    customerId: String(after.customerId || '').trim(),
+    request: after,
+  });
+  if (customerIdentityId) identities.push(customerIdentityId);
   const helperId = String(after.helperAssignment?.helperId || '').trim();
   if (helperId) {
     const link = await db.collection('whatsappUserLinks').doc(helperId).get();
@@ -15458,21 +15518,25 @@ async function syncWhatsAppRelayModeForRequestTransition({ after, status, before
   }
 }
 
-function buildWhatsAppLifecycleText({ after, status, beforeStatus, paymentChanged, eventRole, arrivalPin = '' }) {
+function buildWhatsAppLifecycleText({ after, status, beforeStatus, paymentChanged, eventRole, arrivalPin = '', paymentUrl = '' }) {
   const serviceName = String(after.serviceSummary || after.subject || 'your Uncedo service').trim();
   const helperName = String(after.helperAssignment?.helperName || 'Your helper').trim();
   const refCode = String(after.publicRequestReference || after.requestReference || '').trim();
   const refPrefix = refCode ? `[*${refCode}*] ` : '';
   const totalAmount = Number(after.totalAmount ?? after.pricingSnapshot?.finalAmount ?? after.pricingSnapshot?.total ?? 0);
+  const cancelFeeAmount = Number(after.cancellationFeeAmount ?? after.pricingSnapshot?.cancellationAmount ?? 0);
   const wholeTotalDisplay = formatWholeRandDisplay(totalAmount);
+  const wholeCancelDisplay = formatWholeRandDisplay(cancelFeeAmount);
   const paymentStatus = String(after.paymentStatus || '').toLowerCase();
+  const isCanceled = status === 'canceled' || status === 'cancelled';
 
   if (eventRole === 'helper') {
-    if (status === 'canceled' && String(after.canceledBy || '').toLowerCase() === 'customer') {
+    if (isCanceled && String(after.canceledBy || '').toLowerCase() === 'customer') {
       return `${refPrefix}❌ The customer canceled the *${serviceName}* request.`;
     }
     if (paymentChanged && paymentStatus === 'paid') {
-      return `${refPrefix}✅ Payment of *R${wholeTotalDisplay} ZAR* for *${serviceName}* has been confirmed.`;
+      const helperSettledAmount = isCanceled ? wholeCancelDisplay : wholeTotalDisplay;
+      return `${refPrefix}✅ Payment of *R${helperSettledAmount} ZAR* for *${serviceName}* has been confirmed.`;
     }
     return '';
   }
@@ -15506,11 +15570,17 @@ function buildWhatsAppLifecycleText({ after, status, beforeStatus, paymentChange
       if (paymentStatus === 'paid') {
         return `${refPrefix}🎉 Your *${serviceName}* service is complete! Payment of *R${wholeTotalDisplay} ZAR* is settled. Thank you for choosing Uncedo.`;
       }
-      return `${refPrefix}🎉 Your *${serviceName}* service is complete!\n\n💰 Amount due: *R${wholeTotalDisplay} ZAR*\n💳 Reply *pay* to choose *Cash / EFT* or *Card* payment.`;
+      if (['payment_failed', 'wallet_debt_recorded'].includes(paymentStatus)) {
+        return `${refPrefix}🎉 Your *${serviceName}* service is complete!\n\n⚠️ Your payment of *R${wholeTotalDisplay} ZAR* failed, so *R${wholeTotalDisplay} ZAR* has been deducted from your wallet.${paymentUrl ? ` Please pay using a new card here: ${paymentUrl}` : ' Reply *pay* to try Pay with Cash or Pay with Card.'}`;
+      }
+      return `${refPrefix}🎉 Your *${serviceName}* service is complete!\n\n💰 Amount due: *R${wholeTotalDisplay} ZAR*\nChoose how you would like to pay:`;
     }
-    if (status === 'canceled') {
+    if (isCanceled) {
       const canceledBy = String(after.canceledBy || '').toLowerCase();
       const reasonNote = after.canceledReason ? `\nReason: ${String(after.canceledReason).slice(0, 140)}` : '';
+      if (canceledBy !== 'helper' && paymentStatus === 'wallet_debt_recorded' && cancelFeeAmount > 0) {
+        return `${refPrefix}❌ Your *${serviceName}* request has been canceled.\n\n⚠️ No saved card could be charged, so *R${wholeCancelDisplay} ZAR* has been deducted from your wallet. Please pay by card using this link: ${paymentUrl || 'Open your Uncedo payment page to pay by card.'}`;
+      }
       return canceledBy === 'helper'
         ? `${refPrefix}❌ *${helperName}* canceled your *${serviceName}* request.${reasonNote}`
         : `${refPrefix}❌ Your *${serviceName}* request has been canceled.`;
@@ -15518,14 +15588,18 @@ function buildWhatsAppLifecycleText({ after, status, beforeStatus, paymentChange
   }
 
   if (paymentChanged) {
+    const dueDisplay = isCanceled ? wholeCancelDisplay : wholeTotalDisplay;
     if (paymentStatus === 'paid') {
-      return `${refPrefix}✅ Payment of *R${wholeTotalDisplay} ZAR* for *${serviceName}* is confirmed. Thank you!`;
+      return `${refPrefix}✅ Payment of *R${dueDisplay} ZAR* for *${serviceName}* is confirmed. Thank you!`;
     }
     if (['payment_failed', 'wallet_debt_recorded'].includes(paymentStatus)) {
       if (eventRole === 'helper') return '';
-      return `${refPrefix}⚠️ Your payment of *R${wholeTotalDisplay} ZAR* for *${serviceName}* was not completed. Reply *pay* anytime to try Cash / EFT or another card.`;
+      return `${refPrefix}⚠️ Your payment of *R${dueDisplay} ZAR* for *${serviceName}* failed, so *R${dueDisplay} ZAR* has been deducted from your wallet.${paymentUrl ? ` Please pay using a new card here: ${paymentUrl}` : isCanceled ? ' Please pay by card in the Uncedo app.' : ' Reply *pay* to pay by Cash or New card.'}`;
     }
-    return `${refPrefix}💳 Payment of *R${wholeTotalDisplay} ZAR* is required for *${serviceName}*. Reply *pay* to choose *Cash / EFT* or *Card*.`;
+    if (isCanceled) {
+      return `${refPrefix}💳 A cancellation fee of *R${dueDisplay} ZAR* is due for *${serviceName}*.${paymentUrl ? ` Pay by card here: ${paymentUrl}` : ' Reply *pay* to pay by card.'}`;
+    }
+    return `${refPrefix}💳 Payment of *R${dueDisplay} ZAR* is required for *${serviceName}*.${paymentUrl ? ` Pay online here: ${paymentUrl}` : ' Choose Pay with Cash or Pay with Card by replying *pay*.'}`;
   }
   return '';
 }
@@ -15557,18 +15631,17 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
     description: afterPaymentStatus === 'paid'
       ? 'Payment for your service was confirmed.'
       : ['payment_failed', 'wallet_debt_recorded'].includes(afterPaymentStatus)
-        ? 'Payment for your service was not completed.'
+        ? 'Payment for your service failed and was deducted from your wallet.'
         : 'Payment is required for your service request.',
   } : null);
   if (!eventConfig || status === 'helper_found') return;
 
   const identities = [];
-  const customerIdentityId = String(after.originIdentityId || '').trim();
+  const customerIdentityId = await resolveCustomerWhatsAppIdentityId({
+    customerId: String(after.customerId || '').trim(),
+    request: after,
+  });
   if (customerIdentityId) identities.push({ identityId: customerIdentityId, eventRole: 'customer' });
-  else if (String(after.customerId || '').trim() && !String(after.customerId).startsWith('guest_')) {
-    const link = await db.collection('whatsappUserLinks').doc(String(after.customerId)).get();
-    if (link.exists) identities.push({ identityId: String(link.data()?.identityId || ''), eventRole: 'customer' });
-  }
   if (status === 'canceled' || paymentChanged) {
     const helperId = String(after.helperAssignment?.helperId || '').trim();
     if (helperId) {
@@ -15583,6 +15656,17 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
     if (pinSnap?.exists) {
       arrivalPin = String(pinSnap.data()?.pin || '').trim();
     }
+  }
+
+  let customerPaymentUrl = '';
+  const needsCustomerPaymentLink = ['wallet_debt_recorded', 'payment_failed'].includes(afterPaymentStatus)
+    && (
+      status === 'completed'
+      || ((status === 'canceled' || status === 'cancelled') && Number(after.cancellationFeeAmount ?? after.pricingSnapshot?.cancellationAmount ?? 0) > 0)
+      || paymentChanged
+    );
+  if (needsCustomerPaymentLink && customerIdentityId) {
+    customerPaymentUrl = await buildRequestPaymentLink({ requestId, request: { id: requestId, ...after } });
   }
 
   const secrets = getWhatsAppSecrets();
@@ -15602,6 +15686,7 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
       paymentChanged,
       eventRole: recipient.eventRole,
       arrivalPin: recipient.eventRole === 'customer' ? arrivalPin : '',
+      paymentUrl: recipient.eventRole === 'customer' ? customerPaymentUrl : '',
     });
     if (!messageBody) continue;
 
@@ -15621,19 +15706,39 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
     if (!isCustomerActiveBooking && !optedIn) continue;
     if (!inServiceWindow && !templateAvailable) continue;
 
+    const totalDueAmount = Number(after.pricingSnapshot?.cashChargeAmount ?? after.totalAmount ?? after.pricingSnapshot?.finalAmount ?? after.pricingSnapshot?.total ?? 0);
+    const shouldSendCompletedPaymentPrompt = inServiceWindow
+      && recipient.eventRole === 'customer'
+      && beforeStatus !== status
+      && status === 'completed'
+      && afterPaymentStatus === 'unpaid'
+      && totalDueAmount > 0;
+
+    const completedPaymentInteractive = shouldSendCompletedPaymentPrompt ? {
+      type: 'button',
+      body: {
+        text: formatWhatsAppText(messageBody).slice(0, 1024),
+      },
+      action: {
+        buttons: [
+          { type: 'reply', reply: { id: 'wa_payment_cash', title: 'Pay with Cash' } },
+          { type: 'reply', reply: { id: 'wa_payment_card', title: 'Pay with Card' } },
+        ],
+      },
+    } : null;
+
     const shouldPromptCustomerRating = inServiceWindow
+      && !shouldSendCompletedPaymentPrompt
       && recipient.eventRole === 'customer'
       && paymentChanged
       && ['paid', 'payment_failed', 'wallet_debt_recorded'].includes(afterPaymentStatus)
       && Boolean(after.helperAssignment?.helperId)
       && !after.ratings?.customer
       && !after.customerRatedHelper;
-    const sendMode = inServiceWindow ? (shouldPromptCustomerRating ? 'interactive' : 'text') : 'template';
-    const helperDisplayName = String(after.helperAssignment?.helperName || 'your helper').trim() || 'your helper';
     const ratingInteractive = shouldPromptCustomerRating ? {
       type: 'list',
       body: {
-        text: formatWhatsAppText(`${messageBody}\n\nHow was your experience with *${helperDisplayName}*? Tap *Rate helper* below to rate (1–5 stars).`).slice(0, 1000),
+        text: formatWhatsAppText(`${messageBody}\n\nHow was your experience with *${String(after.helperAssignment?.helperName || 'your helper').trim() || 'your helper'}*? Tap *Rate helper* below to rate (1–5 stars).`).slice(0, 1000),
       },
       action: {
         button: 'Rate helper',
@@ -15651,6 +15756,8 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
         ],
       },
     } : null;
+    const interactivePayload = completedPaymentInteractive || ratingInteractive;
+    const sendMode = inServiceWindow ? (interactivePayload ? 'interactive' : 'text') : 'template';
 
     const notificationId = stableEventId(`lifecycle:${requestId}:${eventKey}:${recipient.identityId}`);
     const outboundRef = db.collection('whatsappMessages').doc(notificationId);
@@ -15671,8 +15778,8 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
     });
     if (!claimed) continue;
     try {
-      const delivery = sendMode === 'interactive' && ratingInteractive
-        ? await client.sendInteractive({ to: identity.waId, interactive: ratingInteractive, lastInboundAtMs })
+      const delivery = sendMode === 'interactive' && interactivePayload
+        ? await client.sendInteractive({ to: identity.waId, interactive: interactivePayload, lastInboundAtMs })
         : sendMode === 'text'
           ? await client.sendText({ to: identity.waId, text: messageBody, lastInboundAtMs })
           : await client.sendTemplate({
@@ -15701,6 +15808,16 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
             recentHistory: memory.recentHistory,
             conversationSummary: memory.conversationSummary,
             lastMessageAtMs: Date.now(),
+            ...(shouldSendCompletedPaymentPrompt ? {
+              pendingPaymentSelection: {
+                identityId: recipient.identityId,
+                requestId,
+                amount: totalDueAmount,
+                expiresAtMs: Date.now() + 24 * 60 * 60 * 1000,
+              },
+              currentMode: 'payment',
+              currentIntent: 'payment_method_selection',
+            } : {}),
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           }, { merge: true });
         }).catch(() => null);
@@ -16429,16 +16546,20 @@ async function getOptionalPaymentCaller(req) {
 function paymentSessionPublicPayload(resolved) {
   const request = resolved.request || {};
   const operation = resolved.paymentOperation || {};
-  const methods = ['cash', 'paystack_checkout'];
+  const requestStatus = String(request.status || '').trim().toLowerCase();
+  const isCanceled = requestStatus === 'canceled' || requestStatus === 'cancelled';
+  const methods = isCanceled ? ['paystack_checkout'] : ['cash', 'paystack_checkout'];
   const paymentState = String(resolved.paymentStatus || '').toLowerCase();
   const helperId = String(request.helperAssignment?.helperId || '').trim();
   const customerRating = request.ratings?.customer || null;
   const canRateHelper = Boolean(
-    helperId && ['paid', 'payment_failed', 'wallet_debt_recorded'].includes(paymentState),
+    helperId && !isCanceled && ['paid', 'payment_failed', 'wallet_debt_recorded'].includes(paymentState),
   );
   return {
     success: true,
     requestReference: String(request.publicRequestReference || request.requestReference || request.id || ''),
+    requestStatus,
+    isCancellationFee: isCanceled,
     service: String(request.subject || request.serviceName || 'Uncedo service'),
     helperName: String(request.helperAssignment?.helperName || '').trim(),
     amount: Number(resolved.amount || 0),
@@ -16470,12 +16591,39 @@ async function saveReusablePaystackAuthorization({ uid, transaction, consentAtMs
   });
 }
 
+async function issueFailedRequestPaymentPostEffects({ requestId, attemptId = '', paymentResult }) {
+  if (paymentResult?.action !== 'failed') return;
+  const requestSnap = await db.collection('serviceRequests').doc(requestId).get();
+  if (!requestSnap.exists) return;
+  const request = { id: requestSnap.id, ...(requestSnap.data() || {}) };
+  const customerId = String(paymentResult.customerId || request.customerId || '').trim();
+  if (!customerId) return;
+  const paymentUrl = await buildRequestPaymentLink({ requestId, request });
+  const displayAmount = formatWholeRandDisplay(paymentResult.amount || 0);
+  await createUserNotificationOnce({
+    notificationId: `failed_payment_${requestId}_${attemptId || paymentResult.amount}`,
+    userId: customerId,
+    title: 'Payment failed — wallet deducted',
+    message: `Your payment of R${displayAmount} for request ${request.publicRequestReference || requestId} failed${paymentResult.walletDebtApplied ? ' and was deducted from your wallet' : ' and remains owed in your wallet'}. Please pay with a new card${paymentUrl ? `: ${paymentUrl}` : ' on your payment page'}.`,
+    type: 'payment_failed',
+    requestId,
+    targetPath: `/customer/requests/${requestId}`,
+    metadata: {
+      paymentStatus: paymentResult.failureState || 'wallet_debt_recorded',
+      amount: Number(paymentResult.amount || 0),
+      walletDebtApplied: Boolean(paymentResult.walletDebtApplied),
+      paymentUrl: paymentUrl || null,
+    },
+  }).catch(() => null);
+}
+
 async function issuePaidRequestPostEffects({ requestId, paymentResult }) {
   if (paymentResult?.action !== 'settled') return;
   const requestSnap = await db.collection('serviceRequests').doc(requestId).get();
   if (!requestSnap.exists) return;
   const request = { id: requestSnap.id, ...(requestSnap.data() || {}) };
-  if (request.serviceCreditRedemptionId) {
+  const isCanceled = ['canceled', 'cancelled'].includes(String(request.status || paymentResult.requestStatus || '').toLowerCase());
+  if (!isCanceled && request.serviceCreditRedemptionId) {
     const operationSnap = await db.collection(FINANCIAL_OPERATIONS_COLLECTION).doc(serviceFinancialOperationId(requestId)).get().catch(() => null);
     const appliedPoints = Number(operationSnap?.data()?.settlementData?.serviceCreditPoints || request.pricingSnapshot?.serviceCreditPoints || 0);
     await finalizeServiceCredit({ db, admin, requestId, paymentSucceeded: true, appliedPoints, reason: 'final_cap' }).catch((error) => {
@@ -16484,26 +16632,37 @@ async function issuePaidRequestPostEffects({ requestId, paymentResult }) {
   }
   const customerId = String(request.customerId || '');
   const helperId = String(request.helperAssignment?.helperId || '');
-  const customerConfig = await getRewardConfig(db, 'customer').catch(() => ({}));
-  const helperConfig = await getRewardConfig(db, 'helper').catch(() => ({}));
-  const expandedServiceIds = serviceIdsFor(request);
-  if (customerId) {
-    await applyRewardTransaction({ db, admin, userId: customerId, accountType: ACCOUNT_TYPES.CUSTOMER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(customerConfig.rewards?.completedPaidBooking || 50), reasonCode: REWARD_REASON_CODES.CUSTOMER_COMPLETED_PAID_BOOKING, reasonLabel: 'Completed paid booking', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `customer:${customerId}:request:${requestId}:completed-paid`, requestId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch(() => null);
-    const firstReward = await applyRewardTransaction({ db, admin, userId: customerId, accountType: ACCOUNT_TYPES.CUSTOMER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(customerConfig.rewards?.firstCompletedPaidBooking || 100), reasonCode: REWARD_REASON_CODES.CUSTOMER_FIRST_COMPLETED_PAID_BOOKING, reasonLabel: 'First completed paid booking', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `customer:${customerId}:request:first-booking-bonus`, requestId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch(() => null);
-    await incrementCompletedPaid({ db, admin, userId: customerId, accountType: ACCOUNT_TYPES.CUSTOMER, requestId }).catch(() => null);
-    if (firstReward) await awardReferralStage({ db, admin, referredUserId: customerId, stage: 2, requestId }).catch(() => null);
+  if (!isCanceled) {
+    const customerConfig = await getRewardConfig(db, 'customer').catch(() => ({}));
+    const helperConfig = await getRewardConfig(db, 'helper').catch(() => ({}));
+    const expandedServiceIds = serviceIdsFor(request);
+    if (customerId) {
+      await applyRewardTransaction({ db, admin, userId: customerId, accountType: ACCOUNT_TYPES.CUSTOMER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(customerConfig.rewards?.completedPaidBooking || 50), reasonCode: REWARD_REASON_CODES.CUSTOMER_COMPLETED_PAID_BOOKING, reasonLabel: 'Completed paid booking', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `customer:${customerId}:request:${requestId}:completed-paid`, requestId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch(() => null);
+      const firstReward = await applyRewardTransaction({ db, admin, userId: customerId, accountType: ACCOUNT_TYPES.CUSTOMER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(customerConfig.rewards?.firstCompletedPaidBooking || 100), reasonCode: REWARD_REASON_CODES.CUSTOMER_FIRST_COMPLETED_PAID_BOOKING, reasonLabel: 'First completed paid booking', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `customer:${customerId}:request:first-booking-bonus`, requestId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch(() => null);
+      await incrementCompletedPaid({ db, admin, userId: customerId, accountType: ACCOUNT_TYPES.CUSTOMER, requestId }).catch(() => null);
+      if (firstReward) await awardReferralStage({ db, admin, referredUserId: customerId, stage: 2, requestId }).catch(() => null);
+    }
+    if (helperId) {
+      await applyRewardTransaction({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(helperConfig.rewards?.completedPaidJob || 50), reasonCode: REWARD_REASON_CODES.HELPER_COMPLETED_PAID_JOB, reasonLabel: 'Completed paid job', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `helper:${helperId}:request:${requestId}:completed-paid`, requestId, relatedUserId: customerId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch(() => null);
+      await incrementCompletedPaid({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, requestId, serviceIds: expandedServiceIds, categoryId: request.categoryId || '' }).catch(() => null);
+    }
+    await db.collection('customerServiceEvents').doc(`request_completed_${requestId}`).set({
+      requestId,
+      eventType: 'request_completed',
+      metadata: { paymentStatus: 'paid', paymentMethod: paymentResult.method, totalAmount: Number(paymentResult.amount || 0), requestStatus: 'completed' },
+      paymentUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true }).catch(() => null);
   }
-  if (helperId) {
-    await applyRewardTransaction({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(helperConfig.rewards?.completedPaidJob || 50), reasonCode: REWARD_REASON_CODES.HELPER_COMPLETED_PAID_JOB, reasonLabel: 'Completed paid job', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `helper:${helperId}:request:${requestId}:completed-paid`, requestId, relatedUserId: customerId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch(() => null);
-    await incrementCompletedPaid({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, requestId, serviceIds: expandedServiceIds, categoryId: request.categoryId || '' }).catch(() => null);
-  }
-  await db.collection('customerServiceEvents').doc(`request_completed_${requestId}`).set({
+  await createUserNotificationOnce({
+    notificationId: `request_payment_${requestId}_${paymentResult.receiptId}_customer`,
+    userId: customerId,
+    title: 'Payment confirmed',
+    message: `Payment of R${formatWholeRandDisplay(paymentResult.amount)} received for request ${request.publicRequestReference || requestId}.${paymentResult.debtReversed ? ' Your wallet debt has been reversed.' : ''}`,
+    type: 'payment_confirmed',
     requestId,
-    eventType: 'request_completed',
-    metadata: { paymentStatus: 'paid', paymentMethod: paymentResult.method, totalAmount: Number(paymentResult.amount || 0), requestStatus: 'completed' },
-    paymentUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
-  }, { merge: true }).catch(() => null);
-  await createUserNotificationOnce({ notificationId: `request_payment_${requestId}_${paymentResult.receiptId}_customer`, userId: customerId, title: 'Payment confirmed', message: `Payment received for request ${request.publicRequestReference || requestId}.`, type: 'payment_confirmed', requestId, targetPath: `/customer/requests/${requestId}`, metadata: { paymentStatus: 'paid', receiptId: paymentResult.receiptId } }).catch(() => null);
+    targetPath: `/customer/requests/${requestId}`,
+    metadata: { paymentStatus: 'paid', receiptId: paymentResult.receiptId, debtReversed: Boolean(paymentResult.debtReversed) },
+  }).catch(() => null);
 }
 
 async function verifyAndSettleRequestPayment({ requestId, attemptId, reference, paystackSecretKey, helperId = '' }) {
@@ -16527,6 +16686,9 @@ async function verifyAndSettleRequestPayment({ requestId, attemptId, reference, 
   }
   const result = await settleRequestPayment({ db, admin, requestId, attemptId, outcome: verification.outcome, gatewayTransactionId: verification.transaction?.id ? String(verification.transaction.id) : '', gatewayReference: reference, providerStatus: verification.transaction?.status || verification.outcome, helperId, walletEnabled: helperWalletEnabled() });
   if (['settled', 'already-paid'].includes(result.action)) await issuePaidRequestPostEffects({ requestId, paymentResult: result });
+  else if (result.action === 'failed' && result.failureState === 'wallet_debt_recorded') {
+    await issueFailedRequestPaymentPostEffects({ requestId, attemptId, paymentResult: result }).catch(() => null);
+  }
   return { ...result, verification };
 }
 
@@ -16944,6 +17106,9 @@ exports.confirmSavedCardServicePayment = onRequest({ cors: true, invoker: 'publi
   });
   const settled = await settleRequestPayment({ db, admin, requestId, attemptId, outcome: outcome.outcome, gatewayTransactionId: outcome.transaction?.id ? String(outcome.transaction.id) : '', gatewayReference: reference, providerStatus: outcome.transaction?.status || outcome.outcome, walletEnabled: helperWalletEnabled() });
   if (['settled', 'already-paid'].includes(settled.action)) await issuePaidRequestPostEffects({ requestId, paymentResult: settled });
+  else if (settled.action === 'failed' && settled.failureState === 'wallet_debt_recorded') {
+    await issueFailedRequestPaymentPostEffects({ requestId, attemptId, paymentResult: settled }).catch(() => null);
+  }
   return res.status(200).json({ success: ['settled', 'already-paid'].includes(settled.action), status: settled.action === 'settled' || settled.action === 'already-paid' ? 'paid' : settled.action === 'failed' ? 'payment_failed' : 'payment_reconciliation_required', receiptId: settled.receiptId || null });
 });
 
@@ -17633,15 +17798,25 @@ async function runServiceFinancialPostEffects(operationRef) {
       }
     }
 
+    let completionPaymentUrl = '';
+    if (paymentStatus === 'wallet_debt_recorded' && Number(settlementData.totalAmount || 0) > 0) {
+      completionPaymentUrl = await buildRequestPaymentLink({ requestId, request: { id: requestId, ...request } });
+    }
     await createUserNotificationOnce({
       notificationId: `financial_${operationId}_completion_${customerId}`,
       userId: customerId,
-      title: 'Service completed',
-      message: `Your service request for ${request.subject || 'help'} was marked as completed. Total: ${formatMoney(settlementData.totalAmount || 0)}.${paymentStatus === 'payment_reconciliation_required' ? ' The payment result is still being verified.' : ''}`,
-      type: 'service_completed',
+      title: paymentStatus === 'wallet_debt_recorded' ? 'Payment failed — wallet deducted' : 'Service completed',
+      message: paymentStatus === 'wallet_debt_recorded'
+        ? `Your automatic payment of ${formatMoney(settlementData.totalAmount || 0)} failed and was deducted from your wallet. Please pay using a new card${completionPaymentUrl ? `: ${completionPaymentUrl}` : ' on your payment page'}.`
+        : `Your service request for ${request.subject || 'help'} was marked as completed. Total: ${formatMoney(settlementData.totalAmount || 0)}.${paymentStatus === 'payment_reconciliation_required' ? ' The payment result is still being verified.' : ''}`,
+      type: paymentStatus === 'wallet_debt_recorded' ? 'payment_failed' : 'service_completed',
       requestId,
       targetPath: `/customer/requests/${requestId}`,
-      metadata: { paymentStatus, totalAmount: Number(settlementData.totalAmount || 0) },
+      metadata: {
+        paymentStatus,
+        totalAmount: Number(settlementData.totalAmount || 0),
+        ...(completionPaymentUrl ? { paymentUrl: completionPaymentUrl } : {}),
+      },
     }).catch((error) => logger.warn('service_completion_customer_notification_failed', { requestId, error: error.message }));
     if (helperId) {
       await createUserNotificationOnce({
@@ -17658,6 +17833,7 @@ async function runServiceFinancialPostEffects(operationRef) {
     }
   } else if (operation.operationType === 'customer_cancellation') {
     const cancellation = settlementData.cancellation || {};
+    const cancellationFee = Number(cancellation.cancellationAmount || 0);
     await admin.database().ref(`liveTracking/serviceRequests/${requestId}`).update({
       status: 'canceled',
       closedReason: cancellation.liveTrackingClosedReason || 'customer_canceled',
@@ -17675,7 +17851,7 @@ async function runServiceFinancialPostEffects(operationRef) {
       metadata: {
         helperId,
         paymentStatus,
-        cancellationAmount: Number(cancellation.cancellationAmount || 0),
+        cancellationAmount: cancellationFee,
         cancellationBillingRule: cancellation.cancellationBillingRule || 'pre_assignment',
         cancellationDistanceKm: Number(cancellation.cancellationDistanceKm || 0),
         helperPayoutAmount: Number(cancellation.helperPayoutBreakdown?.helperAmount || 0),
@@ -17686,24 +17862,36 @@ async function runServiceFinancialPostEffects(operationRef) {
       createdAtMs: endedAt,
       dayBucket: new Date(endedAt).toISOString().slice(0, 10),
     }, { merge: true }).catch((error) => logger.warn('service_cancellation_event_write_failed', { requestId, error: error.message }));
+    let cancellationPaymentUrl = '';
+    if (paymentStatus === 'wallet_debt_recorded' && cancellationFee > 0) {
+      cancellationPaymentUrl = await buildRequestPaymentLink({ requestId, request: { id: requestId, ...request } });
+    }
     await createUserNotificationOnce({
       notificationId: `financial_${operationId}_cancellation_${customerId}`,
       userId: customerId,
-      title: 'Service canceled',
-      message: Number(cancellation.cancellationAmount || 0) > 0
-        ? `Your service request was canceled. Cancellation fee: ${formatMoney(cancellation.cancellationAmount)}.${paymentStatus === 'payment_reconciliation_required' ? ' The payment result is still being verified.' : ''}`
+      title: paymentStatus === 'wallet_debt_recorded' ? 'Cancellation fee deducted from wallet' : 'Service canceled',
+      message: cancellationFee > 0
+        ? (paymentStatus === 'wallet_debt_recorded'
+          ? `Your service request was canceled. Because no saved card could be charged, the ${formatMoney(cancellationFee)} cancellation fee was deducted from your wallet. Pay with a new card here: ${cancellationPaymentUrl || 'Open your Uncedo payment page to pay by card.'}`
+          : `Your service request was canceled. Cancellation fee: ${formatMoney(cancellationFee)}.${paymentStatus === 'payment_reconciliation_required' ? ' The payment result is still being verified.' : ''}`)
         : `Your service request was canceled.${paymentStatus === 'payment_reconciliation_required' ? ' The payment result is still being verified.' : ''}`,
       type: 'service_canceled',
       requestId,
       targetPath: `/customer/requests/${requestId}`,
-      metadata: { paymentStatus, cancellationAmount: Number(cancellation.cancellationAmount || 0) },
+      metadata: {
+        paymentStatus,
+        cancellationAmount: cancellationFee,
+        ...(cancellationPaymentUrl ? { paymentUrl: cancellationPaymentUrl } : {}),
+      },
     }).catch((error) => logger.warn('service_cancellation_customer_notification_failed', { requestId, error: error.message }));
     if (helperId) {
       await createUserNotificationOnce({
         notificationId: `financial_${operationId}_cancellation_${helperId}`,
         userId: helperId,
         title: 'Job canceled',
-        message: `${request.customerName || 'The customer'} canceled this job. Helper earnings recorded: ${formatMoney(cancellation.helperPayoutBreakdown?.helperAmount || 0)}.`,
+        message: cancellationFee > 0
+          ? `${request.customerName || 'The customer'} canceled this job. Helper earnings recorded: ${formatMoney(cancellation.helperPayoutBreakdown?.helperAmount || 0)}.`
+          : `${request.customerName || 'The customer'} canceled this job before travel began. No cancellation fee applies.`,
         type: 'job_canceled',
         requestId,
         targetPath: `/provider/jobs/${requestId}`,
@@ -17742,158 +17930,165 @@ async function isCustomerRequestPrincipalOwnedByUid(uid, customerId) {
   return false;
 }
 
-exports.finalizeServiceRequestBilling = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 60 }, async (req, res) => {
+exports.finalizeServiceRequestBilling = onRequest({ cors: true, invoker: 'public', maxInstances: 3, ...HALF_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 60 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
-  const token = getBearerToken(req);
-  const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
-  if (!decoded?.uid) return res.status(401).json({ success: false, message: 'Unauthorized request.' });
-  const requestId = String(req.body?.requestId || '').trim();
-  if (!requestId) return res.status(400).json({ success: false, message: 'Missing requestId.' });
+  let requestId = '';
+  try {
+    const token = getBearerToken(req);
+    const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
+    if (!decoded?.uid) return res.status(401).json({ success: false, message: 'Unauthorized request.' });
+    requestId = String(req.body?.requestId || '').trim();
+    if (!requestId) return res.status(400).json({ success: false, message: 'Missing requestId.' });
 
-  const requestRef = db.collection('serviceRequests').doc(requestId);
-  const requestSnap = await requestRef.get();
-  if (!requestSnap.exists) return res.status(404).json({ success: false, message: 'Service request not found.' });
-  const request = requestSnap.data() || {};
-  const helperId = String(request.helperAssignment?.helperId || '').trim();
-  if (decoded.uid !== helperId && !(await isCustomerRequestPrincipalOwnedByUid(decoded.uid, request.customerId))) {
-    return res.status(403).json({ success: false, message: 'Not allowed to finalize billing for this request.' });
-  }
-  const operationId = serviceFinancialOperationId(requestId);
-  const operationRef = db.collection(FINANCIAL_OPERATIONS_COLLECTION).doc(operationId);
-  const existingOperation = await operationRef.get();
-  const deferCompletionPayment = shouldDeferCompletionPayment(request, existingOperation.exists ? existingOperation.data() : null);
-  if (['completed', 'canceled', 'cancelled'].includes(String(request.status || '').toLowerCase())
-    && existingOperation.exists
-    && existingOperation.data()?.operationType !== 'completion') {
-    return res.status(200).json({ success: true, request: { id: requestId, ...request }, charge: { ok: request.paymentStatus === 'paid', reason: null } });
-  }
-  if (['completed', 'canceled', 'cancelled'].includes(String(request.status || '').toLowerCase()) && !existingOperation.exists) {
-    return res.status(200).json({ success: true, request: { id: requestId, ...request }, charge: { ok: true, reason: null } });
-  }
-
-  let settlementData = null;
-  let cashChargeAmount = 0;
-  let selectedCard = null;
-  let customerData = {};
-  if (!existingOperation.exists) {
-    const endedAt = Date.now();
-    const arrivedAtMs = timestampToMillis(request.arrivedAt || request.helperAssignment?.arrivedAt);
-    const workStartedAtMs = timestampToMillis(request.workStartedAt || request.helperAssignment?.workStartedAt);
-    const quoteTotal = getServiceQuoteTotal(request);
-    let waitingMinutes = 0;
-    let waitingCost = 0;
-    if (arrivedAtMs && workStartedAtMs && workStartedAtMs > arrivedAtMs) {
-      waitingMinutes = Number(((workStartedAtMs - arrivedAtMs) / 60000).toFixed(2));
-      if (quoteTotal <= 0 && waitingMinutes > 2) waitingCost = Math.round(waitingMinutes - 2);
+    const requestRef = db.collection('serviceRequests').doc(requestId);
+    const requestSnap = await requestRef.get();
+    if (!requestSnap.exists) return res.status(404).json({ success: false, message: 'Service request not found.' });
+    const request = requestSnap.data() || {};
+    const helperId = String(request.helperAssignment?.helperId || '').trim();
+    const customerId = String(request.customerId || '').trim();
+    const isGuestCustomer = customerId.startsWith('guest_');
+    if (decoded.uid !== helperId && !(await isCustomerRequestPrincipalOwnedByUid(decoded.uid, customerId))) {
+      return res.status(403).json({ success: false, message: 'Not allowed to finalize billing for this request.' });
     }
-    const subtotal = getServiceQuoteSubtotal(request);
-    const travelFee = getServiceTravelFee(request);
-    const bookingFee = getServiceBookingFee(request);
-    const helperPayoutBreakdown = getServiceHelperPayoutBreakdown(request, {
-      closureType: 'completed',
-      waitingCost,
-      travelFeeAmount: travelFee,
-      bookingFeeAmount: bookingFee,
-    });
-    const totalAmount = quoteTotal > 0
-      ? toWholeRand(quoteTotal)
-      : toWholeRand(helperPayoutBreakdown.customerChargeAmount);
-    const redemptionId = String(request.serviceCreditRedemptionId || '').trim();
-    let serviceCreditAmount = 0;
-    let serviceCreditPoints = 0;
-    if (redemptionId) {
-      const redemptionSnap = await db.collection('serviceCreditRedemptions').doc(redemptionId).get();
-      const redemption = redemptionSnap.data() || {};
-      if (!redemptionSnap.exists || redemption.userId !== request.customerId || redemption.requestId !== requestId || redemption.status !== 'reserved') {
-        return res.status(409).json({ success: false, message: 'The service-credit reservation is no longer valid.' });
+    const operationId = serviceFinancialOperationId(requestId);
+    const operationRef = db.collection(FINANCIAL_OPERATIONS_COLLECTION).doc(operationId);
+    const existingOperation = await operationRef.get();
+    const deferCompletionPayment = shouldDeferCompletionPayment(request, existingOperation.exists ? existingOperation.data() : null);
+    if (['completed', 'canceled', 'cancelled'].includes(String(request.status || '').toLowerCase())
+      && existingOperation.exists
+      && existingOperation.data()?.operationType !== 'completion') {
+      return res.status(200).json({ success: true, request: { id: requestId, ...request }, charge: { ok: request.paymentStatus === 'paid', reason: null } });
+    }
+    if (['completed', 'canceled', 'cancelled'].includes(String(request.status || '').toLowerCase()) && !existingOperation.exists) {
+      return res.status(200).json({ success: true, request: { id: requestId, ...request }, charge: { ok: true, reason: null } });
+    }
+
+    let settlementData = null;
+    let cashChargeAmount = 0;
+    let selectedCard = null;
+    let customerData = {};
+    if (!existingOperation.exists) {
+      const endedAt = Date.now();
+      const arrivedAtMs = timestampToMillis(request.arrivedAt || request.helperAssignment?.arrivedAt);
+      const workStartedAtMs = timestampToMillis(request.workStartedAt || request.helperAssignment?.workStartedAt);
+      const quoteTotal = getServiceQuoteTotal(request);
+      let waitingMinutes = 0;
+      let waitingCost = 0;
+      if (arrivedAtMs && workStartedAtMs && workStartedAtMs > arrivedAtMs) {
+        waitingMinutes = Number(((workStartedAtMs - arrivedAtMs) / 60000).toFixed(2));
+        if (quoteTotal <= 0 && waitingMinutes > 2) waitingCost = Math.round(waitingMinutes - 2);
       }
-      const globalRewardConfig = await getRewardConfig(db, 'global');
-      const pointsPerRand = Math.max(1, Number(globalRewardConfig.pointsPerRand || 10));
-      const redemptionIncrement = Math.max(1, Number(globalRewardConfig.redemptionIncrementPoints || 10));
-      const eligibleSubtotal = Math.max(0, Number(quoteTotal || 0));
-      const percentageCap = eligibleSubtotal * (Number(globalRewardConfig.maximumServiceCreditPercentagePerBooking || 20) / 100);
-      const randCap = Number(globalRewardConfig.maximumServiceCreditRandPerBooking || 0);
-      const maxCreditRand = randCap > 0 ? Math.min(percentageCap, randCap) : percentageCap;
-      const maximumPoints = Math.floor((maxCreditRand * pointsPerRand) / redemptionIncrement) * redemptionIncrement;
-      serviceCreditPoints = Math.max(0, Math.min(Number(redemption.points || 0), maximumPoints));
-      serviceCreditAmount = toWholeRand(serviceCreditPoints / pointsPerRand);
-    }
-    cashChargeAmount = toWholeRand(Math.max(0, totalAmount - serviceCreditAmount));
-    if (!deferCompletionPayment) {
-      const customerSnap = await db.collection('users').doc(request.customerId).get();
-      customerData = customerSnap.data() || {};
-      const paymentMethods = (await getServerPaymentMethods({ db, admin, uid: request.customerId }))
-        .filter((method) => String(method.paystackAuthorizationCode || '').trim());
-      const selectedCardId = request.selectedCardId || request.requestPayload?.selectedCardId || null;
-      selectedCard = paymentMethods.find((card) => card.id === selectedCardId)
-        || paymentMethods.find((card) => card.isDefault)
-        || paymentMethods[0]
-        || null;
-    }
-    settlementData = {
-      customerId: String(request.customerId || ''),
-      helperId,
-      endedAt,
-      noChargePaymentStatus: deferCompletionPayment && cashChargeAmount > 0 ? 'unpaid' : 'paid',
-      ...(deferCompletionPayment ? { deferredPaymentSelection: true } : {}),
-      totalAmount,
-      waitingMinutes,
-      waitingCost,
-      serviceCreditAmount,
-      serviceCreditPoints,
-      redemptionId: redemptionId || null,
-      selectedCardId: selectedCard?.id || null,
-      chargedCardLast4: selectedCard?.last4 || null,
-      helperPayoutBreakdown: { ...helperPayoutBreakdown, finalizedAt: new Date(endedAt).toISOString() },
-      requestPatch: {
-        status: 'completed',
-        statusDetail: 'Service completed and billing finalized.',
+      const subtotal = getServiceQuoteSubtotal(request);
+      const travelFee = getServiceTravelFee(request);
+      const bookingFee = getServiceBookingFee(request);
+      const helperPayoutBreakdown = getServiceHelperPayoutBreakdown(request, {
+        closureType: 'completed',
+        waitingCost,
+        travelFeeAmount: travelFee,
+        bookingFeeAmount: bookingFee,
+      });
+      const totalAmount = quoteTotal > 0
+        ? toWholeRand(quoteTotal)
+        : toWholeRand(helperPayoutBreakdown.customerChargeAmount);
+      const redemptionId = String(request.serviceCreditRedemptionId || '').trim();
+      let serviceCreditAmount = 0;
+      let serviceCreditPoints = 0;
+      if (redemptionId) {
+        const redemptionSnap = await db.collection('serviceCreditRedemptions').doc(redemptionId).get();
+        const redemption = redemptionSnap.data() || {};
+        if (!redemptionSnap.exists || redemption.userId !== request.customerId || redemption.requestId !== requestId || redemption.status !== 'reserved') {
+          return res.status(409).json({ success: false, message: 'The service-credit reservation is no longer valid.' });
+        }
+        const globalRewardConfig = await getRewardConfig(db, 'global');
+        const pointsPerRand = Math.max(1, Number(globalRewardConfig.pointsPerRand || 10));
+        const redemptionIncrement = Math.max(1, Number(globalRewardConfig.redemptionIncrementPoints || 10));
+        const eligibleSubtotal = Math.max(0, Number(quoteTotal || 0));
+        const percentageCap = eligibleSubtotal * (Number(globalRewardConfig.maximumServiceCreditPercentagePerBooking || 20) / 100);
+        const randCap = Number(globalRewardConfig.maximumServiceCreditRandPerBooking || 0);
+        const maxCreditRand = randCap > 0 ? Math.min(percentageCap, randCap) : percentageCap;
+        const maximumPoints = Math.floor((maxCreditRand * pointsPerRand) / redemptionIncrement) * redemptionIncrement;
+        serviceCreditPoints = Math.max(0, Math.min(Number(redemption.points || 0), maximumPoints));
+        serviceCreditAmount = toWholeRand(serviceCreditPoints / pointsPerRand);
+      }
+      cashChargeAmount = toWholeRand(Math.max(0, totalAmount - serviceCreditAmount));
+      if (!deferCompletionPayment && customerId) {
+        const customerSnap = await db.collection('users').doc(customerId).get().catch(() => null);
+        customerData = customerSnap?.exists ? customerSnap.data() || {} : {};
+        if (!isGuestCustomer) {
+          const paymentMethods = (await getServerPaymentMethods({ db, admin, uid: customerId }).catch(() => []))
+            .filter((method) => String(method.paystackAuthorizationCode || '').trim());
+          const selectedCardId = request.selectedCardId || request.requestPayload?.selectedCardId || null;
+          selectedCard = paymentMethods.find((card) => card.id === selectedCardId)
+            || paymentMethods.find((card) => card.isDefault)
+            || paymentMethods[0]
+            || null;
+        }
+      }
+      settlementData = {
+        customerId,
+        helperId,
         endedAt,
+        noChargePaymentStatus: deferCompletionPayment && cashChargeAmount > 0 ? 'unpaid' : 'paid',
+        ...(deferCompletionPayment ? { deferredPaymentSelection: true } : {}),
+        totalAmount,
         waitingMinutes,
         waitingCost,
-        totalAmount,
-        pricingSnapshot: {
-          ...(request.pricingSnapshot || {}),
-          subtotal, travelFee, bookingFee,
-          bookingFeeRate: SERVICE_BOOKING_FEE_RATE,
-          bookingFeeCap: SERVICE_BOOKING_FEE_CAP,
-          waitingMinutes, waitingCost, serviceCreditAmount, serviceCreditPoints,
-          cashChargeAmount,
-          finalAmount: totalAmount,
-          finalizedAt: new Date(endedAt).toISOString(),
-        },
+        serviceCreditAmount,
+        serviceCreditPoints,
+        redemptionId: redemptionId || null,
+        selectedCardId: selectedCard?.id || null,
+        chargedCardLast4: selectedCard?.last4 || null,
         helperPayoutBreakdown: { ...helperPayoutBreakdown, finalizedAt: new Date(endedAt).toISOString() },
-        ...(deferCompletionPayment ? {} : { chargedCardLast4: selectedCard?.last4 || null }),
-      },
-    };
-  }
-
-  if (existingOperation.exists && existingOperation.data()?.status === 'settled_failed' && req.body?.retryConfirmedFailure === true) {
-    const customerSnap = await db.collection('users').doc(request.customerId).get();
-    customerData = customerSnap.data() || {};
-    const paymentMethods = (await getServerPaymentMethods({ db, admin, uid: request.customerId }))
-      .filter((method) => String(method.paystackAuthorizationCode || '').trim());
-    const selectedCardId = existingOperation.data()?.settlementData?.selectedCardId || null;
-    selectedCard = paymentMethods.find((card) => card.id === selectedCardId) || null;
-  }
-
-  let paymentsSecrets = { PAYSTACK_SECRET_KEY: '' };
-  const existingOperationData = existingOperation.exists ? existingOperation.data() || {} : null;
-  const existingOperationStatus = String(existingOperationData?.status || '').toLowerCase();
-  const needsPaystack = deferCompletionPayment ? false : existingOperation.exists
-    ? (['processing', 'gateway_succeeded', 'gateway_failed_confirmed', 'gateway_reversed', 'reconciliation_required'].includes(existingOperationStatus)
-      || (existingOperationStatus === 'settled_failed' && req.body?.retryConfirmedFailure === true))
-    : cashChargeAmount > 0;
-  if (needsPaystack && Number(existingOperationData?.amountMinor || Math.round(cashChargeAmount * 100)) > 0) {
-    try {
-      paymentsSecrets = getPaymentsSecrets();
-    } catch (error) {
-      logger.error('Payment configuration is unavailable during service request billing.', { requestId, error: error.message });
-      return res.status(500).json({ success: false, message: 'Payment configuration is unavailable.' });
+        requestPatch: {
+          status: 'completed',
+          statusDetail: 'Service completed and billing finalized.',
+          endedAt,
+          waitingMinutes,
+          waitingCost,
+          totalAmount,
+          pricingSnapshot: {
+            ...(request.pricingSnapshot || {}),
+            subtotal, travelFee, bookingFee,
+            bookingFeeRate: SERVICE_BOOKING_FEE_RATE,
+            bookingFeeCap: SERVICE_BOOKING_FEE_CAP,
+            waitingMinutes, waitingCost, serviceCreditAmount, serviceCreditPoints,
+            cashChargeAmount,
+            finalAmount: totalAmount,
+            finalizedAt: new Date(endedAt).toISOString(),
+          },
+          helperPayoutBreakdown: { ...helperPayoutBreakdown, finalizedAt: new Date(endedAt).toISOString() },
+          ...(deferCompletionPayment ? {} : { chargedCardLast4: selectedCard?.last4 || null }),
+        },
+      };
     }
-  }
 
-  try {
+    if (existingOperation.exists && existingOperation.data()?.status === 'settled_failed' && req.body?.retryConfirmedFailure === true && customerId) {
+      const customerSnap = await db.collection('users').doc(customerId).get().catch(() => null);
+      customerData = customerSnap?.exists ? customerSnap.data() || {} : {};
+      if (!isGuestCustomer) {
+        const paymentMethods = (await getServerPaymentMethods({ db, admin, uid: customerId }).catch(() => []))
+          .filter((method) => String(method.paystackAuthorizationCode || '').trim());
+        const selectedCardId = existingOperation.data()?.settlementData?.selectedCardId || null;
+        selectedCard = paymentMethods.find((card) => card.id === selectedCardId) || null;
+      }
+    }
+
+    let paymentsSecrets = { PAYSTACK_SECRET_KEY: '' };
+    const existingOperationData = existingOperation.exists ? existingOperation.data() || {} : null;
+    const existingOperationStatus = String(existingOperationData?.status || '').toLowerCase();
+    const needsPaystack = deferCompletionPayment ? false : existingOperation.exists
+      ? (['processing', 'gateway_succeeded', 'gateway_failed_confirmed', 'gateway_reversed', 'reconciliation_required'].includes(existingOperationStatus)
+        || (existingOperationStatus === 'settled_failed' && req.body?.retryConfirmedFailure === true && Boolean(selectedCard?.paystackAuthorizationCode)))
+      : (cashChargeAmount > 0 && Boolean(selectedCard?.paystackAuthorizationCode));
+    if (needsPaystack && Number(existingOperationData?.amountMinor || Math.round(cashChargeAmount * 100)) > 0) {
+      try {
+        paymentsSecrets = getPaymentsSecrets();
+      } catch (error) {
+        logger.error('Payment configuration is unavailable during service request billing.', { requestId, error: error.message });
+        return res.status(500).json({ success: false, message: 'Payment configuration is unavailable.' });
+      }
+    }
+
     const claim = await claimServiceFinancialOperation({
       db,
       requestRef,
@@ -17943,7 +18138,7 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, invoker: 'public
     }
     const activeCustomer = customerData && Object.keys(customerData).length
       ? customerData
-      : (await db.collection('users').doc(request.customerId).get()).data() || {};
+      : customerId ? ((await db.collection('users').doc(customerId).get().catch(() => null))?.data() || {}) : {};
     const { outcome, settlement } = await runServiceFinancialOperation({
       operationRef: claim.operationRef,
       requestRef,
@@ -18268,20 +18463,24 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
       if (!isPostAssignmentServiceRequestStatus(status)) {
         return res.status(409).json({ success: false, message: 'This request cannot be canceled from its current state.' });
       }
+      const customerId = String(request.customerId || '').trim();
+      const isGuestCustomer = customerId.startsWith('guest_');
       const bookingFee = getServiceBookingFee(request);
       const travelFee = getServiceTravelFee(request);
       cancellationAmount = Number(cancellationTerms.cancellationAmount || 0);
       const helperPayoutBreakdown = cancellationTerms.helperPayoutBreakdown;
-      const bookingCharge = bookingFee;
-      const customerSnap = await db.collection('users').doc(request.customerId).get();
-      customerData = customerSnap.data() || {};
-      const paymentMethods = (await getServerPaymentMethods({ db, admin, uid: request.customerId }))
-        .filter((method) => String(method.paystackAuthorizationCode || '').trim());
-      const selectedCardId = request.selectedCardId || request.requestPayload?.selectedCardId || null;
-      selectedCard = paymentMethods.find((card) => card.id === selectedCardId)
-        || paymentMethods.find((card) => card.isDefault)
-        || paymentMethods[0]
-        || null;
+      const bookingCharge = toWholeRand(bookingFee);
+      const customerSnap = customerId ? await db.collection('users').doc(customerId).get().catch(() => null) : null;
+      customerData = customerSnap?.exists ? customerSnap.data() || {} : {};
+      if (cancellationAmount > 0 && customerId && !isGuestCustomer) {
+        const paymentMethods = (await getServerPaymentMethods({ db, admin, uid: customerId }).catch(() => []))
+          .filter((method) => String(method.paystackAuthorizationCode || '').trim());
+        const selectedCardId = request.selectedCardId || request.requestPayload?.selectedCardId || null;
+        selectedCard = paymentMethods.find((card) => card.id === selectedCardId)
+          || paymentMethods.find((card) => card.isDefault)
+          || paymentMethods[0]
+          || null;
+      }
       const pricingSnapshot = {
         ...(request.pricingSnapshot || {}),
         subtotal: getServiceQuoteSubtotal(request),
@@ -18309,19 +18508,19 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
         walletBalance: null,
         walletCurrency: String(customerData.wallet?.currency || 'ZAR'),
         pricingSnapshot,
-        liveTrackingClosedReason: 'customer_canceled',
+        liveTrackingClosedReason: cancellationAmount > 0 ? 'customer_canceled' : 'customer_canceled_accepted_before_travel',
       };
       settlementData = {
-        customerId: String(request.customerId || ''),
+        customerId,
         helperId,
         endedAt,
-        noChargePaymentStatus: 'paid',
+        noChargePaymentStatus: cancellationAmount > 0 ? 'paid' : 'not_applicable',
         cancellation,
         requestPatch: {
           status: 'canceled',
           statusDetail: cancellationAmount > 0
             ? `Customer canceled the service. Cancellation fee charged: R${cancellationAmount.toFixed(2)}.`
-            : 'Customer canceled the service.',
+            : 'Customer canceled the service before travel began.',
           canceledAt: endedAt,
           canceledBy: 'customer',
           canceledReason,
@@ -18334,13 +18533,16 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
     }
   }
 
-  if (existingOperation.exists && existingOperation.data()?.status === 'settled_failed' && req.body?.retryConfirmedFailure === true) {
-    const customerSnap = await db.collection('users').doc(request.customerId).get();
-    customerData = customerSnap.data() || {};
-    const paymentMethods = (await getServerPaymentMethods({ db, admin, uid: request.customerId }))
-      .filter((method) => String(method.paystackAuthorizationCode || '').trim());
-    const selectedCardId = existingOperation.data()?.settlementData?.cancellation?.selectedCardId || null;
-    selectedCard = paymentMethods.find((card) => card.id === selectedCardId) || null;
+  const cancelCustomerId = String(request.customerId || '').trim();
+  if (existingOperation.exists && existingOperation.data()?.status === 'settled_failed' && req.body?.retryConfirmedFailure === true && cancelCustomerId) {
+    const customerSnap = await db.collection('users').doc(cancelCustomerId).get().catch(() => null);
+    customerData = customerSnap?.exists ? customerSnap.data() || {} : {};
+    if (!cancelCustomerId.startsWith('guest_')) {
+      const paymentMethods = (await getServerPaymentMethods({ db, admin, uid: cancelCustomerId }).catch(() => []))
+        .filter((method) => String(method.paystackAuthorizationCode || '').trim());
+      const selectedCardId = existingOperation.data()?.settlementData?.cancellation?.selectedCardId || null;
+      selectedCard = paymentMethods.find((card) => card.id === selectedCardId) || null;
+    }
   }
 
   let paymentsSecrets = { PAYSTACK_SECRET_KEY: '' };
@@ -18348,8 +18550,8 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
   const existingOperationStatus = String(existingOperationData?.status || '').toLowerCase();
   const needsPaystack = existingOperation.exists
     ? (['processing', 'gateway_succeeded', 'gateway_failed_confirmed', 'gateway_reversed', 'reconciliation_required'].includes(existingOperationStatus)
-      || (existingOperationStatus === 'settled_failed' && req.body?.retryConfirmedFailure === true))
-    : cancellationAmount > 0;
+      || (existingOperationStatus === 'settled_failed' && req.body?.retryConfirmedFailure === true && Boolean(selectedCard?.paystackAuthorizationCode)))
+    : (cancellationAmount > 0 && Boolean(selectedCard?.paystackAuthorizationCode));
   if (needsPaystack && Number(existingOperationData?.amountMinor || Math.round(cancellationAmount * 100)) > 0) {
     try {
       paymentsSecrets = getPaymentsSecrets();
@@ -18461,8 +18663,12 @@ async function getWhatsAppPaymentContext({ identityId, identity, requestId, allo
   const legacyOperation = legacySnap.exists ? legacySnap.data() || {} : null;
   const state = paymentStateForRequest(request, paymentOperation, legacyOperation);
   const amount = getFinalPayableAmount(request, legacyOperation);
+  const requestStatus = String(request.status || '').trim().toLowerCase();
+  const isCanceled = requestStatus === 'canceled' || requestStatus === 'cancelled';
   if (state === 'paid') return { code: 'already-paid', identity: currentIdentity, request, paymentOperation, legacyOperation };
-  if (request.status !== 'completed' || amount === null) return { code: 'not-payable', identity: currentIdentity, request };
+  if ((requestStatus !== 'completed' && !isCanceled) || amount === null || amount <= 0) {
+    return { code: 'not-payable', identity: currentIdentity, request };
+  }
   const blockedStates = allowAwaitingCustomerConfirmation
     ? ['payment_processing', 'awaiting_cash_confirmation', 'payment_reconciliation_required']
     : ['payment_processing', 'awaiting_cash_confirmation', 'awaiting_customer_confirmation', 'payment_reconciliation_required'];
@@ -18482,7 +18688,7 @@ async function getWhatsAppPaymentContext({ identityId, identity, requestId, allo
       .map((card) => ({ id: String(card.id || ''), brand: String(card.brand || 'Card').slice(0, 40), last4: String(card.last4 || '').slice(-4), isDefault: card.isDefault === true }))
       .filter((card) => card.id)
     : [];
-  return { code: 'available', identity: currentIdentity, request, amount, ownerUid, cards, paymentOperation, legacyOperation };
+  return { code: 'available', identity: currentIdentity, request, isCanceled, amount, ownerUid, cards, paymentOperation, legacyOperation };
 }
 
 async function createWhatsAppPaymentSession(context) {
@@ -19660,7 +19866,8 @@ exports.sendHelperRequestMessage = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS
 
 exports.evaluateRouteTravelMilestones = onValueWritten({
   ref: 'liveTracking/serviceRequests/{requestId}/helperLocation',
-  maxInstances: 5,
+  maxInstances: 2,
+  ...HALF_CPU_OPTIONS,
 }, async (event) => {
   const before = event.data.before.exists() ? event.data.before.val() : null;
   const after = event.data.after.exists() ? event.data.after.val() : null;
@@ -19674,12 +19881,7 @@ exports.evaluateRouteTravelMilestones = onValueWritten({
   if (!['accepted', 'driving', 'en_route', 'buying_resources', 'arrived'].includes(status)) return;
 
   const customerId = String(request.customerId || '').trim();
-  const customerIdentityId = String(request.originIdentityId || '').trim();
-  let recipientIdentityId = customerIdentityId;
-  if (!recipientIdentityId && customerId && !customerId.startsWith('guest_')) {
-    const customerLink = await db.collection('whatsappUserLinks').doc(customerId).get();
-    if (customerLink.exists) recipientIdentityId = String(customerLink.data()?.identityId || '').trim();
-  }
+  const recipientIdentityId = await resolveCustomerWhatsAppIdentityId({ customerId, request });
   if (!recipientIdentityId) return;
 
   const identitySnap = await db.collection('whatsappIdentities').doc(recipientIdentityId).get();

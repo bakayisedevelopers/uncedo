@@ -47,6 +47,16 @@ export default function PaymentPage() {
   const ownerCanSave = Boolean(user?.firebaseUser?.uid && payment?.canSaveCard);
   const cards = useMemo(() => Array.isArray(payment?.savedCards) ? payment.savedCards : [], [payment]);
   const pendingSavedCard = savedCardAttempt || payment?.pendingSavedCardPayment || null;
+  const availableMethods = useMemo(
+    () => (Array.isArray(payment?.availableMethods) ? payment.availableMethods : []),
+    [payment],
+  );
+  const allowsCash = availableMethods.length > 0
+    ? availableMethods.includes('cash')
+    : !payment?.isCancellationFee;
+  const allowsCard = availableMethods.length > 0
+    ? availableMethods.includes('paystack_checkout')
+    : true;
 
   const refresh = useCallback(async (sessionToken = token) => {
     if (!sessionToken) return;
@@ -143,7 +153,7 @@ export default function PaymentPage() {
   }
 
   async function selectCash() {
-    const result = await runAction(() => requestPaymentFunction('selectCashPaymentFromSession', { token, idempotencyKey: makeIdempotencyKey() }), 'Cash / direct payment selected. Pay the assigned helper directly, then report it here.');
+    const result = await runAction(() => requestPaymentFunction('selectCashPaymentFromSession', { token, idempotencyKey: makeIdempotencyKey() }), 'Cash payment selected. Pay the assigned helper in cash, then report it here.');
     if (result?.attemptId) setPayment((current) => ({ ...current, activeAttemptId: result.attemptId, paymentStatus: result.status }));
   }
 
@@ -224,9 +234,17 @@ export default function PaymentPage() {
       </header>
       <main className="mx-auto max-w-2xl">
         <div className="mb-6">
-          <p className="text-xs font-black uppercase tracking-[0.22em] text-emerald-700">Request payment</p>
-          <h1 className="mt-2 text-3xl font-black tracking-tight text-zinc-950 sm:text-4xl">Complete your payment</h1>
-          <p className="mt-3 max-w-xl text-sm leading-6 text-zinc-600">Review the final service amount and choose how you would like to pay. Uncedo confirms card payments directly with Paystack.</p>
+          <p className="text-xs font-black uppercase tracking-[0.22em] text-emerald-700">
+            {payment?.isCancellationFee ? 'Cancellation fee' : 'Request payment'}
+          </p>
+          <h1 className="mt-2 text-3xl font-black tracking-tight text-zinc-950 sm:text-4xl">
+            {payment?.isCancellationFee ? 'Pay cancellation fee' : 'Complete your payment'}
+          </h1>
+          <p className="mt-3 max-w-xl text-sm leading-6 text-zinc-600">
+            {payment?.isCancellationFee
+              ? 'Review your cancellation fee and pay with a card below. Uncedo confirms card payments directly with Paystack.'
+              : 'Review the final service amount and choose how you would like to pay. Uncedo confirms card payments directly with Paystack.'}
+          </p>
         </div>
 
         {error ? <Notice tone="error">{error}</Notice> : null}
@@ -265,28 +283,32 @@ export default function PaymentPage() {
               </section>
             ) : inProgress ? (
               <section className="app-surface p-6 sm:p-8"><StatePanel icon={<Loader2 className="animate-spin" />} title="Payment is being verified" copy="Uncedo is checking the payment with Paystack. Please do not start another payment while this check is in progress." /><button onClick={() => refresh()} className="mt-5 inline-flex items-center gap-2 rounded-xl border border-zinc-300 px-4 py-2.5 text-sm font-bold text-zinc-700"><RefreshCw size={15} /> Check again</button></section>
-            ) : cashWaiting ? (
+            ) : cashWaiting && allowsCash ? (
               <section className="app-surface p-6 sm:p-8">
-                <StatePanel icon={<Banknote />} title={payment.paymentStatus === 'awaiting_cash_confirmation' ? 'Waiting for helper confirmation' : 'Pay the assigned helper directly'} copy={payment.paymentStatus === 'awaiting_cash_confirmation' ? 'Your report has been sent. The helper must confirm that they received the payment.' : 'Cash, EFT and direct bank transfer are recorded as one direct-to-helper method. Uncedo will mark the request paid only after the assigned helper confirms receipt.'} />
+                <StatePanel icon={<Banknote />} title={payment.paymentStatus === 'awaiting_cash_confirmation' ? 'Waiting for helper confirmation' : 'Pay the assigned helper in cash'} copy={payment.paymentStatus === 'awaiting_cash_confirmation' ? 'Your report has been sent. The helper must confirm that they received the cash payment.' : 'Pay the assigned helper in cash. Uncedo will mark the request paid only after the assigned helper confirms receipt.'} />
                 {payment.paymentStatus === 'cash_selected' && activeAttemptId ? <button disabled={busy} onClick={reportCashPaid} className="mt-5 w-full rounded-xl bg-emerald-700 px-5 py-3.5 font-extrabold text-white hover:bg-emerald-800 disabled:opacity-50">{busy ? 'Sending…' : 'I have paid the helper'}</button> : null}
                 {payment.paymentStatus === 'cash_selected' && activeAttemptId ? <button disabled={busy} onClick={changeFromCash} className="mt-3 w-full rounded-xl border border-zinc-300 px-5 py-3 text-sm font-bold text-zinc-700 disabled:opacity-50">Change payment method</button> : null}
                 <button onClick={() => refresh()} className="mt-3 inline-flex items-center gap-2 rounded-xl border border-zinc-300 px-4 py-2.5 text-sm font-bold text-zinc-700"><RefreshCw size={15} /> Refresh status</button>
               </section>
             ) : (
               <div className="grid gap-5">
-                <section className="app-surface p-5 sm:p-6">
-                  <div className="flex items-center gap-3"><span className="rounded-xl bg-emerald-100 p-2.5 text-emerald-800"><Banknote size={21} /></span><div><h2 className="font-extrabold text-zinc-950">Cash or direct payment</h2><p className="mt-0.5 text-xs text-zinc-500">Pay the assigned helper in person or by bank transfer.</p></div></div>
-                  <button disabled={busy} onClick={selectCash} className="mt-5 w-full rounded-xl border border-emerald-700 px-5 py-3 font-extrabold text-emerald-800 hover:bg-emerald-50 disabled:opacity-50">Choose cash / direct payment</button>
-                </section>
+                {allowsCash ? (
+                  <section className="app-surface p-5 sm:p-6">
+                    <div className="flex items-center gap-3"><span className="rounded-xl bg-emerald-100 p-2.5 text-emerald-800"><Banknote size={21} /></span><div><h2 className="font-extrabold text-zinc-950">Pay with Cash</h2><p className="mt-0.5 text-xs text-zinc-500">Pay the assigned helper in cash.</p></div></div>
+                    <button disabled={busy} onClick={selectCash} className="mt-5 w-full rounded-xl border border-emerald-700 px-5 py-3 font-extrabold text-emerald-800 hover:bg-emerald-50 disabled:opacity-50">Pay with Cash</button>
+                  </section>
+                ) : null}
 
-                <section className="app-surface p-5 sm:p-6">
-                  <div className="flex items-center gap-3"><span className="rounded-xl bg-blue-100 p-2.5 text-blue-800"><CreditCard size={21} /></span><div><h2 className="font-extrabold text-zinc-950">Pay by new card</h2><p className="mt-0.5 text-xs text-zinc-500">Your card details are collected on Paystack’s secure hosted checkout.</p></div></div>
-                  <form onSubmit={startCardCheckout} className="mt-5 space-y-4">
-                    <label className="block text-sm font-semibold text-zinc-700">Email for the Paystack receipt<input required type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} className="mt-1.5 w-full rounded-xl border border-zinc-300 px-4 py-3 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/15" /></label>
-                    {ownerCanSave ? <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-sm leading-5 text-zinc-700"><input type="checkbox" checked={saveCardConsent} onChange={(event) => setSaveCardConsent(event.target.checked)} className="mt-1 accent-emerald-700" /><span><strong>Save this card for future payments</strong><span className="block text-xs text-zinc-500">The card is stored by Paystack. Uncedo stores only a reusable authorisation and masked card details.</span></span></label> : <p className="rounded-xl bg-zinc-50 p-3 text-xs leading-5 text-zinc-500">Saving a card is available only when you are signed in as the verified request owner. This one-time payment can still be completed below.</p>}
-                    <button disabled={busy || !email.trim()} className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-700 px-5 py-3.5 font-extrabold text-white hover:bg-blue-800 disabled:opacity-50">{busy ? <Loader2 size={17} className="animate-spin" /> : <LockKeyhole size={17} />}{busy ? 'Preparing secure checkout…' : `Continue to Paystack · ${formatMoney(payment.amount, payment.currency)}`}</button>
-                  </form>
-                </section>
+                {allowsCard ? (
+                  <section className="app-surface p-5 sm:p-6">
+                    <div className="flex items-center gap-3"><span className="rounded-xl bg-blue-100 p-2.5 text-blue-800"><CreditCard size={21} /></span><div><h2 className="font-extrabold text-zinc-950">Pay by new card</h2><p className="mt-0.5 text-xs text-zinc-500">Your card details are collected on Paystack’s secure hosted checkout.</p></div></div>
+                    <form onSubmit={startCardCheckout} className="mt-5 space-y-4">
+                      <label className="block text-sm font-semibold text-zinc-700">Email for the Paystack receipt<input required type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} className="mt-1.5 w-full rounded-xl border border-zinc-300 px-4 py-3 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/15" /></label>
+                      {ownerCanSave ? <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-sm leading-5 text-zinc-700"><input type="checkbox" checked={saveCardConsent} onChange={(event) => setSaveCardConsent(event.target.checked)} className="mt-1 accent-emerald-700" /><span><strong>Save this card for future payments</strong><span className="block text-xs text-zinc-500">The card is stored by Paystack. Uncedo stores only a reusable authorisation and masked card details.</span></span></label> : <p className="rounded-xl bg-zinc-50 p-3 text-xs leading-5 text-zinc-500">Saving a card is available only when you are signed in as the verified request owner. This one-time payment can still be completed below.</p>}
+                      <button disabled={busy || !email.trim()} className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-700 px-5 py-3.5 font-extrabold text-white hover:bg-blue-800 disabled:opacity-50">{busy ? <Loader2 size={17} className="animate-spin" /> : <LockKeyhole size={17} />}{busy ? 'Preparing secure checkout…' : `Continue to Paystack · ${formatMoney(payment.amount, payment.currency)}`}</button>
+                    </form>
+                  </section>
+                ) : null}
 
                 {cards.length ? (
                   <section className="app-surface p-5 sm:p-6">
@@ -298,10 +320,18 @@ export default function PaymentPage() {
             )}
 
             {paymentFailed && !paid ? (
-              <Notice tone="error">Your previous payment attempt did not succeed. You can try Cash / EFT or another card above, and still rate your helper below.</Notice>
+              <Notice tone="error">
+                {payment?.paymentStatus === 'wallet_debt_recorded'
+                  ? (allowsCash
+                    ? 'This amount has been deducted from your wallet. Please pay using a new card or Cash above to clear the balance.'
+                    : 'This amount has been deducted from your wallet. Please pay using a card above to clear the balance.')
+                  : (allowsCash
+                    ? 'Your previous payment attempt did not succeed. You can try Cash or a new card above.'
+                    : 'Your previous payment attempt did not succeed. Please pay using a card above.')}
+              </Notice>
             ) : null}
 
-            {(payment.canRateHelper || paid || paymentFailed) && payment.helperName !== undefined ? (
+            {!payment?.isCancellationFee && (payment.canRateHelper || paid || paymentFailed) && payment.helperName !== undefined ? (
               <section className="app-surface p-5 sm:p-6">
                 <div className="flex items-start justify-between gap-3">
                   <div>
