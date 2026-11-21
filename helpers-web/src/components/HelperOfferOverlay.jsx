@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AlertCircle, Clock, X } from 'lucide-react';
 import { useHelperSession } from '../context/HelperSessionContext';
+import { resolveHelperPayoutAmount } from '../services/helperDataService';
 
 function getCountdownColor(secondsLeft) {
   if (secondsLeft <= 10) return '#ef4444';
@@ -106,9 +107,7 @@ export function HelperOfferOverlay({ onNavigate }) {
     || 'Location pending';
   const payoutAmount =
     activeOffer.payoutEstimate
-    ?? activeOffer.pricingSnapshot?.total
-    ?? activeOffer.pricingSnapshot?.finalAmount
-    ?? 0;
+    ?? resolveHelperPayoutAmount(activeOffer);
 
   const handleAction = async (action) => {
     setPendingAction({ offerId: activeOffer.id, action });
@@ -175,7 +174,10 @@ export function HelperOfferOverlay({ onNavigate }) {
                 {customerName} | {areaText}
               </p>
             </div>
-            <div className="shrink-0 rounded-full bg-tealbrand-800 px-3.5 py-2 text-center">
+            <div className="shrink-0 rounded-2xl bg-tealbrand-800 px-3.5 py-2 text-center">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-tealbrand-100 leading-none mb-0.5">
+                Your payout
+              </div>
               <span className="tabular-nums-mono text-base font-extrabold text-white">
                 {formatRand(payoutAmount)}
               </span>

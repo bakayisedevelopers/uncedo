@@ -22,6 +22,8 @@ import { useHelperSession } from '../context/HelperSessionContext';
 import {
   finalizeServiceRequestBillingApi,
   normalizeTimestampMs,
+  resolveHelperPayoutAmount,
+  resolveRequestCustomerTotal,
   respondToCashServicePaymentApi,
   sendHelperRequestMessage,
   submitServiceRequestRatingApi,
@@ -343,18 +345,8 @@ export function RequestDetailPage({ requestId, onNavigate }) {
       ? `https://www.google.com/maps/search/?api=1&query=${lat},${lon}`
       : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
 
-  const totalAmount = Number(
-    request.totalAmount
-      ?? request.pricingSnapshot?.finalAmount
-      ?? request.pricingSnapshot?.total
-      ?? 0,
-  );
-  const helperPayoutAmount = Number(
-    request?.helperPayoutBreakdown?.helperAmount
-      ?? request.pricingSnapshot?.total
-      ?? request.pricingSnapshot?.finalAmount
-      ?? 0,
-  );
+  const totalAmount = resolveRequestCustomerTotal(request);
+  const helperPayoutAmount = resolveHelperPayoutAmount(request);
   const waitingCost = Number(request.waitingCost ?? request.pricingSnapshot?.waitingCost ?? 0);
   const paymentStatus = String(
     paymentOperation?.status || request.paymentStatus || 'unpaid',
@@ -448,15 +440,21 @@ export function RequestDetailPage({ requestId, onNavigate }) {
                   <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{address}</span>
                 </p>
               </div>
-              <div className="pt-4 border-t border-border flex flex-wrap items-center justify-between gap-2 text-sm">
-                <span className="text-ink-500">
-                  {status === 'completed' ? 'Your Helper Payout' : 'Estimated Total'}
-                </span>
-                <span className="tabular-nums-mono font-bold text-lg text-tealbrand-700 shrink-0">
-                  {status === 'completed'
-                    ? `R${helperPayoutAmount.toFixed(2)}`
-                    : `R${Math.round(totalAmount)}`}
-                </span>
+              <div className="pt-4 border-t border-border space-y-1.5 text-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-ink-500">Your Helper Payout</span>
+                  <span className="tabular-nums-mono font-bold text-lg text-tealbrand-700 shrink-0">
+                    R{helperPayoutAmount.toFixed(2)}
+                  </span>
+                </div>
+                {totalAmount > 0 && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <span className="text-ink-400">Customer Confirmed Total</span>
+                    <span className="tabular-nums-mono font-semibold text-ink-600 shrink-0">
+                      R{Math.round(totalAmount)}
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
 

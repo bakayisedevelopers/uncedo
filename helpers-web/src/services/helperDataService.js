@@ -701,7 +701,7 @@ async function fetchJsonWithRetry(
   url,
   fetchOptions,
   {
-    retries = 3,
+    retries = 4,
     defaultErrorMessage = 'Request failed right now.',
     networkErrorMessage = 'Uncedo servers are temporarily busy. Please wait a moment and try again.',
   } = {},
@@ -710,8 +710,8 @@ async function fetchJsonWithRetry(
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
       const response = await fetch(url, fetchOptions);
-      if ([502, 503, 504].includes(response.status) && attempt < retries) {
-        const delayMs = 1200 * (attempt + 1) + Math.floor(Math.random() * 400);
+      if ([429, 502, 503, 504].includes(response.status) && attempt < retries) {
+        const delayMs = Math.min(4500, 900 * (attempt + 1)) + Math.floor(Math.random() * 400);
         await new Promise((resolve) => setTimeout(resolve, delayMs));
         continue;
       }
@@ -732,7 +732,7 @@ async function fetchJsonWithRetry(
       const isNetworkError = err instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(String(err?.message || ''));
       if (isNetworkError && attempt < retries) {
         lastNetworkError = err;
-        const delayMs = 1200 * (attempt + 1) + Math.floor(Math.random() * 400);
+        const delayMs = Math.min(4500, 900 * (attempt + 1)) + Math.floor(Math.random() * 400);
         await new Promise((resolve) => setTimeout(resolve, delayMs));
         continue;
       }
@@ -900,19 +900,56 @@ export function normalizeTimestampMs(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+export function resolveHelperPayoutAmount(request = {}) {
+  const stored = request?.helperPayoutBreakdown?.helperAmount;
+  if (stored !== null && stored !== undefined && stored !== '') {
+    const parsedStored = Number(stored);
+    if (Number.isFinite(parsedStored) && parsedStored >= 0) {
+      return Number(parsedStored.toFixed(2));
+    }
+  }
+  const snapshot = request?.pricingSnapshot || request?.requestPayload?.pricingSnapshot || {};
+  const customerTotal = Number(
+    request?.totalAmount
+      ?? snapshot?.finalAmount
+      ?? snapshot?.total
+      ?? snapshot?.totalAmount
+      ?? snapshot?.finalPrice
+      ?? snapshot?.basePrice
+      ?? 0,
+  ) || 0;
+  const subtotal = Number(snapshot?.subtotal || 0);
+  const rawTravel = snapshot?.travelFee;
+  const travelFee = rawTravel !== null && rawTravel !== undefined && rawTravel !== ''
+    && Number.isFinite(Number(rawTravel)) && Number(rawTravel) >= 0
+    ? Number(rawTravel)
+    : 35;
+  if (subtotal > 0) {
+    const calculated = Number(((subtotal * 0.75) + travelFee).toFixed(2));
+    return customerTotal > 0 ? Math.min(customerTotal, calculated) : calculated;
+  }
+  return customerTotal;
+}
+
+export function resolveRequestCustomerTotal(request = {}) {
+  const snapshot = request?.pricingSnapshot || request?.requestPayload?.pricingSnapshot || {};
+  return Number(
+    request?.totalAmount
+      ?? snapshot?.finalAmount
+      ?? snapshot?.total
+      ?? snapshot?.totalAmount
+      ?? snapshot?.finalPrice
+      ?? snapshot?.basePrice
+      ?? 0,
+  ) || 0;
+}
+
 export function mapServiceRequestToOffer(request) {
   if (!request?.id) return null;
   const timingPreference = String(request?.requestPayload?.timingPreference || 'now').trim().toLowerCase();
   const scheduledForText = String(request?.requestPayload?.scheduledForText || '').trim();
-  const payoutEstimate =
-    Number(
-      request.pricingSnapshot?.total
-        ?? request.pricingSnapshot?.totalAmount
-        ?? request.pricingSnapshot?.finalPrice
-        ?? request.pricingSnapshot?.finalAmount
-        ?? request.pricingSnapshot?.basePrice
-        ?? 0,
-    ) || 0;
+  const payoutEstimate = resolveHelperPayoutAmount(request);
+  const customerTotal = resolveRequestCustomerTotal(request);
 
   return {
     ...request,
@@ -922,6 +959,7 @@ export function mapServiceRequestToOffer(request) {
     description: request.description || request.serviceSummary || 'A customer is requesting help.',
     customerName: request.customerName || 'Customer',
     payoutEstimate,
+    customerTotal,
     offerExpiresAt: normalizeTimestampMs(request.offerExpiresAt),
     lastOfferAt: normalizeTimestampMs(request.lastOfferAt),
     offerToken: String(request.offerToken || ''),

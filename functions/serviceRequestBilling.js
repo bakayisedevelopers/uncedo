@@ -135,9 +135,18 @@ function getServiceHelperPayoutBreakdown(request = {}, options = {}) {
     const customerChargeAmount = shouldLockToQuotedTotal
       ? toWholeRand(quotedTotal)
       : toWholeRand(laborAmount + baseTravelFee + bookingFee);
-    const helperLaborAmount = toRand(laborAmount * HELPER_LABOR_PAYOUT_RATE);
-    const helperTravelAmount = baseTravelFee;
-    const helperAmount = toRand(helperLaborAmount + helperTravelAmount);
+    const rawHelperLaborAmount = toRand(laborAmount * HELPER_LABOR_PAYOUT_RATE);
+    const rawHelperTravelAmount = baseTravelFee;
+    const rawHelperAmount = toRand(rawHelperLaborAmount + rawHelperTravelAmount);
+    const helperAmount = customerChargeAmount > 0
+      ? toRand(Math.min(customerChargeAmount, rawHelperAmount))
+      : rawHelperAmount;
+    const helperTravelAmount = helperAmount < rawHelperAmount && rawHelperTravelAmount > helperAmount
+      ? helperAmount
+      : rawHelperTravelAmount;
+    const helperLaborAmount = helperAmount < rawHelperAmount
+      ? toRand(Math.max(0, helperAmount - helperTravelAmount))
+      : rawHelperLaborAmount;
     const platformAmount = toRand(Math.max(0, customerChargeAmount - helperAmount));
     const platformBookingAmount = Math.min(platformAmount, bookingFee);
     const platformLaborAmount = toRand(Math.max(0, platformAmount - platformBookingAmount));

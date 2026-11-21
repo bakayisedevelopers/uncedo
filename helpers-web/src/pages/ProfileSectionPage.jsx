@@ -8,6 +8,7 @@ import { StepProfilePhoto } from '../components/steps/StepProfilePhoto';
 import { useHelperSession } from '../context/HelperSessionContext';
 import {
   getHelperCashPaymentConfirmationsApi,
+  resolveHelperPayoutAmount,
   respondToCashServicePaymentApi,
   signOutHelperAccount,
 } from '../services/helperDataService';
@@ -33,13 +34,7 @@ function formatDate(val) {
 }
 
 function getJobAmount(job) {
-  return Number(
-    job?.helperPayoutBreakdown?.helperAmount
-      ?? job?.payoutEstimate
-      ?? job?.pricingSnapshot?.total
-      ?? job?.pricingSnapshot?.finalAmount
-      ?? 0,
-  );
+  return resolveHelperPayoutAmount(job);
 }
 
 export function ProfileSectionPage({ section = 'details', isTopLevel = false, onNavigate }) {

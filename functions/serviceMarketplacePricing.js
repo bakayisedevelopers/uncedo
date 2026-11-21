@@ -614,7 +614,13 @@ function computeMarketplaceQuote({
     }))
     .filter(Boolean);
 
-  const travelFee = roundCurrency(DEFAULT_TRAVEL_FEE);
+  const configuredTravelFees = selectedServices
+    .map((serviceId) => catalogIndex.get(serviceId)?.pricing?.travelFee)
+    .filter((fee) => fee !== null && fee !== undefined && Number.isFinite(Number(fee)) && Number(fee) >= 0)
+    .map((fee) => roundCurrency(fee));
+  const travelFee = configuredTravelFees.length > 0
+    ? Math.max(...configuredTravelFees)
+    : roundCurrency(DEFAULT_TRAVEL_FEE);
   const serviceTotal = roundCurrency(serviceBreakdown.reduce((sum, item) => sum + Number(item.subtotal || 0), 0));
   const bookingFeeBase = roundCurrency(serviceTotal + travelFee);
   const bookingFee = computeDynamicBookingFee(bookingFeeBase);

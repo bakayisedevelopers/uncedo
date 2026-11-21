@@ -16,7 +16,7 @@ import {
   UserCircle2,
 } from 'lucide-react';
 import { useHelperSession } from '../context/HelperSessionContext';
-import { WHATSAPP_CHAT_URL, signOutHelperAccount } from '../services/helperDataService';
+import { WHATSAPP_CHAT_URL, resolveHelperPayoutAmount, signOutHelperAccount } from '../services/helperDataService';
 
 function getInitials(name = '') {
   const parts = String(name || '')
@@ -100,8 +100,7 @@ export function ProfilePage({ onNavigate, pwa }) {
   const completedEarnings = jobHistory
     .filter((job) => String(job.status || '').toLowerCase() === 'completed')
     .reduce(
-      (sum, job) =>
-        sum + Number(job?.helperPayoutBreakdown?.helperAmount ?? job?.pricingSnapshot?.total ?? 0),
+      (sum, job) => sum + resolveHelperPayoutAmount(job),
       0,
     );
   const displayWalletText =

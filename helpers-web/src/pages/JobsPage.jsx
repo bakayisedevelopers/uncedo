@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { ArrowRight, Briefcase, Clock, MapPin, Navigation } from 'lucide-react';
 import { useHelperSession } from '../context/HelperSessionContext';
+import { resolveHelperPayoutAmount, resolveRequestCustomerTotal } from '../services/helperDataService';
 
 function formatDate(val) {
   if (!val) return 'Recent';
@@ -11,12 +12,7 @@ function formatDate(val) {
 }
 
 function getJobAmount(job) {
-  return Number(
-    job?.helperPayoutBreakdown?.helperAmount
-      ?? job?.pricingSnapshot?.total
-      ?? job?.pricingSnapshot?.finalAmount
-      ?? 0,
-  );
+  return resolveHelperPayoutAmount(job);
 }
 
 const ACTIVE_STATUSES = new Set(['accepted', 'en_route', 'driving', 'buying_resources', 'arrived', 'work_started']);
@@ -253,6 +249,7 @@ export function JobsPage({ onNavigate }) {
             {filteredHistory.map((job) => {
               const status = String(job.status || 'pending').toLowerCase();
               const amount = getJobAmount(job);
+              const customerTotal = resolveRequestCustomerTotal(job);
               return (
                 <button
                   key={job.id}
@@ -308,9 +305,16 @@ export function JobsPage({ onNavigate }) {
                             : 'Payment Pending'}
                       </span>
                     )}
-                    <span className="tabular-nums-mono text-sm font-bold text-ink-900">
-                      {amount > 0 ? `R${amount.toFixed(2)}` : '—'}
-                    </span>
+                    <div className="text-right">
+                      <span className="tabular-nums-mono text-sm font-bold text-ink-900 block">
+                        {amount > 0 ? `R${amount.toFixed(2)}` : '—'}
+                      </span>
+                      {customerTotal > 0 && !status.includes('cancel') && (
+                        <span className="tabular-nums-mono text-[11px] text-ink-500 block">
+                          Customer: R{Math.round(customerTotal)}
+                        </span>
+                      )}
+                    </div>
                     <ArrowRight className="h-4 w-4 text-ink-400" />
                   </div>
                 </button>

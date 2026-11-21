@@ -110,6 +110,20 @@ test('customer and WhatsApp requests share quote calculation and submitted reque
   assert.equal(guest.request.originChannel, 'whatsapp');
   assert.equal(guest.request.originIdentityId, 'identity-1');
   assert.equal(customer.request.pricingSnapshot.total, guest.request.pricingSnapshot.total);
+  assert.equal(customer.request.pricingSnapshot.travelFee, 35);
+  assert.equal(customer.request.totalAmount, customer.request.pricingSnapshot.total);
+  assert.equal(guest.request.totalAmount, guest.request.pricingSnapshot.total);
+  // Subtotal 282 -> 75% labor (211.50) + travelFee (35) = 246.50 <= customerChargeAmount (320)
+  assert.equal(customer.request.helperPayoutBreakdown.helperAmount, 246.5);
+  assert.equal(customer.request.helperPayoutBreakdown.customerChargeAmount, customer.request.totalAmount);
+  assert.equal(
+    customer.request.helperPayoutBreakdown.helperAmount <= customer.request.helperPayoutBreakdown.customerChargeAmount,
+    true,
+  );
+  assert.equal(
+    guest.request.helperPayoutBreakdown.helperAmount,
+    customer.request.helperPayoutBreakdown.helperAmount,
+  );
 });
 
 test('newly confirmed requests can be explicitly versioned for future payment and wallet accounting', async () => {

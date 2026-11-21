@@ -7,6 +7,10 @@ const {
   quoteFromCatalogEntries,
   validateAndResolveOptionSelection,
 } = require('./serviceRequestPricing');
+const {
+  getServiceHelperPayoutBreakdown,
+  toWholeRand,
+} = require('./serviceRequestBilling');
 
 const ACTIVE_REQUEST_STATUSES = [
   'collecting_details', 'scheduled_pending', 'matching', 'helper_found',
@@ -448,13 +452,28 @@ function createMarketplaceRequestOperations({ db, admin }) {
         answers,
         answers.service_address || request.location?.address || request.serviceAddress || request.requestPayload?.serviceAddress,
       );
+      const confirmedTotalAmount = toWholeRand(quote.total);
+      const confirmedQuote = {
+        ...quote,
+        total: confirmedTotalAmount,
+        finalAmount: confirmedTotalAmount,
+      };
+      const initialHelperPayoutBreakdown = getServiceHelperPayoutBreakdown(
+        { pricingSnapshot: confirmedQuote },
+        {
+          closureType: 'completed',
+          waitingCost: 0,
+          travelFeeAmount: confirmedQuote.travelFee,
+          bookingFeeAmount: confirmedQuote.bookingFee,
+        },
+      );
       const nextPayload = {
         ...(request.requestPayload || {}), categoryId, serviceIds, selectedPackageId,
         selectedOptionId: optionId, selectedOptionTitle: optionTitle,
         summary, structuredAnswers: answers,
         selectedPortfolioReferences: request.selectedPortfolioReferences || request.requestPayload?.selectedPortfolioReferences || [],
         attachments: request.referenceAttachments || request.requestPayload?.attachments || [],
-        pricingSnapshot: quote, timingPreference, scheduledForText, scheduledForAtMs, location, serviceAddress,
+        pricingSnapshot: confirmedQuote, totalAmount: confirmedTotalAmount, timingPreference, scheduledForText, scheduledForAtMs, location, serviceAddress,
         quoteExpiresAtMs: null,
       };
       const submitEventRef = db.collection('customerServiceEvents').doc(`request_submitted_${requestId}`);
@@ -469,7 +488,7 @@ function createMarketplaceRequestOperations({ db, admin }) {
         subject: packageEntry?.label || entries.find((item) => item.id === serviceIds[0])?.categoryName || 'Service request',
         topic: optionTitle ? `${labels.join(', ')} (${optionTitle})` : labels.join(', '),
         description: summary, serviceSummary: summary,
-        structuredAnswers: answers, pricingSnapshot: quote, quoteExpiresAtMs: null, status: nextStatus,
+        structuredAnswers: answers, pricingSnapshot: confirmedQuote, totalAmount: confirmedTotalAmount, helperPayoutBreakdown: initialHelperPayoutBreakdown, quoteExpiresAtMs: null, status: nextStatus,
         statusDetail: timingPreference === 'later'
           ? `Scheduled for ${scheduledForText || 'later'}. Matching will begin closer to the requested time.`
           : 'Searching for a helper.',

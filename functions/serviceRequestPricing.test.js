@@ -54,7 +54,8 @@ test('backend quote uses the same shared category pricing source and Firestore q
 
   assert.equal(backendQuote.total, appEquivalentQuote.total);
   assert.deepEqual(backendQuote.serviceBreakdown, appEquivalentQuote.serviceBreakdown);
-  assert.equal(backendQuote.total, 317);
+  assert.equal(backendQuote.travelFee, 35);
+  assert.equal(backendQuote.total, 320);
   assert.match(backendQuote.questionnaireVersion, /^[a-f0-9]{64}$/);
 });
 
@@ -124,7 +125,8 @@ test('Firestore package lookup keeps selected package metadata out of the priced
     selectedPackageId: 'wash_bundle',
     structuredAnswers: answers,
   });
-  assert.equal(quote.total, 317);
+  assert.equal(quote.travelFee, 35);
+  assert.equal(quote.total, 320);
   assert.deepEqual(quote.serviceBreakdown.map((line) => line.serviceId), ['full_body_wash']);
 });
 
@@ -343,10 +345,50 @@ test('question dependencies support chaining, prune stale child answers, and app
       travel_distance_km: 10,
     },
   });
-  // Service subtotal: (200 base + 50 + 30 + 20) * 14 = 300 * 14 = 4200 (travelFee 40 is NOT multiplied by 14)
+  // Service subtotal: (200 base + 50 + 30 + 20) * 14 = 300 * 14 = 4200 (service saved travelFee 35 is used and NOT multiplied by 14 or distance)
   assert.equal(fullQuote.serviceBreakdown[0].subtotal, 4200);
-  assert.equal(fullQuote.travelFee, 40);
-  assert.equal(fullQuote.total, 4240 + fullQuote.bookingFee);
+  assert.equal(fullQuote.travelFee, 35);
+  assert.equal(fullQuote.bookingFee, 5);
+  assert.equal(Number.isInteger(fullQuote.bookingFee), true);
+  assert.equal(fullQuote.total, 4235 + fullQuote.bookingFee);
+});
+
+test('service saved pricing.travelFee is used directly (falling back to 35 only when unset) and marketplace quote aligns', () => {
+  const { computeMarketplaceQuote } = require('./serviceMarketplacePricing');
+  const customTravelService = {
+    id: 'deep_oven_clean',
+    categoryId: 'cleaning',
+    categoryName: 'Cleaning',
+    label: 'Oven Cleaning',
+    active: true,
+    approved: true,
+    pricing: { basePrice: 200, travelFee: 50 },
+    questionnaire: { required: [], optional: [] },
+  };
+  const quote = quoteFromCatalogEntries({
+    entries: [customTravelService],
+    categoryId: 'cleaning',
+    serviceIds: ['deep_oven_clean'],
+    structuredAnswers: { travel_distance_km: 25 },
+  });
+  assert.equal(quote.subtotal, 200);
+  assert.equal(quote.travelFee, 50);
+  assert.equal(quote.bookingFee, 3);
+  assert.equal(quote.total, 253);
+
+  const marketplaceQuote = computeMarketplaceQuote({
+    categoryId: 'cleaning',
+    serviceIds: ['deep_oven_clean'],
+    catalogEntries: [customTravelService],
+    signalContext: {
+      now: new Date('2026-11-18T09:00:00'),
+      onlineHelpers: 4,
+      activeRequests: 2,
+    },
+  });
+  assert.equal(marketplaceQuote.travelFee, 50);
+  assert.equal(marketplaceQuote.bookingFee, 3);
+  assert.equal(marketplaceQuote.total, 253);
 });
 
 test('question dependency triggers when any selected dependsOnOptionValues matches and prunes otherwise', () => {

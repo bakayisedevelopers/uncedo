@@ -3,7 +3,7 @@
 const TRAVEL_RATE_PER_KM = 4;
 const BOOKING_FEE_RATE = 0.01;
 const BOOKING_FEE_CAP = 5;
-const MINIMUM_TRAVEL_FEE = 32;
+const DEFAULT_SERVICE_TRAVEL_FEE = 35;
 const INTAKE_BOOKING_FEE_LABEL = 'Booking fee (guided intake)';
 const PRICING_CALIBRATION = {
   region: 'South Africa',
@@ -116,14 +116,29 @@ function vehicleMultiplier(vehicleType) {
   }[toLower(vehicleType)] || 1.1;
 }
 
-function buildTravelLine(distanceKm) {
-  const normalizedDistance = Math.max(0, Number(distanceKm || 0));
-  const rawFee = normalizedDistance * TRAVEL_RATE_PER_KM;
-  const amount = roundCurrency(Math.max(MINIMUM_TRAVEL_FEE, rawFee));
+function resolveFiniteNonNegativeFee(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? roundCurrency(parsed) : null;
+}
+
+function resolveServiceTravelFee(selectedServices = [], serviceOverrides = {}) {
+  const overrideFee = resolveFiniteNonNegativeFee(serviceOverrides?.travelFee);
+  if (overrideFee !== null) return overrideFee;
+  const configuredFees = (Array.isArray(selectedServices) ? selectedServices : [])
+    .map((service) => resolveFiniteNonNegativeFee(service?.pricing?.travelFee))
+    .filter((fee) => fee !== null);
+  if (configuredFees.length > 0) {
+    return Math.max(...configuredFees);
+  }
+  return DEFAULT_SERVICE_TRAVEL_FEE;
+}
+
+function buildTravelLine(travelFee) {
+  const resolved = resolveFiniteNonNegativeFee(travelFee);
+  const amount = resolved !== null ? resolved : DEFAULT_SERVICE_TRAVEL_FEE;
   return {
-    label: normalizedDistance > 0
-      ? `Travel (${normalizedDistance.toFixed(1)} km @ R${TRAVEL_RATE_PER_KM.toFixed(2)}/km, min R${MINIMUM_TRAVEL_FEE})`
-      : `Travel minimum fee`,
+    label: 'Travel fee',
     amount,
   };
 }
@@ -997,9 +1012,8 @@ function createCategoryPricingEngine(categoryId, catalogue = {}) {
       };
     });
 
-    const travelLine = buildTravelLine(
-      travelDistanceKm ?? serviceOverrides.travelDistanceKm ?? structuredAnswers.travel_distance_km ?? 0,
-    );
+    const resolvedTravelFee = resolveServiceTravelFee(selectedServices, serviceOverrides);
+    const travelLine = buildTravelLine(resolvedTravelFee);
     const serviceLines = serviceBreakdown.flatMap((item) => item.lines);
     const serviceTotal = serviceBreakdown.reduce((sum, item) => sum + Number(item.subtotal || 0), 0);
     const bookingFeeLine = buildBookingFeeLine(serviceTotal + travelLine.amount);
@@ -1018,7 +1032,7 @@ function createCategoryPricingEngine(categoryId, catalogue = {}) {
       estimateLabel: serviceBreakdown.length ? 'South Africa calibrated quote' : 'No services selected',
       pricingCalibration: PRICING_CALIBRATION,
       currency,
-      minimumCallout: roundCurrency(MINIMUM_TRAVEL_FEE),
+      minimumCallout: travelLine.amount,
       estimatedDurationMinutes: 0,
       serviceBreakdown,
       lines: allLines,

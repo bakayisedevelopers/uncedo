@@ -175,6 +175,7 @@ export function HelperSessionProvider({ user, children }) {
   const lastGeocodedCoordsRef = useRef(null);
   const shiftEpochRef = useRef(0);
   const isOnlineRef = useRef(false);
+  const latestProfileRef = useRef(profile);
   const notifiedOfferKeysRef = useRef(new Set());
 
   const isOnline = String(profile?.onlineStatus || '').toLowerCase() === 'online';
@@ -184,6 +185,10 @@ export function HelperSessionProvider({ user, children }) {
   useEffect(() => {
     isOnlineRef.current = isOnline;
   }, [isOnline]);
+
+  useEffect(() => {
+    latestProfileRef.current = profile;
+  }, [profile]);
 
   const activeCoords = useMemo(() => {
     if (
@@ -375,6 +380,12 @@ export function HelperSessionProvider({ user, children }) {
                 lat: loc.latitude,
                 lon: loc.longitude,
               });
+            }
+            const latestProfile = latestProfileRef.current || {};
+            const latestOnline = String(latestProfile.onlineStatus || '').toLowerCase() === 'online';
+            const lastSyncedAtMs = Number(latestProfile?.liveLocation?.updatedAtMs || 0);
+            if (!latestOnline && lastSyncedAtMs > 0 && Date.now() - lastSyncedAtMs < 5 * 60 * 1000) {
+              return;
             }
             await updateWebHelperLiveLocation({
               preserveOnlineStatus: true,

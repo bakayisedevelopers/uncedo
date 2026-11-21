@@ -41,6 +41,8 @@ const { ensureCustomerProfileRecord } = require('./account/customerProfileBootst
 // A single-concurrency fractional-CPU profile for Functions that previously
 // failed deployment under the project's regional CPU quota.
 const HALF_CPU_OPTIONS = Object.freeze({ cpu: 0.5, concurrency: 1 });
+const QUARTER_CPU_OPTIONS = Object.freeze({ cpu: 0.25, concurrency: 1 });
+const MICRO_CPU_OPTIONS = Object.freeze({ cpu: 0.167, concurrency: 1 });
 const {
   FINANCIAL_OPERATIONS_COLLECTION,
   PAYSTACK_TRANSFER_REFERENCES_COLLECTION,
@@ -10310,10 +10312,10 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       strictUnknownAnswers: true,
     });
     const isBooking = intentResult.intent === 'service_booking';
-    const bookingConfirmation = isBooking
+    let bookingConfirmation = isBooking
       ? formatWhatsAppBookingConfirmation({ service, selectedOption, questions: applicableQuestions, answers: validation.answers, quote })
       : null;
-    const replyText = bookingConfirmation?.text || `*${service.label}${selectedOption?.title ? ` — ${selectedOption.title}` : ''}*\n\nIndicative estimate: *R${Number(quote.total || 0).toFixed(2)} ${quote.currency || 'ZAR'}*. This is based on the current Uncedo pricing calculation. To book this service, tell me you would like to book it.`;
+    let replyText = bookingConfirmation?.text || `*${service.label}${selectedOption?.title ? ` — ${selectedOption.title}` : ''}*\n\nIndicative estimate: *R${Number(quote.total || 0).toFixed(2)} ${quote.currency || 'ZAR'}*. This is based on the current Uncedo pricing calculation. To book this service, tell me you would like to book it.`;
     let canonicalRequestId = String(activeDraft?.requestId || '').trim();
     let quoteExpiresAtMs = now + (15 * 60 * 1000);
     if (isBooking) {
@@ -10358,6 +10360,8 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       }
       quote = canonicalQuote.quote;
       quoteExpiresAtMs = canonicalQuote.quoteExpiresAtMs;
+      bookingConfirmation = formatWhatsAppBookingConfirmation({ service, selectedOption, questions: applicableQuestions, answers: validation.answers, quote });
+      replyText = bookingConfirmation.text;
     }
     await db.runTransaction(async (transaction) => {
       transaction.set(draftRef, {
@@ -10506,7 +10510,7 @@ exports.retryWhatsAppAssistantJob = onCall({ maxInstances: 2, ...HALF_CPU_OPTION
 exports.syncServiceRequestLifecycle = onDocumentWritten({
   document: 'serviceRequests/{requestId}',
   maxInstances: 2,
-  ...HALF_CPU_OPTIONS,
+  ...MICRO_CPU_OPTIONS,
 }, async (event) => {
   const afterData = event.data.after.exists ? event.data.after.data() : null;
   if (!afterData) return;
@@ -10714,7 +10718,8 @@ exports.syncServiceRequestLifecycle = onDocumentWritten({
 
 exports.scheduleServiceRequestOfferExpiryOnServiceRequestWrite = onDocumentWritten({
   document: 'serviceRequests/{requestId}',
-  ...HALF_CPU_OPTIONS,
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
 }, async (event) => {
   const before = event.data.before.exists ? event.data.before.data() : null;
   const after = event.data.after.exists ? event.data.after.data() : null;
@@ -11253,7 +11258,8 @@ async function handleCustomerBusyHelperChoice({
 
 exports.scheduleBusyHelperConfirmationExpiryOnWrite = onDocumentWritten({
   document: 'serviceRequests/{requestId}',
-  ...HALF_CPU_OPTIONS,
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
 }, async (event) => {
   const before = event.data.before.exists ? event.data.before.data() : null;
   const after = event.data.after.exists ? event.data.after.data() : null;
@@ -11364,7 +11370,8 @@ async function sendWhatsAppCustomerRequestExpiredNotification({ requestId, reque
 
 exports.scheduleServiceRequestExpiryOnNoHelperWrite = onDocumentWritten({
   document: 'serviceRequests/{requestId}',
-  ...HALF_CPU_OPTIONS,
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
 }, async (event) => {
   const before = event.data.before.exists ? event.data.before.data() : null;
   const after = event.data.after.exists ? event.data.after.data() : null;
@@ -11590,12 +11597,20 @@ exports.notifyWhatsAppHelperOfferOnServiceRequestWrite = onDocumentWritten({
   if (!claimed) return;
 
   const bodySummary = String(after.serviceSummary || after.subject || 'Uncedo service request').trim().slice(0, 500);
-  const indicativeTotal = toRand(after.pricingSnapshot?.total ?? after.pricingSnapshot?.finalAmount ?? 0);
+  const offerPayoutBreakdown = after.helperPayoutBreakdown && typeof after.helperPayoutBreakdown === 'object'
+    ? after.helperPayoutBreakdown
+    : getServiceHelperPayoutBreakdown(after, { closureType: 'completed', waitingCost: 0 });
+  const indicativeTotal = toRand(
+    offerPayoutBreakdown?.helperAmount
+      ?? after.pricingSnapshot?.total
+      ?? after.pricingSnapshot?.finalAmount
+      ?? 0,
+  );
   const requestWebUrl = `${getWhatsAppHelperWebBaseUrl()}/requests/${requestId}`;
   const isBusyFallbackOffer = String(after.offerType || '').trim().toLowerCase() === 'busy_helper_fallback';
   const interactiveOfferText = isBusyFallbackOffer
-    ? `🔔 Next Uncedo Job Offer (After Your Current Job)\n\n• Service: ${bodySummary}\n• Estimate: ${formatMoney(indicativeTotal)}\n\nAccept to queue this job after you finish your current request, or open Helpers Web:\n${requestWebUrl}`
-    : `🔔 New Uncedo Service Offer\n\n• Service: ${bodySummary}\n• Estimate: ${formatMoney(indicativeTotal)}\n\nRespond here or open in Helpers Web:\n${requestWebUrl}`;
+    ? `🔔 Next Uncedo Job Offer (After Your Current Job)\n\n• Service: ${bodySummary}\n• Your payout: ${formatMoney(indicativeTotal)}\n\nAccept to queue this job after you finish your current request, or open Helpers Web:\n${requestWebUrl}`
+    : `🔔 New Uncedo Service Offer\n\n• Service: ${bodySummary}\n• Your payout: ${formatMoney(indicativeTotal)}\n\nRespond here or open in Helpers Web:\n${requestWebUrl}`;
   try {
     const client = createMetaWhatsAppClient({
       accessToken: secrets.accessToken,
@@ -11647,7 +11662,7 @@ exports.notifyWhatsAppHelperOfferOnServiceRequestWrite = onDocumentWritten({
   }
 });
 
-exports.respondToServiceRequestOffer = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 60 }, async (req, res) => {
+exports.respondToServiceRequestOffer = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...QUARTER_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 60 }, async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, message: 'Method not allowed.' });
     return;
@@ -11755,7 +11770,7 @@ exports.respondToServiceRequestOffer = onRequest({ cors: true, invoker: 'public'
   }
 });
 
-exports.updateHelperServiceRequest = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 60 }, async (req, res) => {
+exports.updateHelperServiceRequest = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...QUARTER_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 60 }, async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, message: 'Method not allowed.' });
     return;
@@ -11837,6 +11852,13 @@ exports.updateHelperServiceRequest = onRequest({ cors: true, invoker: 'public', 
           canceledAt: admin.firestore.FieldValue.serverTimestamp(),
           canceledAtMs: cancelNowMs,
           endedAt: cancelNowMs,
+          helperPayoutBreakdown: {
+            helperAmount: 0,
+            platformAmount: 0,
+            customerChargeAmount: 0,
+            closureType: 'canceled',
+            payoutRule: 'helper_canceled',
+          },
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           financialOperationId: serviceFinancialOperationId(requestId),
         });
@@ -11882,6 +11904,11 @@ exports.updateHelperServiceRequest = onRequest({ cors: true, invoker: 'public', 
 
       if (nextStatus === 'completed') {
         return { error: 'billing-finalization-required', status: 409 };
+      }
+
+      if (['driving', 'en_route', 'buying_resources', 'arrived', 'work_started'].includes(nextStatus)
+        && currentStatusLower === nextStatus) {
+        return { changed: false, alreadyInStatus: true };
       }
 
       const decision = evaluateHelperRequestTransition(request, { helperId, nextStatus });
@@ -12147,7 +12174,7 @@ async function promoteNextQueuedServiceRequestForHelper({ helperId, closedReques
 exports.syncServiceRequestAssignmentState = onDocumentWritten({
   document: 'serviceRequests/{requestId}',
   maxInstances: 2,
-  ...HALF_CPU_OPTIONS,
+  ...MICRO_CPU_OPTIONS,
 }, async (event) => {
   const before = event.data.before.exists ? event.data.before.data() : null;
   const after = event.data.after.exists ? event.data.after.data() : null;
@@ -12587,7 +12614,8 @@ exports.notifyWhatsAppHelperServiceModeration = onDocumentCreated({
 
 exports.syncHelperDispatchIndex = onDocumentWritten({
   document: 'users/{uid}',
-  ...HALF_CPU_OPTIONS,
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
 }, async (event) => {
   const after = event.data.after.exists ? event.data.after.data() : null;
   const helperId = event.params.uid;
@@ -14901,7 +14929,7 @@ exports.getHelperPoliceClearanceViewUrl = onCall({ maxInstances: 2, ...HALF_CPU_
   return { url, expiresAtMs, mimeType: String(submission.mimeType || 'application/pdf') };
 });
 
-exports.getMyHelperPoliceClearanceReview = onCall({ maxInstances: 3, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 20 }, async (request) => {
+exports.getMyHelperPoliceClearanceReview = onCall({ maxInstances: 2, ...MICRO_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 20 }, async (request) => {
   const uid = String(request.auth?.uid || '').trim();
   if (!uid) throw new HttpsError('unauthenticated', 'Sign in to view your clearance documents.');
   const profileSnapshot = await db.collection('users').doc(uid).get();
@@ -15605,7 +15633,7 @@ function buildWhatsAppLifecycleText({ after, status, beforeStatus, paymentChange
 }
 
 exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
-  document: 'serviceRequests/{requestId}', maxInstances: 2, ...HALF_CPU_OPTIONS,
+  document: 'serviceRequests/{requestId}', maxInstances: 2, ...MICRO_CPU_OPTIONS,
 }, async (event) => {
   const before = event.data.before.exists ? event.data.before.data() || {} : null;
   const after = event.data.after.exists ? event.data.after.data() || {} : null;
@@ -16945,7 +16973,7 @@ exports.respondToCashServicePayment = onRequest({ cors: true, invoker: 'public',
   return res.status(result.action === 'settled' || result.action === 'rejected' ? 200 : 409).json({ success: result.action === 'settled' || result.action === 'rejected', code: result.action, receiptId: result.receiptId || null });
 });
 
-exports.getHelperCashPaymentConfirmations = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 20 }, async (req, res) => {
+exports.getHelperCashPaymentConfirmations = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...MICRO_CPU_OPTIONS, timeoutSeconds: 20 }, async (req, res) => {
   if (req.method !== 'GET') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
   const caller = await getOptionalPaymentCaller(req);
@@ -16997,7 +17025,7 @@ async function authenticateHelperWalletCaller(req, res) {
   return decoded.uid;
 }
 
-exports.getHelperWallet = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
+exports.getHelperWallet = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...MICRO_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
   if (req.method !== 'GET') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   const helperId = await authenticateHelperWalletCaller(req, res);
   if (!helperId) return;
@@ -17013,7 +17041,7 @@ exports.getHelperWallet = onRequest({ cors: true, invoker: 'public', maxInstance
   });
 });
 
-exports.getHelperWalletTransactions = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
+exports.getHelperWalletTransactions = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...MICRO_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
   if (req.method !== 'GET') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   const helperId = await authenticateHelperWalletCaller(req, res);
   if (!helperId) return;
@@ -17509,7 +17537,7 @@ async function initiatePaystackTransfer({ paystackSecretKey, amount, recipientCo
   return payload?.data || {};
 }
 
-exports.getHelperPayoutBanks = onRequest({ cors: true, invoker: 'public', ...HALF_CPU_OPTIONS }, async (req, res) => {
+exports.getHelperPayoutBanks = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...MICRO_CPU_OPTIONS }, async (req, res) => {
   if (!['GET', 'POST'].includes(req.method)) {
     res.status(405).json({ success: false, message: 'Method not allowed' });
     return;
@@ -17930,7 +17958,7 @@ async function isCustomerRequestPrincipalOwnedByUid(uid, customerId) {
   return false;
 }
 
-exports.finalizeServiceRequestBilling = onRequest({ cors: true, invoker: 'public', maxInstances: 3, ...HALF_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 60 }, async (req, res) => {
+exports.finalizeServiceRequestBilling = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...QUARTER_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 60 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
   let requestId = '';
   try {
@@ -18438,6 +18466,13 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
           paymentStatus: null,
           paymentTransactionId: null,
           cancellationFeeAmount: 0,
+          helperPayoutBreakdown: {
+            helperAmount: 0,
+            platformAmount: 0,
+            customerChargeAmount: 0,
+            closureType: 'canceled',
+            payoutRule: 'pre_assignment',
+          },
         },
       };
       if (queuedHelperId) {
@@ -19579,7 +19614,7 @@ async function computeDrivingRouteEtaWithFallback(origin, destination) {
   return { distanceMeters: fallbackMeters, durationSeconds: fallbackSeconds, provider: 'haversine_fallback' };
 }
 
-exports.updateWebHelperLiveLocation = onCall({ maxInstances: 5, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+exports.updateWebHelperLiveLocation = onCall({ maxInstances: 2, ...MICRO_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
   const uid = String(request.auth?.uid || '').trim();
   if (!uid) throw new HttpsError('unauthenticated', 'You must be signed in as a helper.');
   const userRef = db.collection('users').doc(uid);
@@ -19673,7 +19708,9 @@ exports.updateWebHelperLiveLocation = onCall({ maxInstances: 5, ...HALF_CPU_OPTI
     transaction.set(userRef, updatePayload, { merge: true });
   });
 
-  await syncHelperDispatchIndexById(uid).catch((error) => logger.warn('web_helper_location_dispatch_sync_failed', { uid, error: error.message }));
+  if (!syncOnly || requestedOnlineStatus === 'online') {
+    await syncHelperDispatchIndexById(uid).catch((error) => logger.warn('web_helper_location_dispatch_sync_failed', { uid, error: error.message }));
+  }
   if (shouldGoOnline) {
     try {
       await admin.database().ref(`liveTracking/helpers/${uid}`).set({
@@ -19690,7 +19727,7 @@ exports.updateWebHelperLiveLocation = onCall({ maxInstances: 5, ...HALF_CPU_OPTI
   return { success: true, onlineStatus: effectiveOnlineStatus, liveLocation: location, shiftExpiresAtMs };
 });
 
-exports.reportHelperAppVisibility = onCall({ maxInstances: 3, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 25 }, async (request) => {
+exports.reportHelperAppVisibility = onCall({ maxInstances: 2, ...MICRO_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 25 }, async (request) => {
   const uid = String(request.auth?.uid || '').trim();
   if (!uid) throw new HttpsError('unauthenticated', 'You must be signed in.');
   const userRef = db.collection('users').doc(uid);
@@ -19757,7 +19794,7 @@ exports.reportHelperAppVisibility = onCall({ maxInstances: 3, ...HALF_CPU_OPTION
   return { success: true, visibilityState };
 });
 
-exports.sendHelperRequestMessage = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+exports.sendHelperRequestMessage = onCall({ maxInstances: 2, ...MICRO_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
   const uid = String(request.auth?.uid || '').trim();
   if (!uid) throw new HttpsError('unauthenticated', 'You must be signed in.');
   const requestId = String(request.data?.requestId || '').trim();
@@ -19867,7 +19904,7 @@ exports.sendHelperRequestMessage = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS
 exports.evaluateRouteTravelMilestones = onValueWritten({
   ref: 'liveTracking/serviceRequests/{requestId}/helperLocation',
   maxInstances: 2,
-  ...HALF_CPU_OPTIONS,
+  ...MICRO_CPU_OPTIONS,
 }, async (event) => {
   const before = event.data.before.exists() ? event.data.before.val() : null;
   const after = event.data.after.exists() ? event.data.after.val() : null;
