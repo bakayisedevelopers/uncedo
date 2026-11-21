@@ -1,157 +1,155 @@
+import { Link } from 'react-router-dom';
 import LegalPageShell, { LegalSection } from '../components/legal/LegalPageShell';
 
 export default function TermsPage() {
   return (
     <LegalPageShell
       title="Terms and Conditions"
-      updatedAt="26 October 2026"
-      intro="These terms explain how Uncedo’s customer and helper services work when you use our website, mobile applications or WhatsApp channel. Please read them before creating an account, submitting a request or accepting work."
-      contact="For help with these terms or a service request, use the support option in the Uncedo app or contact Uncedo through its official WhatsApp channel. Do not send passwords, one-time codes, full card details or security codes in a support message."
+      updatedAt="21 November 2026"
+      intro="These Terms and Conditions govern your use of Uncedo’s customer website, mobile apps, payment pages, and WhatsApp service channel. By creating an account, confirming a booking, or paying through Uncedo, you agree to these terms together with our Privacy Policy & POPIA Notice, Payment & Pricing Policy, and Refund Policy."
+      contact="For help with a booking, cancellation, payment link, or dispute, use the in-app support option or contact Uncedo via our official WhatsApp support channel (wa.me/27605239926). Never share passwords, one-time codes, full card numbers, or CVVs."
     >
-      <LegalSection title="1. About Uncedo and these terms">
+      <LegalSection title="1. About Uncedo and marketplace role">
         <p>
-          “Uncedo”, “we” and “us” refer to Uncedo, operated by Jabu Msiza, and the operator responsible for making the
-          service available.
-          Uncedo provides online tools that help customers find and request services from independent helpers. These
-          terms apply to the Uncedo customer website, mobile applications and WhatsApp service, together with any
-          service-specific terms shown before you confirm a request.
-        </p>
-        <p>
-          The operator’s full registered legal name and formal contact details should be confirmed and published by the
-          business. Where a specific service term conflicts with these general terms, the specific term shown for that
-          service applies to that request.
+          “Uncedo”, “we”, and “us” refer to Uncedo, operated by <strong>Jabu Msiza</strong> in the Republic of South
+          Africa. Uncedo provides a digital marketplace and dispatch platform connecting customers with independent service
+          helpers. Unless expressly stated otherwise in writing, helpers are independent contractors and not employees
+          or agents of Uncedo.
         </p>
       </LegalSection>
 
-      <LegalSection title="2. Who may use Uncedo">
+      <LegalSection title="2. Eligibility, accounts, and WhatsApp guest bookings">
         <p>
-          You must provide information that is accurate and keep your sign-in credentials and verification codes secure.
-          You are responsible for activity carried out through your account. Do not impersonate another person or use
-          another person’s account or WhatsApp identity without authority.
+          You must be at least 18 years old (or legally authorised on behalf of a business) and supply accurate name,
+          email, international WhatsApp/phone number, and service address details. You are responsible for keeping your
+          login credentials and WhatsApp account secure.
         </p>
         <p>
-          A person may make an eligible enquiry or service request as a WhatsApp guest where that feature is available.
-          Guest activity is associated with the verified WhatsApp conversation and does not, by itself, create or grant
-          access to an existing Firebase account. To connect guest history to an account, the account owner must complete
-          the verification and linking steps offered by Uncedo. A matching phone number alone is not sufficient proof of
-          account ownership.
-        </p>
-        <p>
-          If a service request concerns a child, a parent or legal guardian should make or manage the request and provide
-          only the information reasonably needed for that service.
+          Eligible enquiries and bookings may also be submitted as a <strong>WhatsApp guest</strong> where supported.
+          Guest activity is tied to that verified WhatsApp conversation and remains subject to these Terms (including
+          quote confirmation, arrival verification, and cancellation fee billing). Matching a phone number alone never
+          grants access to an existing Uncedo account—linking guest history requires completing Uncedo’s one-time
+          verified account-link flow.
         </p>
       </LegalSection>
 
-      <LegalSection title="3. Customer requests, quotes and matching">
+      <LegalSection title="3. Service quotes, travel fees, and booking fees">
         <p>
-          The services currently available are the services displayed in the Uncedo catalogue. You may be asked to answer
-          service questions and provide a service location or other details needed to prepare a quote and find an eligible
-          helper. A quote is based on the information you provide and the applicable catalogue and pricing rules. Review
-          the request details and final amount before confirming. A quote may expire or need to be recalculated if its
-          validity period ends or the request details change.
+          Before you confirm a request, Uncedo calculates a transparent quote in South African Rand (ZAR) based on the
+          selected service or bundle, your answers to dynamic intake questions, the service’s configured{' '}
+          <strong>travel fee</strong> (or the R35 default travel fee where a service does not specify one), and an integer{' '}
+          <strong>booking fee</strong> (1% of the service plus travel subtotal, rounded and capped between R1 and R5 when
+          applicable). Full fee mechanics are detailed in our{' '}
+          <Link className="font-bold text-brand underline" to="/payment-pricing-policy">
+            Payment &amp; Pricing Policy
+          </Link>
+          .
         </p>
         <p>
-          Submitting a draft or asking for a quote does not confirm a booking. A request becomes confirmed only after
-          Uncedo records the required confirmation. Helper availability is not guaranteed. Uncedo may attempt to match an
-          eligible helper, but it does not promise that a helper will be available or accept the request.
-        </p>
-        <p>
-          Keep your request information accurate and use the available account or WhatsApp workflows to update or cancel
-          a request. Cancellation eligibility, any applicable charge and any refund are determined by the terms shown for
-          that request and the state of the service when the cancellation is processed. Do not rely on an AI-generated
-          explanation as a substitute for the confirmed request or payment record.
+          Quotes may expire if not confirmed within their validity window or if you change your service selections. A
+          request becomes a confirmed booking only once you submit final confirmation and Uncedo records the confirmed
+          pricing snapshot in our backend.
         </p>
       </LegalSection>
 
-      <LegalSection title="4. Helpers and service delivery">
+      <LegalSection title="4. Matching, arrival PIN verification, and service delivery">
         <p>
-          Helpers use Uncedo to create a profile, offer services where permitted, receive eligible requests and manage
-          service work. Helpers must provide accurate information, complete any verification required for their role,
-          follow applicable safety requirements and communicate respectfully with customers.
-        </p>
-        <p>
-          Helpers are responsible for delivering the service they accept. Uncedo provides the marketplace and operational
-          tools; it does not guarantee a particular service outcome, helper earnings, customer result or uninterrupted
-          availability. Helper verification or an active profile is not a guarantee of future conduct or service quality.
+          Uncedo routes confirmed requests to eligible, verified, online helpers within the applicable dispatch radius,
+          but helper availability or acceptance is never guaranteed. When a helper arrives at your service address, Uncedo
+          issues a <strong>6-digit arrival PIN</strong> via WhatsApp/app notification. You must provide that PIN to the
+          assigned helper so they can verify arrival and start work. Helpers may also capture proof-of-completion photos
+          or record post-arrival waiting time where applicable.
         </p>
       </LegalSection>
 
-      <LegalSection title="5. Payments">
+      <LegalSection title="5. Payments (Card or Cash only — no EFT)">
         <p>
-          The payment methods offered for a request depend on its status and the options shown by Uncedo. They may include
-          cash or a direct electronic payment to the assigned helper, or a card payment through Paystack-hosted checkout.
-          For a direct payment, the customer pays the assigned helper and the helper must confirm receipt through an
-          authorised Uncedo workflow. A customer’s statement that payment was made is not, on its own, confirmation of
-          receipt.
+          When a service is completed, Uncedo presents the verified final payable amount on your secure{' '}
+          <code>/payment</code> checkout link or in-app payment flow using one of two approved methods:
         </p>
+        <ul className="list-disc space-y-2 pl-5">
+          <li>
+            <strong>Pay by Card (Paystack):</strong> Pay via Paystack’s hosted checkout or confirm an explicit one-time
+            payment using a previously saved card. Card payments are considered complete only after Uncedo verifies
+            settlement directly with Paystack.
+          </li>
+          <li>
+            <strong>Pay with Cash:</strong> Where enabled for completed service jobs, you may select Cash, pay the
+            assigned helper directly in cash, and tap “I have paid the helper”. Cash payment is marked paid only once the
+            assigned helper confirms receipt inside Uncedo’s helper app.
+          </li>
+        </ul>
         <p>
-          Card payments are considered complete only after Uncedo verifies the result with the payment provider and
-          updates the authoritative payment record. A browser redirect, chat message or screenshot is not proof of
-          payment. Never send a full card number, CVV or one-time payment credential through WhatsApp or support chat.
-        </p>
-        <p>
-          A saved payment method may be charged only through a flow that identifies the request and amount and obtains
-          your explicit confirmation. Payment processing, refunds and any applicable fees follow the terms shown for the
-          request and the authoritative payment record. Uncedo does not promise that a payment method, provider or payment
-          attempt will always be available.
-        </p>
-      </LegalSection>
-
-      <LegalSection title="6. WhatsApp, automated assistance and communications">
-        <p>
-          If you contact Uncedo through WhatsApp, the service may use automated systems to understand your message, provide
-          approved information, retrieve authorised request details or guide you through supported workflows. You can ask
-          for human support where available. Automated responses can be incomplete or unavailable; confirm important
-          booking and payment information in the relevant Uncedo record or app.
-        </p>
-        <p>
-          Do not use a chat response to authorise an action unless the Uncedo workflow clearly asks you to confirm it.
-          Uncedo will not treat an AI-generated statement as proof of identity, payment, helper acceptance or a completed
-          booking. WhatsApp messages outside the applicable customer-service window may require an approved message
-          template, and delivery depends on Meta and the recipient’s WhatsApp account.
+          <strong>Direct EFT / off-platform bank transfers are not supported</strong> for service completion or
+          cancellation payments. Helpers must never solicit off-platform EFT transfers or bypass Uncedo payment flows.
         </p>
       </LegalSection>
 
-      <LegalSection title="7. Acceptable use and safety">
+      <LegalSection title="6. Cancellations and customer wallet debt">
         <p>
-          You must not use Uncedo to commit fraud, harass or threaten another person, submit unlawful or misleading
-          content, interfere with the platform, bypass payment or matching safeguards, or access information that does
-          not belong to you. Do not use a helper or customer’s private contact details for unrelated purposes.
+          Cancellation rules depend strictly on the status of your booking when Uncedo processes your cancellation:
         </p>
+        <ul className="list-disc space-y-2 pl-5">
+          <li>
+            <strong>No cancellation fee (R0):</strong> Cancelling before a helper is assigned, <em>or</em> after a helper
+            has accepted the offer but before the helper starts driving/traveling, incurs <strong>R0 cancellation fee
+            and R0 booking fee</strong>.
+          </li>
+          <li>
+            <strong>Post-driving cancellation fee:</strong> Cancelling once the assigned helper has started driving, is
+            en route, or is buying resources (or after arrival / work started) incurs the applicable cancellation charge
+            calculated from distance travelled (or the service travel fee once arrived) plus the integer booking fee, as
+            displayed to you for confirmation before cancelling.
+          </li>
+          <li>
+            <strong>Card-only settlement &amp; wallet debt:</strong> Cancellation fees are payable by <strong>card
+            only</strong> (cash is not accepted for cancellations). If an automatic completion or cancellation charge
+            fails, or no chargeable saved card is present, the unpaid amount is deducted against your Uncedo{' '}
+            <strong>wallet balance</strong> as an outstanding debt and a secure card payment link is sent to you. Settling
+            that link by card reverses and clears the wallet debt.
+          </li>
+        </ul>
         <p>
-          We may restrict, suspend or close access where reasonably necessary to protect users, investigate suspected
-          misuse, comply with law or maintain platform security. Where appropriate, we may preserve records needed to
-          investigate a safety, payment or service dispute.
-        </p>
-      </LegalSection>
-
-      <LegalSection title="8. Service availability and changes">
-        <p>
-          Uncedo and third-party services may be interrupted, changed or unavailable. We may add, change or retire features
-          and update these terms. The current version will be published here with its update date. If a material change
-          requires renewed acceptance, Uncedo may ask you to review the updated terms before continuing to use the
-          affected channel or feature.
-        </p>
-      </LegalSection>
-
-      <LegalSection title="9. Liability and applicable law">
-        <p>
-          Nothing in these terms limits a right or remedy that cannot lawfully be limited. To the extent permitted by law,
-          Uncedo is not responsible for losses caused by inaccurate information supplied by a user, a third-party service
-          outage, or conduct outside Uncedo’s reasonable control. This does not exclude responsibility that applicable
-          law does not allow us to exclude.
-        </p>
-        <p>
-          These terms are governed by the laws of the Republic of South Africa, subject to mandatory consumer-protection
-          and other legal rights. If you have a concern, contact Uncedo support first so it can be reviewed.
+          Further detail appears in our{' '}
+          <Link className="font-bold text-brand underline" to="/refund-policy">Refund &amp; Cancellation Policy</Link>.
         </p>
       </LegalSection>
 
-      <LegalSection title="10. Privacy">
+      <LegalSection title="7. WhatsApp automated assistance">
         <p>
-          Our <a className="font-bold text-brand underline" href="/privacy-policy">Privacy Policy</a> explains how Uncedo
-          handles personal information, including information shared through WhatsApp, service requests, payment and
-          support workflows, and how to exercise your rights under South African data-protection law.
+          When you interact with Uncedo on WhatsApp, automated assistants may guide booking steps, answer questions, or
+          share request updates. You may request human support where available. Automated messages are never treated as
+          authoritative proof of payment, booking confirmation, cancellation terms, or account ownership—Uncedo’s backend
+          records govern in every case.
+        </p>
+      </LegalSection>
+
+      <LegalSection title="8. Acceptable use, safety, and suspension">
+        <p>
+          You must not commit fraud, harass or threaten helpers or staff, manipulate quotes or GPS/PIN verification,
+          attempt to take confirmed bookings off-platform to evade fees, or misuse another user’s personal information.
+          Uncedo may suspend or terminate accounts, cancel active requests, or withhold/offset disputed balances where
+          reasonably necessary for safety, fraud prevention, or legal compliance.
+        </p>
+      </LegalSection>
+
+      <LegalSection title="9. Liability, consumer rights, and governing law">
+        <p>
+          Nothing in these terms limits any non-waivable rights you hold under South Africa’s{' '}
+          <strong>Consumer Protection Act 68 of 2008</strong> or <strong>POPIA</strong>. To the maximum extent permitted
+          by law, Uncedo is not liable for indirect losses, third-party outages (such as network, WhatsApp, or Paystack
+          downtime), or inaccurate information supplied by a user. These terms are governed by the laws of the Republic of
+          South Africa.
+        </p>
+      </LegalSection>
+
+      <LegalSection title="10. Related policies">
+        <p>
+          Please also review our{' '}
+          <Link className="font-bold text-brand underline" to="/privacy-policy">Privacy Policy &amp; POPIA Notice</Link>,{' '}
+          <Link className="font-bold text-brand underline" to="/payment-pricing-policy">Payment &amp; Pricing Policy</Link>,{' '}
+          <Link className="font-bold text-brand underline" to="/refund-policy">Refund Policy</Link>, and{' '}
+          <Link className="font-bold text-brand underline" to="/data-voice-policy">Data &amp; Location Policy</Link>.
         </p>
       </LegalSection>
     </LegalPageShell>

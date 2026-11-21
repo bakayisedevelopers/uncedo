@@ -284,6 +284,30 @@
           "destination": "/app.html"
         },
         {
+          "source": "/privacy-policy",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/privacy",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/terms",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/payment-pricing-policy",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/refund-policy",
+          "destination": "/app.html"
+        },
+        {
+          "source": "/data-voice-policy",
+          "destination": "/app.html"
+        },
+        {
           "source": "**",
           "destination": "/index.html"
         }

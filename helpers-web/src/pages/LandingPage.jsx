@@ -305,17 +305,33 @@ export function LandingPage({ user, onNavigate, pwa }) {
       </main>
 
       <footer className="border-t border-border bg-surface py-6 px-4 sm:px-8">
-        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4 text-xs text-ink-500">
-          <div className="flex items-center gap-3">
+        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-xs text-ink-500">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <span className="font-display font-bold text-ink-900">Uncedo Helpers</span>
             <span aria-hidden="true">·</span>
             <span>© {new Date().getFullYear()} Uncedo</span>
+            <span aria-hidden="true">·</span>
+            <button type="button" onClick={() => onNavigate('/privacy-policy')} className="hover:text-tealbrand-700 hover:underline font-medium">
+              Privacy &amp; POPIA
+            </button>
+            <button type="button" onClick={() => onNavigate('/terms')} className="hover:text-tealbrand-700 hover:underline font-medium">
+              Helper Terms
+            </button>
+            <button type="button" onClick={() => onNavigate('/payment-pricing-policy')} className="hover:text-tealbrand-700 hover:underline font-medium">
+              Payouts &amp; Pricing
+            </button>
+            <button type="button" onClick={() => onNavigate('/refund-policy')} className="hover:text-tealbrand-700 hover:underline font-medium">
+              Cancellations
+            </button>
+            <button type="button" onClick={() => onNavigate('/data-voice-policy')} className="hover:text-tealbrand-700 hover:underline font-medium">
+              Location &amp; Data
+            </button>
           </div>
           <a
             href={WHATSAPP_CHAT_URL}
             target="_blank"
             rel="noreferrer"
-            className="inline-flex items-center gap-1 font-medium text-tealbrand-700 hover:underline"
+            className="inline-flex items-center gap-1 font-medium text-tealbrand-700 hover:underline shrink-0"
           >
             Chat with Uncedo Support on WhatsApp
             <ArrowUpRight className="h-3.5 w-3.5" />

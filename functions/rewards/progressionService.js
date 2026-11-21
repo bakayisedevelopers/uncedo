@@ -2,6 +2,8 @@ const {
   MEMBERSHIP_LEVELS,
   MASTERY_LEVELS,
   SCHEMA_VERSION,
+  normalizeRewardToken,
+  buildServiceOptionMasteryKey,
 } = require('../shared/rewards');
 const { getRewardConfig } = require('./config');
 
@@ -188,6 +190,31 @@ async function recalculateMembership({
   return payload.membership;
 }
 
+function normalizeServiceOptionTargets(serviceIds = [], serviceOptions = []) {
+  const normalizedServiceIds = [...new Set(
+    (Array.isArray(serviceIds) ? serviceIds : [])
+      .map((value) => String(value || '').trim())
+      .filter(Boolean),
+  )];
+  const rawOptions = Array.isArray(serviceOptions) && serviceOptions.length > 0
+    ? serviceOptions
+    : normalizedServiceIds.map((serviceId) => ({ serviceId, optionId: '', optionTitle: '' }));
+
+  const seenKeys = new Set();
+  const normalizedOptions = [];
+  for (const entry of rawOptions) {
+    const serviceId = String(entry?.serviceId || '').trim();
+    if (!serviceId) continue;
+    const optionId = normalizeRewardToken(entry?.optionId || '');
+    const optionTitle = String(entry?.optionTitle || '').trim();
+    const masteryKey = String(entry?.masteryKey || buildServiceOptionMasteryKey(serviceId, optionId)).trim();
+    if (!masteryKey || seenKeys.has(masteryKey)) continue;
+    seenKeys.add(masteryKey);
+    normalizedOptions.push({ serviceId, optionId, optionTitle, masteryKey });
+  }
+  return { normalizedServiceIds, normalizedOptions };
+}
+
 async function incrementCompletedPaid({
   db,
   admin,
@@ -195,17 +222,14 @@ async function incrementCompletedPaid({
   accountType,
   requestId,
   serviceIds = [],
+  serviceOptions = [],
   categoryId = '',
 }) {
   if (!userId || !requestId) {
     throw new Error('userId and requestId are required');
   }
 
-  const normalizedServiceIds = [...new Set(
-    (Array.isArray(serviceIds) ? serviceIds : [])
-      .map((value) => String(value || '').trim())
-      .filter(Boolean),
-  )];
+  const { normalizedServiceIds, normalizedOptions } = normalizeServiceOptionTargets(serviceIds, serviceOptions);
 
   await db.runTransaction(async (tx) => {
     const accountRef = db.collection('rewardAccounts').doc(userId);
@@ -230,6 +254,11 @@ async function incrementCompletedPaid({
       accountType,
       categoryId: String(categoryId || '').trim(),
       serviceIds: normalizedServiceIds,
+      serviceOptions: normalizedOptions.map((item) => ({
+        serviceId: item.serviceId,
+        optionId: item.optionId || null,
+        masteryKey: item.masteryKey,
+      })),
       processedAt: admin.firestore.FieldValue.serverTimestamp(),
       schemaVersion: SCHEMA_VERSION,
     });
@@ -240,6 +269,21 @@ async function incrementCompletedPaid({
         tx.set(serviceRef, {
           helperId: userId,
           serviceId,
+          categoryId: String(categoryId || '').trim(),
+          eligibleCompletedJobCount: admin.firestore.FieldValue.increment(1),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          schemaVersion: SCHEMA_VERSION,
+        }, { merge: true });
+      });
+
+      normalizedOptions.forEach((item) => {
+        const optionRef = db.collection('helperMastery').doc(userId).collection('serviceOptions').doc(item.masteryKey);
+        tx.set(optionRef, {
+          helperId: userId,
+          serviceId: item.serviceId,
+          optionId: item.optionId || null,
+          ...(item.optionTitle ? { optionTitle: item.optionTitle } : {}),
+          masteryKey: item.masteryKey,
           categoryId: String(categoryId || '').trim(),
           eligibleCompletedJobCount: admin.firestore.FieldValue.increment(1),
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -258,6 +302,17 @@ async function incrementCompletedPaid({
         serviceId,
       });
     }
+    for (const item of normalizedOptions) {
+      await recalculateServiceOptionMastery({
+        db,
+        admin,
+        helperId: userId,
+        serviceId: item.serviceId,
+        optionId: item.optionId,
+        optionTitle: item.optionTitle,
+        masteryKey: item.masteryKey,
+      });
+    }
   }
 
   return recalculateMembership({
@@ -266,6 +321,21 @@ async function incrementCompletedPaid({
     userId,
     accountType,
   });
+}
+
+function evaluateMasteryLevel({ masteryConfig = {}, eligibleCompletedJobCount = 0, averageRating = 0, ratingCount = 0 }) {
+  let achievedLevel = MASTERY_LEVELS[0];
+  for (const level of MASTERY_LEVELS) {
+    const rule = masteryConfig[level] || {};
+    if (
+      meetsMinimum(eligibleCompletedJobCount, rule.minCompletedPaidJobs)
+      && meetsMinimum(averageRating, rule.minAverageRating)
+      && meetsMinimum(ratingCount, rule.minRatingCount)
+    ) {
+      achievedLevel = level;
+    }
+  }
+  return achievedLevel;
 }
 
 async function recalculateMastery({
@@ -286,17 +356,12 @@ async function recalculateMastery({
   const averageRating = toNumber(rating.average);
   const ratingCount = toNumber(rating.count);
 
-  let achievedLevel = MASTERY_LEVELS[0];
-  for (const level of MASTERY_LEVELS) {
-    const rule = masteryConfig[level] || {};
-    if (
-      meetsMinimum(eligibleCompletedJobCount, rule.minCompletedPaidJobs)
-      && meetsMinimum(averageRating, rule.minAverageRating)
-      && meetsMinimum(ratingCount, rule.minRatingCount)
-    ) {
-      achievedLevel = level;
-    }
-  }
+  const achievedLevel = evaluateMasteryLevel({
+    masteryConfig,
+    eligibleCompletedJobCount,
+    averageRating,
+    ratingCount,
+  });
 
   const highestIndex = Math.max(
     MASTERY_LEVELS.indexOf(achievedLevel),
@@ -327,8 +392,77 @@ async function recalculateMastery({
   return payload;
 }
 
+async function recalculateServiceOptionMastery({
+  db,
+  admin,
+  helperId,
+  serviceId,
+  optionId = '',
+  optionTitle = '',
+  masteryKey = '',
+}) {
+  const cleanServiceId = String(serviceId || '').trim();
+  const cleanOptionId = normalizeRewardToken(optionId);
+  const resolvedMasteryKey = String(masteryKey || buildServiceOptionMasteryKey(cleanServiceId, cleanOptionId)).trim();
+  if (!helperId || !resolvedMasteryKey) {
+    throw new Error('helperId and serviceId/masteryKey are required');
+  }
+
+  const [masteryConfig, masterySnapshot, ratingSnapshot] = await Promise.all([
+    getRewardConfig(db, 'mastery'),
+    db.collection('helperMastery').doc(helperId).collection('serviceOptions').doc(resolvedMasteryKey).get(),
+    db.collection('ratingAccounts').doc(helperId).collection('serviceOptions').doc(resolvedMasteryKey).get(),
+  ]);
+
+  const mastery = masterySnapshot.data() || {};
+  const rating = ratingSnapshot.data() || {};
+  const eligibleCompletedJobCount = toNumber(mastery.eligibleCompletedJobCount);
+  const averageRating = toNumber(rating.average);
+  const ratingCount = toNumber(rating.count);
+
+  const achievedLevel = evaluateMasteryLevel({
+    masteryConfig,
+    eligibleCompletedJobCount,
+    averageRating,
+    ratingCount,
+  });
+
+  const highestIndex = Math.max(
+    MASTERY_LEVELS.indexOf(achievedLevel),
+    MASTERY_LEVELS.indexOf(mastery.highestLevel || MASTERY_LEVELS[0]),
+  );
+
+  const resolvedTitle = String(optionTitle || mastery.optionTitle || rating.optionTitle || '').trim();
+  const payload = {
+    helperId,
+    serviceId: cleanServiceId || String(mastery.serviceId || rating.serviceId || '').trim(),
+    optionId: cleanOptionId || mastery.optionId || rating.optionId || null,
+    ...(resolvedTitle ? { optionTitle: resolvedTitle } : {}),
+    masteryKey: resolvedMasteryKey,
+    categoryId: mastery.categoryId || rating.categoryId || '',
+    level: achievedLevel,
+    highestLevel: MASTERY_LEVELS[highestIndex] || achievedLevel,
+    averageRating,
+    ratingCount,
+    qualificationSnapshot: {
+      eligibleCompletedJobCount,
+      averageRating,
+      ratingCount,
+    },
+    achievedAt: MASTERY_LEVELS.indexOf(achievedLevel) > MASTERY_LEVELS.indexOf(mastery.level || MASTERY_LEVELS[0])
+      ? admin.firestore.FieldValue.serverTimestamp()
+      : mastery.achievedAt || admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    schemaVersion: SCHEMA_VERSION,
+  };
+
+  await db.collection('helperMastery').doc(helperId).collection('serviceOptions').doc(resolvedMasteryKey).set(payload, { merge: true });
+  return payload;
+}
+
 module.exports = {
   recalculateMembership,
   incrementCompletedPaid,
   recalculateMastery,
+  recalculateServiceOptionMastery,
 };

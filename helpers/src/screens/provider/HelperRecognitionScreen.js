@@ -32,18 +32,21 @@ export function HelperRecognitionScreen({ goBack }) {
     load();
   }, [load]);
 
-  const topMastery = useMemo(
-    () => [...(bundle?.mastery || [])].sort((left, right) => (
-      Number(right?.qualificationSnapshot?.eligibleCompletedJobCount || 0) - Number(left?.qualificationSnapshot?.eligibleCompletedJobCount || 0)
-    ))[0] || null,
-    [bundle?.mastery],
-  );
+  const topMastery = useMemo(() => {
+    const source = Array.isArray(bundle?.optionMastery) && bundle.optionMastery.length
+      ? bundle.optionMastery
+      : bundle?.mastery || [];
+    return [...source].sort((left, right) => (
+      Number(right?.eligibleCompletedJobCount || right?.qualificationSnapshot?.eligibleCompletedJobCount || 0)
+      - Number(left?.eligibleCompletedJobCount || left?.qualificationSnapshot?.eligibleCompletedJobCount || 0)
+    ))[0] || null;
+  }, [bundle?.mastery, bundle?.optionMastery]);
   const annualRecognition = buildAnnualRecognitionPreview(bundle?.helperConfig || {}, bundle?.rewardAccount || {});
 
   return (
     <Screen
       title="Recognition"
-      description="Recognition combines helper membership, service mastery, and future annual appreciation programs without converting points into cash earnings."
+      description="Recognition combines helper membership, service option mastery, and future annual appreciation programs without converting points into cash earnings."
       footerAction={<ActionButton label="Back to rewards" tone="secondary" onPress={() => goBack('HelperRewardsOverview')} />}
     >
       {error ? (
@@ -61,7 +64,13 @@ export function HelperRecognitionScreen({ goBack }) {
           <Card>
             <SectionHeading title="Current badges" />
             <MembershipBadge level={bundle?.rewardAccount?.membership?.currentLevel} subtitle="Current helper membership" variant="expanded" />
-            {topMastery ? <MasteryBadge level={topMastery.level} subtitle={`Top mastery - ${topMastery.serviceId}`} variant="expanded" /> : null}
+            {topMastery ? (
+              <MasteryBadge
+                level={topMastery.level}
+                subtitle={`Top mastery - ${topMastery.optionTitle || topMastery.serviceId}`}
+                variant="expanded"
+              />
+            ) : null}
           </Card>
 
           <Card>

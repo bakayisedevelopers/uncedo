@@ -21,6 +21,16 @@ import { JobsPage } from './pages/JobsPage';
 import { ProfilePage } from './pages/ProfilePage';
 import { ProfileSectionPage } from './pages/ProfileSectionPage';
 import { RequestDetailPage } from './pages/RequestDetailPage';
+import { PolicyPage } from './pages/PolicyPage';
+
+const POLICY_ROUTE_KEYS = {
+  '/privacy-policy': 'privacy',
+  '/privacy': 'privacy',
+  '/terms': 'terms',
+  '/payment-pricing-policy': 'payment',
+  '/refund-policy': 'refund',
+  '/data-voice-policy': 'data',
+};
 
 function normalizePath(path = '/') {
   const clean = String(path || '/').split('?')[0].split('#')[0].replace(/\/+$/, '');
@@ -111,12 +121,16 @@ export default function App() {
 
   let content = null;
 
+  const policyKey = POLICY_ROUTE_KEYS[pathname] || '';
+
   if (!authReady) {
     content = (
       <div className="min-h-screen bg-canvas flex items-center justify-center p-6">
         <div className="text-sm text-ink-500">Loading Uncedo Helpers…</div>
       </div>
     );
+  } else if (policyKey) {
+    content = <PolicyPage policyKey={policyKey} user={user} onNavigate={navigate} />;
   } else if (pathname === '/whatsapp-link') {
     content = (
       <WhatsAppLinkPage

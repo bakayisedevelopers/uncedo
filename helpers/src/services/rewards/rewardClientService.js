@@ -129,10 +129,22 @@ export async function getServiceRatingSummaries(userId = currentUserId()) {
   return snapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
 }
 
+export async function getServiceOptionRatingSummaries(userId = currentUserId()) {
+  const { db } = getFirebaseClients();
+  const snapshot = await getDocs(collection(db, 'ratingAccounts', userId, 'serviceOptions'));
+  return snapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
+}
+
 export async function getServiceRatingSummary(userId = currentUserId(), serviceId) {
   if (!serviceId) return null;
   const { db } = getFirebaseClients();
   return mapSnapshot(await getDoc(doc(db, 'ratingAccounts', userId, 'services', serviceId)));
+}
+
+export async function getServiceOptionRatingSummary(userId = currentUserId(), masteryKey) {
+  if (!masteryKey) return null;
+  const { db } = getFirebaseClients();
+  return mapSnapshot(await getDoc(doc(db, 'ratingAccounts', userId, 'serviceOptions', masteryKey)));
 }
 
 export async function getHelperMasterySummary(helperId = currentUserId()) {
@@ -141,8 +153,18 @@ export async function getHelperMasterySummary(helperId = currentUserId()) {
   return snapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
 }
 
+export async function getHelperServiceOptionMasterySummary(helperId = currentUserId()) {
+  const { db } = getFirebaseClients();
+  const snapshot = await getDocs(collection(db, 'helperMastery', helperId, 'serviceOptions'));
+  return snapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
+}
+
 export async function getMyHelperMasterySummary() {
   return getHelperMasterySummary(currentUserId());
+}
+
+export async function getMyHelperServiceOptionMasterySummary() {
+  return getHelperServiceOptionMasterySummary(currentUserId());
 }
 
 export function subscribeToHelperMastery(helperId, onData, onError) {
@@ -154,10 +176,25 @@ export function subscribeToHelperMastery(helperId, onData, onError) {
   );
 }
 
+export function subscribeToHelperServiceOptionMastery(helperId, onData, onError) {
+  const { db } = getFirebaseClients();
+  return onSnapshot(
+    collection(db, 'helperMastery', helperId, 'serviceOptions'),
+    (snapshot) => onData?.(snapshot.docs.map((item) => ({ id: item.id, ...item.data() }))),
+    (error) => onError?.(error),
+  );
+}
+
 export async function getHelperMasteryRecord(helperId = currentUserId(), serviceId) {
   if (!serviceId) return null;
   const { db } = getFirebaseClients();
   return mapSnapshot(await getDoc(doc(db, 'helperMastery', helperId, 'services', serviceId)));
+}
+
+export async function getHelperServiceOptionMasteryRecord(helperId = currentUserId(), masteryKey) {
+  if (!masteryKey) return null;
+  const { db } = getFirebaseClients();
+  return mapSnapshot(await getDoc(doc(db, 'helperMastery', helperId, 'serviceOptions', masteryKey)));
 }
 
 export async function ensureMyReferralCode(accountType = ACCOUNT_TYPES.HELPER) {
@@ -175,10 +212,11 @@ export async function getMyReferralSummary(accountType = ACCOUNT_TYPES.HELPER) {
 }
 
 export async function refreshHelperRewardBundle({ userId = currentUserId(), forceConfig = false } = {}) {
-  const [rewardAccount, ratingSummary, mastery, configs, referralSummary, recentTransactions] = await Promise.all([
+  const [rewardAccount, ratingSummary, mastery, optionMastery, configs, referralSummary, recentTransactions] = await Promise.all([
     getRewardAccount(userId),
     getRatingSummary(userId),
     getHelperMasterySummary(userId),
+    getHelperServiceOptionMasterySummary(userId),
     getRewardConfigs({ force: forceConfig }),
     getMyReferralSummary(ACCOUNT_TYPES.HELPER).catch(() => null),
     getRewardTransactions(userId, 5),
@@ -187,6 +225,7 @@ export async function refreshHelperRewardBundle({ userId = currentUserId(), forc
     rewardAccount,
     ratingSummary,
     mastery,
+    optionMastery,
     referralSummary,
     recentTransactions,
     ...configs,

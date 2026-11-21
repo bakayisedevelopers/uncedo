@@ -2,6 +2,9 @@ import { BrowserRouter as Router, Navigate, Route, Routes } from 'react-router-d
 import LandingPage from './pages/LandingPage';
 import PrivacyPolicyPage from './pages/PrivacyPolicyPage';
 import TermsPage from './pages/TermsPage';
+import PaymentPricingPolicyPage from './pages/PaymentPricingPolicyPage';
+import RefundPolicyPage from './pages/RefundPolicyPage';
+import DataVoicePolicyPage from './pages/DataVoicePolicyPage';
 import AuthPage from './pages/AuthPage';
 import CustomerAccountPage from './pages/CustomerAccountPage';
 import PaymentPage from './pages/PaymentPage';
@@ -20,7 +23,11 @@ export default function App() {
           <Route path="/payment" element={<PaymentPage />} />
           <Route path="/whatsapp-link" element={<WhatsAppAccountLinkPage />} />
           <Route path="/privacy-policy" element={<PrivacyPolicyPage />} />
+          <Route path="/privacy" element={<Navigate to="/privacy-policy" replace />} />
           <Route path="/terms" element={<TermsPage />} />
+          <Route path="/payment-pricing-policy" element={<PaymentPricingPolicyPage />} />
+          <Route path="/refund-policy" element={<RefundPolicyPage />} />
+          <Route path="/data-voice-policy" element={<DataVoicePolicyPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Router>

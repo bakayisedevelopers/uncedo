@@ -6,6 +6,8 @@ const {
   REWARD_REASON_CODES,
   REWARD_TRANSACTION_DIRECTIONS,
   SCHEMA_VERSION,
+  normalizeRewardToken,
+  buildServiceOptionMasteryKey,
 } = require('../shared/rewards');
 const { getRewardConfig } = require('./config');
 const { applyRewardTransaction } = require('./rewardService');
@@ -48,6 +50,56 @@ function serviceIdsFor(request = {}) {
   }
 
   return [...new Set(ids)].slice(0, 25);
+}
+
+function serviceOptionsFor(request = {}) {
+  const expandedServiceIds = serviceIdsFor(request);
+  if (!expandedServiceIds.length) return [];
+
+  const breakdownOptionMap = new Map();
+  const breakdown = Array.isArray(request.pricingSnapshot?.serviceBreakdown)
+    ? request.pricingSnapshot.serviceBreakdown
+    : [];
+  for (const item of breakdown) {
+    const sid = String(item?.serviceId || item?.id || '').trim();
+    const optId = normalizeRewardToken(item?.selectedOptionId || item?.optionId || '');
+    const optTitle = String(item?.selectedOptionTitle || item?.optionTitle || '').trim();
+    if (sid && optId && !breakdownOptionMap.has(sid)) {
+      breakdownOptionMap.set(sid, { optionId: optId, optionTitle: optTitle });
+    }
+  }
+
+  const fallbackOptionId = normalizeRewardToken(
+    request.selectedOptionId
+      || request.requestPayload?.selectedOptionId
+      || request.pricingSnapshot?.selectedOptionId
+      || request.structuredAnswers?.selectedOptionId
+      || '',
+  );
+  const fallbackOptionTitle = String(
+    request.selectedOptionTitle
+      || request.requestPayload?.selectedOptionTitle
+      || request.pricingSnapshot?.selectedOptionTitle
+      || '',
+  ).trim();
+
+  const seen = new Set();
+  const results = [];
+  for (const serviceId of expandedServiceIds) {
+    const fromBreakdown = breakdownOptionMap.get(serviceId);
+    const optionId = fromBreakdown?.optionId || (expandedServiceIds.length === 1 ? fallbackOptionId : '');
+    const optionTitle = fromBreakdown?.optionTitle || (optionId && optionId === fallbackOptionId ? fallbackOptionTitle : '');
+    const masteryKey = buildServiceOptionMasteryKey(serviceId, optionId);
+    if (!masteryKey || seen.has(masteryKey)) continue;
+    seen.add(masteryKey);
+    results.push({
+      serviceId,
+      optionId: optionId || '',
+      optionTitle,
+      masteryKey,
+    });
+  }
+  return results.slice(0, 25);
 }
 
 function distributionPatch(field, oldScore, newScore, admin) {
@@ -131,6 +183,7 @@ async function submitServiceRequestRating({
   }
 
   const expandedServiceIds = serviceIdsFor(request);
+  const serviceOptions = serviceOptionsFor(request);
   const primaryServiceId = expandedServiceIds[0] || '';
   const ratingId = `${normalizedRequestId}_${direction}`;
   const ratingRef = db.collection('ratings').doc(ratingId);
@@ -150,6 +203,10 @@ async function submitServiceRequestRating({
     for (const serviceId of expandedServiceIds) {
       serviceSnapshots[serviceId] = await tx.get(ratingAccountRef.collection('services').doc(serviceId));
     }
+    const serviceOptionSnapshots = {};
+    for (const item of serviceOptions) {
+      serviceOptionSnapshots[item.masteryKey] = await tx.get(ratingAccountRef.collection('serviceOptions').doc(item.masteryKey));
+    }
 
     const ratingRecord = {
       ratingId,
@@ -163,6 +220,8 @@ async function submitServiceRequestRating({
       serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
       expandedServiceIds,
       primaryServiceId,
+      selectedOptionId: serviceOptions[0]?.optionId || null,
+      serviceOptionKeys: serviceOptions.map((item) => item.masteryKey),
       selectedPackageId: String(request.selectedPackageId || '').trim() || null,
       score: scoreValue,
       comment: commentValue,
@@ -219,6 +278,31 @@ async function submitServiceRequestRating({
         average: servicePatch.average,
         distribution: {
           ...(serviceAccount.distribution || {}),
+        },
+        ...distributionPatch('distribution', oldScore, scoreValue, admin),
+        updatedAt: now,
+        schemaVersion: SCHEMA_VERSION,
+      }, { merge: true });
+    }
+
+    for (const item of serviceOptions) {
+      const optionRef = ratingAccountRef.collection('serviceOptions').doc(item.masteryKey);
+      const optionSnapshot = serviceOptionSnapshots[item.masteryKey];
+      const optionAccount = optionSnapshot.exists ? (optionSnapshot.data() || {}) : {};
+      const optionPatch = aggregatePatch(optionAccount, deltaCount, deltaScore, oldScore, scoreValue, admin);
+
+      tx.set(optionRef, {
+        userId: ratedUserId,
+        serviceId: item.serviceId,
+        optionId: item.optionId || null,
+        ...(item.optionTitle ? { optionTitle: item.optionTitle } : {}),
+        masteryKey: item.masteryKey,
+        categoryId: String(request.categoryId || '').trim(),
+        count: optionPatch.count,
+        totalScore: optionPatch.totalScore,
+        average: optionPatch.average,
+        distribution: {
+          ...(optionAccount.distribution || {}),
         },
         ...distributionPatch('distribution', oldScore, scoreValue, admin),
         updatedAt: now,
@@ -304,6 +388,7 @@ async function submitServiceRequestRating({
     ratedUserId,
     score: scoreValue,
     expandedServiceIds,
+    serviceOptions,
     ratedAccountType,
     raterAccountType,
     rewards: {
@@ -316,4 +401,5 @@ async function submitServiceRequestRating({
 module.exports = {
   submitServiceRequestRating,
   serviceIdsFor,
+  serviceOptionsFor,
 };

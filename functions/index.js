@@ -33,8 +33,8 @@ const {
   awardReferralStage,
   evaluateCustomerProfileCompletionReward,
 } = require('./rewards/referralService');
-const { submitServiceRequestRating, serviceIdsFor } = require('./rewards/ratingService');
-const { incrementCompletedPaid, recalculateMastery, recalculateMembership } = require('./rewards/progressionService');
+const { submitServiceRequestRating, serviceIdsFor, serviceOptionsFor } = require('./rewards/ratingService');
+const { incrementCompletedPaid, recalculateMastery, recalculateServiceOptionMastery, recalculateMembership } = require('./rewards/progressionService');
 const { getFunctions } = require('firebase-admin/functions');
 const { applyTrustedAdminRole, isTrustedAdminToken } = require('./security/adminAuthorization');
 const { ensureCustomerProfileRecord } = require('./account/customerProfileBootstrap');
@@ -80,6 +80,7 @@ const {
   safePaymentReceipt,
   settleRequestPayment,
 } = require('./requestPaymentService');
+const { ensureAndSendServiceRequestInvoice } = require('./serviceRequestInvoice');
 const {
   HELPER_WALLETS,
   creditHelperWalletEarning,
@@ -126,6 +127,10 @@ const {
 } = require('./paymentMethodStore');
 const { createOrAppendWhatsAppSupportMessage } = require('./whatsapp/supportTicketService');
 const { extractQuestionnaireAnswers, getMissingRequiredQuestions, questionnaireNeedsExtractionPass } = require('./whatsapp/serviceBookingIntake');
+const {
+  buildCustomerRequestAcceptedWhatsAppText,
+  resolveHelperAcceptanceSummary,
+} = require('./whatsapp/acceptanceNotification');
 const {
   formatVerifiedWhatsAppNextQuestion,
   formatWhatsAppBookingConfirmation,
@@ -7882,6 +7887,17 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           for (const serviceId of ratingResult.expandedServiceIds || []) {
             await recalculateMastery({ db, admin, helperId: ratingResult.ratedUserId, serviceId }).catch(() => null);
           }
+          for (const optionTarget of ratingResult.serviceOptions || []) {
+            await recalculateServiceOptionMastery({
+              db,
+              admin,
+              helperId: ratingResult.ratedUserId,
+              serviceId: optionTarget.serviceId,
+              optionId: optionTarget.optionId,
+              optionTitle: optionTarget.optionTitle,
+              masteryKey: optionTarget.masteryKey,
+            }).catch(() => null);
+          }
           await conversationRef.set({
             pendingRatingComment: {
               identityId,
@@ -11007,10 +11023,25 @@ async function finalizeBusyFallbackAcceptanceEffects({
     return etaSummary;
   }
 
+  const helperSummary = await resolveHelperAcceptanceSummary({
+    db,
+    helperId,
+    request: {
+      ...request,
+      pendingBusyAssignment: {
+        ...(request.pendingBusyAssignment || {}),
+        helperId,
+        helperName,
+        helperPhone: helperData.phoneNumber || '',
+      },
+    },
+  }).catch(() => null);
+
   const { text, interactiveBody } = buildBusyHelperCustomerConfirmationMessage({
     request,
     helperName,
     etaSummary,
+    helperSummary,
   });
 
   const client = createMetaWhatsAppClient({
@@ -15546,7 +15577,16 @@ async function syncWhatsAppRelayModeForRequestTransition({ after, status, before
   }
 }
 
-function buildWhatsAppLifecycleText({ after, status, beforeStatus, paymentChanged, eventRole, arrivalPin = '', paymentUrl = '' }) {
+function buildWhatsAppLifecycleText({
+  after,
+  status,
+  beforeStatus,
+  paymentChanged,
+  eventRole,
+  arrivalPin = '',
+  paymentUrl = '',
+  helperAcceptanceSummary = null,
+}) {
   const serviceName = String(after.serviceSummary || after.subject || 'your Uncedo service').trim();
   const helperName = String(after.helperAssignment?.helperName || 'Your helper').trim();
   const refCode = String(after.publicRequestReference || after.requestReference || '').trim();
@@ -15574,9 +15614,11 @@ function buildWhatsAppLifecycleText({ after, status, beforeStatus, paymentChange
       return `${refPrefix}🔍 We received your *${serviceName}* request and are finding a nearby helper.`;
     }
     if (status === 'accepted') {
-      return beforeStatus === 'helper_queued'
-        ? `${refPrefix}✅ *${helperName}* finished their previous job and is now preparing to head your way for *${serviceName}*!`
-        : `${refPrefix}✅ *${helperName}* accepted your *${serviceName}* request and is preparing to head your way.`;
+      return buildCustomerRequestAcceptedWhatsAppText({
+        request: after,
+        beforeStatus,
+        helperSummary: helperAcceptanceSummary,
+      });
     }
     if (status === 'driving' || status === 'en_route') {
       return beforeStatus === 'buying_resources'
@@ -15633,7 +15675,7 @@ function buildWhatsAppLifecycleText({ after, status, beforeStatus, paymentChange
 }
 
 exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
-  document: 'serviceRequests/{requestId}', maxInstances: 2, ...MICRO_CPU_OPTIONS,
+  document: 'serviceRequests/{requestId}', maxInstances: 2, ...MICRO_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 60,
 }, async (event) => {
   const before = event.data.before.exists ? event.data.before.data() || {} : null;
   const after = event.data.after.exists ? event.data.after.data() || {} : null;
@@ -15705,6 +15747,16 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
   const client = createMetaWhatsAppClient({ accessToken: secrets.accessToken, phoneNumberId: secrets.phoneNumberId, graphApiVersion: secrets.graphApiVersion, approvedTemplateNames: secrets.approvedTemplateNames, requestTimeoutMs: process.env.WHATSAPP_META_SEND_TIMEOUT_MS, isRecipientAllowed: (recipient) => isWhatsAppRecipientAllowed(recipient, process.env) });
   const eventKey = String(event.id || '').trim() || `${status}:${String(after.paymentStatus || '')}`;
 
+  let helperAcceptanceSummary = null;
+  if (status === 'accepted' && beforeStatus !== 'accepted') {
+    const acceptedHelperId = String(after.helperAssignment?.helperId || '').trim();
+    helperAcceptanceSummary = await resolveHelperAcceptanceSummary({
+      db,
+      request: after,
+      helperId: acceptedHelperId,
+    }).catch(() => null);
+  }
+
   for (const recipient of identities) {
     if (!recipient.identityId) continue;
     const messageBody = buildWhatsAppLifecycleText({
@@ -15715,6 +15767,7 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
       eventRole: recipient.eventRole,
       arrivalPin: recipient.eventRole === 'customer' ? arrivalPin : '',
       paymentUrl: recipient.eventRole === 'customer' ? customerPaymentUrl : '',
+      helperAcceptanceSummary: recipient.eventRole === 'customer' ? helperAcceptanceSummary : null,
     });
     if (!messageBody) continue;
 
@@ -15731,8 +15784,41 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
     const inServiceWindow = isWithinCustomerServiceWindow(lastInboundAtMs);
     const optedIn = Number(identity.whatsappNotificationsConsentAtMs || 0) > 0 || identity.whatsappNotificationsEnabled === true;
     const isCustomerActiveBooking = recipient.eventRole === 'customer' && inServiceWindow;
-    if (!isCustomerActiveBooking && !optedIn) continue;
-    if (!inServiceWindow && !templateAvailable) continue;
+    const isNewlyPaidForCustomer = recipient.eventRole === 'customer'
+      && afterPaymentStatus === 'paid'
+      && (!before || String(before.paymentStatus || '').toLowerCase() !== 'paid');
+    if (!isCustomerActiveBooking && !optedIn) {
+      if (isNewlyPaidForCustomer) {
+        await ensureAndSendServiceRequestInvoice({
+          db,
+          admin,
+          requestId,
+          request: after,
+          recipientWaId: identity.waId,
+          lastInboundAtMs,
+          inServiceWindow: false,
+          metaClient: client,
+          logger,
+        }).catch(() => null);
+      }
+      continue;
+    }
+    if (!inServiceWindow && !templateAvailable) {
+      if (isNewlyPaidForCustomer) {
+        await ensureAndSendServiceRequestInvoice({
+          db,
+          admin,
+          requestId,
+          request: after,
+          recipientWaId: identity.waId,
+          lastInboundAtMs,
+          inServiceWindow: false,
+          metaClient: client,
+          logger,
+        }).catch(() => null);
+      }
+      continue;
+    }
 
     const totalDueAmount = Number(after.pricingSnapshot?.cashChargeAmount ?? after.totalAmount ?? after.pricingSnapshot?.finalAmount ?? after.pricingSnapshot?.total ?? 0);
     const shouldSendCompletedPaymentPrompt = inServiceWindow
@@ -15819,6 +15905,24 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
             });
       await outboundRef.set({ status: 'sent', metaMessageId: delivery.messageId || null, sentAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       await reconcileWhatsAppDeliveryStatuses({ metaMessageId: delivery.messageId, recipientId: identity.waId, messageRef: outboundRef });
+      if (isNewlyPaidForCustomer) {
+        await ensureAndSendServiceRequestInvoice({
+          db,
+          admin,
+          requestId,
+          request: after,
+          recipientWaId: identity.waId,
+          lastInboundAtMs,
+          inServiceWindow,
+          metaClient: client,
+          logger,
+        }).catch((invoiceError) => {
+          logger.warn('whatsapp_invoice_dispatch_failed', {
+            requestId,
+            error: String(invoiceError?.message || 'unknown').slice(0, 120),
+          });
+        });
+      }
       if (sendMode !== 'template') {
         await db.runTransaction(async (transaction) => {
           const convSnap = await transaction.get(conversationRef);
@@ -16671,8 +16775,9 @@ async function issuePaidRequestPostEffects({ requestId, paymentResult }) {
       if (firstReward) await awardReferralStage({ db, admin, referredUserId: customerId, stage: 2, requestId }).catch(() => null);
     }
     if (helperId) {
+      const expandedServiceOptions = serviceOptionsFor(request);
       await applyRewardTransaction({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(helperConfig.rewards?.completedPaidJob || 50), reasonCode: REWARD_REASON_CODES.HELPER_COMPLETED_PAID_JOB, reasonLabel: 'Completed paid job', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `helper:${helperId}:request:${requestId}:completed-paid`, requestId, relatedUserId: customerId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch(() => null);
-      await incrementCompletedPaid({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, requestId, serviceIds: expandedServiceIds, categoryId: request.categoryId || '' }).catch(() => null);
+      await incrementCompletedPaid({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, requestId, serviceIds: expandedServiceIds, serviceOptions: expandedServiceOptions, categoryId: request.categoryId || '' }).catch(() => null);
     }
     await db.collection('customerServiceEvents').doc(`request_completed_${requestId}`).set({
       requestId,
@@ -17227,6 +17332,17 @@ exports.submitServiceRequestRating = onRequest({ cors: true, invoker: 'public', 
       for (const serviceId of result.expandedServiceIds || []) {
         await recalculateMastery({ db, admin, helperId: result.ratedUserId, serviceId }).catch(() => null);
       }
+      for (const optionTarget of result.serviceOptions || []) {
+        await recalculateServiceOptionMastery({
+          db,
+          admin,
+          helperId: result.ratedUserId,
+          serviceId: optionTarget.serviceId,
+          optionId: optionTarget.optionId,
+          optionTitle: optionTarget.optionTitle,
+          masteryKey: optionTarget.masteryKey,
+        }).catch(() => null);
+      }
     }
     res.status(200).json({ success: true, rating: result });
   } catch (error) { logger.warn('rating_validation_failed', { uid: decoded.uid, error: error.message }); res.status(400).json({ success: false, message: error.message }); }
@@ -17267,6 +17383,17 @@ exports.submitServiceRatingFromPaymentSession = onRequest({ cors: true, invoker:
     await recalculateMembership({ db, admin, userId: result.ratedUserId, accountType: ACCOUNT_TYPES.HELPER }).catch(() => null);
     for (const serviceId of result.expandedServiceIds || []) {
       await recalculateMastery({ db, admin, helperId: result.ratedUserId, serviceId }).catch(() => null);
+    }
+    for (const optionTarget of result.serviceOptions || []) {
+      await recalculateServiceOptionMastery({
+        db,
+        admin,
+        helperId: result.ratedUserId,
+        serviceId: optionTarget.serviceId,
+        optionId: optionTarget.optionId,
+        optionTitle: optionTarget.optionTitle,
+        masteryKey: optionTarget.masteryKey,
+      }).catch(() => null);
     }
     res.set('Cache-Control', 'no-store, private');
     res.set('Referrer-Policy', 'no-referrer');
@@ -17818,8 +17945,9 @@ async function runServiceFinancialPostEffects(operationRef) {
       const firstBookingRewardResult = await applyRewardTransaction({ db, admin, userId: customerId, accountType: ACCOUNT_TYPES.CUSTOMER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(customerConfig.rewards?.firstCompletedPaidBooking || 100), reasonCode: REWARD_REASON_CODES.CUSTOMER_FIRST_COMPLETED_PAID_BOOKING, reasonLabel: 'First completed paid booking', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `customer:${customerId}:request:first-booking-bonus`, requestId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch((error) => { logger.info('first_booking_bonus_skipped_or_failed', { requestId, error: error.message }); return null; });
       await incrementCompletedPaid({ db, admin, userId: customerId, accountType: ACCOUNT_TYPES.CUSTOMER, requestId }).catch((error) => logger.warn('customer_membership_recalc_failed', { requestId, error: error.message }));
       if (helperId) {
+        const expandedServiceOptions = serviceOptionsFor(updatedRequest);
         await applyRewardTransaction({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, direction: REWARD_TRANSACTION_DIRECTIONS.CREDIT, points: Number(helperConfig.rewards?.completedPaidJob || 50), reasonCode: REWARD_REASON_CODES.HELPER_COMPLETED_PAID_JOB, reasonLabel: 'Completed paid job', sourceType: 'service_request', sourceId: requestId, idempotencyKey: `helper:${helperId}:request:${requestId}:completed-paid`, requestId, relatedUserId: customerId, categoryId: request.categoryId || '', serviceIds: expandedServiceIds, primaryServiceId: expandedServiceIds[0] || '', notifyUser: true }).catch((error) => logger.warn('helper_booking_reward_failed', { requestId, helperId, error: error.message }));
-        await incrementCompletedPaid({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, requestId, serviceIds: expandedServiceIds, categoryId: request.categoryId || '' }).catch((error) => logger.warn('helper_mastery_recalc_failed', { requestId, helperId, error: error.message }));
+        await incrementCompletedPaid({ db, admin, userId: helperId, accountType: ACCOUNT_TYPES.HELPER, requestId, serviceIds: expandedServiceIds, serviceOptions: expandedServiceOptions, categoryId: request.categoryId || '' }).catch((error) => logger.warn('helper_mastery_recalc_failed', { requestId, helperId, error: error.message }));
       }
       if (firstBookingRewardResult) {
         await awardReferralStage({ db, admin, referredUserId: customerId, stage: 2, requestId }).catch((error) => logger.warn('referral_stage_two_failed', { requestId, error: error.message }));

@@ -11,6 +11,8 @@ export const {
   REWARD_REASON_CODES,
   REFERRAL_STATUSES,
   SCHEMA_VERSION,
+  normalizeRewardToken,
+  buildServiceOptionMasteryKey,
 } = sharedRewards;
 
 export default sharedRewards;

@@ -857,6 +857,22 @@ export function AuthPage({
                           ? (hashInfo.token ? 'Create Account & Link WhatsApp' : 'Create Account & Start Onboarding')
                           : (hashInfo.token ? 'Sign In & Link WhatsApp' : 'Sign In & Continue Onboarding'))}
                     </button>
+
+                    <p className="text-center text-xs leading-relaxed text-ink-500 pt-1">
+                      By continuing, you agree to Uncedo’s{' '}
+                      <button type="button" onClick={() => onNavigate('/terms')} className="font-semibold text-tealbrand-700 underline">
+                        Helper Terms
+                      </button>
+                      ,{' '}
+                      <button type="button" onClick={() => onNavigate('/payment-pricing-policy')} className="font-semibold text-tealbrand-700 underline">
+                        Payout Policy
+                      </button>
+                      , and acknowledge personal-information processing under POPIA in our{' '}
+                      <button type="button" onClick={() => onNavigate('/privacy-policy')} className="font-semibold text-tealbrand-700 underline">
+                        Privacy Policy &amp; POPIA Notice
+                      </button>
+                      .
+                    </p>
                   </>
                 )}
               </form>

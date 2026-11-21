@@ -1,4 +1,12 @@
-import { MEMBERSHIP_LEVELS, MASTERY_LEVELS, REWARD_REASON_CODES, REWARD_TRANSACTION_DIRECTIONS, REWARD_TRANSACTION_STATUSES } from '../../shared/rewards.js';
+import {
+  buildServiceOptionMasteryKey,
+  MASTERY_LEVELS,
+  MEMBERSHIP_LEVELS,
+  normalizeRewardToken,
+  REWARD_REASON_CODES,
+  REWARD_TRANSACTION_DIRECTIONS,
+  REWARD_TRANSACTION_STATUSES,
+} from '../../shared/rewards.js';
 import { WEB_APP_BASE_URL } from '../../constants/runtimeConfig';
 
 const DEFAULT_POINTS_PER_RAND = 10;
@@ -426,6 +434,41 @@ export function buildMasteryProgressModel({
     nextLevel,
     overallProgress: requirements.reduce((sum, item) => sum + item.progress, 0) / requirements.length,
     requirements,
+  };
+}
+
+export function resolveOfferingMasteryRecord({
+  offering = {},
+  optionMasteryMap = null,
+  serviceMasteryMap = null,
+  optionRatingMap = null,
+  serviceRatingMap = null,
+} = {}) {
+  const serviceId = String(offering?.serviceId || '').trim();
+  const optionId = normalizeRewardToken(offering?.optionId || '');
+  const masteryKey = buildServiceOptionMasteryKey(serviceId, optionId);
+
+  let mastery = masteryKey && optionMasteryMap instanceof Map ? optionMasteryMap.get(masteryKey) || null : null;
+  let ratingSummary = masteryKey && optionRatingMap instanceof Map ? optionRatingMap.get(masteryKey) || null : null;
+
+  if (!mastery && !optionId && serviceId && serviceMasteryMap instanceof Map) {
+    mastery = serviceMasteryMap.get(serviceId) || null;
+  }
+  if (!ratingSummary && !optionId && serviceId && serviceRatingMap instanceof Map) {
+    ratingSummary = serviceRatingMap.get(serviceId) || null;
+  }
+
+  return {
+    masteryKey,
+    mastery: mastery || {
+      serviceId,
+      optionId: optionId || null,
+      level: 'beginner',
+      eligibleCompletedJobCount: 0,
+      averageRating: 0,
+      ratingCount: 0,
+    },
+    ratingSummary: ratingSummary || {},
   };
 }
 

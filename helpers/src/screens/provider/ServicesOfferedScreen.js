@@ -5,7 +5,11 @@ import { ActionButton, Card, EmptyState, SectionHeading, StatusBadge } from '../
 import { useHelpersApp } from '../../context/HelpersAppContext';
 import { useAuth } from '../../context/AuthContext';
 import { MasteryBadge } from '../../components/rewards/RewardBadges';
-import { subscribeToHelperMastery } from '../../services/rewards/rewardClientService';
+import {
+  subscribeToHelperMastery,
+  subscribeToHelperServiceOptionMastery,
+} from '../../services/rewards/rewardClientService';
+import { resolveOfferingMasteryRecord } from '../../services/rewards/rewardPresentation';
 import { colors } from '../../theme/colors';
 
 function formatStatusLabel(status = 'approved') {
@@ -20,14 +24,27 @@ export function ServicesOfferedScreen({ navigate, goBack }) {
   const { user } = useAuth();
   const { helperServiceOfferings, actions, saving, saveError } = useHelpersApp();
   const [mastery, setMastery] = useState([]);
+  const [optionMastery, setOptionMastery] = useState([]);
   const orderedServiceOfferings = [...helperServiceOfferings].sort((left, right) => (
     `${left.serviceName} ${left.optionTitle || ''}`.localeCompare(`${right.serviceName} ${right.optionTitle || ''}`)
   ));
-  const masteryByService = useMemo(() => new Map(mastery.map((item) => [String(item.serviceId || item.id || ''), item])), [mastery]);
+  const masteryByService = useMemo(
+    () => new Map(mastery.map((item) => [String(item.serviceId || item.id || ''), item])),
+    [mastery],
+  );
+  const masteryByOption = useMemo(
+    () => new Map(optionMastery.map((item) => [String(item.masteryKey || item.id || ''), item])),
+    [optionMastery],
+  );
 
   useEffect(() => {
     if (!user?.uid) return () => {};
-    return subscribeToHelperMastery(user.uid, setMastery, () => setMastery([]));
+    const unsubServices = subscribeToHelperMastery(user.uid, setMastery, () => setMastery([]));
+    const unsubOptions = subscribeToHelperServiceOptionMastery(user.uid, setOptionMastery, () => setOptionMastery([]));
+    return () => {
+      unsubServices?.();
+      unsubOptions?.();
+    };
   }, [user?.uid]);
 
   return (
@@ -96,7 +113,15 @@ export function ServicesOfferedScreen({ navigate, goBack }) {
               <View style={styles.badgeRow}>
                 <StatusBadge label={formatStatusLabel(offering.status)} tone={offering.status === 'approved' ? 'success' : 'warning'} />
                 <StatusBadge label={offering.active ? 'Active' : 'Paused'} tone={offering.active ? 'info' : 'neutral'} />
-                {offering.status === 'approved' ? <MasteryBadge level={masteryByService.get(String(offering.serviceId))?.level || 'beginner'} /> : null}
+                {offering.status === 'approved' ? (
+                  <MasteryBadge
+                    level={resolveOfferingMasteryRecord({
+                      offering,
+                      optionMasteryMap: masteryByOption,
+                      serviceMasteryMap: masteryByService,
+                    }).mastery.level}
+                  />
+                ) : null}
               </View>
             </View>
           </Pressable>

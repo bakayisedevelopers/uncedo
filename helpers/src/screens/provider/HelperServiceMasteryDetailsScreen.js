@@ -4,15 +4,29 @@ import { ActionButton, Card, EmptyState, Screen } from '../../components/app/Hel
 import { MasteryBadge } from '../../components/rewards/RewardBadges';
 import { useAuth } from '../../context/AuthContext';
 import { useHelpersApp } from '../../context/HelpersAppContext';
-import { getHelperMasteryRecord, getRewardConfig, getServiceRatingSummary } from '../../services/rewards/rewardClientService';
+import {
+  getHelperMasteryRecord,
+  getHelperServiceOptionMasteryRecord,
+  getRewardConfig,
+  getServiceOptionRatingSummary,
+  getServiceRatingSummary,
+} from '../../services/rewards/rewardClientService';
 import { buildMasteryProgressModel } from '../../services/rewards/rewardPresentation';
-import { REWARD_CONFIG_DOCS, MASTERY_LEVELS } from '../../shared/rewards';
+import {
+  buildServiceOptionMasteryKey,
+  MASTERY_LEVELS,
+  normalizeRewardToken,
+  REWARD_CONFIG_DOCS,
+} from '../../shared/rewards';
 import { colors } from '../../theme/colors';
 
 export function HelperServiceMasteryDetailsScreen({ route, goBack }) {
   const { user } = useAuth();
   const { helperServiceOfferings, serviceCatalog } = useHelpersApp();
   const serviceId = String(route?.params?.serviceId || '').trim();
+  const optionId = normalizeRewardToken(route?.params?.optionId || '');
+  const paramOptionTitle = String(route?.params?.optionTitle || '').trim();
+  const masteryKey = String(route?.params?.masteryKey || buildServiceOptionMasteryKey(serviceId, optionId) || serviceId).trim();
   const [mastery, setMastery] = useState(null);
   const [ratingSummary, setRatingSummary] = useState(null);
   const [masteryConfig, setMasteryConfig] = useState(null);
@@ -26,30 +40,45 @@ export function HelperServiceMasteryDetailsScreen({ route, goBack }) {
 
     setError('');
     try {
-      const [nextMastery, nextRating, config] = await Promise.all([
-        getHelperMasteryRecord(user.uid, serviceId),
-        getServiceRatingSummary(user.uid, serviceId),
+      const [optionMasteryDoc, optionRatingDoc, config] = await Promise.all([
+        getHelperServiceOptionMasteryRecord(user.uid, masteryKey),
+        getServiceOptionRatingSummary(user.uid, masteryKey),
         getRewardConfig(REWARD_CONFIG_DOCS.MASTERY, { force: true }),
       ]);
-      setMastery(nextMastery);
-      setRatingSummary(nextRating);
+      const [fallbackMastery, fallbackRating] = !optionId && (!optionMasteryDoc || !optionRatingDoc)
+        ? await Promise.all([
+          optionMasteryDoc ? null : getHelperMasteryRecord(user.uid, serviceId),
+          optionRatingDoc ? null : getServiceRatingSummary(user.uid, serviceId),
+        ])
+        : [null, null];
+
+      setMastery(optionMasteryDoc || fallbackMastery || null);
+      setRatingSummary(optionRatingDoc || fallbackRating || null);
       setMasteryConfig(config);
     } catch (nextError) {
       setError(nextError.message || 'Unable to load service mastery details.');
     } finally {
       setLoading(false);
     }
-  }, [serviceId, user?.uid]);
+  }, [masteryKey, optionId, serviceId, user?.uid]);
 
   useEffect(() => {
     load();
   }, [load]);
 
   const serviceEntry = useMemo(() => (
-    helperServiceOfferings.find((item) => String(item.serviceId || '').trim() === serviceId)
+    helperServiceOfferings.find((item) => (
+      String(item.serviceId || '').trim() === serviceId
+      && normalizeRewardToken(item.optionId || '') === optionId
+    ))
+    || helperServiceOfferings.find((item) => String(item.serviceId || '').trim() === serviceId)
     || serviceCatalog.find((item) => String(item.id || '').trim() === serviceId)
     || null
-  ), [helperServiceOfferings, serviceCatalog, serviceId]);
+  ), [helperServiceOfferings, optionId, serviceCatalog, serviceId]);
+
+  const optionTitle = paramOptionTitle || mastery?.optionTitle || serviceEntry?.optionTitle || '';
+  const serviceTitle = serviceEntry?.serviceName || serviceEntry?.label || serviceId || 'Service mastery';
+  const screenTitle = optionTitle ? `${serviceTitle} — ${optionTitle}` : serviceTitle;
 
   const progress = buildMasteryProgressModel({
     mastery,
@@ -59,8 +88,8 @@ export function HelperServiceMasteryDetailsScreen({ route, goBack }) {
 
   return (
     <Screen
-      title={serviceEntry?.serviceName || serviceEntry?.label || serviceId || 'Service mastery'}
-      description="This is your Uncedo service experience level for one service. It is not a statutory or trade certification."
+      title={screenTitle}
+      description="This is your Uncedo service experience level for one service option. It is not a statutory or trade certification."
       footerAction={<ActionButton label="Back to mastery" tone="secondary" onPress={() => goBack('HelperServiceMasteryOverview')} />}
     >
       {error ? (
@@ -71,7 +100,7 @@ export function HelperServiceMasteryDetailsScreen({ route, goBack }) {
 
       {loading ? (
         <Card>
-          <EmptyState title="Loading mastery details" description="Reading per-service job, rating, and mastery records." />
+          <EmptyState title="Loading mastery details" description="Reading per-option job, rating, and mastery records." />
         </Card>
       ) : (
         <>
@@ -82,8 +111,8 @@ export function HelperServiceMasteryDetailsScreen({ route, goBack }) {
               variant="expanded"
             />
             <Text style={styles.copy}>Eligible completed jobs: {Number(mastery?.eligibleCompletedJobCount || mastery?.qualificationSnapshot?.eligibleCompletedJobCount || 0)}</Text>
-            <Text style={styles.copy}>Average service rating: {Number(ratingSummary?.average || mastery?.averageRating || 0) > 0 ? Number(ratingSummary?.average || mastery?.averageRating || 0).toFixed(1) : 'No ratings yet'}</Text>
-            <Text style={styles.copy}>Received service ratings: {Number(ratingSummary?.count || mastery?.ratingCount || 0)}</Text>
+            <Text style={styles.copy}>Average option rating: {Number(ratingSummary?.average || mastery?.averageRating || 0) > 0 ? Number(ratingSummary?.average || mastery?.averageRating || 0).toFixed(1) : 'No ratings yet'}</Text>
+            <Text style={styles.copy}>Received option ratings: {Number(ratingSummary?.count || mastery?.ratingCount || 0)}</Text>
           </Card>
 
           <Card>

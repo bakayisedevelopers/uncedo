@@ -26,10 +26,13 @@ export default function MainLayout({ children }) {
               </ul>
             </div>
             <div>
-              <h4 className="mb-4 font-bold text-zinc-900">Legal</h4>
+              <h4 className="mb-4 font-bold text-zinc-900">Legal &amp; POPIA</h4>
               <ul className="space-y-2 text-sm text-zinc-600">
-                <li><Link to="/privacy-policy" className={footerLinkClassName}>Privacy Policy</Link></li>
+                <li><Link to="/privacy-policy" className={footerLinkClassName}>Privacy Policy &amp; POPIA</Link></li>
                 <li><Link to="/terms" className={footerLinkClassName}>Terms of Service</Link></li>
+                <li><Link to="/payment-pricing-policy" className={footerLinkClassName}>Payment &amp; Pricing Policy</Link></li>
+                <li><Link to="/refund-policy" className={footerLinkClassName}>Refund &amp; Cancellation Policy</Link></li>
+                <li><Link to="/data-voice-policy" className={footerLinkClassName}>Data &amp; Location Policy</Link></li>
               </ul>
             </div>
             <div>

@@ -110,15 +110,28 @@ function buildBusyHelperCustomerConfirmationMessage({
   request = {},
   helperName = 'A helper',
   etaSummary = {},
+  helperSummary = null,
 } = {}) {
   const serviceName = String(request.serviceSummary || request.subject || 'your Uncedo service').trim();
   const refCode = String(request.publicRequestReference || request.requestReference || '').trim();
   const refPrefix = refCode ? `[*${refCode}*] ` : '';
-  const safeHelperName = String(helperName || 'A helper').trim() || 'A helper';
+  const safeHelperName = String(helperSummary?.helperName || helperName || 'A helper').trim() || 'A helper';
   const finishMins = Math.max(1, Number(etaSummary.finishCurrentMinutes || 25));
   const arrivalMins = Math.max(finishMins + 1, Number(etaSummary.totalArrivalMinutes || 40));
   const finishClock = String(etaSummary.finishClockTime || '').trim();
   const arrivalClock = String(etaSummary.arrivalClockTime || '').trim();
+
+  const summaryLines = [];
+  if (helperSummary) {
+    const ratingText = helperSummary.optionRatingCount > 0 && helperSummary.optionRatingAverage > 0
+      ? `${helperSummary.optionRatingAverage.toFixed(1)} ★ (${helperSummary.optionRatingCount})`
+      : 'New';
+    const completedText = `${helperSummary.completedJobsCount || 0} completed ${helperSummary.completedJobsCount === 1 ? 'job' : 'jobs'}`;
+    summaryLines.push(
+      `• Helper: *${safeHelperName}*${helperSummary.verified ? ' (Verified)' : ''}${helperSummary.helperPhone ? ` · ${helperSummary.helperPhone}` : ''}`,
+      `• ${helperSummary.optionDisplayName || serviceName}: *${helperSummary.masteryLabel || 'Beginner'}* · ${ratingText} · ${completedText}`,
+    );
+  }
 
   const text = [
     `${refPrefix}👷 *Helper Found (Finishing Another Job)*`,
@@ -126,12 +139,14 @@ function buildBusyHelperCustomerConfirmationMessage({
     `*${safeHelperName}* accepted your *${serviceName}* request, but is currently finishing up another nearby job.`,
     `• Estimated time to finish current job: *~${finishMins} mins*${finishClock ? ` (around *${finishClock}*)` : ''}`,
     `• Estimated arrival at your location: *~${arrivalMins} mins*${arrivalClock ? ` (around *${arrivalClock}*)` : ''}`,
+    ...summaryLines,
     '',
     'Would you like to wait for this helper, or should we continue searching for another helper?',
   ].join('\n');
 
   const interactiveBody = [
-    `*${safeHelperName}* is finishing another job:`,
+    `*${safeHelperName}*${helperSummary?.verified ? ' (Verified)' : ''} accepted and is finishing another job:`,
+    ...(summaryLines.length ? summaryLines : []),
     `• Finishes current job: ~${finishMins} min${finishClock ? ` (${finishClock})` : ''}`,
     `• Estimated arrival: ~${arrivalMins} min${arrivalClock ? ` (${arrivalClock})` : ''}`,
     '',

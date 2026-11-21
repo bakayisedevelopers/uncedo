@@ -1,5 +1,7 @@
+import { useMemo } from 'react';
 import {
   AlertCircle,
+  Award,
   CheckCircle2,
   ChevronRight,
   Download,
@@ -15,8 +17,10 @@ import {
   Star,
   UserCircle2,
 } from 'lucide-react';
+import { MasteryBadge, MembershipBadge } from '../components/rewards/MasteryBadge';
 import { useHelperSession } from '../context/HelperSessionContext';
 import { WHATSAPP_CHAT_URL, resolveHelperPayoutAmount, signOutHelperAccount } from '../services/helperDataService';
+import { buildHelperApprovedMasteryList } from '../utils/masteryModel';
 
 function getInitials(name = '') {
   const parts = String(name || '')
@@ -80,15 +84,34 @@ export function ProfilePage({ onNavigate, pwa }) {
   const {
     user,
     profile,
+    offerings,
     evaluation,
     walletSnapshot,
     jobHistory,
+    rewardAccount,
+    serviceOptionMasteryMap,
+    serviceMasteryMap,
+    serviceOptionRatingMap,
+    serviceRatingMap,
     isOnline,
     liveLocationText,
     locationAccuracyMeters,
     locationLoading,
     refreshCurrentLocation,
   } = useHelperSession();
+
+  const approvedMasteryItems = useMemo(
+    () =>
+      buildHelperApprovedMasteryList({
+        offerings,
+        serviceOptionMasteryMap,
+        serviceMasteryMap,
+        optionRatingMap: serviceOptionRatingMap,
+        serviceRatingMap,
+      }),
+    [offerings, serviceOptionMasteryMap, serviceMasteryMap, serviceOptionRatingMap, serviceRatingMap],
+  );
+  const membershipLevel = String(rewardAccount?.membership?.currentLevel || 'neighbour').trim().toLowerCase();
 
   const fullName = String(profile?.fullName || user?.displayName || 'Helper').trim();
   const initials = getInitials(fullName);
@@ -288,6 +311,73 @@ export function ProfilePage({ onNavigate, pwa }) {
           tone="warning"
         />
       )}
+
+      {/* Service Badges & Recognition */}
+      <section className="rounded-[24px] border border-border bg-surface p-4 sm:p-5 space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="space-y-1">
+            <h2 className="font-display text-base font-extrabold text-ink-900 flex items-center gap-2">
+              <Award className="h-4 w-4 text-tealbrand-700" aria-hidden="true" />
+              <span>Badges &amp; Recognition</span>
+            </h2>
+            <p className="text-xs text-ink-500">
+              Platform membership reflects your overall helper standing; service badges are earned per approved service option.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => onNavigate('/services')}
+            className="inline-flex items-center gap-1 px-3 py-2 min-h-[40px] rounded-lg border border-border bg-well/50 hover:bg-well text-xs font-semibold text-tealbrand-700 whitespace-nowrap shrink-0"
+          >
+            <span>View all options</span>
+            <ChevronRight className="h-3.5 w-3.5" />
+          </button>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-border/70">
+          <span className="text-xs font-semibold text-ink-700">Overall helper membership</span>
+          <MembershipBadge level={membershipLevel} size="md" />
+        </div>
+
+        {approvedMasteryItems.length > 0 ? (
+          <div className="divide-y divide-border/70 border-t border-border/70">
+            {approvedMasteryItems.slice(0, 4).map((item) => (
+              <button
+                key={item.offeringId}
+                type="button"
+                onClick={() => onNavigate('/services')}
+                className="w-full py-2.5 flex items-center justify-between gap-3 text-left hover:bg-well/35 transition-colors"
+              >
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-ink-900 truncate">
+                    {item.optionTitle || item.serviceName}
+                  </div>
+                  <div className="text-xs text-ink-500 flex flex-wrap items-center gap-x-1.5 tabular-nums-mono">
+                    {item.optionTitle && (
+                      <>
+                        <span>{item.serviceName}</span>
+                        <span aria-hidden="true">·</span>
+                      </>
+                    )}
+                    <span>{item.mastery.eligibleCompletedJobCount} paid jobs</span>
+                    {item.mastery.averageRating > 0 && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span>{item.mastery.averageRating.toFixed(1)}★</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <MasteryBadge level={item.mastery.level} size="sm" />
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-ink-500 pt-2 border-t border-border/70">
+            Once your first service option is approved, its mastery badge (starting at Beginner) will appear here.
+          </p>
+        )}
+      </section>
 
       {/* Settings List */}
       <section className="space-y-3">

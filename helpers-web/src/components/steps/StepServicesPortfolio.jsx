@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
   ChevronDown,
@@ -10,6 +10,7 @@ import {
   Search,
   Trash2,
 } from 'lucide-react';
+import { useHelperSession } from '../../context/HelperSessionContext';
 import {
   buildHelperServiceOfferingId,
   deleteStorageObject,
@@ -17,12 +18,15 @@ import {
   saveHelperServiceOffering,
   uploadHelperFile,
 } from '../../services/helperDataService';
+import { DEFAULT_MASTERY_CONFIG, resolveOfferingMastery } from '../../utils/masteryModel';
 import {
   getAvailableCatalogEntries,
   getOfferingStatusMeta,
   groupSubmittedOfferings,
+  isOfferingApproved,
   normalizeServiceToken,
 } from '../../utils/serviceOfferingsFilter';
+import { MasteryBadge, MasteryProgressPanel } from '../rewards/MasteryBadge';
 
 export function StepServicesPortfolio({
   user,
@@ -30,7 +34,20 @@ export function StepServicesPortfolio({
   offerings,
   onCompleteNext,
   showContinueButton = true,
+  initialExpandApproved = false,
+  serviceOptionMasteryMap: propOptionMasteryMap,
+  serviceMasteryMap: propServiceMasteryMap,
+  serviceOptionRatingMap: propOptionRatingMap,
+  serviceRatingMap: propServiceRatingMap,
+  masteryConfig: propMasteryConfig,
 }) {
+  const session = useHelperSession() || {};
+  const serviceOptionMasteryMap = propOptionMasteryMap ?? session.serviceOptionMasteryMap ?? null;
+  const serviceMasteryMap = propServiceMasteryMap ?? session.serviceMasteryMap ?? null;
+  const serviceOptionRatingMap = propOptionRatingMap ?? session.serviceOptionRatingMap ?? null;
+  const serviceRatingMap = propServiceRatingMap ?? session.serviceRatingMap ?? null;
+  const masteryConfig = propMasteryConfig ?? session.masteryConfig ?? DEFAULT_MASTERY_CONFIG;
+
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedServiceId, setSelectedServiceId] = useState('');
   const [selectedOptionIds, setSelectedOptionIds] = useState([]);
@@ -41,6 +58,7 @@ export function StepServicesPortfolio({
   const [deletingId, setDeletingId] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const hasAutoExpandedApprovedRef = useRef(false);
   const photoInputRef = useRef(null);
 
   const catalogById = useMemo(() => {
@@ -58,6 +76,19 @@ export function StepServicesPortfolio({
     () => groupSubmittedOfferings(offerings, catalogById),
     [offerings, catalogById],
   );
+
+  useEffect(() => {
+    if (!initialExpandApproved || hasAutoExpandedApprovedRef.current || !groupedOfferings.length) {
+      return;
+    }
+    const approvedGroupIds = groupedOfferings
+      .filter((group) => group.approvedCount > 0)
+      .map((group) => group.serviceId);
+    if (approvedGroupIds.length > 0) {
+      hasAutoExpandedApprovedRef.current = true;
+      setExpandedServiceIds(approvedGroupIds);
+    }
+  }, [groupedOfferings, initialExpandApproved]);
 
   const availableCatalog = useMemo(
     () => getAvailableCatalogEntries(catalog, offerings),
@@ -272,6 +303,21 @@ export function StepServicesPortfolio({
                 ? (group.approvedCount === 1 ? 'option' : 'options')
                 : (group.approvedCount === 1 ? 'service' : 'services');
 
+              let topGroupMastery = null;
+              for (const item of group.items) {
+                if (!isOfferingApproved(item)) continue;
+                const resolved = resolveOfferingMastery({
+                  offering: item,
+                  serviceOptionMasteryMap,
+                  serviceMasteryMap,
+                  optionRatingMap: serviceOptionRatingMap,
+                  serviceRatingMap,
+                });
+                if (!topGroupMastery || resolved.meta.rank > topGroupMastery.meta.rank) {
+                  topGroupMastery = resolved;
+                }
+              }
+
               return (
                 <div key={group.serviceId}>
                   <button
@@ -284,11 +330,17 @@ export function StepServicesPortfolio({
                       <span className="text-sm font-semibold text-ink-900 truncate">
                         {group.serviceName}
                       </span>
-                      <div className="text-xs flex flex-wrap items-center gap-x-2 gap-y-0.5 tabular-nums-mono shrink-0">
+                      <div className="text-xs flex flex-wrap items-center gap-x-2 gap-y-1 tabular-nums-mono shrink-0">
                         {group.approvedCount > 0 && (
                           <span className="text-tealbrand-700 font-semibold">
                             {group.approvedCount} {approvedUnit} approved
                           </span>
+                        )}
+                        {topGroupMastery && topGroupMastery.level !== 'beginner' && (
+                          <>
+                            <span className="text-ink-400" aria-hidden="true">·</span>
+                            <MasteryBadge level={topGroupMastery.level} size="sm" />
+                          </>
                         )}
                         {group.pendingCount > 0 && (
                           <>
@@ -326,6 +378,16 @@ export function StepServicesPortfolio({
                         const isOptionExpanded = expandedOfferingIds.includes(offering.id);
                         const statusMeta = getOfferingStatusMeta(offering);
                         const optionDisplayName = offering.optionTitle || offering.serviceName;
+                        const approved = isOfferingApproved(offering);
+                        const offeringMastery = approved
+                          ? resolveOfferingMastery({
+                            offering,
+                            serviceOptionMasteryMap,
+                            serviceMasteryMap,
+                            optionRatingMap: serviceOptionRatingMap,
+                            serviceRatingMap,
+                          })
+                          : null;
 
                         return (
                           <div key={offering.id}>
@@ -335,7 +397,7 @@ export function StepServicesPortfolio({
                               aria-expanded={isOptionExpanded}
                               className="w-full min-h-[52px] pl-5 pr-4 sm:pl-8 sm:pr-5 py-3 flex items-center justify-between gap-3 text-left hover:bg-well/70 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-tealbrand-600/40"
                             >
-                              <div className="min-w-0 flex-1 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                              <div className="min-w-0 flex-1 flex flex-wrap items-center gap-x-2 gap-y-1">
                                 <span className="text-sm font-medium text-ink-900 truncate">
                                   {optionDisplayName}
                                 </span>
@@ -343,6 +405,18 @@ export function StepServicesPortfolio({
                                 <span className={`text-xs ${statusMeta.className}`}>
                                   {statusMeta.label}
                                 </span>
+                                {offeringMastery && (
+                                  <>
+                                    <span className="text-ink-400 text-xs" aria-hidden="true">·</span>
+                                    <MasteryBadge level={offeringMastery.level} size="sm" />
+                                    <span className="text-[11px] text-ink-500 tabular-nums-mono">
+                                      {offeringMastery.eligibleCompletedJobCount} job{offeringMastery.eligibleCompletedJobCount === 1 ? '' : 's'}
+                                      {offeringMastery.averageRating > 0
+                                        ? ` · ${offeringMastery.averageRating.toFixed(1)}★ (${offeringMastery.ratingCount})`
+                                        : ''}
+                                    </span>
+                                  </>
+                                )}
                               </div>
                               <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-tealbrand-700 shrink-0 whitespace-nowrap">
                                 <Pencil className="h-3.5 w-3.5" />
@@ -366,6 +440,13 @@ export function StepServicesPortfolio({
                                       : `${photoCount} work photo${photoCount === 1 ? '' : 's'}`}
                                   </span>
                                 </div>
+
+                                {offeringMastery && (
+                                  <MasteryProgressPanel
+                                    mastery={offeringMastery}
+                                    masteryConfig={masteryConfig}
+                                  />
+                                )}
 
                                 {offering.declineReason && (
                                   <p className="text-xs text-red-700">Reason: {offering.declineReason}</p>

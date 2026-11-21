@@ -526,6 +526,7 @@ test('trusted rating workflow updates deterministic records, aggregates, edits, 
 
   const helperRatings = await db.collection('ratingAccounts').doc('helper-rate').get();
   const helperServiceA = await db.collection('ratingAccounts').doc('helper-rate').collection('services').doc('svc-a').get();
+  const helperServiceOptA = await db.collection('ratingAccounts').doc('helper-rate').collection('serviceOptions').doc('svc-a').get();
   const helperServiceB = await db.collection('ratingAccounts').doc('helper-rate').collection('services').doc('svc-b').get();
   const helperBundle = await db.collection('ratingAccounts').doc('helper-rate').collection('services').doc('bundle-x').get();
   const helperRewardAccount = await getRewardAccount('helper-rate');
@@ -538,6 +539,8 @@ test('trusted rating workflow updates deterministic records, aggregates, edits, 
   assert.equal(helperRatings.data().overallAverage, 4);
   assert.equal(helperServiceA.data().count, 1);
   assert.equal(helperServiceA.data().average, 4);
+  assert.equal(helperServiceOptA.data().count, 1);
+  assert.equal(helperServiceOptA.data().average, 4);
   assert.equal(helperServiceB.data().count, 1);
   assert.equal(helperServiceB.data().average, 4);
   assert.equal(helperBundle.exists, false);
@@ -677,6 +680,7 @@ test('membership and mastery progression honour thresholds, preserve highest ach
   });
   const helperProgress = await db.collection('rewardAccounts').doc('membership-helper').collection('requestProgress').doc('helper_helper-job-1').get();
   const helperMasteryDoc = await db.collection('helperMastery').doc('membership-helper').collection('services').doc('svc-mastery').get();
+  const helperOptionMasteryDoc = await db.collection('helperMastery').doc('membership-helper').collection('serviceOptions').doc('svc-mastery').get();
 
   assert.equal(customerPartner.currentLevel, 'partner');
   assert.equal(customerDowngraded.currentLevel, 'neighbour');
@@ -687,4 +691,5 @@ test('membership and mastery progression honour thresholds, preserve highest ach
   assert.equal(helperMasterAfterDrop.highestLevel, 'master');
   assert.equal(helperProgress.exists, true);
   assert.equal(helperMasteryDoc.data().eligibleCompletedJobCount, 220);
+  assert.equal(helperOptionMasteryDoc.data().eligibleCompletedJobCount, 1);
 });

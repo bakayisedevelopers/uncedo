@@ -37,6 +37,21 @@ function normalizeReferralCode(code = '') {
   return String(code).trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
+function normalizeRewardToken(value = '') {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function buildServiceOptionMasteryKey(serviceId = '', optionId = '') {
+  const cleanServiceId = String(serviceId || '').trim();
+  if (!cleanServiceId) return '';
+  const cleanOptionId = normalizeRewardToken(optionId);
+  return cleanOptionId ? `${cleanServiceId}__${cleanOptionId}` : cleanServiceId;
+}
+
 module.exports = {
   SCHEMA_VERSION,
   ACCOUNT_TYPES,
@@ -53,4 +68,6 @@ module.exports = {
   assertOneOf,
   assertIntegerPoints,
   normalizeReferralCode,
+  normalizeRewardToken,
+  buildServiceOptionMasteryKey,
 };

@@ -1,191 +1,247 @@
+import { Link } from 'react-router-dom';
 import LegalPageShell, { LegalSection } from '../components/legal/LegalPageShell';
 
 export default function PrivacyPolicyPage() {
   return (
     <LegalPageShell
-      title="Privacy Policy"
-      updatedAt="26 October 2026"
-      intro="This policy describes how Uncedo handles personal information when you use our customer and helper services through the website, mobile applications or WhatsApp. It is written with the Protection of Personal Information Act 4 of 2013 (POPIA) in mind."
-      contact="For a privacy question or data-subject request, use the support option in the Uncedo app or contact Uncedo through its official WhatsApp channel and ask for the request to be routed to the person responsible for privacy. We may verify your identity before responding. Do not send passwords, one-time codes, full card details or security codes."
+      title="Privacy Policy & POPIA Notice"
+      updatedAt="21 November 2026"
+      intro="This Privacy Policy and POPIA Notice explains how Uncedo collects, uses, stores, shares, secures, and disposes of personal information across the Uncedo website, customer and helper applications, web payment pages, and WhatsApp service channel in compliance with the Protection of Personal Information Act 4 of 2013 (POPIA) of South Africa."
+      contact="To submit a POPIA access, correction, deletion, or objection request, or to reach our Information Officer / privacy team, use the in-app support option or contact Uncedo through our official WhatsApp support channel (wa.me/27605239926) and request routing to the Information Officer. We verify identity before acting on any request. Never send passwords, one-time codes, full card numbers, or CVVs."
     >
-      <LegalSection title="1. Who is responsible">
+      <LegalSection title="1. Accountability and responsible party (POPIA Condition 1)">
         <p>
-          Uncedo is operated by Jabu Msiza. The operator responsible for providing Uncedo is the responsible party under
-          POPIA and may use service providers acting on its behalf. The operator’s full registered legal name and the
-          Information Officer’s direct contact details should be confirmed and published by the business. Until then, use
-          the support route above to direct a request to the responsible party.
-        </p>
-      </LegalSection>
-
-      <LegalSection title="2. Personal information we may handle">
-        <p>
-          Depending on how you use Uncedo, we may handle your name, email address, telephone or WhatsApp number, account
-          identifiers, role, profile details, sign-in and verification records, service location, request details,
-          questionnaire answers, quotes, booking and matching status, and communications with Uncedo or a helper.
-        </p>
-        <p>
-          For customer requests, we may handle information needed to describe and deliver the requested service. For
-          helpers, this may include service offerings, qualifications or verification material, availability, work
-          history, ratings, earnings, wallet and commission records, payout details and payment-provider references.
-          We also handle payment status, transaction references and limited card descriptors such as brand and last four
-          digits where supported. Uncedo does not request or store your full card number or CVV in WhatsApp messages.
-        </p>
-        <p>
-          If you use WhatsApp, we may process message text, interactive-button selections, message and delivery timestamps,
-          conversation references and relevant account or request context. Supported attachments may be processed where
-          the relevant feature is enabled. Do not send identity numbers, health information, payment credentials or other
-          sensitive information unless Uncedo specifically asks for it through a suitable secure process.
-        </p>
-        <p>
-          We may also process technical and security information such as device or browser details, service logs, failed
-          operation codes, fraud-prevention signals and administrative audit records. We aim to limit the information
-          collected to what is reasonably needed for the stated purposes.
-        </p>
-      </LegalSection>
-
-      <LegalSection title="3. Why we use personal information">
-        <p>
-          We use information to create and secure accounts; verify identity and role; prepare service questions and quotes;
-          match customers with eligible helpers; coordinate, update or cancel requests; confirm payments; account for
-          helper earnings, commissions and payouts; provide customer and helper support; investigate disputes or misuse;
-          maintain platform security; improve service reliability; and meet legal, tax, accounting and regulatory
+          Uncedo is operated by <strong>Jabu Msiza</strong> in the Republic of South Africa (“Uncedo”, “we”, “us”). As the
+          Responsible Party under POPIA, Uncedo determines why and how personal information is processed when you use our
+          platform and holds our authorised service providers (“Operators”) to written confidentiality and security
           obligations.
         </p>
         <p>
-          Where WhatsApp automated assistance is enabled, relevant message text and limited conversation or request
-          context may be processed by automated systems to respond, retrieve authorised information or support a
-          requested workflow. Automated summaries or responses are not the authoritative record of a booking, payment,
-          identity or wallet balance. Those facts are checked against Uncedo’s backend records.
-        </p>
-        <p>
-          We process information where needed to provide a service you request, to meet legal obligations, to protect
-          legitimate safety and security interests, or on another lawful basis under POPIA. Where consent is the basis, you
-          may withdraw it; withdrawal does not undo processing already lawfully carried out or processing required on
-          another lawful basis.
+          Privacy enquiries, PAIA/POPIA requests, and complaints directed to Uncedo’s Information Officer should be sent
+          through the in-app support workflow or our official WhatsApp support channel with enough account or request
+          context to locate your record.
         </p>
       </LegalSection>
 
-      <LegalSection title="4. Who may receive information">
+      <LegalSection title="2. Personal information we collect and minimality (Condition 2)">
         <p>
-          We may share the minimum information needed with the helper assigned to a request so the service can be delivered.
-          We may also use service providers for cloud hosting and storage, account authentication, messaging, automated
-          assistance, payment processing, notifications, security and technical support. Providers receive information
-          only as needed for their role and under applicable contractual and legal safeguards.
+          We collect only personal information that is adequate, relevant, and not excessive for delivering requested
+          services, managing accounts, verifying safety, and settling payments:
+        </p>
+        <ul className="list-disc space-y-2 pl-5">
+          <li>
+            <strong>Identity, contact &amp; account records:</strong> Full name, email address, international WhatsApp or
+            telephone number, Firebase user identifier (UID), account role (customer or helper), individual or business
+            account details (including business name, category, and email), and account discovery source.
+          </li>
+          <li>
+            <strong>Service requests, quotes &amp; verification:</strong> Service categories, intake questionnaire answers,
+            calculated quotes (service subtotal, service travel fee, integer booking fee, and any applicable post-arrival
+            waiting fee), booking status, 6-digit arrival PIN verification events, completion-proof photos uploaded for a
+            job, ratings, and support tickets.
+          </li>
+          <li>
+            <strong>Location &amp; live GPS tracking:</strong> Customer service address and coordinates needed to quote,
+            match, and navigate to the job. For active helpers, live GPS coordinates and reverse-geocoded street/city
+            locations are processed while the helper is online or on an active trip and stop when the helper goes offline.
+          </li>
+          <li>
+            <strong>Payment &amp; wallet records:</strong> Payment status, Paystack transaction and receipt references,
+            masked card descriptors (brand and last four digits) with reusable Paystack authorisation tokens where you
+            explicitly consent to save a card, customer wallet ledger entries (including unpaid completion or cancellation
+            fee debt balances and card-settlement reversals), cash payment confirmations, and helper weekly ZAR bank
+            payout records. Uncedo never collects or stores your full card number or CVV and never accepts card details
+            over WhatsApp.
+          </li>
+          <li>
+            <strong>Special personal information &amp; helper vetting (POPIA s26–s33):</strong> For helpers applying to
+            deliver services, Uncedo collects a profile headshot/selfie, work portfolio images, banking/identity
+            verification references (South African ID, passport, or business registration number verified via Paystack
+            recipient verification), and a <strong>Police Clearance Certificate</strong>. Police clearance files contain
+            sensitive criminal-record verification data and are stored in access-restricted private verification storage,
+            reviewed solely by authorised Uncedo administrators, and never displayed publicly or sent to AI models.
+          </li>
+          <li>
+            <strong>WhatsApp, automated assistance &amp; technical logs:</strong> WhatsApp message content, interactive
+            button choices, delivery timestamps, supported media attachments where enabled, device/browser telemetry,
+            error/audit logs, and short-lived session storage keys required for security and checkout integrity.
+          </li>
+        </ul>
+      </LegalSection>
+
+      <LegalSection title="3. Lawful grounds and purpose specification (Conditions 2 & 3)">
+        <p>We process personal information under POPIA section 11 only where a lawful justification applies:</p>
+        <ul className="list-disc space-y-2 pl-5">
+          <li>
+            <strong>Performance of a contract or pre-contract steps:</strong> Preparing quotes, matching customers with
+            eligible nearby helpers, issuing arrival PINs, coordinating job progress, verifying Paystack card or cash
+            payments, managing cancellation fees, and executing helper payouts.
+          </li>
+          <li>
+            <strong>Compliance with legal obligations:</strong> Financial reconciliation, tax/SARS accounting records,
+            fraud and anti-abuse prevention, and regulatory or court compliance.
+          </li>
+          <li>
+            <strong>Legitimate safety and platform interests:</strong> Helper vetting, live dispatch safety, preventing
+            duplicate charges or off-platform payment evasion, and securing user accounts and one-time links.
+          </li>
+          <li>
+            <strong>Explicit consent (which you may withdraw):</strong> Saving a reusable Paystack card token for faster
+            future checkout, submitting special personal information such as a Police Clearance Certificate during helper
+            onboarding, or optional media/marketing communications. Withdrawing consent does not invalidate prior lawful
+            processing or prevent retention required by law.
+          </li>
+        </ul>
+      </LegalSection>
+
+      <LegalSection title="4. Further processing limitation & openness (Conditions 4 & 6)">
+        <p>
+          Uncedo does not sell, rent, or trade your personal information to third parties for unrelated marketing. Any
+          further processing is strictly compatible with the purpose for which the information was originally collected
+          (for example, using a request and payment record to resolve a dispute, calculate a helper payout, or investigate
+          a safety incident).
         </p>
         <p>
-          A payment provider may receive transaction information needed to process or verify a card payment. Uncedo does not
-          receive your full card number or CVV through the hosted checkout. We do not expose payment credentials, OTPs or
-          private account records to the conversational assistant.
-        </p>
-        <p>
-          We may disclose information to a regulator, court, law-enforcement authority, professional adviser or another
-          party where required or permitted by law, or where reasonably necessary to protect a person’s safety, prevent
-          fraud or establish, exercise or defend legal rights.
+          Notices linking to this Privacy Policy and our{' '}
+          <Link className="font-bold text-brand underline" to="/terms">Terms of Service</Link>,{' '}
+          <Link className="font-bold text-brand underline" to="/payment-pricing-policy">Payment &amp; Pricing Policy</Link>,
+          and <Link className="font-bold text-brand underline" to="/refund-policy">Refund Policy</Link> are surfaced across
+          sign-up, customer account, payment checkout, and footer links.
         </p>
       </LegalSection>
 
-      <LegalSection title="5. Processing outside South Africa">
+      <LegalSection title="5. Cookies, browser storage, and capability links">
         <p>
-          Some service providers or their infrastructure may process or store information outside South Africa. Where
-          personal information is transferred across borders, the responsible party must ensure that a condition in
-          section 72 of POPIA is met, such as adequate protection, an applicable agreement or another lawful ground. The
-          specific provider locations and transfer safeguards depend on the services configured for the feature you use.
+          Uncedo uses essential browser storage rather than third-party advertising trackers: Firebase Authentication local
+          persistence to keep signed-in users authenticated, <code>sessionStorage</code> on the <code>/payment</code> page
+          to retain your single-session payment reference after scrubbing sensitive tokens from the URL bar, and strict{' '}
+          <code>no-store</code> / <code>no-referrer</code> headers on payment and account-linking routes so one-time
+          capability links are not leaked via browser referrers.
         </p>
       </LegalSection>
 
-      <LegalSection title="6. Guest requests and account linking">
+      <LegalSection title="6. Who may receive personal information">
+        <ul className="list-disc space-y-2 pl-5">
+          <li>
+            <strong>Assigned helpers or customers:</strong> Once a job offer is accepted, Uncedo shares only the minimum
+            job details required for fulfilment (such as service summary, service location, arrival status, and relayed
+            updates). Helpers are contractually bound under our Helper Agreement and POPIA not to copy, export, contact
+            off-platform, or misuse customer personal information.
+          </li>
+          <li>
+            <strong>Authorised service providers (Operators):</strong> Google Cloud and Firebase (hosting, authentication,
+            Firestore, Realtime Database, and Storage), Paystack (hosted card checkout, card tokenization, South African bank
+            account verification, and ZAR helper transfers), Meta Platforms (WhatsApp Cloud API delivery), and configured
+            AI assistance providers acting strictly under Uncedo’s backend permission controls.
+          </li>
+          <li>
+            <strong>Law enforcement &amp; regulators:</strong> Where required by South African law, court order, subpoena, or
+            to protect vital safety and prevent fraud.
+          </li>
+        </ul>
+      </LegalSection>
+
+      <LegalSection title="7. Transborder information flows (POPIA section 72)">
         <p>
-          An eligible WhatsApp guest request is associated with a WhatsApp identity and conversation reference so Uncedo
-          can respond and manage the request. A guest record is separate from a Firebase-authenticated account. Uncedo
-          does not give a person access to an existing account merely because the person supplies a matching telephone
-          number. Where account linking is available, ownership must be established through the verification flow. Once
-          successfully linked, eligible guest request history may be associated with that verified account. Requests that
-          cannot be securely matched remain separate.
+          Cloud infrastructure, payment, messaging, and AI service providers used by Uncedo (including Google Cloud,
+          Firebase, Meta WhatsApp Cloud API, and Paystack) may store or process data on servers located outside South
+          Africa. When cross-border transfers occur, Uncedo relies on POPIA section 72 safeguards—such as binding
+          contractual data-protection commitments, adequate statutory protections, or necessity to perform your requested
+          international communication or transaction.
         </p>
       </LegalSection>
 
-      <LegalSection title="7. Payments and financial records">
+      <LegalSection title="8. Guest WhatsApp requests & account linking">
         <p>
-          Uncedo may retain payment attempts, verified settlement status, transaction and receipt references, refund
-          records, helper earnings, commission obligations, wallet ledger entries and payout outcomes. These records are
-          used to reconcile payments, prevent duplicate charges or payouts, resolve disputes and meet legal accounting
-          duties. A customer’s message or a successful browser redirect is not treated as proof of payment.
-        </p>
-        <p>
-          A card is collected through the payment provider’s hosted interface. Where you explicitly choose to save a card
-          and the payment provider supports it, Uncedo may retain a reusable authorisation reference and limited masked
-          card details. You can request removal of an eligible saved payment method through the supported account or
-          support workflow. No card is charged solely because an automated assistant suggested a payment option.
+          Eligible WhatsApp guest requests are linked to the verified WhatsApp phone number and conversation reference so
+          Uncedo can manage bookings, cancellations, and card payment links. Guest records remain separate from
+          Firebase-authenticated accounts. Uncedo never grants access to an existing account solely because a phone number
+          matches; ownership must be verified via a one-time expiring WhatsApp link before guest history can be linked.
         </p>
       </LegalSection>
 
-      <LegalSection title="8. Automated assistance and human review">
+      <LegalSection title="9. Automated processing & human review (POPIA section 71)">
         <p>
-          Automated assistance may classify a message, use approved service information, retrieve limited authorised
-          account or request data, and help explain a result. Access to information and actions is controlled by backend
-          permissions. The assistant is not allowed to approve payments, change wallet balances, link accounts or bypass
-          required confirmations. You may request human support where available, and a support administrator may review
-          relevant conversation and request information to resolve the issue.
+          Where WhatsApp automated assistance is enabled, AI systems may classify enquiries, summarise approved service
+          rules, or retrieve authorised booking status on your behalf. Automated assistants cannot approve payments,
+          modify wallet debt or helper balances, alter bookings without required confirmations, or grant account access.
+          Authoritative pricing, cancellation fees, payments, and payout decisions are enforced by Uncedo’s backend
+          servers, and you may always request human administrator review for any dispute, moderation decision, or account
+          action.
         </p>
       </LegalSection>
 
-      <LegalSection title="9. Retention and deletion">
+      <LegalSection title="10. Information quality, retention, and honest operational controls (Condition 5)">
         <p>
-          We keep information for as long as reasonably necessary for the purpose for which it was collected, including
-          service delivery, account security, financial reconciliation, legal duties, safety investigations and dispute
-          handling. Financial and audit records may need to be retained after an account is closed. When information is no
-          longer needed and no lawful retention ground applies, it should be securely deleted, de-identified or otherwise
-          disposed of.
+          You can review and update your customer name, service address, account type, and contact details at any time on
+          your <Link className="font-bold text-brand underline" to="/account">Account page</Link> or through supported
+          WhatsApp/in-app flows.
         </p>
         <p>
-          Some temporary WhatsApp records are assigned target expiry periods. An expiry marker alone does not delete a
-          record, and automated cleanup has not been verified as active for every record category in the current service.
-          Some records may therefore remain until the relevant cleanup or an approved deletion process runs. This is a
-          current operational limitation; contact support to make a request concerning your information.
+          We retain financial, booking, wallet-debt, payout, and audit records for as long as needed for service delivery,
+          dispute resolution, fraud prevention, and statutory South African tax and accounting periods. Helper Police
+          Clearance Certificates are held in private storage with object-hold safeguards to preserve vetting and audit
+          integrity unless lawful destruction is required and approved.
         </p>
-      </LegalSection>
-
-      <LegalSection title="10. Security and incidents">
         <p>
-          Uncedo uses technical and organisational safeguards intended to protect personal information against
-          unauthorised access, loss, misuse, alteration or disclosure. Access is limited according to role and operational
-          need. No internet service can guarantee perfect security. If a security compromise creates a risk as described
-          by POPIA, the responsible party will notify the Information Regulator and affected data subjects as required by
-          law.
+          Certain temporary WhatsApp operational and media records carry target expiry timestamps; however, scheduled
+          automated cleanup only executes when retention-cleanup flags and Cloud Storage bucket lifecycle rules are
+          explicitly active in the live environment. Where automatic deletion has not yet run, records remain protected in
+          access-restricted backend storage until manual or scheduled deletion—contact support at any time to exercise a
+          deletion request.
         </p>
       </LegalSection>
 
-      <LegalSection title="11. Your rights under POPIA">
+      <LegalSection title="11. Security safeguards and breach notification (Conditions 7 & s22)">
         <p>
-          Subject to applicable law and verification, you may ask for access to personal information, correction or
-          deletion of inaccurate, excessive or unlawfully held information, details about how it is used, or objection to
-          certain processing. You may also withdraw consent where processing is based on consent and complain to the
-          Information Regulator. Some requests may be limited where information must be retained to meet legal duties,
-          protect another person’s rights, complete a transaction or resolve a dispute.
+          Uncedo protects personal information using HTTPS/TLS encryption in transit, Firebase Authentication, strict
+          role-based Firestore and Cloud Storage security rules, server-side authority for financial and wallet writes,
+          hashed arrival PIN verification, and tokenized payment credentials.
         </p>
         <p>
-          To exercise a right, contact Uncedo through the support route listed above and state what you are requesting.
-          We may ask for reasonable proof of identity and enough details to locate the relevant account or conversation.
-          Do not send your password, verification code or full payment credentials as proof.
-        </p>
-        <p>
-          Information Regulator of South Africa: <a className="font-bold text-brand underline" href="https://inforegulator.org.za/" target="_blank" rel="noreferrer">inforegulator.org.za</a>.
+          If there are reasonable grounds to believe that personal information has been accessed or acquired by an
+          unauthorised person (a security compromise under section 22 of POPIA), Uncedo will notify the{' '}
+          <strong>Information Regulator of South Africa</strong> and affected data subjects as soon as reasonably possible,
+          providing steps you can take to mitigate potential harm.
         </p>
       </LegalSection>
 
-      <LegalSection title="12. Children and special personal information">
+      <LegalSection title="12. Data subject participation and your POPIA rights (Condition 8)">
+        <p>Subject to identity verification and applicable statutory exceptions under POPIA sections 23–25, you have the right to:</p>
+        <ul className="list-disc space-y-1.5 pl-5">
+          <li>Request confirmation of whether Uncedo holds your personal information and obtain a copy or description of it;</li>
+          <li>Request correction, updating, or deletion of inaccurate, irrelevant, excessive, outdated, or unlawfully held data;</li>
+          <li>Object on reasonable grounds to processing (section 11(3)), or object at any time to direct marketing;</li>
+          <li>Withdraw previously granted consent where processing relies solely on consent;</li>
+          <li>Request human intervention or challenge decisions made solely by automated processing (section 71);</li>
+          <li>
+            Lodge a complaint with the <strong>Information Regulator of South Africa</strong> if you are unsatisfied with how
+            Uncedo handles your personal information:{' '}
+            <a className="font-bold text-brand underline" href="https://inforegulator.org.za/" target="_blank" rel="noreferrer">
+              inforegulator.org.za
+            </a>
+            .
+          </li>
+        </ul>
         <p>
-          Where a service request concerns a child, a parent or legal guardian should make or manage the request and
-          provide only the information reasonably needed for the service. Uncedo should process children’s information or
-          special personal information only on a lawful basis and with the safeguards required by POPIA.
+          Some deletion requests may be deferred or limited where retention is legally required (for example, unpaid
+          wallet-debt settlement records, statutory tax records, or active safety investigations).
         </p>
       </LegalSection>
 
-      <LegalSection title="13. Changes to this policy">
+      <LegalSection title="13. Children's personal information (POPIA sections 34–35)">
         <p>
-          We may update this policy when the service or applicable requirements change. The current version and date will
-          appear on this page. If a material change requires renewed acceptance, Uncedo may ask you to review the updated
-          policy before continuing to use the affected channel or feature.
+          Uncedo accounts are intended for adults (18 years or older) or legally authorised business representatives. We do
+          not knowingly permit children to create accounts independently. Any service request involving a child must be
+          placed and managed by a parent or legal guardian, providing only the minimum information necessary.
+        </p>
+      </LegalSection>
+
+      <LegalSection title="14. Updates to this policy">
+        <p>
+          We may update this Privacy Policy and POPIA Notice as Uncedo’s features, payment flows, or legal requirements
+          evolve. The latest effective date is shown at the top of this page, and material changes may require renewed
+          notice or acceptance before continued use.
         </p>
       </LegalSection>
     </LegalPageShell>

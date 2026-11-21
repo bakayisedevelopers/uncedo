@@ -12,9 +12,10 @@ import {
   getMasteryDisplayMeta,
   getMembershipDisplayMeta,
   maskReferralDisplay,
+  resolveOfferingMasteryRecord,
   summarizeReferralList,
 } from '../rewardPresentation.js';
-import { REWARD_REASON_CODES } from '../../../shared/rewards.js';
+import { buildServiceOptionMasteryKey, REWARD_REASON_CODES } from '../../../shared/rewards.js';
 
 test('formats helper points to rand safely', () => {
   assert.equal(formatPointsToRand(125, 10), 'R12.50');
@@ -165,4 +166,36 @@ test('keeps per-service mastery progress independent for multiple services', () 
   const gardening = buildMasteryProgressModel({ mastery: { level: 'beginner', eligibleCompletedJobCount: 0 }, masteryConfig: { specialist: { minCompletedPaidJobs: 50, minAverageRating: 4.6, minRatingCount: 10 } }, ratingSummary: { average: 0, count: 0 } });
   assert.equal(cleaning.nextLevel, 'master');
   assert.equal(gardening.nextLevel, 'specialist');
+});
+
+test('resolves option-specific mastery independently of sibling options and falls back only when optionless', () => {
+  const optionMap = new Map([
+    [
+      buildServiceOptionMasteryKey('cleaning', 'deep_clean'),
+      { serviceId: 'cleaning', optionId: 'deep_clean', level: 'specialist', eligibleCompletedJobCount: 55 },
+    ],
+  ]);
+  const serviceMap = new Map([
+    ['cleaning', { serviceId: 'cleaning', level: 'specialist', eligibleCompletedJobCount: 55 }],
+  ]);
+
+  const deepClean = resolveOfferingMasteryRecord({
+    offering: { serviceId: 'cleaning', optionId: 'deep_clean' },
+    optionMasteryMap: optionMap,
+    serviceMasteryMap: serviceMap,
+  });
+  const windows = resolveOfferingMasteryRecord({
+    offering: { serviceId: 'cleaning', optionId: 'window_wash' },
+    optionMasteryMap: optionMap,
+    serviceMasteryMap: serviceMap,
+  });
+  const optionless = resolveOfferingMasteryRecord({
+    offering: { serviceId: 'cleaning', optionId: '' },
+    optionMasteryMap: optionMap,
+    serviceMasteryMap: serviceMap,
+  });
+
+  assert.equal(deepClean.mastery.level, 'specialist');
+  assert.equal(windows.mastery.level, 'beginner');
+  assert.equal(optionless.mastery.level, 'specialist');
 });

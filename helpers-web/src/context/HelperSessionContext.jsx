@@ -19,6 +19,15 @@ import {
   formatLiveLocationDisplay,
   reverseGeocodeCoords,
 } from '../services/locationGeocodeService';
+import {
+  getMasteryConfig,
+  subscribeToHelperOptionRatings,
+  subscribeToHelperServiceMastery,
+  subscribeToHelperServiceOptionMastery,
+  subscribeToHelperServiceRatings,
+  subscribeToRewardAccount,
+} from '../services/helperMasteryService';
+import { DEFAULT_MASTERY_CONFIG } from '../utils/masteryModel';
 import { evaluateHelperOnboarding } from '../utils/onboardingSteps';
 
 const HelperSessionContext = createContext(null);
@@ -153,6 +162,12 @@ export function HelperSessionProvider({ user, children }) {
   const [walletSnapshot, setWalletSnapshot] = useState(EMPTY_WALLET_SNAPSHOT);
   const [walletLoading, setWalletLoading] = useState(false);
   const [walletError, setWalletError] = useState('');
+  const [serviceOptionMastery, setServiceOptionMastery] = useState([]);
+  const [serviceMastery, setServiceMastery] = useState([]);
+  const [serviceOptionRatings, setServiceOptionRatings] = useState([]);
+  const [serviceRatings, setServiceRatings] = useState([]);
+  const [rewardAccount, setRewardAccount] = useState(null);
+  const [masteryConfig, setMasteryConfig] = useState(DEFAULT_MASTERY_CONFIG);
   const [loadingInitial, setLoadingInitial] = useState(true);
 
   const [gpsStatus, setGpsStatus] = useState('idle');
@@ -244,17 +259,24 @@ export function HelperSessionProvider({ user, children }) {
     const unsubCatalog = subscribeToServiceCatalog(setCatalog);
     const unsubOffers = subscribeToPendingHelperOffers(user.uid, setOffers);
     const unsubHistory = subscribeToHelperServiceRequests(user.uid, setJobHistory);
+    const unsubOptionMastery = subscribeToHelperServiceOptionMastery(user.uid, setServiceOptionMastery, () => setServiceOptionMastery([]));
+    const unsubServiceMastery = subscribeToHelperServiceMastery(user.uid, setServiceMastery, () => setServiceMastery([]));
+    const unsubOptionRatings = subscribeToHelperOptionRatings(user.uid, setServiceOptionRatings, () => setServiceOptionRatings([]));
+    const unsubServiceRatings = subscribeToHelperServiceRatings(user.uid, setServiceRatings, () => setServiceRatings([]));
+    const unsubRewardAccount = subscribeToRewardAccount(user.uid, setRewardAccount, () => setRewardAccount(null));
 
     let active = true;
     Promise.all([
       getMyPoliceClearanceReview().catch(() => null),
       getHelperAgreementBundle(user.uid).catch(() => null),
       getHelperWalletSnapshot().catch(() => null),
-    ]).then(([reviewData, agreementData, walletData]) => {
+      getMasteryConfig().catch(() => DEFAULT_MASTERY_CONFIG),
+    ]).then(([reviewData, agreementData, walletData, nextMasteryConfig]) => {
       if (!active) return;
       if (reviewData) setClearanceReview(reviewData);
       if (agreementData?.activeVersion) setActiveAgreement(agreementData.activeVersion);
       if (walletData) setWalletSnapshot(walletData);
+      if (nextMasteryConfig) setMasteryConfig(nextMasteryConfig);
       setLoadingInitial(false);
     });
 
@@ -265,6 +287,11 @@ export function HelperSessionProvider({ user, children }) {
       unsubCatalog?.();
       unsubOffers?.();
       unsubHistory?.();
+      unsubOptionMastery?.();
+      unsubServiceMastery?.();
+      unsubOptionRatings?.();
+      unsubServiceRatings?.();
+      unsubRewardAccount?.();
     };
   }, [user?.uid]);
 
@@ -833,6 +860,46 @@ export function HelperSessionProvider({ user, children }) {
     return Number.isFinite(acc) && acc > 0 ? Math.round(acc) : null;
   }, [activeCoords?.accuracy]);
 
+  const serviceOptionMasteryMap = useMemo(
+    () => new Map(
+      (Array.isArray(serviceOptionMastery) ? serviceOptionMastery : []).map((item) => [
+        String(item?.id || item?.masteryKey || '').trim(),
+        item,
+      ]),
+    ),
+    [serviceOptionMastery],
+  );
+
+  const serviceMasteryMap = useMemo(
+    () => new Map(
+      (Array.isArray(serviceMastery) ? serviceMastery : []).map((item) => [
+        String(item?.id || item?.serviceId || '').trim(),
+        item,
+      ]),
+    ),
+    [serviceMastery],
+  );
+
+  const serviceOptionRatingMap = useMemo(
+    () => new Map(
+      (Array.isArray(serviceOptionRatings) ? serviceOptionRatings : []).map((item) => [
+        String(item?.id || item?.masteryKey || '').trim(),
+        item,
+      ]),
+    ),
+    [serviceOptionRatings],
+  );
+
+  const serviceRatingMap = useMemo(
+    () => new Map(
+      (Array.isArray(serviceRatings) ? serviceRatings : []).map((item) => [
+        String(item?.id || item?.serviceId || '').trim(),
+        item,
+      ]),
+    ),
+    [serviceRatings],
+  );
+
   const value = useMemo(
     () => ({
       user,
@@ -849,6 +916,14 @@ export function HelperSessionProvider({ user, children }) {
       walletLoading,
       walletError,
       refreshWallet,
+      serviceOptionMastery,
+      serviceMastery,
+      serviceOptionMasteryMap,
+      serviceMasteryMap,
+      serviceOptionRatingMap,
+      serviceRatingMap,
+      rewardAccount,
+      masteryConfig,
       loadingInitial,
       evaluation,
       isOnline,
@@ -890,6 +965,14 @@ export function HelperSessionProvider({ user, children }) {
       walletLoading,
       walletError,
       refreshWallet,
+      serviceOptionMastery,
+      serviceMastery,
+      serviceOptionMasteryMap,
+      serviceMasteryMap,
+      serviceOptionRatingMap,
+      serviceRatingMap,
+      rewardAccount,
+      masteryConfig,
       loadingInitial,
       evaluation,
       isOnline,

@@ -104,7 +104,7 @@ C:\Users\Jabu Babb\AppData\Local\Android\Sdk\platform-tools\adb.exe connect 192.
 
 ## Helper rewards experience
 
-The helper app submits service-request ratings through the trusted `submitServiceRequestRating` Cloud Function instead of updating customer aggregates from the client. The Helpers Rewards experience is read-only against the shared Phase 0 rewards foundation: it displays Uncedo Points, paginated ledger history, overall membership, per-service mastery, customer-safe ratings, referrals, performance, and recognition without mixing points with cash earnings or payouts.
+The helper app submits service-request ratings through the trusted `submitServiceRequestRating` Cloud Function instead of updating customer aggregates from the client. The Helpers Rewards experience is read-only against the shared Phase 0 rewards foundation: it displays Uncedo Points, paginated ledger history, overall membership, per-service-option mastery (`helperMastery/{uid}/serviceOptions/{masteryKey}` with optionless fallback to `services/{serviceId}`), customer-safe ratings, referrals, performance, and recognition without mixing points with cash earnings or payouts.
 
 `src/services/rewards/rewardClientService.js` is the focused data client for reward accounts, transactions, reward configuration, rating summaries, mastery, and referral endpoints. Reward-sensitive writes remain server-authoritative. Helper reward screens are registered in `src/navigation/RootNavigator.js`; profile, home, earnings, service offerings, completion, rating, and server-authored notification flows link into them.
 

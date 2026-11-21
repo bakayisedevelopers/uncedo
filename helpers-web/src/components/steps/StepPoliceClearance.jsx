@@ -187,7 +187,7 @@ export function StepPoliceClearance({ profile, onReviewLoaded, onCompleteNext })
               </div>
               <p className="text-xs text-ink-500 flex items-center gap-1.5">
                 <Lock className="h-3.5 w-3.5 text-tealbrand-700 shrink-0" />
-                Stored encrypted in private verification storage — never shared publicly.
+                Stored encrypted in private verification storage under POPIA Special Personal Information safeguards — reviewed only by authorised Uncedo vetting administrators and never shared publicly or sent to AI.
               </p>
             </div>
 

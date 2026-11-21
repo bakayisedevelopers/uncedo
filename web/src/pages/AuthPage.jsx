@@ -229,7 +229,11 @@ export default function AuthPage({ mode = 'login' }) {
           </button>
           {!googleAuthEnabled ? <p className="text-center text-xs text-zinc-500">Google sign-in is awaiting Firebase OAuth provider setup.</p> : null}
           <p className="mt-4 text-center text-xs leading-5 text-zinc-500">
-            By continuing, you agree to Uncedo’s <Link className="font-semibold underline" to="/terms">Terms of Service</Link> and <Link className="font-semibold underline" to="/privacy-policy">Privacy Policy</Link>.
+            By continuing, you agree to Uncedo’s{' '}
+            <Link className="font-semibold underline" to="/terms">Terms of Service</Link>,{' '}
+            <Link className="font-semibold underline" to="/payment-pricing-policy">Payment Policy</Link>,{' '}
+            <Link className="font-semibold underline" to="/refund-policy">Refund Policy</Link>, and acknowledge personal-information processing under POPIA in our{' '}
+            <Link className="font-semibold underline" to="/privacy-policy">Privacy Policy &amp; POPIA Notice</Link>.
           </p>
           {!signupLink?.token ? (
             <p className="mt-6 text-center text-sm text-zinc-600">

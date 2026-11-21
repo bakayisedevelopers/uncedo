@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ArrowRight, Banknote, CheckCircle2, ChevronLeft, CreditCard, ExternalLink, MapPin, RefreshCw, XCircle } from 'lucide-react';
+import { ArrowRight, Banknote, CheckCircle2, ChevronLeft, CreditCard, MapPin, RefreshCw, XCircle } from 'lucide-react';
 import { StepAgreement } from '../components/steps/StepAgreement';
 import { StepBasics } from '../components/steps/StepBasics';
 import { StepPayoutDetails } from '../components/steps/StepPayoutDetails';
@@ -14,11 +14,11 @@ import {
 } from '../services/helperDataService';
 
 const LEGAL_LINKS = [
-  { href: 'https://uncedo.com/terms', label: 'Terms and Conditions' },
-  { href: 'https://uncedo.com/privacy', label: 'Privacy Policy' },
-  { href: 'https://uncedo.com/payment-pricing-policy', label: 'Payment and Pricing Policy' },
-  { href: 'https://uncedo.com/refund-policy', label: 'Refund Policy' },
-  { href: 'https://uncedo.com/data-voice-policy', label: 'Data and Voice Policy' },
+  { path: '/privacy-policy', label: 'Privacy Policy & POPIA Notice' },
+  { path: '/terms', label: 'Helper Terms and Conditions' },
+  { path: '/payment-pricing-policy', label: 'Helper Payout, Pricing & Cash Policy' },
+  { path: '/refund-policy', label: 'Cancellation, Refund & Adjustment Policy' },
+  { path: '/data-voice-policy', label: 'Location, Data & WhatsApp Policy' },
 ];
 
 function moneyMinor(minor = 0) {
@@ -527,19 +527,18 @@ export function ProfileSectionPage({ section = 'details', isTopLevel = false, on
           </section>
 
           <section className="rounded-[24px] border border-border bg-surface p-5 sm:p-6 space-y-3">
-            <h2 className="font-display text-lg font-extrabold text-ink-900">Policies</h2>
+            <h2 className="font-display text-lg font-extrabold text-ink-900">Policies &amp; POPIA Notices</h2>
             <div className="space-y-2">
               {LEGAL_LINKS.map((link) => (
-                <a
-                  key={link.href}
-                  href={link.href}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex items-center justify-between gap-3 rounded-2xl border border-border bg-tealbrand-50/40 hover:bg-tealbrand-50 px-4 py-3 text-sm font-bold text-tealbrand-800"
+                <button
+                  key={link.path}
+                  type="button"
+                  onClick={() => onNavigate(link.path)}
+                  className="w-full text-left flex items-center justify-between gap-3 rounded-2xl border border-border bg-tealbrand-50/40 hover:bg-tealbrand-50 px-4 py-3 text-sm font-bold text-tealbrand-800 transition-colors"
                 >
                   <span>{link.label}</span>
-                  <ExternalLink className="h-4 w-4 text-ink-400 shrink-0" />
-                </a>
+                  <ArrowRight className="h-4 w-4 text-ink-400 shrink-0" />
+                </button>
               ))}
             </div>
           </section>
