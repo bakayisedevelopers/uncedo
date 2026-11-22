@@ -98,6 +98,29 @@ function formatCurrency(value) {
   return `R${amount}`;
 }
 
+function isRatingEligibleRequest(request = null) {
+  if (!request) return false;
+  const status = String(request?.status || '').trim().toLowerCase();
+  const helperId = String(request?.helperAssignment?.helperId || request?.helperId || '').trim();
+  if (!helperId) return false;
+  if (status === 'completed' || status === 'closed') return true;
+  if (status !== 'canceled' && status !== 'cancelled') return false;
+  const canceledFromStatus = String(request?.canceledFromStatus || '').trim().toLowerCase();
+  const billingRule = String(request?.pricingSnapshot?.cancellationBillingRule || '').trim().toLowerCase();
+  return Boolean(
+    request?.arrivedAt
+    || request?.helperAssignment?.arrivedAt
+    || request?.workStartedAt
+    || request?.helperAssignment?.workStartedAt
+    || request?.arrivalVerification?.required
+    || request?.arrivalVerification?.generatedAtMs
+    || request?.arrivalVerification?.verified
+    || request?.arrivalVerification?.verifiedAtMs
+    || ['arrived', 'work_started'].includes(canceledFromStatus)
+    || ['travel_fee_plus_booking_fee', 'arrived_fee', 'work_started_fee'].includes(billingRule),
+  );
+}
+
 function getPricingTotal(pricingSnapshot = null) {
   return Number(
     pricingSnapshot?.total
@@ -344,8 +367,9 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
 
     if (
       !['completed', 'canceled'].includes(previousStatus)
-      && currentStatus === 'completed'
+      && (currentStatus === 'completed' || (currentStatus === 'canceled' && isRatingEligibleRequest(request)))
       && request?.helperAssignment?.helperId
+      && !request?.ratings?.customer
       && lastPromptedRequestIdRef.current !== String(request?.id || requestId || '')
     ) {
       lastPromptedRequestIdRef.current = String(request?.id || requestId || '');
@@ -366,14 +390,32 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
 
     setShowCancelModal(false);
     setShowSafetyModal(false);
-    setShowRatingModal(false);
 
+    if (isRatingEligibleRequest(request) && !request?.ratings?.customer) {
+      const targetReqId = String(request?.id || requestId || '');
+      if (lastPromptedRequestIdRef.current !== targetReqId && request?.helperAssignment?.helperId) {
+        lastPromptedRequestIdRef.current = targetReqId;
+        setRatingTarget({
+          requestId: targetReqId,
+          helperId: request.helperAssignment.helperId,
+          helperName: request.helperAssignment.helperName || 'helper',
+        });
+        setShowRatingModal(true);
+      }
+      return;
+    }
+
+    if (showRatingModal) {
+      return;
+    }
+
+    setShowRatingModal(false);
     const timeout = setTimeout(() => {
       goBack('CustomerHome');
     }, 250);
 
     return () => clearTimeout(timeout);
-  }, [goBack, request?.status]);
+  }, [goBack, request, requestId, showRatingModal]);
 
   useEffect(() => {
     lastPromptedRequestIdRef.current = '';
@@ -890,6 +932,18 @@ export function ServiceRequestTrackingScreen({ route, goBack, systemInsets = {} 
       setCancelReason('');
       if (updatedRequest) {
         setRequest(updatedRequest);
+      }
+      const effectiveRequest = updatedRequest || request;
+      if (isRatingEligibleRequest(effectiveRequest) && effectiveRequest?.helperAssignment?.helperId && !effectiveRequest?.ratings?.customer) {
+        const targetReqId = String(effectiveRequest.id || requestId || '');
+        lastPromptedRequestIdRef.current = targetReqId;
+        setRatingTarget({
+          requestId: targetReqId,
+          helperId: effectiveRequest.helperAssignment.helperId,
+          helperName: effectiveRequest.helperAssignment.helperName || 'helper',
+        });
+        setShowRatingModal(true);
+        return;
       }
       goBack('CustomerHome');
     } catch (nextError) {

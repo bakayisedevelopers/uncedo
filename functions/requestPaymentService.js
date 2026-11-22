@@ -538,8 +538,20 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
     const debtOutstanding = hasOutstandingWalletDebt(legacy, payment);
     const reversalRef = db.collection(PAYMENT_LEDGER).doc(`payment_debt_reversal_${digest(`${requestId}:${attemptId}`).slice(0, 40)}`);
     const reversalSnap = debtOutstanding ? await transaction.get(reversalRef) : null;
+    let reversalTargetRef = customerRef;
+    let reversalTargetUid = customerId;
     if (debtOutstanding && customerRef) {
       customerSnap = await transaction.get(customerRef);
+      const guestTransferredToUid = String(customerSnap.data()?.debtTransferredToUid || '').trim();
+      if (guestTransferredToUid && guestTransferredToUid !== customerId) {
+        const linkedOwnerRef = db.collection('users').doc(guestTransferredToUid);
+        const linkedOwnerSnap = await transaction.get(linkedOwnerRef);
+        if (linkedOwnerSnap.exists) {
+          customerSnap = linkedOwnerSnap;
+          reversalTargetRef = linkedOwnerRef;
+          reversalTargetUid = guestTransferredToUid;
+        }
+      }
       wallet = customerSnap.data()?.wallet || { balance: 0, currency: 'ZAR' };
     }
     const amount = Number(attempt.amount || 0);
@@ -576,7 +588,7 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
       });
     }
     const canonicalOperationId = String(legacy?.operationId || `service_${digest(requestId).slice(0, 40)}`);
-    const reversedDebtNow = Boolean(debtOutstanding && customerRef && customerSnap?.exists && reversalAmount > 0 && !reversalSnap?.exists);
+    const reversedDebtNow = Boolean(debtOutstanding && reversalTargetRef && customerSnap?.exists && reversalAmount > 0 && !reversalSnap?.exists);
     if (reversedDebtNow) {
       const oldBalance = Number(wallet?.balance || 0);
       const newBalance = Number((oldBalance + reversalAmount).toFixed(2));
@@ -584,7 +596,7 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
         entryId: reversalRef.id,
         operationId: canonicalOperationId,
         requestId,
-        userId: customerId,
+        userId: reversalTargetUid,
         entryType: 'service_charge_debt_reversal',
         amount: reversalAmount,
         currency: 'ZAR',
@@ -593,7 +605,7 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
         sourcePaymentAttemptId: attemptId,
         createdAtMs: now,
       });
-      transaction.set(customerRef, {
+      transaction.set(reversalTargetRef, {
         wallet: {
           ...wallet,
           balance: newBalance,

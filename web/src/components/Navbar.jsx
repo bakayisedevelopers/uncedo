@@ -1,40 +1,70 @@
 import { Link } from 'react-router-dom';
+import WhatsAppIcon from './WhatsAppIcon';
+
+export const UNCEDO_WHATSAPP_BOOK_URL =
+  'https://wa.me/27605239926?text=Hi%20Uncedo%2C%20I%27d%20like%20to%20book%20a%20service';
 
 export default function Navbar() {
   return (
-    <nav className="sticky top-0 z-50 bg-white">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between h-20">
-          {/* Logo */}
-          <Link to="/" className="flex items-center gap-2 group">
-            <img
-              src="/logo.png"
-              alt="Uncedo logo"
-              className="h-10 w-10 object-contain transition-transform group-hover:scale-[1.02]"
-            />
-            <span className="bg-gradient-to-r from-brand via-emerald-500 to-brand-dark bg-clip-text text-xl font-black text-transparent">Uncedo</span>
+    <header className="sticky top-0 z-50 border-b border-zinc-200/80 bg-white/95 backdrop-blur-sm">
+      <div className="mx-auto flex h-20 max-w-7xl items-center justify-between gap-8 px-4 sm:px-6 lg:px-8">
+        <Link
+          to="/"
+          className="flex shrink-0 items-center gap-2.5 whitespace-nowrap rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
+        >
+          <img
+            src="/logo.png"
+            alt="Uncedo"
+            referrerPolicy="no-referrer"
+            className="h-9 w-9 shrink-0 object-contain"
+          />
+          <span className="font-display text-xl font-extrabold tracking-tight text-zinc-900">
+            Uncedo
+          </span>
+        </Link>
+
+        <nav
+          aria-label="Primary navigation"
+          className="hidden items-center gap-7 md:flex"
+        >
+          <a
+            href="/#features"
+            className="whitespace-nowrap shrink-0 text-sm font-medium text-zinc-600 transition-colors hover:text-zinc-950 hover:underline hover:underline-offset-4"
+          >
+            Why WhatsApp
+          </a>
+          <a
+            href="/#how-it-works"
+            className="whitespace-nowrap shrink-0 text-sm font-medium text-zinc-600 transition-colors hover:text-zinc-950 hover:underline hover:underline-offset-4"
+          >
+            How it works
+          </a>
+          <a
+            href="https://helpers.bakayise.com"
+            className="whitespace-nowrap shrink-0 text-sm font-medium text-zinc-600 transition-colors hover:text-zinc-950 hover:underline hover:underline-offset-4"
+          >
+            Helpers
+          </a>
+          <Link
+            to="/sign-in"
+            className="whitespace-nowrap shrink-0 text-sm font-medium text-zinc-600 transition-colors hover:text-zinc-950 hover:underline hover:underline-offset-4"
+          >
+            Sign in
           </Link>
+        </nav>
 
-          {/* Navigation Links */}
-          <div className="hidden md:flex items-center gap-8">
-            <a href="#features" className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white transition-colors font-medium">
-              Features
-            </a>
-            <a href="#how-it-works" className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white transition-colors font-medium">
-              How it Works
-            </a>
-            <Link to="/privacy-policy" className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white transition-colors font-medium">Privacy</Link>
-            <Link to="/terms" className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white transition-colors font-medium">Terms</Link>
-          </div>
-
-          {/* Action Buttons */}
-          <div className="flex items-center gap-3">
-            <a href="https://helpers.bakayise.com" className="hidden text-sm font-bold text-zinc-700 transition hover:text-brand lg:inline">Helpers</a>
-            <Link to="/sign-in" className="hidden text-sm font-bold text-zinc-700 transition hover:text-brand sm:inline">Sign in</Link>
-            <Link to="/sign-up" className="rounded-xl bg-brand px-4 py-2.5 text-sm font-bold text-white shadow-sm transition hover:bg-brand-dark">Create account</Link>
-          </div>
+        <div className="flex shrink-0 items-center gap-3">
+          <a
+            href={UNCEDO_WHATSAPP_BOOK_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex min-h-[42px] shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-xl bg-brand-dark px-5 py-2.5 text-sm font-bold text-white shadow-sm transition-colors duration-150 hover:bg-emerald-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 focus-visible:ring-offset-2"
+          >
+            <WhatsAppIcon className="h-4 w-4 shrink-0" />
+            <span>Book</span>
+          </a>
         </div>
       </div>
-    </nav>
+    </header>
   );
 }

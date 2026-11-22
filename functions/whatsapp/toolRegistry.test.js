@@ -340,6 +340,24 @@ test('relayMessageToHelper is exposed only with an open activeServiceRequest and
   assert.deepEqual(relayedArgs, { messageText: 'Gate code is 1234#', category: 'arrival' });
   assert.equal(res.code, 'relayed');
   assert.equal(res.deliveredToInAppChat, true);
+
+  const helperNameRegistry = createWhatsAppToolRegistry({
+    handlers: {
+      relayMessageToHelper: async () => ({
+        code: 'relayed',
+        requestId: 'req_456',
+        helperName: 'Thabo M.',
+        deliveredToInAppChat: true,
+        relayedToHelperWhatsApp: true,
+      }),
+    },
+  });
+  const helperNameRes = await helperNameRegistry.execute(
+    'relayMessageToHelper',
+    { messageText: 'I am outside now' },
+    { role: 'customer', authorization: linkedCustomer },
+  );
+  assert.equal(helperNameRes.helperName, 'Thabo M.');
 });
 
 test('cancelServiceRequest is exposed for guest and customer roles and validates optional requestId and output schema', async () => {
@@ -360,6 +378,7 @@ test('cancelServiceRequest is exposed for guest and customer roles and validates
           chargeConfirmed: true,
           pendingReconciliation: false,
           confirmationRequired: false,
+          paymentUrl: 'https://uncedo.example.test/payment?token=abc',
         };
       },
     },
@@ -384,6 +403,7 @@ test('cancelServiceRequest is exposed for guest and customer roles and validates
   );
   assert.deepEqual(receivedArgs, { requestId: 'wa_req_999', reason: 'Changed plans' });
   assert.equal(explicitRes.requestId, 'wa_req_999');
+  assert.equal(explicitRes.paymentUrl, 'https://uncedo.example.test/payment?token=abc');
 
   await assert.rejects(
     registry.execute('cancelServiceRequest', { customerId: 'other' }, { role: 'customer', authorization: linkedCustomer }),

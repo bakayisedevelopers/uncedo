@@ -29,7 +29,7 @@ export default function PaymentPage() {
   const [token, setToken] = useState('');
   const [payment, setPayment] = useState(null);
   const [email, setEmail] = useState('');
-  const [saveCardConsent, setSaveCardConsent] = useState(false);
+  const [saveCardConsent, setSaveCardConsent] = useState(true);
   const [savedCardId, setSavedCardId] = useState('');
   const [savedCardAttempt, setSavedCardAttempt] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -45,6 +45,8 @@ export default function PaymentPage() {
   const request = payment || {};
   const activeAttemptId = String(payment?.activeAttemptId || '');
   const ownerCanSave = Boolean(user?.firebaseUser?.uid && payment?.canSaveCard);
+  const canSaveCard = payment?.canSaveCard !== false;
+  const canUseSavedCards = Boolean(ownerCanSave || payment?.canUseSavedCards);
   const cards = useMemo(() => Array.isArray(payment?.savedCards) ? payment.savedCards : [], [payment]);
   const pendingSavedCard = savedCardAttempt || payment?.pendingSavedCardPayment || null;
   const availableMethods = useMemo(
@@ -145,7 +147,7 @@ export default function PaymentPage() {
     const result = await runAction(() => requestPaymentFunction('startServicePaystackCheckout', {
       token,
       email: email.trim(),
-      saveCardConsent: ownerCanSave && saveCardConsent,
+      saveCardConsent: canSaveCard && saveCardConsent,
       idempotencyKey: makeIdempotencyKey(),
     }, { authenticated: Boolean(user) }));
     if (result?.authorizationUrl) window.location.assign(result.authorizationUrl);
@@ -170,7 +172,7 @@ export default function PaymentPage() {
       token,
       paymentMethodId: cardId,
       idempotencyKey: makeIdempotencyKey(),
-    }, { authenticated: true }));
+    }, { authenticated: Boolean(user) }));
     if (result?.attemptId) {
       setSavedCardAttempt({ ...result, card: result.card });
       setSavedCardId(cardId);
@@ -180,10 +182,11 @@ export default function PaymentPage() {
   async function confirmSavedCard() {
     if (!pendingSavedCard?.attemptId) return;
     const result = await runAction(() => requestPaymentFunction('confirmSavedCardServicePayment', {
+      token,
       requestId: pendingSavedCard.requestId,
       attemptId: pendingSavedCard.attemptId,
       confirmed: true,
-    }, { authenticated: true }));
+    }, { authenticated: Boolean(user) }));
     if (result?.status === 'paid') setSavedCardAttempt(null);
     else if (result?.status) setMessage(`Payment status: ${result.status.replaceAll('_', ' ')}. We will not retry an uncertain charge automatically.`);
   }
@@ -191,9 +194,10 @@ export default function PaymentPage() {
   async function cancelSavedCard() {
     if (!pendingSavedCard?.attemptId) return;
     const result = await runAction(() => requestPaymentFunction('cancelSavedCardPaymentConfirmation', {
+      token,
       requestId: pendingSavedCard.requestId,
       attemptId: pendingSavedCard.attemptId,
-    }, { authenticated: true }), 'Saved-card selection cancelled. No charge was made.');
+    }, { authenticated: Boolean(user) }), 'Saved-card selection cancelled. No charge was made.');
     if (result?.success) setSavedCardAttempt(null);
   }
 
@@ -275,11 +279,11 @@ export default function PaymentPage() {
               <section className="app-surface p-6 sm:p-8"><StatePanel icon={<CheckCircle2 />} title="Payment already completed" copy={payment.receipt?.receiptId ? `Receipt ${payment.receipt.receiptId}. Your payment was verified by Uncedo.` : 'This request is marked as paid in Uncedo’s records.'} /><button onClick={() => refresh()} className="mt-5 inline-flex items-center gap-2 rounded-xl border border-zinc-300 px-4 py-2.5 text-sm font-bold text-zinc-700"><RefreshCw size={15} /> Refresh status</button></section>
             ) : payment.paymentStatus === 'awaiting_customer_confirmation' ? (
               <section className="app-surface p-6 sm:p-8">
-                {pendingSavedCard && ownerCanSave ? <>
+                {pendingSavedCard && canUseSavedCards ? <>
                   <StatePanel icon={<CreditCard />} title="Confirm this saved-card payment" copy={`You selected ${pendingSavedCard.card?.brand || 'card'} •••• ${pendingSavedCard.card?.last4}. Nothing is charged until you confirm the exact amount below.`} />
                   <div className="mt-5 rounded-xl bg-violet-50 p-4 text-center"><p className="text-xs font-bold uppercase tracking-wide text-violet-800">One-time payment</p><p className="mt-1 text-2xl font-black text-zinc-950">{formatMoney(pendingSavedCard.amount, payment.currency)}</p><p className="mt-1 text-xs text-zinc-600">Request {request.requestReference}</p></div>
                   <div className="mt-4 grid gap-2 sm:grid-cols-2"><button disabled={busy} onClick={confirmSavedCard} className="rounded-xl bg-violet-700 px-4 py-3 font-extrabold text-white disabled:opacity-50">{busy ? 'Processing…' : 'Confirm payment'}</button><button disabled={busy} onClick={cancelSavedCard} className="rounded-xl border border-zinc-300 px-4 py-3 font-bold text-zinc-700 disabled:opacity-50">Change payment method</button></div>
-                </> : <StatePanel icon={<CreditCard />} title="Saved-card confirmation is pending" copy="No payment has been submitted yet. Sign in as the verified request owner to confirm or cancel this saved-card selection." />}
+                </> : <StatePanel icon={<CreditCard />} title="Saved-card confirmation is pending" copy={payment?.isGuestSession ? 'No payment has been submitted yet. Open your payment link in the same browser session without signing into another account to confirm or cancel.' : 'No payment has been submitted yet. Sign in as the verified request owner to confirm or cancel this saved-card selection.'} />}
               </section>
             ) : inProgress ? (
               <section className="app-surface p-6 sm:p-8"><StatePanel icon={<Loader2 className="animate-spin" />} title="Payment is being verified" copy="Uncedo is checking the payment with Paystack. Please do not start another payment while this check is in progress." /><button onClick={() => refresh()} className="mt-5 inline-flex items-center gap-2 rounded-xl border border-zinc-300 px-4 py-2.5 text-sm font-bold text-zinc-700"><RefreshCw size={15} /> Check again</button></section>
@@ -304,7 +308,26 @@ export default function PaymentPage() {
                     <div className="flex items-center gap-3"><span className="rounded-xl bg-blue-100 p-2.5 text-blue-800"><CreditCard size={21} /></span><div><h2 className="font-extrabold text-zinc-950">Pay by new card</h2><p className="mt-0.5 text-xs text-zinc-500">Your card details are collected on Paystack’s secure hosted checkout.</p></div></div>
                     <form onSubmit={startCardCheckout} className="mt-5 space-y-4">
                       <label className="block text-sm font-semibold text-zinc-700">Email for the Paystack receipt<input required type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} className="mt-1.5 w-full rounded-xl border border-zinc-300 px-4 py-3 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/15" /></label>
-                      {ownerCanSave ? <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-sm leading-5 text-zinc-700"><input type="checkbox" checked={saveCardConsent} onChange={(event) => setSaveCardConsent(event.target.checked)} className="mt-1 accent-emerald-700" /><span><strong>Save this card for future payments</strong><span className="block text-xs text-zinc-500">The card is stored by Paystack. Uncedo stores only a reusable authorisation and masked card details.</span></span></label> : <p className="rounded-xl bg-zinc-50 p-3 text-xs leading-5 text-zinc-500">Saving a card is available only when you are signed in as the verified request owner. This one-time payment can still be completed below.</p>}
+                      {canSaveCard ? (
+                        <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-sm leading-5 text-zinc-700">
+                          <input
+                            type="checkbox"
+                            checked={saveCardConsent}
+                            onChange={(event) => setSaveCardConsent(event.target.checked)}
+                            className="mt-1 accent-emerald-700"
+                          />
+                          <span>
+                            <strong>Save this card for future payments?</strong>
+                            <span className="block text-xs text-zinc-500">
+                              Keep checked to save this card via Paystack for faster future payments and cancellation fees (works for guest bookings too). Uncheck to pay once without saving.
+                            </span>
+                          </span>
+                        </label>
+                      ) : (
+                        <p className="rounded-xl bg-zinc-50 p-3 text-xs leading-5 text-zinc-500">
+                          You are signed into a different account from this booking, so this card will not be saved. You can still complete a one-time payment below.
+                        </p>
+                      )}
                       <button disabled={busy || !email.trim()} className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-700 px-5 py-3.5 font-extrabold text-white hover:bg-blue-800 disabled:opacity-50">{busy ? <Loader2 size={17} className="animate-spin" /> : <LockKeyhole size={17} />}{busy ? 'Preparing secure checkout…' : `Continue to Paystack · ${formatMoney(payment.amount, payment.currency)}`}</button>
                     </form>
                   </section>
@@ -313,7 +336,7 @@ export default function PaymentPage() {
                 {cards.length ? (
                   <section className="app-surface p-5 sm:p-6">
                     <div className="flex items-center gap-3"><span className="rounded-xl bg-violet-100 p-2.5 text-violet-800"><CreditCard size={21} /></span><div><h2 className="font-extrabold text-zinc-950">Saved card</h2><p className="mt-0.5 text-xs text-zinc-500">A charge happens only after you review and confirm it.</p></div></div>
-                    {!savedCardAttempt ? <div className="mt-4 space-y-2">{cards.map((card) => <button key={card.id} disabled={busy} onClick={() => prepareSavedCard(card.id)} className={`flex w-full items-center justify-between rounded-xl border p-3 text-left ${savedCardId === card.id ? 'border-violet-400 bg-violet-50' : 'border-zinc-200 hover:bg-zinc-50'}`}><span className="text-sm font-bold text-zinc-800">{card.brand} •••• {card.last4}</span><span className="text-xs font-extrabold text-violet-800">Select</span></button>)}</div> : <div className="mt-4 rounded-xl border border-violet-200 bg-violet-50 p-4"><p className="text-sm font-bold text-zinc-900">Confirm {formatMoney(savedCardAttempt.amount, payment.currency)} on {savedCardAttempt.card?.brand || 'card'} •••• {savedCardAttempt.card?.last4}</p><p className="mt-1 text-xs leading-5 text-zinc-600">This authorises one payment for request {request.requestReference}. The charge will be verified by Paystack before Uncedo marks it paid.</p><div className="mt-4 flex flex-wrap gap-2"><button disabled={busy} onClick={confirmSavedCard} className="rounded-xl bg-violet-700 px-4 py-2.5 text-sm font-extrabold text-white disabled:opacity-50">{busy ? 'Processing…' : 'Confirm payment'}</button><button disabled={busy} onClick={() => setSavedCardAttempt(null)} className="rounded-xl border border-zinc-300 px-4 py-2.5 text-sm font-bold text-zinc-700">Cancel</button></div></div>}
+                    {!savedCardAttempt ? <div className="mt-4 space-y-2">{cards.map((card) => <button key={card.id} disabled={busy} onClick={() => prepareSavedCard(card.id)} className={`flex w-full items-center justify-between rounded-xl border p-3 text-left ${savedCardId === card.id ? 'border-violet-400 bg-violet-50' : 'border-zinc-200 hover:bg-zinc-50'}`}><span className="text-sm font-bold text-zinc-800">{card.brand} •••• {card.last4}</span><span className="text-xs font-extrabold text-violet-800">Select</span></button>)}</div> : <div className="mt-4 rounded-xl border border-violet-200 bg-violet-50 p-4"><p className="text-sm font-bold text-zinc-900">Confirm {formatMoney(savedCardAttempt.amount, payment.currency)} on {savedCardAttempt.card?.brand || 'card'} •••• {savedCardAttempt.card?.last4}</p><p className="mt-1 text-xs leading-5 text-zinc-600">This authorises one payment for request {request.requestReference}. The charge will be verified by Paystack before Uncedo marks it paid.</p><div className="mt-4 flex flex-wrap gap-2"><button disabled={busy} onClick={confirmSavedCard} className="rounded-xl bg-violet-700 px-4 py-2.5 text-sm font-extrabold text-white disabled:opacity-50">{busy ? 'Processing…' : 'Confirm payment'}</button><button disabled={busy} onClick={cancelSavedCard} className="rounded-xl border border-zinc-300 px-4 py-2.5 text-sm font-bold text-zinc-700">Cancel</button></div></div>}
                   </section>
                 ) : null}
               </div>
@@ -331,7 +354,7 @@ export default function PaymentPage() {
               </Notice>
             ) : null}
 
-            {!payment?.isCancellationFee && (payment.canRateHelper || paid || paymentFailed) && payment.helperName !== undefined ? (
+            {(payment.canRateHelper || payment.hasCustomerRating) && payment.helperName !== undefined ? (
               <section className="app-surface p-5 sm:p-6">
                 <div className="flex items-start justify-between gap-3">
                   <div>
@@ -340,9 +363,13 @@ export default function PaymentPage() {
                       Rate {payment.helperName || 'your helper'}
                     </h2>
                     <p className="mt-1 text-xs text-zinc-500">
-                      {paid
-                        ? 'Your payment is complete. Let us know how the service went.'
-                        : 'Even though the payment did not complete, you can still rate your helper experience.'}
+                      {payment.hasCustomerRating
+                        ? 'Your rating has been saved.'
+                        : payment?.isCancellationFee
+                          ? 'Because your helper had arrived or started work before cancellation, you can still rate your experience.'
+                          : paid
+                            ? 'Your payment is complete. Let us know how the service went.'
+                            : 'Even though the payment did not complete, you can still rate your helper experience.'}
                     </p>
                   </div>
                 </div>

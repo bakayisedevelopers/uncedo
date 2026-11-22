@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Image,
   Linking,
   Platform,
@@ -10,6 +11,7 @@ import {
   StatusBar,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -20,7 +22,10 @@ import {
   getServiceRequestStatusMeta,
   getServiceRequestToneStyle,
 } from '../../utils/serviceRequestStatus';
-import { subscribeToServiceRequestById } from '../../services/customerServiceRequestService';
+import {
+  subscribeToServiceRequestById,
+  submitServiceRequestRating,
+} from '../../services/customerServiceRequestService';
 import { getCustomerServiceCategoryById, getCustomerServiceById } from '../../constants/serviceCatalog';
 
 function formatCurrency(value) {
@@ -54,6 +59,29 @@ function formatServicesLabel(request) {
     .map((id) => getCustomerServiceById(id)?.label || '')
     .filter(Boolean)
     .join(', ');
+}
+
+function isRatingEligibleRequest(request = null) {
+  if (!request) return false;
+  const status = String(request?.status || '').trim().toLowerCase();
+  const helperId = String(request?.helperAssignment?.helperId || request?.helperId || '').trim();
+  if (!helperId) return false;
+  if (status === 'completed' || status === 'closed') return true;
+  if (status !== 'canceled' && status !== 'cancelled') return false;
+  const canceledFromStatus = String(request?.canceledFromStatus || '').trim().toLowerCase();
+  const billingRule = String(request?.pricingSnapshot?.cancellationBillingRule || '').trim().toLowerCase();
+  return Boolean(
+    request?.arrivedAt
+    || request?.helperAssignment?.arrivedAt
+    || request?.workStartedAt
+    || request?.helperAssignment?.workStartedAt
+    || request?.arrivalVerification?.required
+    || request?.arrivalVerification?.generatedAtMs
+    || request?.arrivalVerification?.verified
+    || request?.arrivalVerification?.verifiedAtMs
+    || ['arrived', 'work_started'].includes(canceledFromStatus)
+    || ['travel_fee_plus_booking_fee', 'arrived_fee', 'work_started_fee'].includes(billingRule),
+  );
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -235,6 +263,9 @@ export function ServiceRequestDetailsScreen({ route, goBack }) {
   const [request, setRequest] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [ratingScore, setRatingScore] = useState(5);
+  const [ratingComment, setRatingComment] = useState('');
+  const [submittingRating, setSubmittingRating] = useState(false);
 
   useEffect(() => {
     if (!requestId) {
@@ -299,11 +330,35 @@ export function ServiceRequestDetailsScreen({ route, goBack }) {
     if (status === 'completed') {
       return 'This service request is completed. Thank you for using Uncedo!';
     }
-    if (status === 'canceled' || status === 'canceled') {
-      return 'This request has been cancelled.';
+    if (status === 'canceled' || status === 'cancelled') {
+      return isRatingEligibleRequest(request)
+        ? 'This request was cancelled after helper arrival. You can still rate your helper experience above.'
+        : 'This request has been cancelled.';
     }
     return request.statusDetail || statusMeta.description;
   }, [request, statusMeta.description]);
+
+  const canRateHelper = useMemo(() => isRatingEligibleRequest(request), [request]);
+  const existingCustomerRating = request?.ratings?.customer || null;
+
+  const handleSubmitRating = async () => {
+    const targetId = String(request?.id || requestId || '').trim();
+    if (!targetId || submittingRating) return;
+    try {
+      setSubmittingRating(true);
+      await submitServiceRequestRating({
+        requestId: targetId,
+        score: ratingScore,
+        comment: ratingComment,
+      });
+      setRatingComment('');
+      Alert.alert('Thank you', 'Your helper rating has been saved.');
+    } catch (submitError) {
+      Alert.alert('Rating failed', submitError?.message || 'Unable to submit the rating right now.');
+    } finally {
+      setSubmittingRating(false);
+    }
+  };
 
   if (loading) {
     return (
@@ -390,6 +445,81 @@ export function ServiceRequestDetailsScreen({ route, goBack }) {
               lines={pricingLines}
               total={request.pricingSnapshot?.total || request.totalAmount}
             />
+          </View>
+        ) : null}
+
+        {/* ── Helper rating ── */}
+        {canRateHelper ? (
+          <View style={styles.sectionCard}>
+            <View style={styles.sectionHeader}>
+              <View style={styles.sectionIconWrap}>
+                <Ionicons color={colors.brandDark} name="star-outline" size={18} />
+              </View>
+              <Text style={styles.sectionTitle}>
+                {existingCustomerRating ? 'Your rating' : `Rate ${request.helperAssignment?.helperName || 'your helper'}`}
+              </Text>
+            </View>
+            {existingCustomerRating ? (
+              <View style={styles.savedRatingBox}>
+                <View style={styles.starRow}>
+                  {[1, 2, 3, 4, 5].map((star) => (
+                    <Ionicons
+                      key={star}
+                      color={star <= Number(existingCustomerRating.score || 0) ? '#eab308' : '#cbd5e1'}
+                      name={star <= Number(existingCustomerRating.score || 0) ? 'star' : 'star-outline'}
+                      size={20}
+                    />
+                  ))}
+                  <Text style={styles.savedRatingScore}>{existingCustomerRating.score}/5</Text>
+                </View>
+                {existingCustomerRating.comment ? (
+                  <Text style={styles.savedRatingComment}>“{existingCustomerRating.comment}”</Text>
+                ) : null}
+              </View>
+            ) : (
+              <View style={styles.ratingForm}>
+                <Text style={styles.ratingHint}>
+                  {String(request?.status || '').toLowerCase() === 'canceled'
+                    ? 'Your helper arrived or started work before cancellation. Leave quick feedback about your experience.'
+                    : 'How was your service with this helper?'}
+                </Text>
+                <View style={styles.starRow}>
+                  {[1, 2, 3, 4, 5].map((star) => (
+                    <Pressable key={star} accessibilityRole="button" onPress={() => setRatingScore(star)}>
+                      <Ionicons
+                        color={star <= ratingScore ? '#eab308' : '#cbd5e1'}
+                        name={star <= ratingScore ? 'star' : 'star-outline'}
+                        size={30}
+                      />
+                    </Pressable>
+                  ))}
+                </View>
+                <TextInput
+                  multiline
+                  onChangeText={setRatingComment}
+                  placeholder="Optional comment about your experience"
+                  placeholderTextColor={colors.muted}
+                  style={styles.ratingInput}
+                  value={ratingComment}
+                />
+                <Pressable
+                  accessibilityRole="button"
+                  disabled={submittingRating}
+                  onPress={handleSubmitRating}
+                  style={({ pressed }) => [
+                    styles.submitRatingBtn,
+                    submittingRating && styles.submitRatingBtnDisabled,
+                    pressed && styles.callBtnPressed,
+                  ]}
+                >
+                  {submittingRating ? (
+                    <ActivityIndicator color="#ffffff" size="small" />
+                  ) : (
+                    <Text style={styles.submitRatingBtnText}>Submit rating</Text>
+                  )}
+                </Pressable>
+              </View>
+            )}
           </View>
         ) : null}
 
@@ -827,5 +957,68 @@ const styles = StyleSheet.create({
     color: colors.brandDark,
     fontSize: 16,
     fontWeight: '900',
+  },
+
+  // ── Rating card ───────────────────────────────────────────────────────────
+  ratingForm: {
+    gap: 12,
+  },
+  ratingHint: {
+    color: colors.muted,
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  starRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+  },
+  ratingInput: {
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 14,
+    borderWidth: 1,
+    color: colors.text,
+    fontSize: 14,
+    minHeight: 72,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    textAlignVertical: 'top',
+  },
+  submitRatingBtn: {
+    alignItems: 'center',
+    backgroundColor: colors.brandDark,
+    borderRadius: 16,
+    justifyContent: 'center',
+    minHeight: 46,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+  },
+  submitRatingBtnDisabled: {
+    opacity: 0.6,
+  },
+  submitRatingBtnText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  savedRatingBox: {
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 16,
+    borderWidth: 1,
+    gap: 8,
+    padding: 14,
+  },
+  savedRatingScore: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: '800',
+    marginLeft: 4,
+  },
+  savedRatingComment: {
+    color: colors.muted,
+    fontSize: 13,
+    lineHeight: 19,
   },
 });

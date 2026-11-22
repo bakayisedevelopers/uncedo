@@ -33,7 +33,12 @@ const {
   awardReferralStage,
   evaluateCustomerProfileCompletionReward,
 } = require('./rewards/referralService');
-const { submitServiceRequestRating, serviceIdsFor, serviceOptionsFor } = require('./rewards/ratingService');
+const {
+  isServiceRequestEligibleForRating,
+  submitServiceRequestRating,
+  serviceIdsFor,
+  serviceOptionsFor,
+} = require('./rewards/ratingService');
 const { incrementCompletedPaid, recalculateMastery, recalculateServiceOptionMastery, recalculateMembership } = require('./rewards/progressionService');
 const { getFunctions } = require('firebase-admin/functions');
 const { applyTrustedAdminRole, isTrustedAdminToken } = require('./security/adminAuthorization');
@@ -119,9 +124,11 @@ const {
   resolveHelperSelectionWithBusyFallback,
 } = require('./busyHelperFallbackLogic');
 const {
+  PRIVATE_COLLECTION: PAYMENT_AUTHORIZATIONS_COLLECTION,
   getServerPaymentMethod,
   getServerPaymentMethods,
   migrateLegacyPaymentMethods,
+  publicPaymentMethod,
   storeReusablePaymentMethod,
   updateSavedPaymentMethod,
 } = require('./paymentMethodStore');
@@ -4102,9 +4109,13 @@ async function commitWhatsAppIdentityLink({ uid, role, identityId, phone }) {
     const identity = identitySnap.data() || {};
     const guestPrincipalId = String(identity.guestPrincipalId || buildWhatsAppGuestPrincipalId(identityId));
     const guestLinkRef = db.collection('whatsappGuestOwnership').doc(guestPrincipalId);
-    const [conversationSnap, profileSnap, userLinkSnap, auditSnap, guestLinkSnap, phoneOwnerSnap] = await Promise.all([
+    const guestUserRef = db.collection('users').doc(guestPrincipalId);
+    const ledgerId = stableEventId(`guest-debt-consolidated:${guestPrincipalId}:${uid}`);
+    const consolidationLedgerRef = db.collection(FINANCIAL_LEDGER_COLLECTION).doc(ledgerId);
+    const [conversationSnap, profileSnap, userLinkSnap, auditSnap, guestLinkSnap, phoneOwnerSnap, guestUserSnap, consolidationLedgerSnap] = await Promise.all([
       transaction.get(conversationRef), transaction.get(userRef), transaction.get(userLinkRef),
       transaction.get(auditRef), transaction.get(guestLinkRef), transaction.get(phoneOwnerRef),
+      transaction.get(guestUserRef), transaction.get(consolidationLedgerRef),
     ]);
     if (!profileSnap.exists || !profileAllowsRole(profileSnap.data() || {}, role)) return { code: 'role-mismatch' };
     if (identity.waId && String(identity.waId) !== phone.waId) return { code: 'identity-phone-mismatch' };
@@ -4126,6 +4137,75 @@ async function commitWhatsAppIdentityLink({ uid, role, identityId, phone }) {
     const guestOwner = String(guestLinkSnap.data()?.uid || '').trim();
     if (guestOwner && guestOwner !== uid) return { code: 'guest-history-linked-elsewhere' };
     const now = admin.firestore.FieldValue.serverTimestamp();
+    const nowMs = Date.now();
+    const guestUserData = guestUserSnap.exists ? (guestUserSnap.data() || {}) : {};
+    const guestWallet = guestUserData.wallet || {};
+    const guestWalletBalance = Number(guestWallet.balance || 0);
+    const shouldConsolidateGuestDebt = guestUserSnap.exists
+      && guestWalletBalance < 0
+      && !String(guestUserData.debtTransferredToUid || '').trim()
+      && !consolidationLedgerSnap.exists;
+    const ownerProfileData = profileSnap.data() || {};
+    const guestPublicMethods = Array.isArray(guestUserData.paymentMethods)
+      ? guestUserData.paymentMethods.map(publicPaymentMethod).filter((method) => method.id)
+      : [];
+    const ownerPublicMethods = Array.isArray(ownerProfileData.paymentMethods)
+      ? ownerProfileData.paymentMethods.map(publicPaymentMethod).filter((method) => method.id)
+      : [];
+    let guestAuthSnaps = [];
+    let ownerAuthSnaps = [];
+    if (guestPublicMethods.length > 0) {
+      [guestAuthSnaps, ownerAuthSnaps] = await Promise.all([
+        Promise.all(guestPublicMethods.map((method) => transaction.get(
+          db.collection(PAYMENT_AUTHORIZATIONS_COLLECTION).doc(guestPrincipalId).collection('methods').doc(method.id),
+        ))),
+        Promise.all(ownerPublicMethods.map((method) => transaction.get(
+          db.collection(PAYMENT_AUTHORIZATIONS_COLLECTION).doc(uid).collection('methods').doc(method.id),
+        ))),
+      ]);
+    }
+    const mergedOwnerMethods = [...ownerPublicMethods];
+    const existingOwnerAuthCodes = new Set(
+      ownerAuthSnaps
+        .map((snap) => (snap.exists ? String(snap.data()?.authorizationCode || '').trim() : ''))
+        .filter(Boolean),
+    );
+    const guestAuthTransfers = [];
+    const guestAuthDeletes = [];
+    let movedPaymentMethods = false;
+    if (guestPublicMethods.length > 0) {
+      guestPublicMethods.forEach((method, index) => {
+        const privSnap = guestAuthSnaps[index];
+        const priv = privSnap?.exists ? (privSnap.data() || {}) : {};
+        const authCode = String(priv.authorizationCode || '').trim();
+        if (privSnap?.exists) {
+          guestAuthDeletes.push(privSnap.ref);
+        }
+        if (authCode && !existingOwnerAuthCodes.has(authCode) && !mergedOwnerMethods.some((existing) => existing.id === method.id)) {
+          existingOwnerAuthCodes.add(authCode);
+          mergedOwnerMethods.push({
+            ...method,
+            isDefault: mergedOwnerMethods.length === 0 ? true : method.isDefault === true && !mergedOwnerMethods.some((m) => m.isDefault),
+          });
+          guestAuthTransfers.push({
+            ref: db.collection(PAYMENT_AUTHORIZATIONS_COLLECTION).doc(uid).collection('methods').doc(method.id),
+            data: {
+              ...priv,
+              methodId: method.id,
+              uid,
+              transferredFromUid: guestPrincipalId,
+              transferredAt: now,
+            },
+          });
+          movedPaymentMethods = true;
+        }
+      });
+    }
+    const ownerWallet = ownerProfileData.wallet || { balance: 0, currency: guestWallet.currency || 'ZAR' };
+    const ownerBalanceBefore = Number(ownerWallet.balance || 0);
+    const ownerBalanceAfter = shouldConsolidateGuestDebt
+      ? Number((ownerBalanceBefore + guestWalletBalance).toFixed(2))
+      : ownerBalanceBefore;
     transaction.set(identityRef, {
       channel: 'whatsapp', phoneNumberId, waId: phone.waId, guestPrincipalId,
       linkedFirebaseUid: uid, role, verifiedAt: now, whatsappPhoneNumber: phone.phoneNumber,
@@ -4152,13 +4232,63 @@ async function commitWhatsAppIdentityLink({ uid, role, identityId, phone }) {
       whatsappPhoneNumber: phone.phoneNumber,
       whatsappVerifiedAt: now,
       whatsappGuestPrincipalIds: admin.firestore.FieldValue.arrayUnion(guestPrincipalId),
+      ...(movedPaymentMethods ? { paymentMethods: mergedOwnerMethods } : {}),
+      ...(shouldConsolidateGuestDebt ? {
+        wallet: {
+          ...ownerWallet,
+          balance: ownerBalanceAfter,
+          currency: ownerWallet.currency || guestWallet.currency || 'ZAR',
+          updatedAt: new Date(nowMs).toISOString(),
+        },
+      } : {}),
       updatedAt: now,
     }, { merge: true });
+    guestAuthTransfers.forEach(({ ref, data }) => {
+      transaction.create(ref, data);
+    });
+    guestAuthDeletes.forEach((ref) => {
+      transaction.delete(ref);
+    });
+    if (shouldConsolidateGuestDebt || guestPublicMethods.length > 0) {
+      transaction.set(guestUserRef, {
+        ...(shouldConsolidateGuestDebt ? {
+          debtTransferredToUid: uid,
+          debtTransferredAtMs: nowMs,
+          wallet: {
+            ...guestWallet,
+            balance: 0,
+            currency: guestWallet.currency || ownerWallet.currency || 'ZAR',
+            updatedAt: new Date(nowMs).toISOString(),
+          },
+        } : {}),
+        ...(guestPublicMethods.length > 0 ? { paymentMethods: [] } : {}),
+        updatedAt: now,
+      }, { merge: true });
+    }
+    if (shouldConsolidateGuestDebt) {
+      transaction.create(consolidationLedgerRef, {
+        entryId: ledgerId,
+        operationId: `guest_debt_link_${guestPrincipalId}`,
+        userId: uid,
+        fromGuestPrincipalId: guestPrincipalId,
+        entryType: 'guest_debt_consolidated',
+        amount: Math.abs(guestWalletBalance),
+        currency: ownerWallet.currency || guestWallet.currency || 'ZAR',
+        balanceBefore: ownerBalanceBefore,
+        balanceAfter: ownerBalanceAfter,
+        createdAtMs: nowMs,
+      });
+    }
     if (!auditSnap.exists) transaction.create(auditRef, {
       eventType: 'whatsapp_identity_linked', actorUid: uid, identityId, role,
       phoneHash: createHash('sha256').update(phone.phoneNumber).digest('hex'), createdAt: now,
     });
-    return { code: currentOwner === uid ? 'already-linked' : 'linked', identityId, guestPrincipalId };
+    return {
+      code: currentOwner === uid ? 'already-linked' : 'linked',
+      identityId,
+      guestPrincipalId,
+      consolidatedDebtAmount: shouldConsolidateGuestDebt ? Math.abs(guestWalletBalance) : 0,
+    };
   });
 }
 
@@ -6335,6 +6465,20 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
           const recordedFee = Number(cancelResult.body.cancellation?.cancellationAmount ?? cancellationFee);
           const pendingReconciliation = cancelResult.body.charge?.pendingReconciliation === true;
           const chargeConfirmed = recordedFee <= 0 || cancelResult.body.charge?.ok === true;
+          let paymentUrl = '';
+          if (recordedFee > 0 && !chargeConfirmed && !pendingReconciliation) {
+            const updatedReqForLink = cancelResult.body.request || {
+              ...targetRequest,
+              id: preview.requestId,
+              status: 'canceled',
+              cancellationFeeAmount: recordedFee,
+              paymentStatus: 'wallet_debt_recorded',
+            };
+            paymentUrl = await buildRequestPaymentLink({
+              requestId: preview.requestId,
+              request: { ...updatedReqForLink, id: preview.requestId },
+            }).catch(() => '');
+          }
           return {
             code: 'canceled',
             requestId: preview.requestId,
@@ -6347,6 +6491,7 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
             chargeConfirmed,
             pendingReconciliation,
             confirmationRequired: false,
+            ...(paymentUrl ? { paymentUrl } : {}),
           };
         }
 
@@ -6390,7 +6535,18 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
       async relayMessageToHelper({ messageText, category } = {}, execContext = {}) {
         const currentConversationSnap = await conversationRef.get();
         const currentConversation = currentConversationSnap.data() || {};
-        const requestId = String(currentConversation.activeServiceRequestId || '').trim();
+        const callerIdentity = execContext.identity || {};
+        let requestId = String(currentConversation.activeServiceRequestId || '').trim();
+        if (!requestId) {
+          const openList = await listWhatsAppRequests({
+            db,
+            identity: callerIdentity,
+            perPrincipalLimit: 10,
+            resultLimit: 6,
+          }).catch(() => []);
+          const openMatch = openList.find((item) => Boolean(item?.helperAssignment?.helperId) && isWhatsAppRelayRequestOpen(item));
+          if (openMatch?.id) requestId = openMatch.id;
+        }
         if (!requestId) {
           return { code: 'no-active-request' };
         }
@@ -6404,7 +6560,6 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
         if (!helperId || !isWhatsAppRelayRequestOpen(request)) {
           return { code: 'relay-closed', requestId };
         }
-        const callerIdentity = execContext.identity || {};
         const senderRole = String(callerIdentity.role || (callerIdentity.guestPrincipalId ? 'customer' : '')).toLowerCase();
         const senderUid = String(callerIdentity.linkedFirebaseUid || '').trim();
         const customerId = String(request.customerId || '').trim();
@@ -6682,7 +6837,9 @@ function formatWhatsAppToolResult(toolName, result = {}) {
       if (result.chargeConfirmed) {
         return `Your request (${label}) has been canceled. The cancellation fee of R${fee.toFixed(2)} ZAR was confirmed as paid.`;
       }
-      return `Your request (${label}) has been canceled. The applicable fee is R${fee.toFixed(2)} ZAR; please check payment status in the Uncedo app or contact support.`;
+      return result.paymentUrl
+        ? `Your request (${label}) has been canceled. No saved card was charged, so R${fee.toFixed(2)} ZAR was recorded to your wallet balance. Pay by card using this link: ${result.paymentUrl}`
+        : `Your request (${label}) has been canceled. No saved card was charged, so R${fee.toFixed(2)} ZAR was recorded to your wallet balance. Reply *pay* anytime to pay by card.`;
     }
     if (result.code === 'confirmation-required') {
       return `Please confirm canceling ${result.serviceSummary || 'your active booking'} (${label}). The applicable cancellation fee is R${fee.toFixed(2)} ZAR.`;
@@ -7926,7 +8083,8 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       }
       const context = await getWhatsAppPaymentContext({ identityId, identity, requestId: pending.requestId });
       const card = context.cards?.find((item) => item.id === savedCardChoice[1]);
-      if (!card || !context.ownerUid || context.ownerUid !== String(identity.linkedFirebaseUid || '')) {
+      const allowedOwnerUid = String(identity.linkedFirebaseUid || (!identity.linkedFirebaseUid ? identity.guestPrincipalId : '') || '').trim();
+      if (!card || !context.ownerUid || !allowedOwnerUid || context.ownerUid !== allowedOwnerUid) {
         await conversationRef.set({
           pendingSavedCardPayment: admin.firestore.FieldValue.delete(),
           pendingPaymentSelection: { identityId, requestId: pending.requestId, amount: Number(context.amount || pending.amount || 0), expiresAtMs: Date.now() + 10 * 60 * 1000 },
@@ -8104,10 +8262,13 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         });
         const selectedAttemptSnap = await db.collection(PAYMENT_OPERATIONS).doc(pending.requestId).collection('attempts').doc(pending.attemptId).get();
         const selectedCardId = String(selectedAttemptSnap.data()?.selectedCardId || '');
-        const card = context.ownerUid
-          ? await getServerPaymentMethod({ db, admin, uid: context.ownerUid, methodId: selectedCardId })
-          : null;
-        if (!card || context.ownerUid !== String(identity.linkedFirebaseUid || '') || !['available'].includes(context.code)) {
+        const { methods: billingMethods } = context.request?.customerId
+          ? await getBillingMethodsForCustomer({ customerId: context.request.customerId, preferredUid: context.ownerUid }).catch(() => ({ methods: [] }))
+          : { methods: [] };
+        const card = billingMethods.find((method) => method.id === selectedCardId)
+          || (context.ownerUid ? await getServerPaymentMethod({ db, admin, uid: context.ownerUid, methodId: selectedCardId }) : null);
+        const allowedOwnerUid = String(identity.linkedFirebaseUid || (!identity.linkedFirebaseUid ? identity.guestPrincipalId : '') || '').trim();
+        if (!card || !context.ownerUid || !allowedOwnerUid || context.ownerUid !== allowedOwnerUid || !['available'].includes(context.code)) {
           await cancelSavedCardPaymentConfirmation({
             db,
             admin,
@@ -8121,10 +8282,14 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
             bodyText: 'I could not verify the linked saved card or current request. No charge was made. Try paying using another method:',
           });
         } else {
-          let paystackSecretKey = '';
-          try {
-            paystackSecretKey = getPaymentsSecrets().PAYSTACK_SECRET_KEY;
-          } catch {
+          const ownerUserSnap = await db.collection('users').doc(context.ownerUid).get().catch(() => null);
+          const ownerUserData = ownerUserSnap?.exists ? (ownerUserSnap.data() || {}) : {};
+          const paymentEmail = isValidCustomerEmail(
+            card.payerEmail
+            || ownerUserData.email
+            || context.request?.customerEmail,
+          );
+          if (!paymentEmail) {
             await cancelSavedCardPaymentConfirmation({
               db,
               admin,
@@ -8134,21 +8299,38 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
             }).catch(() => null);
             await offerAlternativePaymentPrompt({
               requestId: pending.requestId,
-              introMessage: 'Saved-card payments are temporarily unavailable. No charge was initiated.',
-              bodyText: 'Saved-card payments are unavailable right now. No charge was made. Choose another payment method:',
+              introMessage: 'I could not find a billing email for that saved card. No charge was made.',
+              bodyText: 'Please pay using a card link instead so we can confirm your billing email:',
             });
-          }
-          if (paystackSecretKey) {
-            const reference = getRequestPaymentReference(pending.requestId, pending.attemptId);
-            const claim = await claimSavedCardPayment({ db, admin, requestId: pending.requestId, attemptId: pending.attemptId, gatewayReference: reference });
-            if (['charge', 'reconcile'].includes(claim.action)) {
-              const outcome = await executeServiceChargeAttempt({
-                operation: { ...claim.attempt, requestId: pending.requestId, operationId: `payment_${pending.requestId}`, gatewayReference: reference },
-                action: claim.action,
-                email: String((await db.collection('users').doc(context.ownerUid).get()).data()?.email || ''),
-                authorizationCode: card.paystackAuthorizationCode,
-                paystack: { chargeAuthorization: (input) => chargeAuthorizationWithPaystack({ paystackSecretKey, ...input }), verifyTransaction: (input) => verifyPaystackTransaction({ paystackSecretKey, ...input }) },
+          } else {
+            let paystackSecretKey = '';
+            try {
+              paystackSecretKey = getPaymentsSecrets().PAYSTACK_SECRET_KEY;
+            } catch {
+              await cancelSavedCardPaymentConfirmation({
+                db,
+                admin,
+                requestId: pending.requestId,
+                customerId: String(context.request?.customerId || identity.linkedFirebaseUid || identity.guestPrincipalId || ''),
+                attemptId: pending.attemptId,
+              }).catch(() => null);
+              await offerAlternativePaymentPrompt({
+                requestId: pending.requestId,
+                introMessage: 'Saved-card payments are temporarily unavailable. No charge was initiated.',
+                bodyText: 'Saved-card payments are unavailable right now. No charge was made. Choose another payment method:',
               });
+            }
+            if (paystackSecretKey) {
+              const reference = getRequestPaymentReference(pending.requestId, pending.attemptId);
+              const claim = await claimSavedCardPayment({ db, admin, requestId: pending.requestId, attemptId: pending.attemptId, gatewayReference: reference });
+              if (['charge', 'reconcile'].includes(claim.action)) {
+                const outcome = await executeServiceChargeAttempt({
+                  operation: { ...claim.attempt, requestId: pending.requestId, operationId: `payment_${pending.requestId}`, gatewayReference: reference },
+                  action: claim.action,
+                  email: paymentEmail,
+                  authorizationCode: card.paystackAuthorizationCode,
+                  paystack: { chargeAuthorization: (input) => chargeAuthorizationWithPaystack({ paystackSecretKey, ...input }), verifyTransaction: (input) => verifyPaystackTransaction({ paystackSecretKey, ...input }) },
+                });
               const result = await settleRequestPayment({ db, admin, requestId: pending.requestId, attemptId: pending.attemptId, outcome: outcome.outcome, gatewayTransactionId: outcome.transaction?.id ? String(outcome.transaction.id) : '', gatewayReference: reference, providerStatus: outcome.transaction?.status || outcome.outcome, walletEnabled: helperWalletEnabled() });
               if (['settled', 'already-paid'].includes(result.action)) await issuePaidRequestPostEffects({ requestId: pending.requestId, paymentResult: result });
               else if (result.action === 'failed' && result.failureState === 'wallet_debt_recorded') {
@@ -8187,6 +8369,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
                 introMessage: 'This payment confirmation is no longer active. No new charge was started.',
                 bodyText: 'This saved-card confirmation expired. Would you like to pay using another method?',
               });
+            }
             }
           }
         }
@@ -8265,13 +8448,22 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         const fee = Number(result.body.cancellation?.cancellationAmount ?? preview.cancellationAmount ?? 0);
         const reconciliation = result.body.charge?.pendingReconciliation === true;
         const chargeConfirmed = result.body.charge?.ok === true;
+        let paymentUrl = '';
+        if (fee > 0 && !chargeConfirmed && !reconciliation && result.body.request) {
+          paymentUrl = await buildRequestPaymentLink({
+            requestId: pending.requestId,
+            request: { ...result.body.request, id: pending.requestId },
+          }).catch(() => '');
+        }
         await reply(fee <= 0
           ? 'Your request was canceled. No cancellation fee was recorded.'
           : reconciliation
             ? `Your request was canceled. The applicable fee is R${fee.toFixed(2)} ZAR. Its payment result is still being verified; Uncedo will not start another charge while it is unresolved.`
             : chargeConfirmed
               ? `Your request was canceled. The cancellation fee of R${fee.toFixed(2)} ZAR was confirmed as paid.`
-              : `Your request was canceled. The applicable fee is R${fee.toFixed(2)} ZAR, but payment was not confirmed. Please check payment status in the Uncedo app or contact support.`);
+              : paymentUrl
+                ? `Your request was canceled. No saved card was charged, so R${fee.toFixed(2)} ZAR was recorded to your wallet balance. You can pay by card here: ${paymentUrl}`
+                : `Your request was canceled. No saved card was charged, so R${fee.toFixed(2)} ZAR was recorded to your wallet balance. Reply *pay* anytime to pay by card.`);
       } else if (result.statusCode === 409 && result.body?.code === 'cancellation-terms-changed') {
         const currentPreview = result.body.cancellationPreview || preview;
         const refreshed = {
@@ -9596,6 +9788,37 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       (item) => ['sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking', 'applyForHelperService', 'relayMessageToHelper', 'cancelServiceRequest'].includes(item.toolName)
         && item.result && !item.errorCode && !['not-found', 'missing-query'].includes(item.result?.code),
     );
+    const shouldFallbackRelayToHelper = (
+      agentOutcome.status === 'tool-preflight-failed'
+      || ['tool-limit', 'repeated-tool-call'].includes(agentOutcome.status)
+    )
+      && !hasCompletedServiceTool
+      && Boolean(activeRelayRequestContext?.isOpen)
+      && whatsappRelayEnabled()
+      && Boolean(commandText)
+      && !['cancellation', 'human_escalation', 'payment_question', 'booking_status', 'service_discovery', 'service_information', 'price_enquiry'].includes(String(intentResult.intent || '').toLowerCase())
+      && !/^(?:cancel|stop|help|support|human|status|pay|payment|menu|services)\b/i.test(commandText);
+    if (shouldFallbackRelayToHelper) {
+      const directRelay = await relayWhatsAppText({
+        eventId,
+        identityId,
+        identity: toolIdentity,
+        conversation: { ...conversation, activeServiceRequestId: activeRelayRequestContext.requestId },
+        inbound,
+        conversationRef,
+      }).catch(() => ({ handled: false }));
+      if (directRelay?.handled) {
+        await reply(`I’ve passed your message to ${activeRelayRequestContext.helperName || 'your assigned helper'} in your active job chat.`);
+        await jobRef.set({
+          status: 'completed',
+          intent: 'provider_relay',
+          reason: 'fallback_direct_relay',
+          toolCallCount: agentOutcome.toolCallCount,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        return;
+      }
+    }
     if (agentOutcome.status === 'tool-preflight-failed'
       || (['tool-limit', 'repeated-tool-call'].includes(agentOutcome.status)
         && !['service_discovery', 'service_information', 'price_enquiry', 'service_booking'].includes(intentResult.intent)
@@ -10785,7 +11008,8 @@ exports.scheduleServiceRequestOfferExpiryOnServiceRequestWrite = onDocumentWritt
 exports.expireServiceRequestOffer = onTaskDispatched({
   retryConfig: { maxAttempts: 5, minBackoffSeconds: 5, maxBackoffSeconds: 60 },
   rateLimits: { maxConcurrentDispatches: 50, maxDispatchesPerSecond: 20 },
-  ...HALF_CPU_OPTIONS,
+  maxInstances: 3,
+  ...MICRO_CPU_OPTIONS,
 }, async (event) => {
   const input = event.data || {};
   const requestId = String(input.requestId || '').trim();
@@ -11324,7 +11548,8 @@ exports.scheduleBusyHelperConfirmationExpiryOnWrite = onDocumentWritten({
 exports.expireBusyHelperConfirmation = onTaskDispatched({
   retryConfig: { maxAttempts: 3, minBackoffSeconds: 5, maxBackoffSeconds: 60 },
   rateLimits: { maxConcurrentDispatches: 30, maxDispatchesPerSecond: 10 },
-  ...HALF_CPU_OPTIONS,
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
 }, async (event) => {
   const requestId = String(event.data?.requestId || '').trim();
   const helperId = String(event.data?.helperId || '').trim();
@@ -11456,7 +11681,8 @@ exports.scheduleServiceRequestExpiryOnNoHelperWrite = onDocumentWritten({
 exports.expireServiceRequestOnNoHelperAvailable = onTaskDispatched({
   retryConfig: { maxAttempts: 3, minBackoffSeconds: 5, maxBackoffSeconds: 60 },
   rateLimits: { maxConcurrentDispatches: 50, maxDispatchesPerSecond: 20 },
-  ...HALF_CPU_OPTIONS,
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
 }, async (event) => {
   const input = event.data || {};
   const requestId = String(input.requestId || '').trim();
@@ -11877,6 +12103,7 @@ exports.updateHelperServiceRequest = onRequest({ cors: true, invoker: 'public', 
         const cancelNowMs = Date.now();
         transaction.update(requestRef, {
           status: SERVICE_REQUEST_STATUS.CANCELED,
+          canceledFromStatus: currentStatusLower,
           statusDetail: 'Helper canceled the session.',
           canceledBy: 'helper',
           canceledReason: reason,
@@ -12344,7 +12571,8 @@ exports.syncServiceRequestAssignmentState = onDocumentWritten({
 
 exports.trackCustomerServiceEvents = onDocumentCreated({
   document: 'customerServiceEvents/{eventId}',
-  ...HALF_CPU_OPTIONS,
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
 }, async (event) => {
   const rawEvent = event.data?.data();
   if (!rawEvent) return;
@@ -12467,6 +12695,8 @@ exports.trackCustomerServiceEvents = onDocumentCreated({
 exports.promoteScheduledServiceRequests = onSchedule({
   schedule: '0 0 * * *',
   timeZone: 'Africa/Johannesburg',
+  maxInstances: 1,
+  ...MICRO_CPU_OPTIONS,
 }, async () => {
   const now = Date.now();
   const snapshot = await db.collection('serviceRequests')
@@ -12507,7 +12737,8 @@ exports.promoteScheduledServiceRequests = onSchedule({
 
 exports.syncHelperDispatchIndexOnServiceOfferingWrite = onDocumentWritten({
   document: 'helperServices/{offeringId}',
-  ...HALF_CPU_OPTIONS,
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
 }, async (event) => {
   const before = event.data.before.exists ? event.data.before.data() : null;
   const after = event.data.after.exists ? event.data.after.data() : null;
@@ -12523,7 +12754,8 @@ exports.syncHelperDispatchIndexOnServiceOfferingWrite = onDocumentWritten({
 exports.notifyWhatsAppHelperServiceModeration = onDocumentCreated({
   document: 'helperServiceModerationEvents/{eventId}',
   retry: true,
-  ...HALF_CPU_OPTIONS,
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
 }, async (event) => {
   const moderation = event.data?.data() || {};
   const helperUid = String(moderation.helperUid || '').trim();
@@ -12751,7 +12983,7 @@ async function isAdminAuthorizationHeader(req) {
   }
 }
 
-exports.rebuildHelperDispatchIndex = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS }, async (req, res) => {
+exports.rebuildHelperDispatchIndex = onRequest({ cors: true, invoker: 'public', maxInstances: 1, ...MICRO_CPU_OPTIONS }, async (req, res) => {
   if (!(await isAdminAuthorizationHeader(req))) {
     res.status(403).json({ ok: false, error: 'Admin authorization required.' });
     return;
@@ -12802,7 +13034,7 @@ exports.getCustomerNearbyHelpers = onRequest({ cors: true, invoker: 'public', ma
   return res.status(200).json({ success: true, currentUser: { id: decoded.uid, ...origin }, helpers, radiusKm });
 });
 
-exports.getMyOfferedTutorSummary = onCall({ maxInstances: 5, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 15 }, async (request) => {
+exports.getMyOfferedTutorSummary = onCall({ maxInstances: 1, ...MICRO_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 15 }, async (request) => {
   const uid = String(request.auth?.uid || '').trim();
   if (!uid) throw new HttpsError('unauthenticated', 'Sign in to view this offer.');
   const requestId = String(request.data?.requestId || '').trim();
@@ -12996,7 +13228,11 @@ exports.syncHelperQueueOnHelperOnline = onDocumentWritten({
   await triggerPendingRequestsForAvailableHelper(event.params.uid, after);
 });
 
-exports.sendWelcomeEmailOnUserCreate = onDocumentCreated('users/{uid}', async (event) => {
+exports.sendWelcomeEmailOnUserCreate = onDocumentCreated({
+  document: 'users/{uid}',
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
+}, async (event) => {
   const after = event.data?.data() || null;
   if (!after) return;
 
@@ -13795,7 +14031,7 @@ exports.acceptWhatsAppHelperAgreement = onCall({ maxInstances: 3, ...HALF_CPU_OP
   }
 });
 
-exports.completeWhatsAppHelperServicePhotos = onCall({ maxInstances: 5, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 60 }, async (request) => {
+exports.completeWhatsAppHelperServicePhotos = onCall({ maxInstances: 2, ...MICRO_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 60 }, async (request) => {
   const uid = String(request.auth?.uid || '').trim();
   if (!uid) throw new HttpsError('unauthenticated', 'Sign in with the helper account linked to WhatsApp.');
   const userLinkSnapshot = await db.collection('whatsappUserLinks').doc(uid).get();
@@ -13978,8 +14214,8 @@ exports.completeWhatsAppHelperPayout = onCall({ maxInstances: 2, ...HALF_CPU_OPT
 });
 
 exports.inspectWhatsAppSignupLink = onCall({
-  maxInstances: 5,
-  ...HALF_CPU_OPTIONS,
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
   memory: '256MiB',
   timeoutSeconds: 20,
 }, async (request) => {
@@ -14719,7 +14955,7 @@ exports.setWhatsAppContactNumber = onCall({ maxInstances: 5, ...HALF_CPU_OPTIONS
   return { saved: true, phoneNumber: phone.phoneNumber };
 });
 
-exports.linkWhatsAppIdentity = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+exports.linkWhatsAppIdentity = onCall({ maxInstances: 1, ...MICRO_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
   const uid = String(request.auth?.uid || '').trim();
   if (!uid || request.auth?.token?.whatsappAuthenticated !== true) {
     throw new HttpsError('unauthenticated', 'Verify your WhatsApp number before linking it to Uncedo.');
@@ -15298,7 +15534,7 @@ exports.getWhatsAppSupportTicketDetails = onCall({ maxInstances: 3, ...HALF_CPU_
   };
 });
 
-exports.listWhatsAppSupportArticles = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+exports.listWhatsAppSupportArticles = onCall({ maxInstances: 1, ...MICRO_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
   await requireWhatsAppSupportAdmin(request);
   const snapshot = await db.collection('supportArticles').orderBy('updatedAt', 'desc').limit(100).get();
   return { articles: snapshot.docs.map((document) => {
@@ -15307,7 +15543,7 @@ exports.listWhatsAppSupportArticles = onCall({ maxInstances: 2, ...HALF_CPU_OPTI
   }) };
 });
 
-exports.saveWhatsAppSupportArticle = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+exports.saveWhatsAppSupportArticle = onCall({ maxInstances: 1, ...MICRO_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
   const adminUid = await requireWhatsAppSupportAdmin(request);
   const articleId = String(request.data?.articleId || '').trim().toLowerCase();
   const title = String(request.data?.title || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 180);
@@ -15335,7 +15571,7 @@ exports.saveWhatsAppSupportArticle = onCall({ maxInstances: 2, ...HALF_CPU_OPTIO
   return { articleId, published };
 });
 
-exports.archiveWhatsAppSupportArticle = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+exports.archiveWhatsAppSupportArticle = onCall({ maxInstances: 1, ...MICRO_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
   const adminUid = await requireWhatsAppSupportAdmin(request);
   const articleId = String(request.data?.articleId || '').trim();
   if (!/^[a-z0-9_-]{3,80}$/.test(articleId)) throw new HttpsError('invalid-argument', 'A valid support article is required.');
@@ -15353,7 +15589,7 @@ exports.archiveWhatsAppSupportArticle = onCall({ maxInstances: 2, ...HALF_CPU_OP
   return { articleId, archived: true };
 });
 
-exports.markWhatsAppSupportTicketRead = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+exports.markWhatsAppSupportTicketRead = onCall({ maxInstances: 1, ...MICRO_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
   const adminUid = await requireWhatsAppSupportAdmin(request);
   const ticketId = String(request.data?.ticketId || '').trim();
   if (!/^wa_support_[a-f0-9]{32}$/.test(ticketId)) throw new HttpsError('invalid-argument', 'A valid support ticket is required.');
@@ -15373,7 +15609,7 @@ exports.markWhatsAppSupportTicketRead = onCall({ maxInstances: 2, ...HALF_CPU_OP
   return { ticketId, read: true };
 });
 
-exports.replyToWhatsAppSupportTicket = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+exports.replyToWhatsAppSupportTicket = onCall({ maxInstances: 1, ...MICRO_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
   const adminUid = await requireWhatsAppSupportAdmin(request);
   if (!whatsappSupportEnabled() || !whatsappMessagingEnabled()) throw new HttpsError('failed-precondition', 'WhatsApp support messaging is disabled.');
   const ticketId = String(request.data?.ticketId || '').trim();
@@ -15452,7 +15688,7 @@ exports.replyToWhatsAppSupportTicket = onCall({ maxInstances: 2, ...HALF_CPU_OPT
   }
 });
 
-exports.getWhatsAppSupportMediaUrl = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+exports.getWhatsAppSupportMediaUrl = onCall({ maxInstances: 1, ...MICRO_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
   await requireWhatsAppSupportAdmin(request);
   const ticketId = String(request.data?.ticketId || '').trim();
   const messageId = String(request.data?.messageId || '').trim();
@@ -15467,7 +15703,7 @@ exports.getWhatsAppSupportMediaUrl = onCall({ maxInstances: 2, ...HALF_CPU_OPTIO
   return { url: result.url, expiresAtMs: result.expiresAtMs, mimeType: result.mimeType };
 });
 
-exports.setWhatsAppNotificationPreference = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
+exports.setWhatsAppNotificationPreference = onCall({ maxInstances: 1, ...MICRO_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 30 }, async (request) => {
   const uid = String(request.auth?.uid || '').trim();
   const enabled = request.data?.enabled === true;
   const authTime = Number(request.auth?.token?.auth_time || 0);
@@ -15649,7 +15885,7 @@ function buildWhatsAppLifecycleText({
       const canceledBy = String(after.canceledBy || '').toLowerCase();
       const reasonNote = after.canceledReason ? `\nReason: ${String(after.canceledReason).slice(0, 140)}` : '';
       if (canceledBy !== 'helper' && paymentStatus === 'wallet_debt_recorded' && cancelFeeAmount > 0) {
-        return `${refPrefix}❌ Your *${serviceName}* request has been canceled.\n\n⚠️ No saved card could be charged, so *R${wholeCancelDisplay} ZAR* has been deducted from your wallet. Please pay by card using this link: ${paymentUrl || 'Open your Uncedo payment page to pay by card.'}`;
+        return `${refPrefix}❌ Your *${serviceName}* request has been canceled.\n\n⚠️ No saved card could be charged, so *R${wholeCancelDisplay} ZAR* has been deducted from your wallet. ${paymentUrl ? `Please pay by card using this link: ${paymentUrl}` : 'Reply *pay* to get your card payment link.'}`;
       }
       return canceledBy === 'helper'
         ? `${refPrefix}❌ *${helperName}* canceled your *${serviceName}* request.${reasonNote}`
@@ -15664,7 +15900,7 @@ function buildWhatsAppLifecycleText({
     }
     if (['payment_failed', 'wallet_debt_recorded'].includes(paymentStatus)) {
       if (eventRole === 'helper') return '';
-      return `${refPrefix}⚠️ Your payment of *R${dueDisplay} ZAR* for *${serviceName}* failed, so *R${dueDisplay} ZAR* has been deducted from your wallet.${paymentUrl ? ` Please pay using a new card here: ${paymentUrl}` : isCanceled ? ' Please pay by card in the Uncedo app.' : ' Reply *pay* to pay by Cash or New card.'}`;
+      return `${refPrefix}⚠️ Your payment of *R${dueDisplay} ZAR* for *${serviceName}* failed, so *R${dueDisplay} ZAR* has been deducted from your wallet.${paymentUrl ? ` Please pay using a new card here: ${paymentUrl}` : isCanceled ? ' Reply *pay* to pay by card.' : ' Reply *pay* to pay by Cash or New card.'}`;
     }
     if (isCanceled) {
       return `${refPrefix}💳 A cancellation fee of *R${dueDisplay} ZAR* is due for *${serviceName}*.${paymentUrl ? ` Pay by card here: ${paymentUrl}` : ' Reply *pay* to pay by card.'}`;
@@ -15841,11 +16077,18 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
       },
     } : null;
 
+    const isCanceledAfter = status === 'canceled' || status === 'cancelled';
+    const ratingEligible = isServiceRequestEligibleForRating(after);
+    const ratingPaymentReady = paymentChanged
+      && ['paid', 'payment_failed', 'wallet_debt_recorded'].includes(afterPaymentStatus);
+    const ratingCancelZeroFeeReady = isCanceledAfter
+      && beforeStatus !== status
+      && afterPaymentStatus === 'not_applicable';
     const shouldPromptCustomerRating = inServiceWindow
       && !shouldSendCompletedPaymentPrompt
       && recipient.eventRole === 'customer'
-      && paymentChanged
-      && ['paid', 'payment_failed', 'wallet_debt_recorded'].includes(afterPaymentStatus)
+      && ratingEligible
+      && (ratingPaymentReady || ratingCancelZeroFeeReady)
       && Boolean(after.helperAssignment?.helperId)
       && !after.ratings?.customer
       && !after.customerRatedHelper;
@@ -16027,7 +16270,7 @@ async function sendTutorAgreementEmailWithAttachment({
   };
 }
 
-exports.verifyPaystack = onRequest({ cors: true, invoker: 'public' }, async (req, res) => {
+exports.verifyPaystack = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...MICRO_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, message: 'Method not allowed' });
     return;
@@ -16368,7 +16611,7 @@ exports.verifyPaystack = onRequest({ cors: true, invoker: 'public' }, async (req
 });
 
 
-exports.seedRewardConfig = onRequest({ cors: true }, async (req, res) => {
+exports.seedRewardConfig = onRequest({ cors: true, maxInstances: 1, ...MICRO_CPU_OPTIONS }, async (req, res) => {
   const token = getBearerToken(req);
   const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
   if (!decoded?.uid || !isAdminToken(decoded)) {
@@ -16378,7 +16621,7 @@ exports.seedRewardConfig = onRequest({ cors: true }, async (req, res) => {
   res.status(200).json({ success: true });
 });
 
-exports.captureReferral = onRequest({ cors: true }, async (req, res) => {
+exports.captureReferral = onRequest({ cors: true, maxInstances: 2, ...MICRO_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
   const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
   if (!decoded?.uid) { res.status(401).json({ success: false, message: 'Unauthorized request.' }); return; }
@@ -16388,7 +16631,7 @@ exports.captureReferral = onRequest({ cors: true }, async (req, res) => {
   } catch (error) { logger.warn('referral_rejected', { uid: decoded.uid, reason: error.message }); res.status(400).json({ success: false, message: error.message }); }
 });
 
-exports.ensureReferralCode = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
+exports.ensureReferralCode = onRequest({ cors: true, maxInstances: 2, ...MICRO_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
   const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
   if (!decoded?.uid) { res.status(401).json({ success: false, message: 'Unauthorized request.' }); return; }
@@ -16398,7 +16641,7 @@ exports.ensureReferralCode = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, asyn
   res.status(200).json({ success: true, code: result.code });
 });
 
-exports.getMyReferralSummary = onRequest({ cors: true }, async (req, res) => {
+exports.getMyReferralSummary = onRequest({ cors: true, maxInstances: 2, ...MICRO_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
   const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
   if (!decoded?.uid) { res.status(401).json({ success: false, message: 'Unauthorized request.' }); return; }
@@ -16469,7 +16712,7 @@ exports.getMyReferralSummary = onRequest({ cors: true }, async (req, res) => {
   }
 });
 
-exports.evaluateCustomerReferralStageOne = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
+exports.evaluateCustomerReferralStageOne = onRequest({ cors: true, maxInstances: 2, ...MICRO_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
   const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
   if (!decoded?.uid) { res.status(401).json({ success: false, message: 'Unauthorized request.' }); return; }
@@ -16482,7 +16725,7 @@ exports.evaluateCustomerReferralStageOne = onRequest({ cors: true, ...HALF_CPU_O
   }
 });
 
-exports.evaluateCustomerProfileRewards = onRequest({ cors: true }, async (req, res) => {
+exports.evaluateCustomerProfileRewards = onRequest({ cors: true, maxInstances: 2, ...MICRO_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
   const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
   if (!decoded?.uid) { res.status(401).json({ success: false, message: 'Unauthorized request.' }); return; }
@@ -16548,14 +16791,14 @@ exports.setTrustedAdminRole = onCall({ maxInstances: 2, ...HALF_CPU_OPTIONS, mem
   }
 });
 
-exports.reserveServiceCredit = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
+exports.reserveServiceCredit = onRequest({ cors: true, maxInstances: 2, ...MICRO_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
   const user = await getVerifiedRequestUser(req); if (!user) return res.status(401).json({ success: false, message: 'Unauthorized request.' });
   try { const redemption = await reserveServiceCredit({ db, admin, userId: user.uid, requestId: String(req.body?.requestId || ''), requestedPoints: req.body?.points }); res.status(200).json({ success: true, redemption }); }
   catch (error) { logger.warn('service_credit_reservation_failed', { uid: user.uid, error: error.message }); res.status(400).json({ success: false, message: error.message }); }
 });
 
-exports.releaseServiceCredit = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
+exports.releaseServiceCredit = onRequest({ cors: true, maxInstances: 2, ...MICRO_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
   const user = await getVerifiedRequestUser(req); if (!user) return res.status(401).json({ success: false, message: 'Unauthorized request.' });
   const requestId = String(req.body?.requestId || ''); const request = (await db.collection('serviceRequests').doc(requestId).get()).data() || {};
@@ -16564,7 +16807,7 @@ exports.releaseServiceCredit = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, as
   catch (error) { res.status(400).json({ success: false, message: error.message }); }
 });
 
-exports.adminAdjustReward = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
+exports.adminAdjustReward = onRequest({ cors: true, maxInstances: 1, ...MICRO_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
   const user = await getVerifiedRequestUser(req); if (!user?.adminAuthorized) return res.status(403).json({ success: false, message: 'Admin only.' });
   try { const result = await adminRewardAdjustment({ db, admin, adminUser: user, userId: String(req.body?.userId || ''), accountType: req.body?.accountType, direction: req.body?.direction, points: req.body?.points, reason: req.body?.reason, supportReference: req.body?.supportReference }); res.status(200).json({ success: true, result }); }
@@ -16585,7 +16828,7 @@ function validateRewardConfigPatch(configId, patch) {
   if (patch.pointsPerRand !== undefined && Number(patch.pointsPerRand) < 1) throw new Error('Points-per-Rand must be at least one.');
 }
 
-exports.adminUpdateRewardConfig = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
+exports.adminUpdateRewardConfig = onRequest({ cors: true, maxInstances: 1, ...MICRO_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
   const user = await getVerifiedRequestUser(req); if (!isRewardAdmin(user)) return res.status(403).json({ success: false, message: 'Admin only.' });
   try {
@@ -16603,7 +16846,7 @@ exports.adminUpdateRewardConfig = onRequest({ cors: true, ...HALF_CPU_OPTIONS },
   } catch (error) { res.status(400).json({ success: false, message: error.message }); }
 });
 
-exports.adminRewardOperations = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
+exports.adminRewardOperations = onRequest({ cors: true, maxInstances: 1, ...MICRO_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'GET') return res.status(405).json({ success: false, message: 'Method not allowed' });
   const user = await getVerifiedRequestUser(req); if (!isRewardAdmin(user)) return res.status(403).json({ success: false, message: 'Admin only.' });
   try {
@@ -16616,7 +16859,7 @@ exports.adminRewardOperations = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, a
   } catch (error) { logger.error('admin_reward_operations_failed', { error: error.message }); res.status(500).json({ success: false, message: 'Unable to load reward operations.' }); }
 });
 
-exports.adminUpsertRewardCampaign = onRequest({ cors: true }, async (req, res) => {
+exports.adminUpsertRewardCampaign = onRequest({ cors: true, maxInstances: 1, ...MICRO_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
   const user = await getVerifiedRequestUser(req); if (!isRewardAdmin(user)) return res.status(403).json({ success: false, message: 'Admin only.' });
   try {
@@ -16630,14 +16873,14 @@ exports.adminUpsertRewardCampaign = onRequest({ cors: true }, async (req, res) =
   } catch (error) { res.status(400).json({ success: false, message: error.message }); }
 });
 
-exports.requestHelperRewardBenefit = onRequest({ cors: true }, async (req, res) => {
+exports.requestHelperRewardBenefit = onRequest({ cors: true, maxInstances: 2, ...MICRO_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
   const user = await getVerifiedRequestUser(req); if (!user) return res.status(401).json({ success: false, message: 'Unauthorized request.' });
   try { const redemption = await requestHelperBenefit({ db, admin, helperId: user.uid, benefitId: String(req.body?.benefitId || '') }); res.status(200).json({ success: true, redemption }); }
   catch (error) { res.status(400).json({ success: false, message: error.message }); }
 });
 
-exports.updatePaymentMethod = onRequest({ cors: true, ...HALF_CPU_OPTIONS }, async (req, res) => {
+exports.updatePaymentMethod = onRequest({ cors: true, maxInstances: 2, ...MICRO_CPU_OPTIONS }, async (req, res) => {
   if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
   const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
   if (!decoded?.uid) { res.status(401).json({ success: false, message: 'Unauthorized request.' }); return; }
@@ -16685,7 +16928,12 @@ function paymentSessionPublicPayload(resolved) {
   const helperId = String(request.helperAssignment?.helperId || '').trim();
   const customerRating = request.ratings?.customer || null;
   const canRateHelper = Boolean(
-    helperId && !isCanceled && ['paid', 'payment_failed', 'wallet_debt_recorded'].includes(paymentState),
+    helperId
+    && isServiceRequestEligibleForRating(request)
+    && (
+      ['paid', 'payment_failed', 'wallet_debt_recorded'].includes(paymentState)
+      || (paymentState === 'not_applicable' && Number(resolved.amount || 0) <= 0)
+    ),
   );
   return {
     success: true,
@@ -16711,7 +16959,57 @@ function paymentSessionPublicPayload(resolved) {
   };
 }
 
-async function saveReusablePaystackAuthorization({ uid, transaction, consentAtMs }) {
+async function resolveCustomerBillingOwner(customerId) {
+  const rawCustomerId = String(customerId || '').trim();
+  if (!rawCustomerId) return { targetUid: '', rawCustomerId: '', linkedUid: '' };
+  if (!rawCustomerId.startsWith('guest_')) {
+    return { targetUid: rawCustomerId, rawCustomerId, linkedUid: rawCustomerId };
+  }
+  const ownerSnap = await db.collection('whatsappGuestOwnership').doc(rawCustomerId).get().catch(() => null);
+  const linkedUid = String(ownerSnap?.data()?.uid || '').trim();
+  if (linkedUid) {
+    return { targetUid: linkedUid, rawCustomerId, linkedUid };
+  }
+  const guestSnap = await db.collection('users').doc(rawCustomerId).get().catch(() => null);
+  const transferredToUid = String(guestSnap?.data()?.debtTransferredToUid || '').trim();
+  return {
+    targetUid: transferredToUid || rawCustomerId,
+    rawCustomerId,
+    linkedUid: transferredToUid || '',
+  };
+}
+
+async function getBillingMethodsForCustomer({ customerId, preferredUid = '' }) {
+  const billingOwner = await resolveCustomerBillingOwner(customerId);
+  const candidates = [...new Set([
+    String(preferredUid || '').trim(),
+    billingOwner.targetUid,
+    billingOwner.rawCustomerId,
+  ].filter(Boolean))];
+  const seenIds = new Set();
+  const seenAuthCodes = new Set();
+  const collected = [];
+  for (const candidateUid of candidates) {
+    const methods = (await getServerPaymentMethods({ db, admin, uid: candidateUid }).catch(() => []))
+      .filter((method) => String(method.paystackAuthorizationCode || '').trim());
+    for (const method of methods) {
+      const authCode = String(method.paystackAuthorizationCode || '').trim();
+      if (!method.id || seenIds.has(method.id) || seenAuthCodes.has(authCode)) continue;
+      seenIds.add(method.id);
+      seenAuthCodes.add(authCode);
+      collected.push({ ...method, ownerUid: candidateUid });
+    }
+  }
+  return { billingOwner, methods: collected };
+}
+
+async function saveReusablePaystackAuthorization({
+  uid,
+  transaction,
+  consentAtMs,
+  payerEmail = '',
+  allowCreateGuestProfile = false,
+}) {
   const authorization = transaction?.authorization || {};
   return storeReusablePaymentMethod({
     db,
@@ -16720,6 +17018,8 @@ async function saveReusablePaystackAuthorization({ uid, transaction, consentAtMs
     authorization,
     consentAtMs,
     consentPurpose: 'explicit_future_card_consent',
+    payerEmail,
+    allowCreateGuestProfile,
   });
 }
 
@@ -16807,14 +17107,38 @@ async function verifyAndSettleRequestPayment({ requestId, attemptId, reference, 
   const attempt = attemptSnap.data() || {};
   if (payment.activeAttemptId !== attemptId || String(attempt.gatewayReference || '') !== String(reference || '')) return { action: 'reference-mismatch' };
   const verification = await verifyPaystackTransaction({ paystackSecretKey, reference, amountMinor: Number(attempt.amountMinor || 0), currency: 'ZAR' });
-  if (verification.outcome === 'success' && attempt.saveCardConsent === true && attempt.saveCardOwnerUid
-    && await isCustomerRequestPrincipalOwnedByUid(attempt.saveCardOwnerUid, attempt.customerId)) {
-    const ownerUid = String(attempt.saveCardOwnerUid);
-    const user = (await db.collection('users').doc(ownerUid).get()).data() || {};
-    const userEmail = String(user.email || '').trim().toLowerCase();
-    const transactionEmail = String(verification.transaction?.customer?.email || '').trim().toLowerCase();
-    if (userEmail && transactionEmail && userEmail === transactionEmail) {
-      await saveReusablePaystackAuthorization({ uid: ownerUid, transaction: verification.transaction, consentAtMs: Number(attempt.saveCardConsentAtMs || Date.now()) }).catch(() => null);
+  const rawSaveOwnerUid = String(attempt.saveCardOwnerUid || '').trim();
+  const isOwnerOfAttemptCustomer = Boolean(
+    rawSaveOwnerUid
+    && (rawSaveOwnerUid === String(attempt.customerId || '').trim()
+      || await isCustomerRequestPrincipalOwnedByUid(rawSaveOwnerUid, attempt.customerId)),
+  );
+  if (verification.outcome === 'success' && attempt.saveCardConsent === true && isOwnerOfAttemptCustomer) {
+    const resolvedSaveOwner = await resolveCustomerBillingOwner(rawSaveOwnerUid);
+    const effectiveOwnerUid = resolvedSaveOwner.targetUid || rawSaveOwnerUid;
+    const user = (await db.collection('users').doc(effectiveOwnerUid).get().catch(() => null))?.data() || {};
+    const attemptEmail = isValidCustomerEmail(attempt.email);
+    const userEmail = isValidCustomerEmail(user.email);
+    const transactionEmail = isValidCustomerEmail(verification.transaction?.customer?.email);
+    const emailMatches = Boolean(transactionEmail) && (
+      (!effectiveOwnerUid.startsWith('guest_') && userEmail)
+        ? (transactionEmail === userEmail || (attemptEmail && transactionEmail === attemptEmail))
+        : Boolean(attemptEmail && transactionEmail === attemptEmail)
+    );
+    if (emailMatches) {
+      await saveReusablePaystackAuthorization({
+        uid: effectiveOwnerUid,
+        transaction: verification.transaction,
+        consentAtMs: Number(attempt.saveCardConsentAtMs || Date.now()),
+        payerEmail: transactionEmail || attemptEmail,
+        allowCreateGuestProfile: effectiveOwnerUid.startsWith('guest_'),
+      }).catch((error) => {
+        logger.warn('save_reusable_paystack_authorization_failed', {
+          requestId,
+          effectiveOwnerUid,
+          error: error?.message || 'save_failed',
+        });
+      });
     }
   }
   const result = await settleRequestPayment({ db, admin, requestId, attemptId, outcome: verification.outcome, gatewayTransactionId: verification.transaction?.id ? String(verification.transaction.id) : '', gatewayReference: reference, providerStatus: verification.transaction?.status || verification.outcome, helperId, walletEnabled: helperWalletEnabled() });
@@ -16855,10 +17179,19 @@ exports.getServicePaymentSession = onRequest({ cors: true, invoker: 'public', ma
   const payload = paymentSessionPublicPayload(result);
   const caller = await getOptionalPaymentCaller(req);
   const verifiedOwner = Boolean(caller?.uid && await isCustomerRequestPrincipalOwnedByUid(caller.uid, result.session.customerId));
-  payload.canSaveCard = verifiedOwner;
+  const billingOwner = await resolveCustomerBillingOwner(result.session.customerId);
+  const isUnlinkedGuestSession = !caller?.uid && billingOwner.targetUid.startsWith('guest_');
+  const canSaveCard = verifiedOwner || !caller?.uid;
+  const canUseSavedCards = verifiedOwner || isUnlinkedGuestSession;
+  payload.canSaveCard = canSaveCard;
+  payload.canUseSavedCards = canUseSavedCards;
+  payload.isGuestSession = billingOwner.targetUid.startsWith('guest_');
   payload.savedCards = [];
-  if (verifiedOwner) {
-    const paymentMethods = await getServerPaymentMethods({ db, admin, uid: caller.uid });
+  if (canUseSavedCards) {
+    const { methods: paymentMethods } = await getBillingMethodsForCustomer({
+      customerId: result.session.customerId,
+      preferredUid: verifiedOwner ? caller.uid : billingOwner.targetUid,
+    });
     payload.savedCards = paymentMethods
       .filter((card) => card?.reusable === true && String(card.paystackAuthorizationCode || '').trim())
       .map((card) => ({ id: String(card.id || ''), brand: String(card.brand || 'Card'), last4: String(card.last4 || '').slice(-4), isDefault: card.isDefault === true }))
@@ -16899,7 +17232,7 @@ exports.getServicePaymentSession = onRequest({ cors: true, invoker: 'public', ma
   return res.status(200).json(payload);
 });
 
-exports.revokeServicePaymentSession = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
+exports.revokeServicePaymentSession = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...MICRO_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   const user = await getOptionalPaymentCaller(req);
   if (!user?.uid) return res.status(401).json({ success: false, message: 'Unauthorized.' });
@@ -16921,7 +17254,12 @@ exports.startServicePaystackCheckout = onRequest({ cors: true, invoker: 'public'
   if (resolved.code !== 'available') return res.status(resolved.code === 'expired' ? 410 : 404).json({ success: false, code: resolved.code, message: 'This payment link is unavailable or expired.' });
   const caller = await getOptionalPaymentCaller(req);
   const isOwnerAuthenticated = Boolean(caller?.uid && await isCustomerRequestPrincipalOwnedByUid(caller.uid, resolved.session.customerId));
-  const saveCardConsent = req.body?.saveCardConsent === true && isOwnerAuthenticated;
+  const billingOwner = await resolveCustomerBillingOwner(resolved.session.customerId);
+  const canPersistCardForCaller = isOwnerAuthenticated || !caller?.uid;
+  const saveCardConsent = req.body?.saveCardConsent === true && canPersistCardForCaller;
+  const saveCardOwnerUid = saveCardConsent
+    ? (isOwnerAuthenticated ? caller.uid : (billingOwner.targetUid || resolved.session.customerId))
+    : null;
   const email = isOwnerAuthenticated
     ? isValidCustomerEmail(caller.email || (await db.collection('users').doc(caller.uid).get()).data()?.email) || isValidCustomerEmail(req.body?.email)
     : isValidCustomerEmail(req.body?.email || resolved.request.customerEmail);
@@ -16938,7 +17276,15 @@ exports.startServicePaystackCheckout = onRequest({ cors: true, invoker: 'public'
   }
   const reference = getRequestPaymentReference(resolved.session.requestId, attempt.attemptId);
   const now = Date.now();
-  await attemptRef.set({ gatewayReference: reference, email, saveCardConsent, saveCardConsentAtMs: saveCardConsent ? now : null, saveCardOwnerUid: saveCardConsent ? caller.uid : null, updatedAtMs: now }, { merge: true });
+  await attemptRef.set({
+    gatewayReference: reference,
+    email,
+    saveCardConsent,
+    saveCardConsentAtMs: saveCardConsent ? now : null,
+    saveCardOwnerUid,
+    saveCardPrincipalType: saveCardOwnerUid ? (String(saveCardOwnerUid).startsWith('guest_') ? 'whatsapp_guest' : 'firebase_uid') : null,
+    updatedAtMs: now,
+  }, { merge: true });
   await recordCheckoutInitialization({ db, admin, requestId: resolved.session.requestId, attemptId: attempt.attemptId, gatewayReference: reference, authorizationUrl: '' });
   try {
     const baseUrl = String(process.env.CUSTOMER_PAYMENT_URL || 'https://uncedo.bakayise.com/payment').trim().replace(/\/$/, '');
@@ -17178,20 +17524,35 @@ exports.prepareSavedCardServicePayment = onRequest({ cors: true, invoker: 'publi
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
   const caller = await getOptionalPaymentCaller(req);
-  if (!caller?.uid) return res.status(401).json({ success: false, message: 'Sign in before using a saved card.' });
+  const sessionToken = String(req.body?.token || '').trim();
+  if (!caller?.uid && !sessionToken) return res.status(401).json({ success: false, message: 'Sign in or open your payment link before using a saved card.' });
   let requestId = String(req.body?.requestId || '');
   let requestSnap = requestId ? await db.collection('serviceRequests').doc(requestId).get() : null;
   let paymentSession = null;
-  if (req.body?.token) {
-    paymentSession = await resolveServicePaymentSession({ db, token: String(req.body.token) });
-    if (paymentSession.code !== 'available') return res.status(404).json({ success: false, code: paymentSession.code });
+  if (sessionToken) {
+    paymentSession = await resolveServicePaymentSession({ db, token: sessionToken });
+    if (paymentSession.code !== 'available') return res.status(paymentSession.code === 'expired' ? 410 : 404).json({ success: false, code: paymentSession.code });
     requestId = paymentSession.session.requestId;
     requestSnap = await db.collection('serviceRequests').doc(requestId).get();
   }
   if (!requestSnap?.exists) return res.status(404).json({ success: false, message: 'Request not found.' });
   const request = requestSnap.data() || {};
-  if (!(await isCustomerRequestPrincipalOwnedByUid(caller.uid, request.customerId))) return res.status(403).json({ success: false, message: 'Saved cards require the verified request owner account.' });
-  const card = await getServerPaymentMethod({ db, admin, uid: caller.uid, methodId: String(req.body?.paymentMethodId || '') });
+  const verifiedOwner = Boolean(caller?.uid && await isCustomerRequestPrincipalOwnedByUid(caller.uid, request.customerId));
+  const { billingOwner, methods } = await getBillingMethodsForCustomer({
+    customerId: request.customerId,
+    preferredUid: verifiedOwner ? caller.uid : '',
+  });
+  const guestTokenAuthorized = Boolean(
+    !caller?.uid
+    && paymentSession?.code === 'available'
+    && billingOwner.targetUid.startsWith('guest_')
+    && String(request.customerId || '') === String(paymentSession.session.customerId || ''),
+  );
+  if (!verifiedOwner && !guestTokenAuthorized) {
+    return res.status(403).json({ success: false, message: 'Saved cards require the verified request owner account.' });
+  }
+  const requestedCardId = String(req.body?.paymentMethodId || '');
+  const card = methods.find((method) => method.id === requestedCardId) || null;
   if (card?.reusable !== true || !String(card.paystackAuthorizationCode || '').trim()) return res.status(404).json({ success: false, code: 'saved-card-unavailable', message: 'That saved card is unavailable.' });
   if (!paymentSession) {
     const created = await createServicePaymentSession({ db, requestId, customerId: request.customerId, principalId: caller.uid, principalType: 'firebase_uid' });
@@ -17209,19 +17570,46 @@ exports.confirmSavedCardServicePayment = onRequest({ cors: true, invoker: 'publi
   if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
   if (req.body?.confirmed !== true) return res.status(400).json({ success: false, code: 'explicit-confirmation-required', message: 'Confirm this saved-card payment before it can be charged.' });
   const caller = await getOptionalPaymentCaller(req);
-  if (!caller?.uid) return res.status(401).json({ success: false, message: 'Sign in before authorising a saved-card charge.' });
+  const sessionToken = String(req.body?.token || '').trim();
+  if (!caller?.uid && !sessionToken) return res.status(401).json({ success: false, message: 'Sign in or open your payment link before authorising a saved-card charge.' });
   const requestId = String(req.body?.requestId || '');
   const attemptId = String(req.body?.attemptId || '');
   const paymentSnap = await db.collection(PAYMENT_OPERATIONS).doc(requestId).get();
   const attemptSnap = await db.collection(PAYMENT_OPERATIONS).doc(requestId).collection('attempts').doc(attemptId).get();
   if (!paymentSnap.exists || !attemptSnap.exists) return res.status(404).json({ success: false, message: 'Payment confirmation not found.' });
   const attempt = attemptSnap.data() || {};
-  if (!(await isCustomerRequestPrincipalOwnedByUid(caller.uid, attempt.customerId))) return res.status(403).json({ success: false, message: 'Not allowed.' });
-  const userSnap = await db.collection('users').doc(caller.uid).get();
-  const card = await getServerPaymentMethod({ db, admin, uid: caller.uid, methodId: String(attempt.selectedCardId || '') });
+  const verifiedOwner = Boolean(caller?.uid && await isCustomerRequestPrincipalOwnedByUid(caller.uid, attempt.customerId));
+  let guestTokenAuthorized = false;
+  if (!verifiedOwner && !caller?.uid && sessionToken) {
+    const resolved = await resolveServicePaymentSession({ db, token: sessionToken });
+    const billingOwner = await resolveCustomerBillingOwner(attempt.customerId);
+    guestTokenAuthorized = Boolean(
+      resolved.code === 'available'
+      && billingOwner.targetUid.startsWith('guest_')
+      && String(resolved.session.requestId || '') === requestId
+      && String(resolved.session.customerId || '') === String(attempt.customerId || ''),
+    );
+  }
+  if (!verifiedOwner && !guestTokenAuthorized) return res.status(403).json({ success: false, message: 'Not allowed.' });
+  const { billingOwner, methods } = await getBillingMethodsForCustomer({
+    customerId: attempt.customerId,
+    preferredUid: verifiedOwner ? caller.uid : '',
+  });
+  const card = methods.find((method) => method.id === String(attempt.selectedCardId || '')) || null;
   if (!card) return res.status(404).json({ success: false, code: 'saved-card-unavailable' });
-  const paymentEmail = isValidCustomerEmail(userSnap.data()?.email || caller.email);
-  if (!paymentEmail) return res.status(422).json({ success: false, code: 'email-required', message: 'Add a valid email address to your Uncedo account before using a saved card.' });
+  const ownerLookupUid = verifiedOwner ? caller.uid : billingOwner.targetUid;
+  const [userSnap, requestSnap] = await Promise.all([
+    ownerLookupUid ? db.collection('users').doc(ownerLookupUid).get().catch(() => null) : Promise.resolve(null),
+    db.collection('serviceRequests').doc(requestId).get().catch(() => null),
+  ]);
+  const paymentEmail = isValidCustomerEmail(
+    card.payerEmail
+    || userSnap?.data()?.email
+    || caller?.email
+    || attempt.email
+    || requestSnap?.data()?.customerEmail,
+  );
+  if (!paymentEmail) return res.status(422).json({ success: false, code: 'email-required', message: 'Add a valid email address before using a saved card.' });
   let paystackSecretKey = '';
   try { paystackSecretKey = getPaymentsSecrets().PAYSTACK_SECRET_KEY; } catch { return res.status(503).json({ success: false, code: 'payments-unavailable' }); }
   const reference = String(attempt.gatewayReference || getRequestPaymentReference(requestId, attemptId));
@@ -17249,15 +17637,29 @@ exports.cancelSavedCardPaymentConfirmation = onRequest({ cors: true, invoker: 'p
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   if (!requestPaymentsEnabled()) return paymentFeatureUnavailable(res);
   const caller = await getOptionalPaymentCaller(req);
-  if (!caller?.uid) return res.status(401).json({ success: false, message: 'Sign in before changing a saved-card payment selection.' });
+  const sessionToken = String(req.body?.token || '').trim();
+  if (!caller?.uid && !sessionToken) return res.status(401).json({ success: false, message: 'Sign in or open your payment link before changing a saved-card payment selection.' });
   const requestId = String(req.body?.requestId || '');
   const requestSnap = requestId ? await db.collection('serviceRequests').doc(requestId).get() : null;
-  if (!requestSnap?.exists || !(await isCustomerRequestPrincipalOwnedByUid(caller.uid, requestSnap.data()?.customerId))) return res.status(403).json({ success: false, message: 'Not allowed.' });
-  const result = await cancelSavedCardPaymentConfirmation({ db, admin, requestId, customerId: requestSnap.data()?.customerId, attemptId: String(req.body?.attemptId || '') });
+  const customerId = requestSnap?.exists ? String(requestSnap.data()?.customerId || '') : '';
+  const verifiedOwner = Boolean(caller?.uid && customerId && await isCustomerRequestPrincipalOwnedByUid(caller.uid, customerId));
+  let guestTokenAuthorized = false;
+  if (!verifiedOwner && !caller?.uid && sessionToken && customerId) {
+    const resolved = await resolveServicePaymentSession({ db, token: sessionToken });
+    const billingOwner = await resolveCustomerBillingOwner(customerId);
+    guestTokenAuthorized = Boolean(
+      resolved.code === 'available'
+      && billingOwner.targetUid.startsWith('guest_')
+      && String(resolved.session.requestId || '') === requestId
+      && String(resolved.session.customerId || '') === customerId,
+    );
+  }
+  if (!requestSnap?.exists || (!verifiedOwner && !guestTokenAuthorized)) return res.status(403).json({ success: false, message: 'Not allowed.' });
+  const result = await cancelSavedCardPaymentConfirmation({ db, admin, requestId, customerId, attemptId: String(req.body?.attemptId || '') });
   return res.status(result.action === 'cancelled' ? 200 : 409).json({ success: result.action === 'cancelled', code: result.action });
 });
 
-exports.getServicePaymentReceipt = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
+exports.getServicePaymentReceipt = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...MICRO_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   const token = String(req.body?.token || '').trim();
   const requestId = String(req.body?.requestId || '').trim();
@@ -17321,7 +17723,7 @@ exports.paystackServicePaymentWebhook = onRequest({ cors: false, invoker: 'publi
   }
 });
 
-exports.submitServiceRequestRating = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 60 }, async (req, res) => {
+exports.submitServiceRequestRating = onRequest({ cors: true, invoker: 'public', maxInstances: 1, ...MICRO_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 60 }, async (req, res) => {
   if (req.method !== 'POST') { res.status(405).json({ success: false, message: 'Method not allowed' }); return; }
   const token = getBearerToken(req); const decoded = token ? await admin.auth().verifyIdToken(token).catch(() => null) : null;
   if (!decoded?.uid) { res.status(401).json({ success: false, message: 'Unauthorized request.' }); return; }
@@ -17348,7 +17750,7 @@ exports.submitServiceRequestRating = onRequest({ cors: true, invoker: 'public', 
   } catch (error) { logger.warn('rating_validation_failed', { uid: decoded.uid, error: error.message }); res.status(400).json({ success: false, message: error.message }); }
 });
 
-exports.submitServiceRatingFromPaymentSession = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...HALF_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 60 }, async (req, res) => {
+exports.submitServiceRatingFromPaymentSession = onRequest({ cors: true, invoker: 'public', maxInstances: 1, ...MICRO_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 60 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   const token = String(req.body?.token || '').trim();
   const resolved = await resolveServicePaymentSession({ db, token });
@@ -17360,7 +17762,10 @@ exports.submitServiceRatingFromPaymentSession = onRequest({ cors: true, invoker:
     });
   }
   const paymentState = String(resolved.paymentStatus || '').toLowerCase();
-  if (!['paid', 'payment_failed', 'wallet_debt_recorded'].includes(paymentState)) {
+  const isZeroFeeEligibleCancel = paymentState === 'not_applicable'
+    && Number(resolved.amount || 0) <= 0
+    && isServiceRequestEligibleForRating(resolved.request);
+  if (!['paid', 'payment_failed', 'wallet_debt_recorded'].includes(paymentState) && !isZeroFeeEligibleCancel) {
     return res.status(409).json({
       success: false,
       code: 'rating-not-ready',
@@ -17404,7 +17809,11 @@ exports.submitServiceRatingFromPaymentSession = onRequest({ cors: true, invoker:
   }
 });
 
-exports.expireRewardPoints = onSchedule('every 24 hours', async () => processExpiredCustomerPoints({ db, admin, limit: 200 }));
+exports.expireRewardPoints = onSchedule({
+  schedule: 'every 24 hours',
+  maxInstances: 1,
+  ...MICRO_CPU_OPTIONS,
+}, async () => processExpiredCustomerPoints({ db, admin, limit: 200 }));
 
 async function chargeAuthorizationWithPaystack({ paystackSecretKey, email, amount, authorizationCode, reference, requestId, operationId }) {
   if (!authorizationCode) {
@@ -18168,17 +18577,19 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, invoker: 'public
       }
       cashChargeAmount = toWholeRand(Math.max(0, totalAmount - serviceCreditAmount));
       if (!deferCompletionPayment && customerId) {
-        const customerSnap = await db.collection('users').doc(customerId).get().catch(() => null);
+        const { billingOwner, methods: paymentMethods } = await getBillingMethodsForCustomer({ customerId });
+        const ownerDocId = billingOwner.targetUid || customerId;
+        const customerSnap = await db.collection('users').doc(ownerDocId).get().catch(() => null);
         customerData = customerSnap?.exists ? customerSnap.data() || {} : {};
-        if (!isGuestCustomer) {
-          const paymentMethods = (await getServerPaymentMethods({ db, admin, uid: customerId }).catch(() => []))
-            .filter((method) => String(method.paystackAuthorizationCode || '').trim());
-          const selectedCardId = request.selectedCardId || request.requestPayload?.selectedCardId || null;
-          selectedCard = paymentMethods.find((card) => card.id === selectedCardId)
-            || paymentMethods.find((card) => card.isDefault)
-            || paymentMethods[0]
-            || null;
-        }
+        const usableCards = paymentMethods.filter((card) => Boolean(
+          String(card.paystackAuthorizationCode || '').trim()
+          && isValidCustomerEmail(card.payerEmail || customerData.email || request.customerEmail),
+        ));
+        const selectedCardId = request.selectedCardId || request.requestPayload?.selectedCardId || null;
+        selectedCard = usableCards.find((card) => card.id === selectedCardId)
+          || usableCards.find((card) => card.isDefault)
+          || usableCards[0]
+          || null;
       }
       settlementData = {
         customerId,
@@ -18219,14 +18630,15 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, invoker: 'public
     }
 
     if (existingOperation.exists && existingOperation.data()?.status === 'settled_failed' && req.body?.retryConfirmedFailure === true && customerId) {
-      const customerSnap = await db.collection('users').doc(customerId).get().catch(() => null);
+      const { billingOwner, methods: paymentMethods } = await getBillingMethodsForCustomer({ customerId });
+      const ownerDocId = billingOwner.targetUid || customerId;
+      const customerSnap = await db.collection('users').doc(ownerDocId).get().catch(() => null);
       customerData = customerSnap?.exists ? customerSnap.data() || {} : {};
-      if (!isGuestCustomer) {
-        const paymentMethods = (await getServerPaymentMethods({ db, admin, uid: customerId }).catch(() => []))
-          .filter((method) => String(method.paystackAuthorizationCode || '').trim());
-        const selectedCardId = existingOperation.data()?.settlementData?.selectedCardId || null;
-        selectedCard = paymentMethods.find((card) => card.id === selectedCardId) || null;
-      }
+      const selectedCardId = existingOperation.data()?.settlementData?.selectedCardId || null;
+      const candidate = paymentMethods.find((card) => card.id === selectedCardId) || null;
+      selectedCard = (candidate && isValidCustomerEmail(candidate.payerEmail || customerData.email || request.customerEmail))
+        ? candidate
+        : null;
     }
 
     let paymentsSecrets = { PAYSTACK_SECRET_KEY: '' };
@@ -18302,7 +18714,7 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, invoker: 'public
       action: claim.action,
       operation,
       paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY,
-      email: activeCustomer.email || request.customerEmail || '',
+      email: selectedCard?.payerEmail || activeCustomer.email || request.customerEmail || '',
       authorizationCode: selectedCard?.paystackAuthorizationCode || '',
     });
     const current = await requestRef.get();
@@ -18573,6 +18985,7 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
         cancellation,
         requestPatch: {
           status: 'canceled',
+          canceledFromStatus: status,
           statusDetail: 'Customer canceled the service request before helper assignment.',
           canceledAt: endedAt,
           canceledBy: 'customer',
@@ -18627,21 +19040,25 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
         return res.status(409).json({ success: false, message: 'This request cannot be canceled from its current state.' });
       }
       const customerId = String(request.customerId || '').trim();
-      const isGuestCustomer = customerId.startsWith('guest_');
+      const billingOwner = await resolveCustomerBillingOwner(customerId);
+      const ownerDocId = billingOwner.targetUid || customerId;
       const bookingFee = getServiceBookingFee(request);
       const travelFee = getServiceTravelFee(request);
       cancellationAmount = Number(cancellationTerms.cancellationAmount || 0);
       const helperPayoutBreakdown = cancellationTerms.helperPayoutBreakdown;
       const bookingCharge = toWholeRand(bookingFee);
-      const customerSnap = customerId ? await db.collection('users').doc(customerId).get().catch(() => null) : null;
+      const customerSnap = ownerDocId ? await db.collection('users').doc(ownerDocId).get().catch(() => null) : null;
       customerData = customerSnap?.exists ? customerSnap.data() || {} : {};
-      if (cancellationAmount > 0 && customerId && !isGuestCustomer) {
-        const paymentMethods = (await getServerPaymentMethods({ db, admin, uid: customerId }).catch(() => []))
-          .filter((method) => String(method.paystackAuthorizationCode || '').trim());
+      if (cancellationAmount > 0 && customerId) {
+        const { methods: paymentMethods } = await getBillingMethodsForCustomer({ customerId });
+        const usableCards = paymentMethods.filter((method) => Boolean(
+          String(method.paystackAuthorizationCode || '').trim()
+          && isValidCustomerEmail(method.payerEmail || customerData.email || request.customerEmail),
+        ));
         const selectedCardId = request.selectedCardId || request.requestPayload?.selectedCardId || null;
-        selectedCard = paymentMethods.find((card) => card.id === selectedCardId)
-          || paymentMethods.find((card) => card.isDefault)
-          || paymentMethods[0]
+        selectedCard = usableCards.find((card) => card.id === selectedCardId)
+          || usableCards.find((card) => card.isDefault)
+          || usableCards[0]
           || null;
       }
       const pricingSnapshot = {
@@ -18681,8 +19098,11 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
         cancellation,
         requestPatch: {
           status: 'canceled',
+          canceledFromStatus: cancellationTerms.status || status,
           statusDetail: cancellationAmount > 0
-            ? `Customer canceled the service. Cancellation fee charged: R${cancellationAmount.toFixed(2)}.`
+            ? (selectedCard
+              ? `Customer canceled the service. Processing cancellation fee of R${cancellationAmount.toFixed(2)}.`
+              : `Customer canceled the service. No saved card was charged; R${cancellationAmount.toFixed(2)} cancellation fee recorded to wallet balance.`)
             : 'Customer canceled the service before travel began.',
           canceledAt: endedAt,
           canceledBy: 'customer',
@@ -18698,14 +19118,15 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
 
   const cancelCustomerId = String(request.customerId || '').trim();
   if (existingOperation.exists && existingOperation.data()?.status === 'settled_failed' && req.body?.retryConfirmedFailure === true && cancelCustomerId) {
-    const customerSnap = await db.collection('users').doc(cancelCustomerId).get().catch(() => null);
+    const { billingOwner, methods: paymentMethods } = await getBillingMethodsForCustomer({ customerId: cancelCustomerId });
+    const ownerDocId = billingOwner.targetUid || cancelCustomerId;
+    const customerSnap = await db.collection('users').doc(ownerDocId).get().catch(() => null);
     customerData = customerSnap?.exists ? customerSnap.data() || {} : {};
-    if (!cancelCustomerId.startsWith('guest_')) {
-      const paymentMethods = (await getServerPaymentMethods({ db, admin, uid: cancelCustomerId }).catch(() => []))
-        .filter((method) => String(method.paystackAuthorizationCode || '').trim());
-      const selectedCardId = existingOperation.data()?.settlementData?.cancellation?.selectedCardId || null;
-      selectedCard = paymentMethods.find((card) => card.id === selectedCardId) || null;
-    }
+    const selectedCardId = existingOperation.data()?.settlementData?.cancellation?.selectedCardId || null;
+    const candidate = paymentMethods.find((card) => card.id === selectedCardId) || null;
+    selectedCard = (candidate && isValidCustomerEmail(candidate.payerEmail || customerData.email || request.customerEmail))
+      ? candidate
+      : null;
   }
 
   let paymentsSecrets = { PAYSTACK_SECRET_KEY: '' };
@@ -18759,7 +19180,7 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
       action: claim.action,
       operation,
       paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY,
-      email: activeCustomer.email || request.customerEmail || '',
+      email: selectedCard?.payerEmail || activeCustomer.email || request.customerEmail || '',
       authorizationCode: selectedCard?.paystackAuthorizationCode || '',
     });
     const current = await requestRef.get();
@@ -18841,17 +19262,18 @@ async function getWhatsAppPaymentContext({ identityId, identity, requestId, allo
     const owner = await db.collection('whatsappGuestOwnership').doc(request.customerId).get().catch(() => null);
     if (owner?.exists) ownerUid = String(owner.data()?.uid || ownerUid);
   }
-  const profileSnap = ownerUid ? await db.collection('users').doc(ownerUid).get().catch(() => null) : null;
-  const linkedCards = currentIdentity.linkedFirebaseUid
-    ? await getServerPaymentMethods({ db, admin, uid: currentIdentity.linkedFirebaseUid }).catch(() => [])
-    : [];
-  const cards = profileSnap?.exists
+  const cardPrincipalId = ownerUid || String(currentIdentity.guestPrincipalId || request.customerId || '').trim();
+  const profileSnap = cardPrincipalId ? await db.collection('users').doc(cardPrincipalId).get().catch(() => null) : null;
+  const { methods: linkedCards } = cardPrincipalId
+    ? await getBillingMethodsForCustomer({ customerId: request.customerId, preferredUid: ownerUid }).catch(() => ({ methods: [] }))
+    : { methods: [] };
+  const cards = (profileSnap?.exists || linkedCards.length > 0)
     ? linkedCards
       .filter((card) => card?.reusable === true && String(card.paystackAuthorizationCode || '').trim())
       .map((card) => ({ id: String(card.id || ''), brand: String(card.brand || 'Card').slice(0, 40), last4: String(card.last4 || '').slice(-4), isDefault: card.isDefault === true }))
       .filter((card) => card.id)
     : [];
-  return { code: 'available', identity: currentIdentity, request, isCanceled, amount, ownerUid, cards, paymentOperation, legacyOperation };
+  return { code: 'available', identity: currentIdentity, request, isCanceled, amount, ownerUid: cardPrincipalId, cards, paymentOperation, legacyOperation };
 }
 
 async function createWhatsAppPaymentSession(context) {
@@ -19301,7 +19723,8 @@ async function recordPayoutConfigurationFailure(payout, payoutRef, runKey) {
 exports.processWeeklyHelperPayouts = onSchedule({
   schedule: '0 0 * * 1',
   timeZone: 'Africa/Johannesburg',
-  cpu: 0.5,
+  maxInstances: 1,
+  ...MICRO_CPU_OPTIONS,
   memory: '256MiB',
 }, async () => {
   let paymentsSecrets;
@@ -19431,7 +19854,8 @@ exports.processWeeklyHelperPayouts = onSchedule({
 exports.reconcileFinancialOperation = onTaskDispatched({
   retryConfig: { maxAttempts: 3, minBackoffSeconds: 30, maxBackoffSeconds: 300, maxDoublings: 3 },
   rateLimits: { maxConcurrentDispatches: 20, maxDispatchesPerSecond: 5 },
-  ...HALF_CPU_OPTIONS,
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
 }, async (request) => {
   const data = request.data || {};
   const operationId = String(data.operationId || '').trim();
@@ -19562,7 +19986,8 @@ exports.reconcileFinancialOperation = onTaskDispatched({
 exports.sendEmailFromQueue = onDocumentCreated(
   {
     document: 'emailEvents/{eventId}',
-    ...HALF_CPU_OPTIONS,
+    maxInstances: 2,
+    ...MICRO_CPU_OPTIONS,
   },
   async (event) => {
     const data = event.data?.data();
@@ -20148,7 +20573,7 @@ exports.evaluateRouteTravelMilestones = onValueWritten({
   }
 });
 
-exports.generateAdminServiceDraft = onCall({ maxInstances: 3, ...HALF_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 60 }, async (request) => {
+exports.generateAdminServiceDraft = onCall({ maxInstances: 1, ...MICRO_CPU_OPTIONS, memory: '256MiB', timeoutSeconds: 60 }, async (request) => {
   await requireWhatsAppSupportAdmin(request);
   const mode = String(request.data?.mode || 'create').trim().toLowerCase() === 'edit' ? 'edit' : 'create';
   const instructions = String(request.data?.instructions || '').trim().slice(0, 2000);
@@ -20196,7 +20621,7 @@ exports.generateAdminServiceDraft = onCall({ maxInstances: 3, ...HALF_CPU_OPTION
   }
 });
 
-exports.generateAdminOptionImage = onCall({ maxInstances: 5, ...HALF_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 120 }, async (request) => {
+exports.generateAdminOptionImage = onCall({ maxInstances: 1, ...MICRO_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 120 }, async (request) => {
   await requireWhatsAppSupportAdmin(request);
 
   const data = request.data && typeof request.data === 'object' && !Array.isArray(request.data)

@@ -75,6 +75,7 @@ async function getServerPaymentMethods({ db, admin, uid }) {
       ...method,
       paystackAuthorizationCode: String(authorization.authorizationCode || ''),
       signature: String(authorization.authorizationSignature || '') || null,
+      payerEmail: String(authorization.payerEmail || '').trim().toLowerCase() || null,
     };
   });
 }
@@ -84,9 +85,20 @@ async function getServerPaymentMethod({ db, admin, uid, methodId }) {
   return methods.find((method) => method.id === String(methodId || '')) || null;
 }
 
-async function storeReusablePaymentMethod({ db, admin, uid, authorization = {}, nickname = '', consentAtMs = Date.now(), consentPurpose = 'customer_payment_method_added' }) {
+async function storeReusablePaymentMethod({
+  db,
+  admin,
+  uid,
+  authorization = {},
+  nickname = '',
+  consentAtMs = Date.now(),
+  consentPurpose = 'customer_payment_method_added',
+  payerEmail = '',
+  allowCreateGuestProfile = false,
+}) {
   const userId = String(uid || '').trim();
   const authorizationCode = String(authorization.authorization_code || '').trim();
+  const normalizedPayerEmail = String(payerEmail || '').trim().toLowerCase();
   if (!userId || !authorizationCode || authorization.reusable !== true) return { saved: false, reason: 'not-reusable' };
   await migrateLegacyPaymentMethods({ db, admin, uid: userId });
   const userRef = db.collection('users').doc(userId);
@@ -94,11 +106,16 @@ async function storeReusablePaymentMethod({ db, admin, uid, authorization = {}, 
   const duplicateQuery = methodsRef.where('authorizationCode', '==', authorizationCode).limit(1);
   return db.runTransaction(async (transaction) => {
     const [userSnap, duplicateSnap] = await Promise.all([transaction.get(userRef), transaction.get(duplicateQuery)]);
-    if (!userSnap.exists) return { saved: false, reason: 'profile-not-found' };
-    const user = userSnap.data() || {};
+    const isGuestUid = userId.startsWith('guest_');
+    if (!userSnap.exists && !allowCreateGuestProfile && !isGuestUid) return { saved: false, reason: 'profile-not-found' };
+    const user = userSnap.exists ? (userSnap.data() || {}) : {};
     const methods = Array.isArray(user.paymentMethods) ? user.paymentMethods.map(publicPaymentMethod) : [];
     if (!duplicateSnap.empty) {
-      const duplicateId = duplicateSnap.docs[0].id;
+      const duplicateDoc = duplicateSnap.docs[0];
+      const duplicateId = duplicateDoc.id;
+      if (normalizedPayerEmail && !String(duplicateDoc.data()?.payerEmail || '').trim()) {
+        transaction.set(duplicateDoc.ref, { payerEmail: normalizedPayerEmail }, { merge: true });
+      }
       let duplicate = methods.find((method) => method.id === duplicateId);
       if (!duplicate) {
         duplicate = publicPaymentMethod({
@@ -107,7 +124,16 @@ async function storeReusablePaymentMethod({ db, admin, uid, authorization = {}, 
           isDefault: methods.length === 0, createdAt: new Date(consentAtMs).toISOString(),
         });
         methods.push(duplicate);
-        transaction.set(userRef, { paymentMethods: methods, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        transaction.set(userRef, {
+          ...(!userSnap.exists ? {
+            uid: userId,
+            ...(isGuestUid ? { isGuest: true } : {}),
+            wallet: { balance: 0, currency: 'ZAR' },
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          } : {}),
+          paymentMethods: methods,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
       }
       return { saved: true, duplicate: true, card: duplicate };
     }
@@ -129,11 +155,21 @@ async function storeReusablePaymentMethod({ db, admin, uid, authorization = {}, 
       brand: card.brand,
       last4: card.last4,
       reusable: true,
+      ...(normalizedPayerEmail ? { payerEmail: normalizedPayerEmail } : {}),
       consentedAtMs: Number(consentAtMs || 0),
       consentPurpose: String(consentPurpose || 'customer_payment_method_added'),
       createdAt: card.createdAt,
     });
-    transaction.set(userRef, { paymentMethods: [...methods, card], updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    transaction.set(userRef, {
+      ...(!userSnap.exists ? {
+        uid: userId,
+        ...(isGuestUid ? { isGuest: true } : {}),
+        wallet: { balance: 0, currency: 'ZAR' },
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      } : {}),
+      paymentMethods: [...methods, card],
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
     return { saved: true, duplicate: false, card };
   });
 }

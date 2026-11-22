@@ -119,3 +119,28 @@ test('payment method removal deletes server authorization and default selection 
   assert.equal((await db.collection('paymentAuthorizations').doc('customer-3').collection('methods').doc('card-a').get()).exists, false);
   assert.equal((await db.collection('paymentAuthorizations').doc('customer-3').collection('methods').doc('card-b').get()).exists, true);
 });
+
+test('guest customers can save reusable cards even before a guest user document exists', async () => {
+  const db = new Db();
+  const saved = await storeReusablePaymentMethod({
+    db,
+    admin,
+    uid: 'guest_wa_123',
+    authorization: { authorization_code: 'AUTH_GUEST_1', reusable: true, brand: 'mastercard', last4: '5555', signature: 'SIG_G1' },
+    consentAtMs: 500,
+    consentPurpose: 'explicit_future_card_consent',
+    payerEmail: 'Guest.One@example.com ',
+  });
+  assert.equal(saved.saved, true);
+  assert.equal(saved.duplicate, false);
+  const profile = (await db.collection('users').doc('guest_wa_123').get()).data();
+  assert.equal(profile.isGuest, true);
+  assert.equal(profile.wallet.balance, 0);
+  assert.equal(profile.paymentMethods.length, 1);
+  assert.equal(profile.paymentMethods[0].last4, '5555');
+  assert.equal(Object.hasOwn(profile.paymentMethods[0], 'payerEmail'), false);
+  assert.equal(Object.hasOwn(profile.paymentMethods[0], 'paystackAuthorizationCode'), false);
+  const serverMethods = await getServerPaymentMethods({ db, admin, uid: 'guest_wa_123' });
+  assert.equal(serverMethods[0].paystackAuthorizationCode, 'AUTH_GUEST_1');
+  assert.equal(serverMethods[0].payerEmail, 'guest.one@example.com');
+});

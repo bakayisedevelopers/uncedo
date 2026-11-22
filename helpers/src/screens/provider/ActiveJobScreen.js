@@ -934,6 +934,9 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
       return;
     }
 
+    const currentStatus = String(activeJob?.status || '').trim().toLowerCase();
+    const canRateAfterCancel = ['arrived', 'work_started'].includes(currentStatus)
+      || Boolean(activeJob?.arrivedAt || activeJob?.workStartedAt);
     const closedJob = activeJob
       ? {
           requestId: activeJob.requestId || activeJob.id,
@@ -947,8 +950,12 @@ export function ActiveJobScreen({ goBack, systemInsets = {} }) {
       setCancelReason('');
       setShowCompletionModal(false);
       setProofPhotos([]);
-      setRatingTarget(closedJob);
-      setShowRatingModal(true);
+      if (canRateAfterCancel && closedJob?.customerId) {
+        setRatingTarget(closedJob);
+        setShowRatingModal(true);
+      } else {
+        goBack('Home');
+      }
       return;
     }
 

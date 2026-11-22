@@ -65,6 +65,7 @@ const TOOL_DEFINITIONS = Object.freeze({
     outputSchema: resultSchema({
       code: stringSchema,
       sentCount: Object.freeze({ type: 'integer' }),
+      persistedReply: Object.freeze({ type: 'boolean' }),
     }, ['code']),
   },
   getServiceDetails: {
@@ -201,7 +202,7 @@ const TOOL_DEFINITIONS = Object.freeze({
     description: 'Forward a customer’s message directed to their currently assigned helper into the active job live chat so the helper sees it immediately in the Uncedo Helpers app. Use ONLY during an active assigned job when the customer is addressing or communicating with their helper (e.g. gate code, directions, asking ETA, saying they are outside, replying to helper questions). NEVER use this for cancellations, complaints about the helper, support escalations, or general platform/billing questions.',
     roles: ['guest', 'customer'],
     auth: 'public',
-    fields: { messageText: 'multi-text', category: 'short-text' },
+    fields: { messageText: 'long-text', category: 'short-text' },
     required: ['messageText'],
     handler: 'relayMessageToHelper',
     canonicalBackend: 'activeSessionHelperChatBridge',
@@ -211,6 +212,7 @@ const TOOL_DEFINITIONS = Object.freeze({
     outputSchema: resultSchema({
       code: stringSchema,
       requestId: stringSchema,
+      helperName: stringSchema,
       deliveredToInAppChat: Object.freeze({ type: 'boolean' }),
       relayedToHelperWhatsApp: Object.freeze({ type: 'boolean' }),
     }, ['code']),
@@ -219,7 +221,7 @@ const TOOL_DEFINITIONS = Object.freeze({
     description: 'Search the sender’s active, non-canceled Uncedo service requests and cancel a booking for them. Accepts optional requestId (request ID or reference) and optional reason. If no requestId is passed, automatically finds the sender’s active open booking/request from conversation state or service request history and cancels it (or initiates confirmation if a cancellation fee applies).',
     roles: ['guest', 'customer'],
     auth: 'public',
-    fields: { requestId: 'short-text', reason: 'multi-text' },
+    fields: { requestId: 'short-text', reason: 'long-text' },
     required: [],
     handler: 'cancelServiceRequest',
     canonicalBackend: 'customerServiceRequestCancellation',
@@ -238,6 +240,7 @@ const TOOL_DEFINITIONS = Object.freeze({
       chargeConfirmed: Object.freeze({ type: 'boolean' }),
       pendingReconciliation: Object.freeze({ type: 'boolean' }),
       confirmationRequired: Object.freeze({ type: 'boolean' }),
+      paymentUrl: stringSchema,
       error: stringSchema,
     }, ['code']),
   },
@@ -273,6 +276,13 @@ function validateToolArguments(definition, args) {
       normalized[key] = item;
     } else if (type === 'multi-text') {
       const item = safeText(value, 240);
+      if (!item) {
+        if (requiredFields.has(key)) throw new Error(`Tool argument ${key} is required.`);
+        continue;
+      }
+      normalized[key] = item;
+    } else if (type === 'long-text') {
+      const item = safeText(value, 1000);
       if (!item) {
         if (requiredFields.has(key)) throw new Error(`Tool argument ${key} is required.`);
         continue;
@@ -323,9 +333,11 @@ function createWhatsAppToolRegistry({ handlers = {} } = {}) {
           properties: Object.fromEntries(Object.entries(definition.fields || {}).map(([key, kind]) => [key,
             kind === 'profile-field'
               ? { type: 'string', enum: ['firstName', 'lastName'] }
-              : kind === 'multi-text'
-                ? { type: 'string', maxLength: 240 }
-                : { type: 'string', maxLength: 120 },
+              : kind === 'long-text'
+                ? { type: 'string', maxLength: 1000 }
+                : kind === 'multi-text'
+                  ? { type: 'string', maxLength: 240 }
+                  : { type: 'string', maxLength: 120 },
           ])),
           required: definition.required || [],
         },

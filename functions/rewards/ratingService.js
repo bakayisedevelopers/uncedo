@@ -37,6 +37,35 @@ function getParticipants(request = {}) {
   };
 }
 
+function isServiceRequestEligibleForRating(request = {}) {
+  const requestStatus = String(request?.status || '').trim().toLowerCase();
+  if (['completed', 'closed'].includes(requestStatus)) {
+    return true;
+  }
+  if (!['canceled', 'cancelled'].includes(requestStatus)) {
+    return false;
+  }
+  const { customerId, helperId } = getParticipants(request);
+  if (!customerId || !helperId) {
+    return false;
+  }
+  const canceledFromStatus = String(request?.canceledFromStatus || '').trim().toLowerCase();
+  const billingRule = String(request?.pricingSnapshot?.cancellationBillingRule || '').trim().toLowerCase();
+  const arrivedAtPresent = Boolean(request?.arrivedAt || request?.helperAssignment?.arrivedAt);
+  const workStartedAtPresent = Boolean(request?.workStartedAt || request?.helperAssignment?.workStartedAt);
+  const arrivalPinPresent = Boolean(
+    request?.arrivalVerification?.required
+      || request?.arrivalVerification?.generatedAtMs
+      || request?.arrivalVerification?.verified
+      || request?.arrivalVerification?.verifiedAtMs,
+  );
+  return arrivedAtPresent
+    || workStartedAtPresent
+    || arrivalPinPresent
+    || ['arrived', 'work_started'].includes(canceledFromStatus)
+    || ['travel_fee_plus_booking_fee', 'arrived_fee', 'work_started_fee'].includes(billingRule);
+}
+
 function serviceIdsFor(request = {}) {
   const ids = [
     ...(Array.isArray(request.serviceIds) ? request.serviceIds : []),
@@ -177,8 +206,7 @@ async function submitServiceRequestRating({
     throw new Error('No valid rating target was found for this request.');
   }
 
-  const requestStatus = String(request.status || '').trim().toLowerCase();
-  if (!['completed', 'closed'].includes(requestStatus)) {
+  if (!isServiceRequestEligibleForRating(request)) {
     throw new Error('This request is not eligible for rating yet.');
   }
 
@@ -399,6 +427,7 @@ async function submitServiceRequestRating({
 }
 
 module.exports = {
+  isServiceRequestEligibleForRating,
   submitServiceRequestRating,
   serviceIdsFor,
   serviceOptionsFor,

@@ -5,7 +5,7 @@ const { txIdFromKey } = require('../rewards/rewardService');
 const shared = require('../../shared/rewards');
 const functionsShared = require('../shared/rewards');
 const { bookingEligibleSubtotal, hashId } = require('../rewards/phase3Service');
-const { serviceOptionsFor, submitServiceRequestRating } = require('../rewards/ratingService');
+const { isServiceRequestEligibleForRating, serviceOptionsFor, submitServiceRequestRating } = require('../rewards/ratingService');
 const {
   incrementCompletedPaid,
   recalculateServiceOptionMastery,
@@ -266,4 +266,86 @@ test('dual mastery tracks option-specific jobs and ratings independently from pa
   assert.equal(parentServiceMastery.eligibleCompletedJobCount, 2);
   assert.equal(parentServiceRating.count, 2);
   assert.equal(parentServiceRating.average, 4);
+});
+
+test('arrived and work_started cancellations are eligible for customer and helper ratings while pre-arrival cancellations are rejected', async () => {
+  const { db, admin } = createInMemoryFirestore();
+  await db.collection('rewardConfig').doc('customer').set(DEFAULT_REWARD_CONFIG.customer);
+  await db.collection('rewardConfig').doc('helper').set(DEFAULT_REWARD_CONFIG.helper);
+  await db.collection('rewardConfig').doc('global').set(DEFAULT_REWARD_CONFIG.global);
+
+  assert.equal(isServiceRequestEligibleForRating({
+    status: 'canceled',
+    customerId: 'cust_pre',
+    helperAssignment: { helperId: 'helper_pre' },
+    canceledFromStatus: 'accepted',
+  }), false);
+
+  assert.equal(isServiceRequestEligibleForRating({
+    status: 'canceled',
+    customerId: 'cust_arr',
+    helperAssignment: { helperId: 'helper_arr' },
+    arrivedAt: '2026-11-22T08:00:00Z',
+    canceledFromStatus: 'arrived',
+  }), true);
+
+  assert.equal(isServiceRequestEligibleForRating({
+    status: 'canceled',
+    customerId: 'cust_work',
+    helperAssignment: { helperId: 'helper_work' },
+    canceledFromStatus: 'work_started',
+  }), true);
+
+  await db.collection('serviceRequests').doc('req_pre_cancel').set({
+    status: 'canceled',
+    customerId: 'cust_pre',
+    helperAssignment: { helperId: 'helper_pre' },
+    canceledFromStatus: 'accepted',
+    serviceIds: ['car_wash'],
+  });
+  await db.collection('serviceRequests').doc('req_arrived_cancel').set({
+    status: 'canceled',
+    customerId: 'cust_arr',
+    helperAssignment: { helperId: 'helper_arr' },
+    arrivedAt: '2026-11-22T08:00:00Z',
+    canceledFromStatus: 'arrived',
+    categoryId: 'car_wash',
+    serviceIds: ['standard_wash'],
+    selectedOptionId: 'hatchback',
+  });
+
+  await assert.rejects(
+    () => submitServiceRequestRating({
+      db,
+      admin,
+      requestId: 'req_pre_cancel',
+      raterUserId: 'cust_pre',
+      score: 4,
+      comment: 'Before arrival',
+    }),
+    /not eligible for rating/i,
+  );
+
+  const custRating = await submitServiceRequestRating({
+    db,
+    admin,
+    requestId: 'req_arrived_cancel',
+    raterUserId: 'cust_arr',
+    score: 5,
+    comment: 'Arrived promptly before cancel',
+  });
+  const helperRating = await submitServiceRequestRating({
+    db,
+    admin,
+    requestId: 'req_arrived_cancel',
+    raterUserId: 'helper_arr',
+    score: 4,
+    comment: 'Respectful customer',
+  });
+
+  assert.equal(custRating.score, 5);
+  assert.equal(helperRating.score, 4);
+  const updatedReq = (await db.collection('serviceRequests').doc('req_arrived_cancel').get()).data();
+  assert.equal(updatedReq.ratings.customer.score, 5);
+  assert.equal(updatedReq.ratings.helper.score, 4);
 });

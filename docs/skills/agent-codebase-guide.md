@@ -96,7 +96,7 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
   * [src/screens/provider/HelperRewardsOverviewScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/screens/provider/HelperRewardsOverviewScreen.js): Primary helper rewards surface for read-only Uncedo Points, membership, mastery, referrals, recent ledger activity, and recognition entry points; points remain separate from earnings and payouts.
   * [src/screens/provider/HelperMembershipScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/screens/provider/HelperMembershipScreen.js) and [src/screens/provider/HelperServiceMasteryOverviewScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/screens/provider/HelperServiceMasteryOverviewScreen.js): Helper-wide membership and option-specific (`helperMastery/{uid}/serviceOptions/{masteryKey}` with optionless fallback to `services/{serviceId}`) mastery progress screens backed by authoritative reward, rating, and configuration records.
   * [src/services/rewards/rewardClientService.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/services/rewards/rewardClientService.js): Read-only Helpers reward data client for ledger pagination, reward/rating subscriptions, config caching, dual service/option mastery, and referral endpoints.
-  * `/helpers-web/src/utils/masteryModel.js`, `/helpers-web/src/services/helperMasteryService.js`, and `/helpers-web/src/components/rewards/MasteryBadge.jsx`: Helpers Web PWA read-only subscriptions and UI badges displaying `Beginner`/`Specialist`/`Master`/`Legend` mastery per approved service option across `/services`, `/onboarding`, and `/profile`.
+  * `/helpers-web/src/utils/masteryModel.js`, `/helpers-web/src/services/helperMasteryService.js`, `/helpers-web/src/components/rewards/MasteryBadge.jsx`, and `/helpers-web/src/pages/RequestDetailPage.jsx`: Helpers Web PWA read-only mastery badges (`Beginner`/`Specialist`/`Master`/`Legend`) across `/services`, `/onboarding`, and `/profile`, plus active job management and customer ratings after completed or post-arrival cancelled jobs.
   * [src/screens/provider/HelperNotificationsScreen.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/screens/provider/HelperNotificationsScreen.js) and [src/navigation/rewardNavigation.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/src/navigation/rewardNavigation.js): Server-authored notification list and privacy-safe routing of reward notification taps to the appropriate Helpers reward surface.
   * [scripts/node-with-production-env.js](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/helpers/scripts/node-with-production-env.js): Android Gradle Node wrapper that sets `NODE_ENV=production` for Expo release bundling while preserving normal development commands.
 
@@ -104,9 +104,12 @@ Use the mapping below to find files, logic, and concepts when asked to modify or
 
 ## 4. Uncedo Web App (`/web`)
 * **Common References**: "Website", "landing page", "privacy page", "terms page".
-* **Purpose**: Vite + React public website containing the landing page plus legal pages only.
-* **Key Pages (`/web/src/pages/`)**:
-  * [LandingPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/web/src/pages/LandingPage.jsx): Public Uncedo marketing landing page.
+* **Purpose**: Vite + React public website featuring the WhatsApp-focused landing page (`+27 60 523 9926`, no account required), customer sign-in/linking, payment session portal, and legal pages.
+* **Key Pages & Components (`/web/src/`)**:
+  * [LandingPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/web/src/pages/LandingPage.jsx): Public Uncedo landing page showcasing WhatsApp booking flows without creating an account.
+  * [Navbar.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/web/src/components/Navbar.jsx): Top navigation bar featuring the direct WhatsApp `Book` CTA button.
+  * [WhatsAppIcon.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/web/src/components/WhatsAppIcon.jsx): Brand WhatsApp vector icon component used across the landing page, navbar, and footer.
+  * [PaymentPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/web/src/pages/PaymentPage.jsx): Hosted customer payment session and post-service/cancellation helper rating portal.
   * [PrivacyPolicyPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/web/src/pages/PrivacyPolicyPage.jsx): Public privacy policy page.
   * [TermsPage.jsx](file:///C:/Users/Jabu%20Babb/Documents/Code/Uncedo/web/src/pages/TermsPage.jsx): Public terms of service page.
 

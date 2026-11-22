@@ -13,6 +13,10 @@ const {
   resolveServicePaymentSession,
   settleRequestPayment,
 } = require('./requestPaymentService');
+const {
+  serviceFinancialOperationId,
+  settleServiceFinancialOperation,
+} = require('./financialOperationService');
 
 class Snapshot {
   constructor(ref, data) {
@@ -417,4 +421,82 @@ test('explicit payment failure deducts guest wallet once and card retry settleme
   const reversalEntries = [...db.records.entries()].filter(([path, val]) => path.startsWith('financialLedger/') && val.entryType === 'service_charge_debt_reversal');
   assert.equal(debtEntries.length, 1);
   assert.equal(reversalEntries.length, 1);
+});
+
+test('cancellation settlement aligns statusDetail with wallet_debt_recorded and transferred guest debt reverses on linked account', async () => {
+  const reqId = 'rq_guest_cancel_linked';
+  const opId = serviceFinancialOperationId(reqId);
+  const db = new MemoryDb({
+    [`serviceRequests/${reqId}`]: {
+      customerId: 'guest_linked_1',
+      status: 'canceled',
+      canceledFromStatus: 'arrived',
+      cancellationFeeAmount: 95,
+    },
+    [`financialOperations/${opId}`]: {
+      operationId: opId,
+      requestId: reqId,
+      operationType: 'customer_cancellation',
+      status: 'gateway_failed_confirmed',
+      amount: 95,
+      amountMinor: 9500,
+      currency: 'ZAR',
+      settlementTransitionCount: 0,
+      settlementData: {
+        customerId: 'guest_linked_1',
+        requestPatch: {
+          status: 'canceled',
+          canceledBy: 'customer',
+          cancellationFeeAmount: 95,
+        },
+      },
+    },
+  });
+
+  const settledFail = await settleServiceFinancialOperation({
+    db,
+    admin,
+    operationRef: db.collection('financialOperations').doc(opId),
+    requestRef: db.collection('serviceRequests').doc(reqId),
+    outcome: 'failed_confirmed',
+    now: 10_000,
+  });
+  assert.equal(settledFail.applied, true);
+  assert.equal(settledFail.paymentStatus, 'wallet_debt_recorded');
+  const requestAfterFail = (await db.collection('serviceRequests').doc(reqId).get()).data();
+  assert.match(requestAfterFail.statusDetail, /No saved card was charged/i);
+  assert.doesNotMatch(requestAfterFail.statusDetail, /Cancellation fee charged/i);
+  assert.equal((await db.collection('users').doc('guest_linked_1').get()).data().wallet.balance, -95);
+
+  // Simulate commitWhatsAppIdentityLink consolidating the guest wallet debt onto the linked Firebase account
+  await db.runTransaction(async (tx) => {
+    tx.set(db.collection('users').doc('guest_linked_1'), { debtTransferredToUid: 'firebase_uid_1', wallet: { balance: 0, currency: 'ZAR' } }, { merge: true });
+    tx.set(db.collection('users').doc('firebase_uid_1'), { uid: 'firebase_uid_1', wallet: { balance: -95, currency: 'ZAR' } }, { merge: true });
+    tx.set(db.collection('servicePaymentOperations').doc(reqId), { status: 'payment_processing', activeAttemptId: 'attempt-card-1' }, { merge: true });
+    tx.create(db.collection('servicePaymentOperations').doc(reqId).collection('attempts').doc('attempt-card-1'), {
+      method: 'paystack_checkout',
+      status: 'processing',
+      amount: 95,
+      amountMinor: 9500,
+      customerId: 'guest_linked_1',
+    });
+  });
+
+  const paid = await settleRequestPayment({
+    db,
+    admin,
+    requestId: reqId,
+    attemptId: 'attempt-card-1',
+    outcome: 'success',
+    gatewayReference: 'ref-cancel-paid',
+    gatewayTransactionId: 'tx-cancel-paid',
+    providerStatus: 'success',
+    now: 20_000,
+  });
+
+  assert.equal(paid.action, 'settled');
+  assert.equal(paid.debtReversed, true);
+  assert.equal((await db.collection('users').doc('firebase_uid_1').get()).data().wallet.balance, 0);
+  const reversal = [...db.records.values()].find((entry) => entry.entryType === 'service_charge_debt_reversal');
+  assert.equal(reversal.userId, 'firebase_uid_1');
 });

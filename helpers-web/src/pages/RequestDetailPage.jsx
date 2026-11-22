@@ -354,6 +354,27 @@ export function RequestDetailPage({ requestId, onNavigate }) {
   const paymentMethod = String(paymentOperation?.method || '').toLowerCase();
   const isCashAwaitingConfirmation = status === 'completed' && paymentStatus === 'awaiting_cash_confirmation';
   const alreadyRated = Boolean(request.helperRatedCustomer || request.ratings?.helper || ratingSuccess);
+  const canceledFrom = String(request.canceledFromStatus || '').toLowerCase();
+  const cancellationBillingRule = String(request.pricingSnapshot?.cancellationBillingRule || '').toLowerCase();
+  const isRatingEligibleCanceledRequest = ['canceled', 'cancelled'].includes(status) && Boolean(
+    request.customerId
+    && (
+      request.arrivedAt
+      || request.helperAssignment?.arrivedAt
+      || request.workStartedAt
+      || request.helperAssignment?.workStartedAt
+      || request.arrivalVerification?.required
+      || request.arrivalVerification?.generatedAtMs
+      || request.arrivalVerification?.verified
+      || request.arrivalVerification?.verifiedAtMs
+      || ['arrived', 'work_started'].includes(canceledFrom)
+      || ['travel_fee_plus_booking_fee', 'arrived_fee', 'work_started_fee'].includes(cancellationBillingRule)
+    ),
+  );
+  const canRateCustomer = Boolean(
+    request.customerId
+    && (['completed', 'closed'].includes(status) || isRatingEligibleCanceledRequest),
+  );
 
   return (
     <div className="min-h-screen w-full max-w-full overflow-x-clip bg-canvas text-ink-900 pb-24 md:pb-10">
@@ -795,7 +816,7 @@ export function RequestDetailPage({ requestId, onNavigate }) {
                   </div>
                 )}
 
-                {!alreadyRated && (
+                {!alreadyRated && canRateCustomer && (
                   <form onSubmit={handleSubmitRating} className="pt-4 border-t border-border space-y-3">
                     <div className="text-xs font-semibold uppercase tracking-[0.1em] text-ink-500">
                       Rate Customer Experience
@@ -824,6 +845,58 @@ export function RequestDetailPage({ requestId, onNavigate }) {
                       value={ratingComment}
                       onChange={(e) => setRatingComment(e.target.value)}
                       placeholder="Optional note about this job…"
+                      className="w-full px-3 py-2 rounded-lg border border-border text-xs focus:outline-none focus:border-tealbrand-700"
+                    />
+                    <button
+                      type="submit"
+                      disabled={actionBusy}
+                      className="px-4 py-2.5 rounded-lg bg-tealbrand-600 hover:bg-tealbrand-700 text-white text-xs font-semibold min-h-[40px] disabled:opacity-50"
+                    >
+                      {actionBusy ? 'Submitting Rating…' : 'Submit Rating'}
+                    </button>
+                  </form>
+                )}
+              </div>
+            )}
+
+            {status !== 'completed' && isRatingEligibleCanceledRequest && (
+              <div className="min-w-0 w-full bg-surface rounded-xl border border-border p-5 sm:p-6 space-y-3 overflow-hidden">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-ink-500">
+                  Post-Cancellation Customer Rating
+                </div>
+                <p className="text-xs text-ink-600">
+                  Because this job was cancelled after arrival or work started, you can still rate the customer experience.
+                </p>
+                {alreadyRated ? (
+                  <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs font-semibold text-emerald-900">
+                    Customer rating submitted. Thank you!
+                  </div>
+                ) : (
+                  <form onSubmit={handleSubmitRating} className="space-y-3">
+                    <div className="flex items-center gap-1.5">
+                      {[1, 2, 3, 4, 5].map((star) => (
+                        <button
+                          key={star}
+                          type="button"
+                          onClick={() => setRatingScore(star)}
+                          aria-label={`Rate ${star} stars`}
+                          className="p-1.5 rounded-lg hover:bg-well"
+                        >
+                          <Star
+                            className={`h-5 w-5 ${
+                              star <= ratingScore
+                                ? 'fill-amber-400 text-amber-500'
+                                : 'text-ink-300'
+                            }`}
+                          />
+                        </button>
+                      ))}
+                    </div>
+                    <input
+                      type="text"
+                      value={ratingComment}
+                      onChange={(e) => setRatingComment(e.target.value)}
+                      placeholder="Optional note about this cancelled job…"
                       className="w-full px-3 py-2 rounded-lg border border-border text-xs focus:outline-none focus:border-tealbrand-700"
                     />
                     <button

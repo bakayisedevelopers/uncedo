@@ -430,13 +430,20 @@ async function settleServiceFinancialOperation({
         : 'not_applicable';
     }
 
-    const customerId = String(settlementData.customerId || request.customerId || '').trim();
-    const customerRef = customerId ? db.collection('users').doc(customerId) : null;
+    const rawCustomerId = String(settlementData.customerId || request.customerId || '').trim();
+    const rawCustomerRef = rawCustomerId ? db.collection('users').doc(rawCustomerId) : null;
     let walletDebtOutstanding = Boolean(operation.walletDebtOutstanding ?? (operation.debtApplied && !operation.debtReversed));
     const shouldApplyWalletDebt = paymentStatus === 'wallet_debt_recorded' && !walletDebtOutstanding;
     const shouldReverseWalletDebt = paymentStatus === 'paid' && walletDebtOutstanding;
-    const needWalletRead = customerRef && operationAmount > 0 && (shouldApplyWalletDebt || shouldReverseWalletDebt);
-    const customerSnap = needWalletRead ? await transaction.get(customerRef) : null;
+    const needWalletRead = rawCustomerRef && operationAmount > 0 && (shouldApplyWalletDebt || shouldReverseWalletDebt);
+    const rawCustomerSnap = needWalletRead ? await transaction.get(rawCustomerRef) : null;
+    const transferredToUid = String(rawCustomerSnap?.data()?.debtTransferredToUid || '').trim();
+    const targetOwnerSnap = needWalletRead && transferredToUid && transferredToUid !== rawCustomerId
+      ? await transaction.get(db.collection('users').doc(transferredToUid))
+      : null;
+    const customerId = targetOwnerSnap?.exists ? transferredToUid : rawCustomerId;
+    const customerRef = customerId ? db.collection('users').doc(customerId) : null;
+    const customerSnap = targetOwnerSnap?.exists ? targetOwnerSnap : rawCustomerSnap;
 
     if (customerRef && operationAmount > 0 && (shouldApplyWalletDebt || shouldReverseWalletDebt)) {
       const customer = customerSnap?.data() || {};
@@ -477,7 +484,17 @@ async function settleServiceFinancialOperation({
       walletDebtOutstanding = delta < 0;
     }
 
-    const requestPatch = settlementData.requestPatch || {};
+    const requestPatch = { ...(settlementData.requestPatch || {}) };
+    if (operationType === 'customer_cancellation' && operationAmount > 0) {
+      const formattedAmount = `R${operationAmount.toFixed(2)}`;
+      if (paymentStatus === 'paid') {
+        requestPatch.statusDetail = `Customer canceled the service. Cancellation fee paid (${formattedAmount}).`;
+      } else if (paymentStatus === 'wallet_debt_recorded') {
+        requestPatch.statusDetail = `Customer canceled the service. No saved card was charged; ${formattedAmount} cancellation fee recorded to wallet balance.`;
+      } else if (paymentStatus === 'payment_reconciliation_required') {
+        requestPatch.statusDetail = `Customer canceled the service. Cancellation fee payment (${formattedAmount}) is being verified.`;
+      }
+    }
     transaction.set(requestRef, {
       ...requestPatch,
       paymentStatus,
