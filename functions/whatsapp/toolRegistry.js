@@ -244,6 +244,430 @@ const TOOL_DEFINITIONS = Object.freeze({
       error: stringSchema,
     }, ['code']),
   },
+  getCustomerRequestHistory: {
+    description: 'List the current customer or guest’s recent and active Uncedo service bookings/requests (references, services, statuses, helper names, and payment statuses), plus any in-progress booking draft.',
+    roles: ['guest', 'customer'],
+    auth: 'public',
+    fields: {},
+    required: [],
+    handler: 'getCustomerRequestHistory',
+    canonicalBackend: 'customerRequestHistoryReader',
+    outputSchema: resultSchema({
+      code: stringSchema,
+      requests: Object.freeze({
+        type: 'array',
+        items: resultSchema({
+          requestId: stringSchema,
+          publicRequestReference: stringSchema,
+          serviceSummary: stringSchema,
+          status: stringSchema,
+          statusLabel: stringSchema,
+          helperName: stringSchema,
+          amount: Object.freeze({ type: ['number', 'null'] }),
+          paymentStatus: stringSchema,
+        }, ['requestId', 'status']),
+      }),
+      activeDraftServiceId: stringSchema,
+      activeDraftStatus: stringSchema,
+    }, ['code', 'requests']),
+  },
+  getServiceRequestDetails: {
+    description: 'Read authoritative details and live status of a specific Uncedo service request (or the caller’s active/most recent request when requestId is omitted), including helper assignment, quoted/final amount, payment status, whether it can be canceled/rated, and the 6-digit arrival PIN when the helper has arrived (for the owning customer only).',
+    roles: ['guest', 'customer', 'helper'],
+    auth: 'public',
+    fields: { requestId: 'short-text' },
+    required: [],
+    handler: 'getServiceRequestDetails',
+    canonicalBackend: 'participantServiceRequestReader',
+    outputSchema: resultSchema({
+      code: stringSchema,
+      requestId: stringSchema,
+      publicRequestReference: stringSchema,
+      serviceSummary: stringSchema,
+      status: stringSchema,
+      statusLabel: stringSchema,
+      helperName: stringSchema,
+      customerName: stringSchema,
+      serviceAddress: stringSchema,
+      estimatedAmount: Object.freeze({ type: ['number', 'null'] }),
+      finalAmount: Object.freeze({ type: ['number', 'null'] }),
+      paymentStatus: stringSchema,
+      arrivalPin: stringSchema,
+      canCancel: Object.freeze({ type: 'boolean' }),
+      canRate: Object.freeze({ type: 'boolean' }),
+      ratingScore: Object.freeze({ type: ['integer', 'null'] }),
+      workspaceUrl: stringSchema,
+      error: stringSchema,
+    }, ['code']),
+  },
+  getRequestPaymentDetails: {
+    description: 'Check the authoritative payment status, amount due or paid, saved card summary, cash payment eligibility, and wallet balance for the customer or guest’s active or specified service request.',
+    roles: ['guest', 'customer'],
+    auth: 'public',
+    fields: { requestId: 'short-text' },
+    required: [],
+    handler: 'getRequestPaymentDetails',
+    canonicalBackend: 'customerPaymentSummaryReader',
+    outputSchema: resultSchema({
+      code: stringSchema,
+      requestId: stringSchema,
+      publicRequestReference: stringSchema,
+      serviceSummary: stringSchema,
+      requestStatus: stringSchema,
+      paymentStatus: stringSchema,
+      state: stringSchema,
+      amount: Object.freeze({ type: ['number', 'null'] }),
+      currency: stringSchema,
+      settledDate: stringSchema,
+      walletBalance: Object.freeze({ type: 'number' }),
+      savedCardCount: Object.freeze({ type: 'integer' }),
+      savedCardSummary: stringSchema,
+      cashAllowed: Object.freeze({ type: 'boolean' }),
+      error: stringSchema,
+    }, ['code']),
+  },
+  createRequestPaymentLink: {
+    description: 'Generate a fresh, secure, request-specific checkout payment link for an unpaid completed or canceled service request so the customer or guest can pay online by card (and optionally save a card for future bookings). Optionally accepts requestId; if omitted, finds a single unpaid finalized request.',
+    roles: ['guest', 'customer'],
+    auth: 'public',
+    fields: { requestId: 'short-text' },
+    required: [],
+    handler: 'createRequestPaymentLink',
+    canonicalBackend: 'customerPaymentSessionGenerator',
+    stateChanging: true,
+    confirmation: 'not-required',
+    idempotency: 'inbound-event-id',
+    outputSchema: resultSchema({
+      code: stringSchema,
+      requestId: stringSchema,
+      publicRequestReference: stringSchema,
+      serviceSummary: stringSchema,
+      amount: Object.freeze({ type: 'number' }),
+      currency: stringSchema,
+      paymentUrl: stringSchema,
+      cashAllowed: Object.freeze({ type: 'boolean' }),
+      savedCardCount: Object.freeze({ type: 'integer' }),
+      pendingRequests: Object.freeze({
+        type: 'array',
+        items: resultSchema({
+          requestId: stringSchema,
+          publicRequestReference: stringSchema,
+          serviceSummary: stringSchema,
+          amount: Object.freeze({ type: 'number' }),
+        }, ['requestId']),
+      }),
+      error: stringSchema,
+    }, ['code']),
+  },
+  rateServiceHelper: {
+    description: 'Submit or update a 1-to-5 star rating (and optional feedback comment) for the assigned helper on a completed service request or a request canceled after arrival/work started.',
+    roles: ['guest', 'customer'],
+    auth: 'public',
+    fields: { requestId: 'short-text', score: 'rating-score', comment: 'long-text' },
+    required: ['score'],
+    handler: 'rateServiceHelper',
+    canonicalBackend: 'serviceRequestRatingWorkflow',
+    stateChanging: true,
+    confirmation: 'not-required',
+    idempotency: 'inbound-event-id',
+    outputSchema: resultSchema({
+      code: stringSchema,
+      requestId: stringSchema,
+      publicRequestReference: stringSchema,
+      helperName: stringSchema,
+      score: Object.freeze({ type: 'integer' }),
+      comment: stringSchema,
+      error: stringSchema,
+    }, ['code']),
+  },
+  escalateToHumanSupport: {
+    description: 'Create or append to an Uncedo human support ticket linked to this WhatsApp conversation (and optional service request) when the user explicitly asks for human help, disputes a charge/rating/incident, or needs manual support assistance.',
+    roles: ['guest', 'customer', 'helper'],
+    auth: 'public',
+    fields: { summary: 'long-text', requestId: 'short-text' },
+    required: [],
+    handler: 'escalateToHumanSupport',
+    canonicalBackend: 'whatsappSupportTicketService',
+    stateChanging: true,
+    confirmation: 'not-required',
+    idempotency: 'inbound-event-id',
+    outputSchema: resultSchema({
+      code: stringSchema,
+      ticketId: stringSchema,
+      requestId: stringSchema,
+      error: stringSchema,
+    }, ['code']),
+  },
+  getHelperOnboardingStatus: {
+    description: 'Check a verified linked helper’s account verification, onboarding checklist (profile photo, service offerings & photos, Helper Agreement, police clearance, payout verification), online readiness, and onboarding URL.',
+    roles: ['helper'],
+    auth: 'verified-linked',
+    fields: {},
+    required: [],
+    handler: 'getHelperOnboardingStatus',
+    canonicalBackend: 'helperReadinessReader',
+    outputSchema: resultSchema({
+      code: stringSchema,
+      readyToGoOnline: Object.freeze({ type: 'boolean' }),
+      helperVerified: Object.freeze({ type: 'boolean' }),
+      payoutVerified: Object.freeze({ type: 'boolean' }),
+      agreementCurrent: Object.freeze({ type: 'boolean' }),
+      policeClearanceStatus: stringSchema,
+      hasProfilePhoto: Object.freeze({ type: 'boolean' }),
+      hasApprovedOffering: Object.freeze({ type: 'boolean' }),
+      onlineStatus: stringSchema,
+      missingRequirements: Object.freeze({ type: 'array', items: stringSchema }),
+      offerings: Object.freeze({
+        type: 'array',
+        items: resultSchema({
+          serviceId: stringSchema,
+          serviceName: stringSchema,
+          optionTitle: stringSchema,
+          status: stringSchema,
+          hasPhotos: Object.freeze({ type: 'boolean' }),
+        }, ['serviceId', 'status']),
+      }),
+      onboardingUrl: stringSchema,
+      error: stringSchema,
+    }, ['code']),
+  },
+  getHelperWalletAndPayouts: {
+    description: 'Read a verified linked helper’s Uncedo wallet balance (available balance, reserved amount, outstanding cash commission, net balance), payout account readiness, pending cash confirmations count, recent payouts, and recent wallet transactions in ZAR.',
+    roles: ['helper'],
+    auth: 'verified-linked',
+    fields: {},
+    required: [],
+    handler: 'getHelperWalletAndPayouts',
+    canonicalBackend: 'helperWalletAndPayoutReader',
+    outputSchema: resultSchema({
+      code: stringSchema,
+      currency: stringSchema,
+      availableBalance: Object.freeze({ type: 'number' }),
+      reservedBalance: Object.freeze({ type: 'number' }),
+      outstandingCommission: Object.freeze({ type: 'number' }),
+      payoutVerified: Object.freeze({ type: 'boolean' }),
+      reconciliationBlocked: Object.freeze({ type: 'boolean' }),
+      pendingCashConfirmationsCount: Object.freeze({ type: 'integer' }),
+      recentTransactions: Object.freeze({
+        type: 'array',
+        items: resultSchema({
+          entryType: stringSchema,
+          amount: Object.freeze({ type: 'number' }),
+          description: stringSchema,
+          date: stringSchema,
+        }, ['entryType', 'amount']),
+      }),
+      recentPayouts: Object.freeze({
+        type: 'array',
+        items: resultSchema({
+          status: stringSchema,
+          amount: Object.freeze({ type: 'number' }),
+          date: stringSchema,
+        }, ['status', 'amount']),
+      }),
+      workspaceUrl: stringSchema,
+      error: stringSchema,
+    }, ['code']),
+  },
+  getHelperJobsAndOffers: {
+    description: 'List a verified linked helper’s current online availability, any pending incoming job offer waiting for a response, active or queued assigned job, and recent completed/assigned jobs.',
+    roles: ['helper'],
+    auth: 'verified-linked',
+    fields: {},
+    required: [],
+    handler: 'getHelperJobsAndOffers',
+    canonicalBackend: 'helperJobsAndOffersReader',
+    outputSchema: resultSchema({
+      code: stringSchema,
+      onlineStatus: stringSchema,
+      pendingOffer: Object.freeze({
+        type: ['object', 'null'],
+        additionalProperties: false,
+        properties: {
+          requestId: stringSchema,
+          publicRequestReference: stringSchema,
+          serviceSummary: stringSchema,
+          estimatedPayout: Object.freeze({ type: 'number' }),
+          offerType: stringSchema,
+          expiresInMinutes: Object.freeze({ type: 'integer' }),
+        },
+        required: ['requestId'],
+      }),
+      activeJob: Object.freeze({
+        type: ['object', 'null'],
+        additionalProperties: false,
+        properties: {
+          requestId: stringSchema,
+          publicRequestReference: stringSchema,
+          serviceSummary: stringSchema,
+          status: stringSchema,
+          customerName: stringSchema,
+          estimatedPayout: Object.freeze({ type: 'number' }),
+        },
+        required: ['requestId', 'status'],
+      }),
+      queuedJob: Object.freeze({
+        type: ['object', 'null'],
+        additionalProperties: false,
+        properties: {
+          requestId: stringSchema,
+          publicRequestReference: stringSchema,
+          serviceSummary: stringSchema,
+          status: stringSchema,
+        },
+        required: ['requestId', 'status'],
+      }),
+      recentJobs: Object.freeze({
+        type: 'array',
+        items: resultSchema({
+          requestId: stringSchema,
+          publicRequestReference: stringSchema,
+          serviceSummary: stringSchema,
+          status: stringSchema,
+          amount: Object.freeze({ type: ['number', 'null'] }),
+          paymentStatus: stringSchema,
+        }, ['requestId', 'status']),
+      }),
+      workspaceUrl: stringSchema,
+      error: stringSchema,
+    }, ['code']),
+  },
+  setHelperAvailability: {
+    description: 'Check or update a verified linked helper’s dispatch availability on Uncedo ("online", "offline", or "status"). Going online checks readiness and directs the helper to open Helpers Workspace to share live GPS; going offline immediately updates availability unless an active job is in progress.',
+    roles: ['helper'],
+    auth: 'verified-linked',
+    fields: { action: 'availability-action' },
+    required: ['action'],
+    handler: 'setHelperAvailability',
+    canonicalBackend: 'helperAvailabilityWorkflow',
+    stateChanging: true,
+    confirmation: 'not-required',
+    idempotency: 'inbound-event-id',
+    outputSchema: resultSchema({
+      code: stringSchema,
+      onlineStatus: stringSchema,
+      hasFreshLocation: Object.freeze({ type: 'boolean' }),
+      missingRequirements: Object.freeze({ type: 'array', items: stringSchema }),
+      workspaceUrl: stringSchema,
+      onboardingUrl: stringSchema,
+      error: stringSchema,
+    }, ['code']),
+  },
+  respondToHelperJobOffer: {
+    description: 'Accept or decline an active pending Uncedo service job offer currently dispatched to the verified linked helper. Accepts action ("accept" or "decline") and optional requestId.',
+    roles: ['helper'],
+    auth: 'verified-linked',
+    fields: { action: 'offer-action', requestId: 'short-text' },
+    required: ['action'],
+    handler: 'respondToHelperJobOffer',
+    canonicalBackend: 'serviceRequestOfferOperations',
+    stateChanging: true,
+    confirmation: 'not-required',
+    idempotency: 'inbound-event-id',
+    outputSchema: resultSchema({
+      code: stringSchema,
+      requestId: stringSchema,
+      publicRequestReference: stringSchema,
+      serviceSummary: stringSchema,
+      busyFallbackAccepted: Object.freeze({ type: 'boolean' }),
+      requestUrl: stringSchema,
+      workspaceUrl: stringSchema,
+      error: stringSchema,
+    }, ['code']),
+  },
+  relayMessageToCustomer: {
+    description: 'Forward a verified linked helper’s message to the customer of their currently active open job into the Uncedo job chat and WhatsApp chat. Use ONLY during an active assigned job when the helper is replying to or updating the customer (e.g. ETA, outside gate, asking access details).',
+    roles: ['helper'],
+    auth: 'verified-linked',
+    fields: { messageText: 'long-text', category: 'short-text' },
+    required: ['messageText'],
+    handler: 'relayMessageToCustomer',
+    canonicalBackend: 'activeSessionCustomerChatBridge',
+    stateChanging: true,
+    confirmation: 'not-required',
+    idempotency: 'inbound-event-id',
+    outputSchema: resultSchema({
+      code: stringSchema,
+      requestId: stringSchema,
+      customerName: stringSchema,
+      deliveredToInAppChat: Object.freeze({ type: 'boolean' }),
+      relayedToCustomerWhatsApp: Object.freeze({ type: 'boolean' }),
+    }, ['code']),
+  },
+  confirmCashPaymentReceipt: {
+    description: 'Confirm or reject receipt of a customer-reported cash payment for one of the verified linked helper’s completed service requests ("confirm" if cash was received, "reject" if not received). Optionally accepts requestId.',
+    roles: ['helper'],
+    auth: 'verified-linked',
+    fields: { action: 'cash-action', requestId: 'short-text' },
+    required: ['action'],
+    handler: 'confirmCashPaymentReceipt',
+    canonicalBackend: 'helperCashPaymentConfirmationWorkflow',
+    stateChanging: true,
+    confirmation: 'not-required',
+    idempotency: 'inbound-event-id',
+    outputSchema: resultSchema({
+      code: stringSchema,
+      requestId: stringSchema,
+      publicRequestReference: stringSchema,
+      amount: Object.freeze({ type: ['number', 'null'] }),
+      currency: stringSchema,
+      pendingRequests: Object.freeze({
+        type: 'array',
+        items: resultSchema({
+          requestId: stringSchema,
+          publicRequestReference: stringSchema,
+          amount: Object.freeze({ type: 'number' }),
+        }, ['requestId']),
+      }),
+      error: stringSchema,
+    }, ['code']),
+  },
+  checkWalletBalance: {
+    description: 'Check the current customer, guest, or helper’s Uncedo wallet balance. If the wallet balance is negative (< 0), attaches a clear overdue-balance message and (1) for customers/guests generates a secure payment link to pay the outstanding amount, or (2) for helpers returns the Capitec banking details (1569166828, reference: WhatsApp number) to send the outstanding amount to.',
+    roles: ['guest', 'customer', 'helper'],
+    auth: 'self-profile',
+    fields: {},
+    required: [],
+    handler: 'checkWalletBalance',
+    canonicalBackend: 'participantWalletBalanceReader',
+    outputSchema: resultSchema({
+      code: stringSchema,
+      role: stringSchema,
+      currency: stringSchema,
+      walletBalance: Object.freeze({ type: 'number' }),
+      availableBalance: Object.freeze({ type: 'number' }),
+      reservedBalance: Object.freeze({ type: 'number' }),
+      outstandingCommission: Object.freeze({ type: 'number' }),
+      isNegative: Object.freeze({ type: 'boolean' }),
+      outstandingAmount: Object.freeze({ type: 'number' }),
+      settlementMessage: stringSchema,
+      paymentUrl: stringSchema,
+      requestId: stringSchema,
+      publicRequestReference: stringSchema,
+      paymentLinks: Object.freeze({
+        type: 'array',
+        items: resultSchema({
+          requestId: stringSchema,
+          publicRequestReference: stringSchema,
+          serviceSummary: stringSchema,
+          amount: Object.freeze({ type: 'number' }),
+          paymentUrl: stringSchema,
+        }, ['amount', 'paymentUrl']),
+      }),
+      bankDetails: Object.freeze({
+        type: ['object', 'null'],
+        additionalProperties: false,
+        properties: {
+          bankName: stringSchema,
+          accountNumber: stringSchema,
+          reference: stringSchema,
+        },
+        required: ['bankName', 'accountNumber', 'reference'],
+      }),
+      workspaceUrl: stringSchema,
+      error: stringSchema,
+    }, ['code']),
+  },
 });
 
 function safeText(value, max = 500) {
@@ -292,6 +716,30 @@ function validateToolArguments(definition, args) {
       const item = safeText(value, 40);
       if (!['firstName', 'lastName'].includes(item)) throw new Error('Only first name or surname can be changed here.');
       normalized[key] = item;
+    } else if (type === 'rating-score') {
+      const numeric = Number(value);
+      if (!Number.isInteger(numeric) || numeric < 1 || numeric > 5) {
+        throw new Error('Rating score must be an integer between 1 and 5.');
+      }
+      normalized[key] = numeric;
+    } else if (type === 'availability-action') {
+      const item = safeText(value, 20).toLowerCase();
+      if (!['online', 'offline', 'status'].includes(item)) {
+        throw new Error('Availability action must be online, offline, or status.');
+      }
+      normalized[key] = item;
+    } else if (type === 'offer-action') {
+      const item = safeText(value, 20).toLowerCase();
+      if (!['accept', 'decline'].includes(item)) {
+        throw new Error('Offer action must be accept or decline.');
+      }
+      normalized[key] = item;
+    } else if (type === 'cash-action') {
+      const item = safeText(value, 20).toLowerCase();
+      if (!['confirm', 'reject'].includes(item)) {
+        throw new Error('Cash action must be confirm or reject.');
+      }
+      normalized[key] = item;
     }
   }
   return normalized;
@@ -323,8 +771,12 @@ function createWhatsAppToolRegistry({ handlers = {} } = {}) {
     const role = roleForContext(context);
     const hasOpenRelayRequest = Boolean(context.activeServiceRequest?.isOpen);
     return Object.entries(TOOL_DEFINITIONS)
-      .filter(([name, definition]) => definition.roles.includes(role)
-        && (name !== 'relayMessageToHelper' || hasOpenRelayRequest))
+      .filter(([name, definition]) => {
+        if (!definition.roles.includes(role)) return false;
+        if (name === 'relayMessageToHelper') return role !== 'helper' && hasOpenRelayRequest;
+        if (name === 'relayMessageToCustomer') return role === 'helper' && hasOpenRelayRequest;
+        return true;
+      })
       .map(([name, definition]) => ({
         name,
         description: definition.description,
@@ -333,11 +785,19 @@ function createWhatsAppToolRegistry({ handlers = {} } = {}) {
           properties: Object.fromEntries(Object.entries(definition.fields || {}).map(([key, kind]) => [key,
             kind === 'profile-field'
               ? { type: 'string', enum: ['firstName', 'lastName'] }
-              : kind === 'long-text'
-                ? { type: 'string', maxLength: 1000 }
-                : kind === 'multi-text'
-                  ? { type: 'string', maxLength: 240 }
-                  : { type: 'string', maxLength: 120 },
+              : kind === 'rating-score'
+                ? { type: 'integer', minimum: 1, maximum: 5 }
+                : kind === 'availability-action'
+                  ? { type: 'string', enum: ['online', 'offline', 'status'] }
+                  : kind === 'offer-action'
+                    ? { type: 'string', enum: ['accept', 'decline'] }
+                    : kind === 'cash-action'
+                      ? { type: 'string', enum: ['confirm', 'reject'] }
+                      : kind === 'long-text'
+                        ? { type: 'string', maxLength: 1000 }
+                        : kind === 'multi-text'
+                          ? { type: 'string', maxLength: 240 }
+                          : { type: 'string', maxLength: 120 },
           ])),
           required: definition.required || [],
         },

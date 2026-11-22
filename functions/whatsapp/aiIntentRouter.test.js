@@ -398,3 +398,65 @@ test('intent router accepts cancelServiceRequest with cancellation intent and in
   assert.match(prompt, /"allowedToolNames":\["","cancelServiceRequest"\]/);
   assert.match(prompt, /cancelServiceRequest/);
 });
+
+test('intent router accepts extended customer and helper tools with strict JSON arguments', () => {
+  const customerRating = normalizeModelResult({
+    intent: 'booking_management',
+    serviceId: '',
+    confidence: 0.96,
+    extractedAnswers: {},
+    toolName: 'rateServiceHelper',
+    toolArgumentsJson: '{"requestId":"req_123","score":5,"comment":"Very polite"}',
+  });
+  assert.equal(customerRating.toolName, 'rateServiceHelper');
+  assert.deepEqual(customerRating.toolArguments, { requestId: 'req_123', score: 5, comment: 'Very polite' });
+
+  const payLink = normalizeModelResult({
+    intent: 'payment_initiation',
+    toolName: 'createRequestPaymentLink',
+    toolArgumentsJson: '{}',
+  });
+  assert.equal(payLink.intent, 'payment_initiation');
+  assert.equal(payLink.toolName, 'createRequestPaymentLink');
+
+  for (const [intent, toolName, rawArgs, expectedArgs] of [
+    ['booking_status', 'getCustomerRequestHistory', '{}', {}],
+    ['booking_status', 'getServiceRequestDetails', '{"requestId":"UNC-1001"}', { requestId: 'UNC-1001' }],
+    ['payment_question', 'getRequestPaymentDetails', '{}', {}],
+    ['human_escalation', 'escalateToHumanSupport', '{"summary":"Disputed fee"}', { summary: 'Disputed fee' }],
+    ['provider_support', 'getHelperOnboardingStatus', '{}', {}],
+    ['provider_support', 'getHelperWalletAndPayouts', '{}', {}],
+    ['provider_support', 'getHelperJobsAndOffers', '{}', {}],
+    ['provider_support', 'setHelperAvailability', '{"action":"offline"}', { action: 'offline' }],
+    ['provider_support', 'respondToHelperJobOffer', '{"action":"accept","requestId":"req_9"}', { action: 'accept', requestId: 'req_9' }],
+    ['provider_relay', 'relayMessageToCustomer', '{"messageText":"I am outside the gate"}', { messageText: 'I am outside the gate' }],
+    ['provider_support', 'confirmCashPaymentReceipt', '{"action":"confirm"}', { action: 'confirm' }],
+    ['payment_question', 'checkWalletBalance', '{}', {}],
+    ['provider_support', 'checkWalletBalance', '{}', {}],
+  ]) {
+    const res = normalizeModelResult({ intent, toolName, toolArgumentsJson: rawArgs });
+    assert.equal(res.intent, intent);
+    assert.equal(res.toolName, toolName);
+    assert.deepEqual(res.toolArguments, expectedArgs);
+  }
+});
+
+test('buildPrompt includes >20 approved tools without truncation and includes customer/helper tool guidance', () => {
+  const manyTools = Array.from({ length: 24 }, (_, idx) => ({
+    name: idx === 23 ? 'confirmCashPaymentReceipt' : `tool_${idx}`,
+    description: `Tool ${idx} description.`,
+    inputSchema: { type: 'object', additionalProperties: false },
+  }));
+  const prompt = buildPrompt({
+    message: { text: 'Check my wallet and confirm cash' },
+    availableTools: manyTools,
+  });
+  assert.match(prompt, /confirmCashPaymentReceipt/);
+  assert.match(prompt, /checkWalletBalance/);
+  assert.match(prompt, /Capitec/);
+  assert.match(prompt, /rateServiceHelper/);
+  assert.match(prompt, /getHelperWalletAndPayouts/);
+  assert.match(prompt, /relayMessageToCustomer/);
+  assert.match(prompt, /"allowedToolNames":\[.*"confirmCashPaymentReceipt"\]/);
+});
+

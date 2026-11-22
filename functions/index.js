@@ -6642,6 +6642,1152 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
           relayedToHelperWhatsApp,
         };
       },
+      async getCustomerRequestHistory(_args = {}, execContext = {}) {
+        const callerIdentity = await getWhatsAppIdentityForCurrentSender(identityId, execContext.identity);
+        if (!callerIdentity) {
+          return { code: 'identity-not-authorized', requests: [] };
+        }
+        const rawRole = String(callerIdentity.role || '').trim().toLowerCase();
+        if (rawRole === 'helper') {
+          return { code: 'customer-role-required', requests: [] };
+        }
+        const targetConvRef = execContext.conversationRef || conversationRef;
+        const convSnap = targetConvRef ? await targetConvRef.get().catch(() => null) : null;
+        const conv = convSnap?.exists ? (convSnap.data() || {}) : {};
+        const draftId = String(conv.activeDraftId || '').trim();
+        const [requests, draftSnap] = await Promise.all([
+          listWhatsAppRequests({ db, identity: callerIdentity, perPrincipalLimit: 25, resultLimit: 8 }).catch(() => []),
+          draftId ? db.collection('serviceRequestDrafts').doc(draftId).get().catch(() => null) : Promise.resolve(null),
+        ]);
+        const draftData = draftSnap?.exists ? (draftSnap.data() || {}) : null;
+        const mapped = (Array.isArray(requests) ? requests : []).map((reqItem) => {
+          const summary = buildWhatsAppRequestSummary(reqItem);
+          const rawAmount = reqItem.status === 'canceled' || reqItem.status === 'cancelled'
+            ? (reqItem.cancellationFeeAmount ?? reqItem.pricingSnapshot?.cancellationAmount ?? null)
+            : (reqItem.totalAmount ?? reqItem.pricingSnapshot?.finalAmount ?? reqItem.pricingSnapshot?.totalAmount ?? reqItem.pricingSnapshot?.total ?? null);
+          const amountNum = Number(rawAmount);
+          return {
+            requestId: String(summary.requestId || reqItem.id || ''),
+            publicRequestReference: String(reqItem.publicRequestReference || ''),
+            serviceSummary: String(summary.summary || reqItem.serviceSummary || reqItem.subject || 'Service request'),
+            status: String(summary.status || reqItem.status || 'unknown'),
+            statusLabel: String(summary.statusLabel || reqItem.status || 'unknown'),
+            helperName: String(summary.helperName || ''),
+            amount: Number.isFinite(amountNum) && amountNum >= 0 ? Number(amountNum.toFixed(2)) : null,
+            paymentStatus: String(reqItem.paymentStatus || ''),
+          };
+        });
+        return {
+          code: mapped.length || (draftData && draftData.status === 'collecting') ? 'found' : 'no-requests',
+          requests: mapped,
+          ...(draftData && ['collecting', 'quoted'].includes(String(draftData.status || '')) ? {
+            activeDraftServiceId: String(draftData.serviceId || ''),
+            activeDraftStatus: String(draftData.status || ''),
+          } : {}),
+        };
+      },
+      async getServiceRequestDetails(args = {}, execContext = {}) {
+        const callerIdentity = await getWhatsAppIdentityForCurrentSender(identityId, execContext.identity);
+        if (!callerIdentity) {
+          return { code: 'identity-not-authorized', error: 'Could not verify your WhatsApp identity.' };
+        }
+        const role = String(execContext.authorization?.role || callerIdentity.role || (callerIdentity.guestPrincipalId ? 'customer' : 'guest')).toLowerCase();
+        const helperUid = role === 'helper' ? String(execContext.authorization?.uid || callerIdentity.linkedFirebaseUid || '').trim() : '';
+        const targetConvRef = execContext.conversationRef || conversationRef;
+        const convSnap = targetConvRef ? await targetConvRef.get().catch(() => null) : null;
+        const conv = convSnap?.exists ? (convSnap.data() || {}) : {};
+        let targetRequestId = String(args?.requestId || '').trim();
+        if (!targetRequestId && role === 'helper' && helperUid) {
+          const helperUserSnap = await db.collection('users').doc(helperUid).get().catch(() => null);
+          targetRequestId = String(conv.activeServiceRequestId || helperUserSnap?.data()?.activeServiceRequestId || '').trim();
+        } else if (!targetRequestId) {
+          targetRequestId = String(conv.activeServiceRequestId || '').trim();
+        }
+        let resolvedRequest = null;
+        if (targetRequestId) {
+          const access = await getWhatsAppRequestForIdentity({ db, identity: callerIdentity, requestId: targetRequestId });
+          if (access.code === 'forbidden') {
+            return { code: 'not-authorized', requestId: targetRequestId, error: 'You do not have access to that request.' };
+          }
+          if (access.code === 'found') {
+            resolvedRequest = access.request;
+          }
+        }
+        if (!resolvedRequest && !targetRequestId) {
+          const list = await listWhatsAppRequests({ db, identity: callerIdentity, perPrincipalLimit: 15, resultLimit: 5 }).catch(() => []);
+          resolvedRequest = (Array.isArray(list) ? list : []).find((r) => !['canceled', 'cancelled', 'expired'].includes(String(r.status || '').toLowerCase()))
+            || list?.[0]
+            || null;
+        }
+        if (!resolvedRequest) {
+          const draftId = String(conv.activeDraftId || '').trim();
+          if (role !== 'helper' && draftId) {
+            const draftSnap = await db.collection('serviceRequestDrafts').doc(draftId).get().catch(() => null);
+            const draft = draftSnap?.exists ? draftSnap.data() || {} : null;
+            if (draft && ['collecting', 'quoted'].includes(String(draft.status || ''))) {
+              const qTotal = Number(draft.quoteSnapshot?.total);
+              return {
+                code: 'draft-active',
+                requestId: String(draft.requestId || ''),
+                serviceSummary: String(draft.serviceId || 'Pending booking draft'),
+                status: String(draft.status || 'collecting'),
+                statusLabel: draft.status === 'quoted' ? 'awaiting your quote confirmation' : 'collecting booking details',
+                estimatedAmount: Number.isFinite(qTotal) && qTotal >= 0 ? Number(qTotal.toFixed(2)) : null,
+                canCancel: true,
+                canRate: false,
+              };
+            }
+          }
+          return {
+            code: targetRequestId ? 'not-found' : 'no-requests',
+            ...(targetRequestId ? { requestId: targetRequestId } : {}),
+            error: targetRequestId ? 'I could not find that service request on your account.' : 'I could not find any service requests on your account.',
+          };
+        }
+        const summary = buildWhatsAppRequestSummary(resolvedRequest);
+        const status = String(summary.status || resolvedRequest.status || '').toLowerCase();
+        let arrivalPin = '';
+        if (role !== 'helper' && status === 'arrived') {
+          const pinSnap = await db.collection('serviceRequests').doc(resolvedRequest.id).collection('private').doc('arrivalPin').get().catch(() => null);
+          if (pinSnap?.exists) {
+            arrivalPin = String(pinSnap.data()?.pin || '').trim();
+          }
+        }
+        const rawEst = resolvedRequest.pricingSnapshot?.total ?? resolvedRequest.pricingSnapshot?.totalAmount ?? resolvedRequest.quoteSnapshot?.total ?? null;
+        const rawFinal = ['canceled', 'cancelled'].includes(status)
+          ? (resolvedRequest.cancellationFeeAmount ?? resolvedRequest.pricingSnapshot?.cancellationAmount ?? null)
+          : (resolvedRequest.totalAmount ?? resolvedRequest.pricingSnapshot?.finalAmount ?? resolvedRequest.pricingSnapshot?.total ?? null);
+        const estNum = Number(rawEst);
+        const finalNum = Number(rawFinal);
+        const existingRating = resolvedRequest.ratings?.customer?.score;
+        const canCancel = role !== 'helper' && ['collecting_details', 'scheduled_pending', 'matching', 'helper_found', 'busy_helper_confirmation', 'helper_queued', 'accepted', 'driving', 'en_route', 'buying_resources', 'arrived', 'work_started'].includes(status);
+        const canRate = role !== 'helper' && isServiceRequestEligibleForRating(resolvedRequest);
+        return {
+          code: 'found',
+          requestId: String(resolvedRequest.id || ''),
+          publicRequestReference: String(resolvedRequest.publicRequestReference || ''),
+          serviceSummary: String(summary.summary || resolvedRequest.serviceSummary || 'Service request'),
+          status,
+          statusLabel: String(summary.statusLabel || status),
+          helperName: String(summary.helperName || resolvedRequest.helperAssignment?.helperName || ''),
+          ...(role === 'helper' ? { customerName: String(resolvedRequest.customerName || 'Customer') } : {}),
+          serviceAddress: String(resolvedRequest.serviceAddress || resolvedRequest.location?.address || '').slice(0, 240),
+          estimatedAmount: Number.isFinite(estNum) && estNum >= 0 ? Number(estNum.toFixed(2)) : null,
+          finalAmount: Number.isFinite(finalNum) && finalNum >= 0 ? Number(finalNum.toFixed(2)) : null,
+          paymentStatus: String(resolvedRequest.paymentStatus || ''),
+          ...(arrivalPin ? { arrivalPin } : {}),
+          canCancel,
+          canRate,
+          ratingScore: Number.isInteger(Number(existingRating)) ? Number(existingRating) : null,
+          ...(role === 'helper' ? { workspaceUrl: `${getWhatsAppHelperWebBaseUrl()}/requests/${resolvedRequest.id}` } : {}),
+        };
+      },
+      async getRequestPaymentDetails(args = {}, execContext = {}) {
+        const callerIdentity = await getWhatsAppIdentityForCurrentSender(identityId, execContext.identity);
+        if (!callerIdentity) {
+          return { code: 'identity-not-authorized', error: 'Could not verify your WhatsApp identity.' };
+        }
+        const rawRole = String(callerIdentity.role || '').trim().toLowerCase();
+        if (rawRole === 'helper') {
+          return { code: 'customer-role-required', error: 'Use getHelperWalletAndPayouts for helper wallet and payouts.' };
+        }
+        const principalUid = String(callerIdentity.linkedFirebaseUid || callerIdentity.guestPrincipalId || '').trim();
+        const targetConvRef = execContext.conversationRef || conversationRef;
+        const convSnap = targetConvRef ? await targetConvRef.get().catch(() => null) : null;
+        const conv = convSnap?.exists ? (convSnap.data() || {}) : {};
+        let targetRequestId = String(args?.requestId || conv.activeServiceRequestId || '').trim();
+        let targetRequest = null;
+        if (targetRequestId) {
+          const access = await getWhatsAppRequestForIdentity({ db, identity: callerIdentity, requestId: targetRequestId });
+          if (access.code === 'forbidden') return { code: 'not-authorized', requestId: targetRequestId, error: 'You cannot inspect payment for that request.' };
+          if (access.code === 'found') targetRequest = access.request;
+        }
+        if (!targetRequest && !args?.requestId) {
+          const list = await listWhatsAppRequests({ db, identity: callerIdentity, perPrincipalLimit: 20, resultLimit: 8 }).catch(() => []);
+          targetRequest = list.find((r) => ['completed', 'canceled', 'cancelled'].includes(String(r.status || '').toLowerCase()) && ['unpaid', 'wallet_debt_recorded', 'payment_reconciliation_required'].includes(String(r.paymentStatus || '').toLowerCase()))
+            || list.find((r) => ['completed', 'canceled', 'cancelled'].includes(String(r.status || '').toLowerCase()))
+            || list?.[0]
+            || null;
+        }
+        const [userSnap, billingData] = await Promise.all([
+          principalUid ? db.collection('users').doc(principalUid).get().catch(() => null) : Promise.resolve(null),
+          principalUid ? getBillingMethodsForCustomer({ customerId: targetRequest?.customerId || principalUid, preferredUid: callerIdentity.linkedFirebaseUid || '' }).catch(() => ({ methods: [] })) : Promise.resolve({ methods: [] }),
+        ]);
+        const reusableCards = (billingData?.methods || []).filter((c) => c?.reusable === true && String(c.paystackAuthorizationCode || '').trim());
+        const defaultCard = reusableCards.find((c) => c.isDefault) || reusableCards[0] || null;
+        const walletBalanceNum = Number(userSnap?.data()?.wallet?.balance || 0);
+        const safeWalletBalance = Number.isFinite(walletBalanceNum) ? Number(walletBalanceNum.toFixed(2)) : 0;
+        if (!targetRequest) {
+          return {
+            code: 'no-requests',
+            walletBalance: safeWalletBalance,
+            savedCardCount: reusableCards.length,
+            ...(defaultCard ? { savedCardSummary: `${defaultCard.brand || 'Card'} •••• ${defaultCard.last4 || ''}`.trim() } : {}),
+            error: 'No service request was found to check payment status.',
+          };
+        }
+        const [opSnap, legacySnap] = await Promise.all([
+          db.collection(PAYMENT_OPERATIONS).doc(targetRequest.id).get().catch(() => null),
+          db.collection(FINANCIAL_OPERATIONS_COLLECTION).doc(serviceFinancialOperationId(targetRequest.id)).get().catch(() => null),
+        ]);
+        const operation = opSnap?.exists ? (opSnap.data() || {}) : (legacySnap?.exists ? (legacySnap.data() || {}) : null);
+        const summary = buildWhatsAppPaymentSummary({ request: targetRequest, operation });
+        const reqStatus = String(targetRequest.status || '').toLowerCase();
+        const isCanceled = ['canceled', 'cancelled'].includes(reqStatus);
+        return {
+          code: summary.code === 'available' ? 'found' : String(summary.code || 'payment-status-unavailable'),
+          requestId: String(targetRequest.id),
+          publicRequestReference: String(targetRequest.publicRequestReference || ''),
+          serviceSummary: String(targetRequest.serviceSummary || targetRequest.subject || 'Service request'),
+          requestStatus: reqStatus,
+          paymentStatus: String(summary.paymentStatus || targetRequest.paymentStatus || ''),
+          state: String(summary.state || (summary.code === 'service-not-finalized' ? 'not_finalized' : 'unavailable')),
+          amount: summary.amount ?? null,
+          currency: String(summary.currency || 'ZAR'),
+          ...(summary.settledAtMs ? { settledDate: new Date(summary.settledAtMs).toISOString().slice(0, 10) } : {}),
+          walletBalance: safeWalletBalance,
+          savedCardCount: reusableCards.length,
+          ...(defaultCard ? { savedCardSummary: `${defaultCard.brand || 'Card'} •••• ${defaultCard.last4 || ''}`.trim() } : {}),
+          cashAllowed: !isCanceled,
+        };
+      },
+      async createRequestPaymentLink(args = {}, execContext = {}) {
+        if (!whatsappPaymentsEnabled()) {
+          return { code: 'payments-disabled', error: 'WhatsApp payment links are not enabled right now.' };
+        }
+        const callerIdentity = await getWhatsAppIdentityForCurrentSender(identityId, execContext.identity);
+        if (!callerIdentity) {
+          return { code: 'identity-not-authorized', error: 'Could not verify your WhatsApp identity.' };
+        }
+        const rawRole = String(callerIdentity.role || '').trim().toLowerCase();
+        if (rawRole === 'helper') {
+          return { code: 'customer-role-required', error: 'Only customers can generate request payment links.' };
+        }
+        const targetConvRef = execContext.conversationRef || conversationRef;
+        const convSnap = targetConvRef ? await targetConvRef.get().catch(() => null) : null;
+        const conv = convSnap?.exists ? (convSnap.data() || {}) : {};
+        const loadPayable = async (targetId) => {
+          let ctx = await getWhatsAppPaymentContext({ identityId, identity: callerIdentity, requestId: targetId });
+          if (ctx.code === 'awaiting_customer_confirmation' && ctx.paymentOperation?.activeAttemptId) {
+            await cancelSavedCardPaymentConfirmation({
+              db,
+              admin,
+              requestId: ctx.request.id,
+              customerId: String(ctx.request.customerId || ''),
+              attemptId: String(ctx.paymentOperation.activeAttemptId),
+            }).catch(() => null);
+            ctx = await getWhatsAppPaymentContext({ identityId, identity: callerIdentity, requestId: targetId });
+          }
+          return ctx;
+        };
+        const explicitId = String(args?.requestId || '').trim();
+        let selectedContext = null;
+        if (explicitId) {
+          selectedContext = await loadPayable(explicitId);
+          if (selectedContext.code === 'already-paid') {
+            return {
+              code: 'already-paid',
+              requestId: String(selectedContext.request?.id || explicitId),
+              publicRequestReference: String(selectedContext.request?.publicRequestReference || ''),
+              serviceSummary: String(selectedContext.request?.serviceSummary || 'Service request'),
+            };
+          }
+          if (selectedContext.code !== 'available') {
+            return {
+              code: selectedContext.code || 'not-payable',
+              requestId: explicitId,
+              error: 'This request is not currently payable by payment link.',
+            };
+          }
+        } else {
+          const candidates = [];
+          const directId = String(conv.activeServiceRequestId || '').trim();
+          if (directId) {
+            const ctx = await loadPayable(directId);
+            if (ctx.code === 'available' && Number(ctx.amount || 0) > 0) candidates.push(ctx);
+          }
+          if (!candidates.length) {
+            const history = await listWhatsAppRequests({ db, identity: callerIdentity, perPrincipalLimit: 25, resultLimit: 8 }).catch(() => []);
+            for (const item of history) {
+              if (!['completed', 'canceled', 'cancelled'].includes(String(item.status || '').toLowerCase())) continue;
+              const ctx = await loadPayable(item.id);
+              if (ctx.code === 'available' && Number(ctx.amount || 0) > 0) candidates.push(ctx);
+            }
+          }
+          if (candidates.length > 1) {
+            return {
+              code: 'multiple-unpaid-requests',
+              pendingRequests: candidates.slice(0, 5).map((ctx) => ({
+                requestId: String(ctx.request.id),
+                publicRequestReference: String(ctx.request.publicRequestReference || ''),
+                serviceSummary: String(ctx.request.serviceSummary || ctx.request.subject || 'Service request'),
+                amount: Number(Number(ctx.amount || 0).toFixed(2)),
+              })),
+            };
+          }
+          selectedContext = candidates[0] || null;
+          if (!selectedContext) {
+            return { code: 'not-found', error: 'No unpaid completed or canceled request was found on your account.' };
+          }
+        }
+        const session = await createWhatsAppPaymentSession(selectedContext);
+        if (session?.code !== 'created' || !session?.token) {
+          return { code: 'failed', requestId: String(selectedContext.request.id), error: 'Could not generate a payment link right now.' };
+        }
+        const baseUrl = String(process.env.CUSTOMER_PAYMENT_URL || 'https://uncedo.bakayise.com/payment').trim().replace(/\/$/, '');
+        const paymentUrl = `${baseUrl}?token=${encodeURIComponent(session.token)}`;
+        return {
+          code: 'created',
+          requestId: String(selectedContext.request.id),
+          publicRequestReference: String(selectedContext.request.publicRequestReference || ''),
+          serviceSummary: String(selectedContext.request.serviceSummary || selectedContext.request.subject || 'Service request'),
+          amount: Number(Number(selectedContext.amount || 0).toFixed(2)),
+          currency: 'ZAR',
+          paymentUrl,
+          cashAllowed: !selectedContext.isCanceled,
+          savedCardCount: Array.isArray(selectedContext.cards) ? selectedContext.cards.length : 0,
+        };
+      },
+      async rateServiceHelper(args = {}, execContext = {}) {
+        const callerIdentity = await getWhatsAppIdentityForCurrentSender(identityId, execContext.identity);
+        if (!callerIdentity) {
+          return { code: 'identity-not-authorized', error: 'Could not verify your WhatsApp identity.' };
+        }
+        const rawRole = String(callerIdentity.role || '').trim().toLowerCase();
+        if (rawRole === 'helper') {
+          return { code: 'customer-role-required', error: 'Only customers can rate a helper with this tool.' };
+        }
+        const score = Number(args?.score);
+        const comment = String(args?.comment || '').trim();
+        const explicitRequestId = String(args?.requestId || '').trim();
+        let targetRequest = null;
+        if (explicitRequestId) {
+          const access = await getWhatsAppRequestForIdentity({ db, identity: callerIdentity, requestId: explicitRequestId });
+          if (access.code === 'forbidden') return { code: 'not-authorized', requestId: explicitRequestId, error: 'You cannot rate that request.' };
+          if (access.code !== 'found') return { code: 'not-found', requestId: explicitRequestId, error: 'Service request not found.' };
+          targetRequest = access.request;
+        } else {
+          const list = await listWhatsAppRequests({ db, identity: callerIdentity, perPrincipalLimit: 20, resultLimit: 8 }).catch(() => []);
+          targetRequest = (Array.isArray(list) ? list : []).find((r) => isServiceRequestEligibleForRating(r) && !r.ratings?.customer)
+            || (Array.isArray(list) ? list : []).find((r) => isServiceRequestEligibleForRating(r))
+            || null;
+          if (!targetRequest) {
+            return { code: 'no-eligible-request', error: 'No completed or post-arrival canceled request was found that can be rated.' };
+          }
+        }
+        if (!isServiceRequestEligibleForRating(targetRequest)) {
+          return {
+            code: 'not-eligible',
+            requestId: String(targetRequest.id || ''),
+            publicRequestReference: String(targetRequest.publicRequestReference || ''),
+            error: 'This request is only eligible for rating once completed or after helper arrival.',
+          };
+        }
+        const targetConvRef = execContext.conversationRef || conversationRef;
+        try {
+          const ratingResult = await submitServiceRequestRating({
+            db,
+            admin,
+            requestId: targetRequest.id,
+            raterUserId: String(targetRequest.customerId || ''),
+            score,
+            comment,
+          });
+          await recalculateMembership({
+            db,
+            admin,
+            userId: ratingResult.ratedUserId,
+            accountType: ACCOUNT_TYPES.HELPER,
+          }).catch(() => null);
+          for (const svcId of ratingResult.expandedServiceIds || []) {
+            await recalculateMastery({ db, admin, helperId: ratingResult.ratedUserId, serviceId: svcId }).catch(() => null);
+          }
+          for (const optionTarget of ratingResult.serviceOptions || []) {
+            await recalculateServiceOptionMastery({
+              db,
+              admin,
+              helperId: ratingResult.ratedUserId,
+              serviceId: optionTarget.serviceId,
+              optionId: optionTarget.optionId,
+              optionTitle: optionTarget.optionTitle,
+              masteryKey: optionTarget.masteryKey,
+            }).catch(() => null);
+          }
+          if (targetConvRef) {
+            await targetConvRef.set({
+              pendingRatingComment: admin.firestore.FieldValue.delete(),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            }, { merge: true }).catch(() => null);
+          }
+          return {
+            code: 'rated',
+            requestId: String(targetRequest.id),
+            publicRequestReference: String(targetRequest.publicRequestReference || ''),
+            helperName: String(targetRequest.helperAssignment?.helperName || 'your helper'),
+            score,
+            comment,
+          };
+        } catch (ratingError) {
+          return {
+            code: 'failed',
+            requestId: String(targetRequest.id || ''),
+            error: String(ratingError?.message || 'Unable to save rating right now.'),
+          };
+        }
+      },
+      async escalateToHumanSupport(args = {}, execContext = {}) {
+        if (!whatsappSupportEnabled()) {
+          return { code: 'support-disabled', error: 'WhatsApp human support escalation is not enabled yet.' };
+        }
+        const callerIdentity = await getWhatsAppIdentityForCurrentSender(identityId, execContext.identity);
+        if (!callerIdentity) {
+          return { code: 'identity-not-authorized', error: 'Could not verify your WhatsApp identity.' };
+        }
+        const targetConvRef = execContext.conversationRef || conversationRef;
+        const convSnap = targetConvRef ? await targetConvRef.get().catch(() => null) : null;
+        const conv = convSnap?.exists ? (convSnap.data() || {}) : {};
+        let requestId = String(args?.requestId || '').trim();
+        if (requestId) {
+          const access = await getWhatsAppRequestForIdentity({ db, identity: callerIdentity, requestId });
+          if (access.code !== 'found') requestId = '';
+        }
+        if (!requestId) requestId = String(conv.activeServiceRequestId || '').trim();
+        const summaryText = String(args?.summary || '').trim();
+        const ticket = await createOrAppendWhatsAppSupportMessage({
+          db,
+          admin,
+          identityId,
+          conversationRef: targetConvRef,
+          eventId,
+          principalId: callerIdentity.linkedFirebaseUid || callerIdentity.guestPrincipalId || '',
+          linkedUid: callerIdentity.linkedFirebaseUid || '',
+          role: callerIdentity.role || (callerIdentity.guestPrincipalId ? 'customer' : 'unknown'),
+          requestId,
+          inbound: { text: summaryText || 'Customer requested human support via WhatsApp assistant.', type: 'text' },
+        });
+        return {
+          code: 'handed_off',
+          ticketId: String(ticket?.ticketId || ''),
+          requestId,
+        };
+      },
+      async getHelperOnboardingStatus(_args = {}, execContext = {}) {
+        const helperUid = String(execContext.authorization?.uid || '').trim();
+        if (!helperUid || execContext.authorization?.role !== 'helper') {
+          return { code: 'helper-authentication-required', error: 'Only verified linked helpers can check onboarding status.' };
+        }
+        const readiness = await getWhatsAppHelperReadiness(helperUid);
+        return {
+          code: 'found',
+          readyToGoOnline: Boolean(readiness.readyByCurrentAppRules),
+          helperVerified: Boolean(readiness.helperVerified),
+          payoutVerified: Boolean(readiness.payoutVerified),
+          agreementCurrent: Boolean(readiness.agreementCurrent),
+          policeClearanceStatus: String(readiness.policeClearanceStatus || 'missing'),
+          hasProfilePhoto: Boolean(readiness.hasProfilePhoto),
+          hasApprovedOffering: Boolean(readiness.approvedOffering),
+          onlineStatus: String(readiness.profile?.onlineStatus || 'offline').toLowerCase(),
+          missingRequirements: (Array.isArray(readiness.missing) ? readiness.missing : []).slice(0, 15).map((item) => String(item)),
+          offerings: (Array.isArray(readiness.offerings) ? readiness.offerings : []).slice(0, 20).map((item) => ({
+            serviceId: String(item.serviceId || ''),
+            serviceName: String(item.serviceName || item.serviceTitle || item.serviceId || ''),
+            optionTitle: String(item.optionTitle || ''),
+            status: String(item.status || 'pending'),
+            hasPhotos: Array.isArray(item.photos) && item.photos.length > 0,
+          })),
+          onboardingUrl: getWhatsAppHelperWebOnboardingUrl(),
+        };
+      },
+      async getHelperWalletAndPayouts(_args = {}, execContext = {}) {
+        const helperUid = String(execContext.authorization?.uid || '').trim();
+        if (!helperUid || execContext.authorization?.role !== 'helper') {
+          return { code: 'helper-authentication-required', error: 'Only verified linked helpers can inspect their wallet.' };
+        }
+        const walletRef = helperWalletReference(db, helperUid);
+        const [profileSnap, walletSnap, txSnap, payoutsSnap, cashPendingSnap] = await Promise.all([
+          db.collection('users').doc(helperUid).get().catch(() => null),
+          walletRef.get().catch(() => null),
+          walletRef.collection('transactions').orderBy('createdAtMs', 'desc').limit(5).get().catch(() => null),
+          db.collection(HELPER_PAYOUT_COLLECTION).where('helperId', '==', helperUid).limit(5).get().catch(() => null),
+          db.collection(PAYMENT_OPERATIONS).where('helperId', '==', helperUid).where('status', '==', 'awaiting_cash_confirmation').limit(10).get().catch(() => null),
+        ]);
+        const wallet = normalizeWalletForClient(walletFromSnapshot(walletSnap, helperUid));
+        const profile = profileSnap?.exists ? (profileSnap.data() || {}) : {};
+        const minorToMajor = (minor) => Number((Number(minor || 0) / 100).toFixed(2));
+        const recentTransactions = (txSnap?.docs || []).map((docSnap) => {
+          const data = docSnap.data() || {};
+          const amtMinor = Number(data.amountMinor || 0);
+          return {
+            entryType: String(data.entryType || 'entry'),
+            amount: minorToMajor(amtMinor),
+            description: String(data.description || '').slice(0, 160),
+            date: Number(data.createdAtMs || 0) > 0 ? new Date(Number(data.createdAtMs)).toISOString().slice(0, 10) : '',
+          };
+        });
+        const recentPayouts = (payoutsSnap?.docs || []).map((docSnap) => {
+          const data = docSnap.data() || {};
+          const amt = Number(data.helperAmount ?? (Number(data.amountMinor || 0) / 100));
+          const tsMs = normalizeTimestamp(data.paidAt || data.updatedAt || data.createdAt);
+          return {
+            status: String(data.status || 'unpaid'),
+            amount: Number.isFinite(amt) ? Number(amt.toFixed(2)) : 0,
+            date: tsMs > 0 ? new Date(tsMs).toISOString().slice(0, 10) : '',
+          };
+        });
+        let pendingCashConfirmationsCount = cashPendingSnap?.size || 0;
+        if (!cashPendingSnap) {
+          const helperJobs = await listWhatsAppRequests({ db, identity: execContext.identity, resultLimit: 12 }).catch(() => []);
+          if (helperJobs.length) {
+            const ops = await Promise.all(helperJobs.map((j) => db.collection(PAYMENT_OPERATIONS).doc(j.id).get().catch(() => null)));
+            pendingCashConfirmationsCount = ops.filter((s) => s?.exists && s.data()?.status === 'awaiting_cash_confirmation').length;
+          }
+        }
+        return {
+          code: 'found',
+          currency: 'ZAR',
+          availableBalance: minorToMajor(wallet.availableMinor),
+          reservedBalance: minorToMajor(wallet.reservedMinor),
+          outstandingCommission: minorToMajor(wallet.outstandingCommissionMinor),
+          payoutVerified: getHelperPayoutVerificationStatus(profile) === 'verified',
+          reconciliationBlocked: wallet.reconciliationBlocked === true,
+          pendingCashConfirmationsCount,
+          recentTransactions,
+          recentPayouts,
+          workspaceUrl: `${getWhatsAppHelperWebBaseUrl()}/earnings`,
+        };
+      },
+      async getHelperJobsAndOffers(_args = {}, execContext = {}) {
+        const helperUid = String(execContext.authorization?.uid || '').trim();
+        if (!helperUid || execContext.authorization?.role !== 'helper') {
+          return { code: 'helper-authentication-required', error: 'Only verified linked helpers can view jobs and offers.' };
+        }
+        const [profileSnap, offerSnap, recentList] = await Promise.all([
+          db.collection('users').doc(helperUid).get().catch(() => null),
+          db.collection('serviceRequests').where('currentOfferHelperId', '==', helperUid).limit(3).get().catch(() => null),
+          listWhatsAppRequests({ db, identity: execContext.identity, perPrincipalLimit: 15, resultLimit: 6 }).catch(() => []),
+        ]);
+        const profile = profileSnap?.exists ? (profileSnap.data() || {}) : {};
+        const onlineStatus = String(profile.onlineStatus || 'offline').toLowerCase();
+        const activeId = String(profile.activeServiceRequestId || '').trim();
+        const queuedId = String(profile.queuedServiceRequestId || '').trim();
+        const [activeSnap, queuedSnap] = await Promise.all([
+          activeId ? db.collection('serviceRequests').doc(activeId).get().catch(() => null) : Promise.resolve(null),
+          queuedId ? db.collection('serviceRequests').doc(queuedId).get().catch(() => null) : Promise.resolve(null),
+        ]);
+        const nowMs = Date.now();
+        const offerDoc = (offerSnap?.docs || []).find((d) => {
+          const data = d.data() || {};
+          return data.status === SERVICE_REQUEST_STATUS.HELPER_FOUND && normalizeTimestamp(data.offerExpiresAt) > nowMs;
+        }) || null;
+        let pendingOffer = null;
+        if (offerDoc) {
+          const offerData = offerDoc.data() || {};
+          const payoutBreakdown = offerData.helperPayoutBreakdown && typeof offerData.helperPayoutBreakdown === 'object'
+            ? offerData.helperPayoutBreakdown
+            : getServiceHelperPayoutBreakdown(offerData, { closureType: 'completed', waitingCost: 0 });
+          const payoutVal = Number(payoutBreakdown?.helperAmount ?? offerData.pricingSnapshot?.total ?? 0);
+          pendingOffer = {
+            requestId: String(offerDoc.id),
+            publicRequestReference: String(offerData.publicRequestReference || ''),
+            serviceSummary: String(offerData.serviceSummary || offerData.subject || 'Service request'),
+            estimatedPayout: Number.isFinite(payoutVal) ? Number(payoutVal.toFixed(2)) : 0,
+            offerType: String(offerData.offerType || 'standard'),
+            expiresInMinutes: Math.max(1, Math.ceil((normalizeTimestamp(offerData.offerExpiresAt) - nowMs) / 60000)),
+          };
+        }
+        const activeData = activeSnap?.exists ? activeSnap.data() || {} : null;
+        const activeJob = activeData && !['completed', 'canceled', 'cancelled'].includes(String(activeData.status || '').toLowerCase())
+          ? {
+              requestId: String(activeSnap.id),
+              publicRequestReference: String(activeData.publicRequestReference || ''),
+              serviceSummary: String(activeData.serviceSummary || activeData.subject || 'Service request'),
+              status: String(activeData.status || ''),
+              customerName: String(activeData.customerName || 'Customer'),
+              estimatedPayout: Number(Number((activeData.helperPayoutBreakdown?.helperAmount ?? activeData.pricingSnapshot?.total) || 0).toFixed(2)),
+            }
+          : null;
+        const queuedData = queuedSnap?.exists ? queuedSnap.data() || {} : null;
+        const queuedJob = queuedData && !['completed', 'canceled', 'cancelled'].includes(String(queuedData.status || '').toLowerCase())
+          ? {
+              requestId: String(queuedSnap.id),
+              publicRequestReference: String(queuedData.publicRequestReference || ''),
+              serviceSummary: String(queuedData.serviceSummary || queuedData.subject || 'Service request'),
+              status: String(queuedData.status || ''),
+            }
+          : null;
+        const recentJobs = (Array.isArray(recentList) ? recentList : []).slice(0, 5).map((item) => {
+          const rawAmt = Number(item.helperPayoutBreakdown?.helperAmount ?? item.totalAmount ?? item.pricingSnapshot?.total ?? NaN);
+          return {
+            requestId: String(item.id || ''),
+            publicRequestReference: String(item.publicRequestReference || ''),
+            serviceSummary: String(item.serviceSummary || item.subject || 'Service request'),
+            status: String(item.status || ''),
+            amount: Number.isFinite(rawAmt) && rawAmt >= 0 ? Number(rawAmt.toFixed(2)) : null,
+            paymentStatus: String(item.paymentStatus || ''),
+          };
+        });
+        return {
+          code: 'found',
+          onlineStatus,
+          pendingOffer,
+          activeJob,
+          queuedJob,
+          recentJobs,
+          workspaceUrl: `${getWhatsAppHelperWebBaseUrl()}/workspace`,
+        };
+      },
+      async setHelperAvailability(args = {}, execContext = {}) {
+        const helperUid = String(execContext.authorization?.uid || '').trim();
+        if (!helperUid || execContext.authorization?.role !== 'helper') {
+          return { code: 'helper-authentication-required', error: 'Only verified linked helpers can manage availability.' };
+        }
+        const action = String(args?.action || 'status').toLowerCase();
+        const workspaceUrl = `${getWhatsAppHelperWebBaseUrl()}/workspace`;
+        const onboardingUrl = getWhatsAppHelperWebOnboardingUrl();
+        const userSnap = await db.collection('users').doc(helperUid).get().catch(() => null);
+        const profile = userSnap?.exists ? (userSnap.data() || {}) : {};
+        const onlineStatus = String(profile.onlineStatus || 'offline').toLowerCase();
+        const hasFreshLocation = isHelperLocationFresh(getLiveLocationSnapshot(profile));
+        if (action === 'status') {
+          const readiness = await getWhatsAppHelperReadiness(helperUid);
+          return {
+            code: 'status',
+            onlineStatus,
+            hasFreshLocation,
+            missingRequirements: (readiness.missing || []).map((item) => String(item)),
+            workspaceUrl,
+            onboardingUrl,
+          };
+        }
+        const noopReply = async () => null;
+        if (action === 'online') {
+          const result = await beginWhatsAppHelperOnline({
+            identityId,
+            eventId,
+            identity: execContext.identity || {},
+            conversationRef: execContext.conversationRef || conversationRef,
+            reply: noopReply,
+          });
+          if (result.code === 'profile-not-ready') {
+            const readiness = await getWhatsAppHelperReadiness(helperUid);
+            return {
+              code: 'profile-not-ready',
+              onlineStatus,
+              hasFreshLocation,
+              missingRequirements: (readiness.missing || []).map((item) => String(item)),
+              workspaceUrl,
+              onboardingUrl,
+            };
+          }
+          return {
+            code: String(result.code || 'state-changed'),
+            onlineStatus: result.code === 'already-online' ? 'online' : onlineStatus,
+            hasFreshLocation,
+            workspaceUrl,
+            onboardingUrl,
+          };
+        }
+        const offlineResult = await setWhatsAppHelperOffline({
+          identityId,
+          eventId,
+          identity: execContext.identity || {},
+          conversationRef: execContext.conversationRef || conversationRef,
+          reply: noopReply,
+        });
+        return {
+          code: String(offlineResult.code || 'state-changed'),
+          onlineStatus: ['offline', 'already-offline'].includes(offlineResult.code) ? 'offline' : onlineStatus,
+          hasFreshLocation,
+          workspaceUrl,
+        };
+      },
+      async respondToHelperJobOffer(args = {}, execContext = {}) {
+        const helperUid = String(execContext.authorization?.uid || '').trim();
+        if (!helperUid || execContext.authorization?.role !== 'helper') {
+          return { code: 'helper-authentication-required', error: 'Only verified linked helpers can respond to offers.' };
+        }
+        const action = String(args?.action || '').toLowerCase();
+        const explicitRequestId = String(args?.requestId || '').trim();
+        let targetRequestSnap = null;
+        if (explicitRequestId) {
+          const candidate = await db.collection('serviceRequests').doc(explicitRequestId).get().catch(() => null);
+          if (candidate?.exists && String(candidate.data()?.currentOfferHelperId || '') === helperUid) {
+            targetRequestSnap = candidate;
+          }
+        } else {
+          const offerQuery = await db.collection('serviceRequests').where('currentOfferHelperId', '==', helperUid).limit(3).get().catch(() => null);
+          const nowMs = Date.now();
+          targetRequestSnap = (offerQuery?.docs || []).find((d) => {
+            const data = d.data() || {};
+            return data.status === SERVICE_REQUEST_STATUS.HELPER_FOUND && normalizeTimestamp(data.offerExpiresAt) > nowMs;
+          }) || null;
+        }
+        if (!targetRequestSnap?.exists) {
+          return {
+            code: 'no-pending-offer',
+            workspaceUrl: `${getWhatsAppHelperWebBaseUrl()}/workspace`,
+            error: 'I could not find an active pending service offer waiting for your response.',
+          };
+        }
+        const targetData = targetRequestSnap.data() || {};
+        const targetRequestId = String(targetRequestSnap.id);
+        const outcome = await serviceRequestOfferOperations.respond({
+          requestId: targetRequestId,
+          helperId: helperUid,
+          offerToken: String(targetData.offerToken || ''),
+          offerRevision: normalizeRevision(targetData.offerRevision),
+          action,
+        });
+        if (outcome.didApply) {
+          await recordHelperOfferLifecycleEvent({
+            helperId: helperUid,
+            requestId: targetRequestId,
+            offerRevision: normalizeRevision(targetData.offerRevision),
+            categoryId: outcome.categoryId,
+            serviceIds: outcome.serviceIds,
+            outcome: action === 'accept' ? 'accepted' : 'declined',
+            offeredAtMs: outcome.offerStartedAtMs,
+            closedAtMs: Date.now(),
+            responseMinutes: Math.max(0, Number(((Date.now() - outcome.offerStartedAtMs) / 60000).toFixed(2))),
+            sourceStatus: action === 'accept' ? (outcome.busyFallbackAccepted ? 'busy_helper_confirmation' : 'accepted') : 'matching',
+          }).catch(() => null);
+        }
+        if (outcome.error) {
+          return {
+            code: String(outcome.error),
+            requestId: targetRequestId,
+            publicRequestReference: String(targetData.publicRequestReference || ''),
+            serviceSummary: String(targetData.serviceSummary || targetData.subject || 'Service request'),
+            workspaceUrl: `${getWhatsAppHelperWebBaseUrl()}/workspace`,
+          };
+        }
+        if (action === 'accept' && outcome.busyFallbackAccepted) {
+          const refreshedSnap = await db.collection('serviceRequests').doc(targetRequestId).get().catch(() => null);
+          await finalizeBusyFallbackAcceptanceEffects({
+            requestId: targetRequestId,
+            request: refreshedSnap?.exists ? (refreshedSnap.data() || {}) : targetData,
+            helperId: helperUid,
+            helperName: outcome.helperName || 'Your helper',
+            activeRequestId: outcome.activeRequestId || '',
+          }).catch(() => null);
+          return {
+            code: 'accepted-queued',
+            requestId: targetRequestId,
+            publicRequestReference: String(targetData.publicRequestReference || ''),
+            serviceSummary: String(targetData.serviceSummary || targetData.subject || 'Service request'),
+            busyFallbackAccepted: true,
+            requestUrl: `${getWhatsAppHelperWebBaseUrl()}/requests/${targetRequestId}`,
+          };
+        }
+        const targetConvRef = execContext.conversationRef || conversationRef;
+        if (action === 'accept' && targetConvRef) {
+          await targetConvRef.set({
+            currentMode: 'provider_relay',
+            currentIntent: 'provider_relay',
+            activeServiceRequestId: targetRequestId,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true }).catch(() => null);
+        }
+        return {
+          code: action === 'accept' ? 'accepted' : 'declined',
+          requestId: targetRequestId,
+          publicRequestReference: String(targetData.publicRequestReference || ''),
+          serviceSummary: String(targetData.serviceSummary || targetData.subject || 'Service request'),
+          busyFallbackAccepted: false,
+          requestUrl: `${getWhatsAppHelperWebBaseUrl()}/requests/${targetRequestId}`,
+        };
+      },
+      async relayMessageToCustomer({ messageText, category } = {}, execContext = {}) {
+        const helperUid = String(execContext.authorization?.uid || '').trim();
+        if (!helperUid || execContext.authorization?.role !== 'helper') {
+          return { code: 'not-authorized' };
+        }
+        const targetConvRef = execContext.conversationRef || conversationRef;
+        const currentConversation = targetConvRef ? ((await targetConvRef.get().catch(() => null))?.data() || {}) : {};
+        const callerIdentity = execContext.identity || {};
+        let requestId = String(currentConversation.activeServiceRequestId || '').trim();
+        if (!requestId) {
+          const helperSnap = await db.collection('users').doc(helperUid).get().catch(() => null);
+          requestId = String(helperSnap?.data()?.activeServiceRequestId || '').trim();
+        }
+        if (!requestId) {
+          const openList = await listWhatsAppRequests({ db, identity: callerIdentity, perPrincipalLimit: 10, resultLimit: 6 }).catch(() => []);
+          const openMatch = openList.find((item) => String(item?.helperAssignment?.helperId || '') === helperUid && isWhatsAppRelayRequestOpen(item));
+          if (openMatch?.id) requestId = openMatch.id;
+        }
+        if (!requestId) {
+          return { code: 'no-active-request' };
+        }
+        const requestRef = db.collection('serviceRequests').doc(requestId);
+        const requestSnap = await requestRef.get();
+        if (!requestSnap.exists) {
+          return { code: 'request-not-found', requestId };
+        }
+        const request = requestSnap.data() || {};
+        if (String(request.helperAssignment?.helperId || '').trim() !== helperUid || !isWhatsAppRelayRequestOpen(request)) {
+          return { code: 'relay-closed', requestId };
+        }
+        const cleanText = String(messageText || '').trim().slice(0, 4096);
+        if (!cleanText) {
+          return { code: 'empty-message', requestId };
+        }
+        const helperName = String(request.helperAssignment?.helperName || callerIdentity.profileName || 'Helper').trim().slice(0, 80);
+        const nowMs = Date.now();
+        const messageId = stableEventId(`helper-wa-msg:${requestId}:${eventId}`);
+        await requestRef.collection('messages').doc(messageId).set({
+          messageId,
+          requestId,
+          senderRole: 'helper',
+          senderUid: helperUid,
+          senderName: helperName,
+          text: cleanText,
+          category: String(category || 'update').slice(0, 40),
+          channel: 'whatsapp',
+          sourceEventId: eventId,
+          deliveryStatus: 'delivered',
+          createdAtMs: nowMs,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+
+        let relayedToCustomerWhatsApp = false;
+        try {
+          const customerIdentityId = await resolveCustomerWhatsAppIdentityId({ customerId: String(request.customerId || ''), request });
+          if (customerIdentityId && customerIdentityId !== identityId) {
+            const [custIdentitySnap, custConvSnap] = await Promise.all([
+              db.collection('whatsappIdentities').doc(customerIdentityId).get(),
+              db.collection('whatsappConversations').doc(customerIdentityId).get(),
+            ]);
+            const custIdentity = custIdentitySnap.data() || {};
+            const custConv = custConvSnap.data() || {};
+            const custLastInbound = Number(custConv.lastInboundMessageAtMs || 0);
+            if (custIdentitySnap.exists
+              && custConvSnap.exists
+              && String(custIdentity.phoneNumberId || '') === String(callerIdentity.phoneNumberId || '')
+              && String(custIdentity.waId || '').trim()
+              && isWithinCustomerServiceWindow(custLastInbound, nowMs)) {
+              const { client } = getWhatsAppMetaClient();
+              await client.sendText({
+                to: custIdentity.waId,
+                text: `💬 *[Helper] ${helperName}* (${request.publicRequestReference || request.subject || 'Active job'}): ${cleanText}`,
+                lastInboundAtMs: custLastInbound,
+              });
+              relayedToCustomerWhatsApp = true;
+            }
+          }
+        } catch (relayError) {
+          logger.warn('whatsapp_ai_relay_customer_whatsapp_failed', {
+            requestId,
+            helperUid,
+            error: relayError?.message || 'unknown',
+          });
+        }
+        return {
+          code: 'relayed',
+          requestId,
+          customerName: String(request.customerName || 'the customer'),
+          deliveredToInAppChat: true,
+          relayedToCustomerWhatsApp,
+        };
+      },
+      async confirmCashPaymentReceipt(args = {}, execContext = {}) {
+        const helperUid = String(execContext.authorization?.uid || '').trim();
+        if (!helperUid || execContext.authorization?.role !== 'helper') {
+          return { code: 'helper-authentication-required', error: 'Only verified linked helpers can confirm cash payments.' };
+        }
+        const action = String(args?.action || '').toLowerCase();
+        const explicitId = String(args?.requestId || '').trim();
+        let targetRequestSnap = null;
+        let targetPaymentData = null;
+        if (explicitId) {
+          const reqSnap = await db.collection('serviceRequests').doc(explicitId).get().catch(() => null);
+          if (!reqSnap?.exists) return { code: 'not-found', requestId: explicitId, error: 'Request not found.' };
+          if (String(reqSnap.data()?.helperAssignment?.helperId || '') !== helperUid) {
+            return { code: 'not-authorized', requestId: explicitId, error: 'You are not the assigned helper for this request.' };
+          }
+          const paySnap = await db.collection(PAYMENT_OPERATIONS).doc(explicitId).get().catch(() => null);
+          const payData = paySnap?.exists ? paySnap.data() || {} : {};
+          if (payData.status !== 'awaiting_cash_confirmation' || !payData.activeAttemptId) {
+            return { code: 'no-pending-cash', requestId: explicitId, error: 'There is no pending cash confirmation for this request.' };
+          }
+          targetRequestSnap = reqSnap;
+          targetPaymentData = payData;
+        } else {
+          const jobs = await listWhatsAppRequests({ db, identity: execContext.identity, perPrincipalLimit: 20, resultLimit: 12 }).catch(() => []);
+          const ops = await Promise.all(jobs.map((j) => db.collection(PAYMENT_OPERATIONS).doc(j.id).get().catch(() => null)));
+          const pendingCandidates = [];
+          jobs.forEach((job, idx) => {
+            const payData = ops[idx]?.exists ? (ops[idx].data() || {}) : {};
+            if (payData.status === 'awaiting_cash_confirmation' && payData.activeAttemptId) {
+              pendingCandidates.push({ job, payData });
+            }
+          });
+          if (!pendingCandidates.length) {
+            return { code: 'no-pending-cash', error: 'No pending customer cash confirmations were found.' };
+          }
+          if (pendingCandidates.length > 1) {
+            return {
+              code: 'multiple-pending-cash',
+              pendingRequests: pendingCandidates.slice(0, 5).map(({ job, payData }) => ({
+                requestId: String(job.id),
+                publicRequestReference: String(job.publicRequestReference || ''),
+                amount: Number(Number(payData.amount || job.totalAmount || 0).toFixed(2)),
+              })),
+            };
+          }
+          targetRequestSnap = { id: pendingCandidates[0].job.id, data: () => pendingCandidates[0].job };
+          targetPaymentData = pendingCandidates[0].payData;
+        }
+        const targetId = String(targetRequestSnap.id);
+        const reqData = targetRequestSnap.data() || {};
+        const result = await handleCashPaymentConfirmation({
+          requestId: targetId,
+          attemptId: String(targetPaymentData.activeAttemptId),
+          helperId: helperUid,
+          action,
+        });
+        const amountVal = Number(targetPaymentData.amount ?? reqData.totalAmount ?? NaN);
+        return {
+          code: result.action === 'settled' ? 'settled' : result.action === 'rejected' ? 'rejected' : 'stale',
+          requestId: targetId,
+          publicRequestReference: String(reqData.publicRequestReference || ''),
+          amount: Number.isFinite(amountVal) ? Number(amountVal.toFixed(2)) : null,
+          currency: 'ZAR',
+        };
+      },
+      async checkWalletBalance(_args = {}, execContext = {}) {
+        const callerIdentity = await getWhatsAppIdentityForCurrentSender(identityId, execContext.identity);
+        if (!callerIdentity) {
+          return { code: 'identity-not-authorized', error: 'Could not verify your WhatsApp identity.' };
+        }
+        const rawRole = String(execContext.authorization?.role || callerIdentity.role || (callerIdentity.guestPrincipalId ? 'guest' : '')).trim().toLowerCase();
+        if (rawRole === 'helper') {
+          const helperUid = String(execContext.authorization?.uid || callerIdentity.linkedFirebaseUid || '').trim();
+          if (!helperUid) {
+            return { code: 'helper-authentication-required', error: 'Only verified linked helpers can check their helper wallet balance.' };
+          }
+          const walletRef = helperWalletReference(db, helperUid);
+          const [profileSnap, walletSnap] = await Promise.all([
+            db.collection('users').doc(helperUid).get().catch(() => null),
+            walletRef.get().catch(() => null),
+          ]);
+          const rawWallet = walletSnap?.exists ? (walletSnap.data() || {}) : {};
+          const rawAvailableMinor = Number(rawWallet.availableMinor ?? 0);
+          const rawReservedMinor = Number(rawWallet.reservedMinor ?? 0);
+          const rawOutstandingMinor = Number(rawWallet.outstandingCommissionMinor ?? 0);
+          const safeAvailableMinor = Number.isFinite(rawAvailableMinor) ? rawAvailableMinor : 0;
+          const safeReservedMinor = Number.isFinite(rawReservedMinor) ? Math.max(0, rawReservedMinor) : 0;
+          const safeOutstandingMinor = Number.isFinite(rawOutstandingMinor) ? Math.max(0, rawOutstandingMinor) : 0;
+          const helperNetRand = Number(((safeAvailableMinor - safeOutstandingMinor) / 100).toFixed(2));
+          const userWalletNum = Number(profileSnap?.data()?.wallet?.balance || 0);
+          const userWalletRand = Number.isFinite(userWalletNum) ? Number(userWalletNum.toFixed(2)) : 0;
+          const walletBalance = (safeAvailableMinor !== 0 || safeOutstandingMinor !== 0 || userWalletRand === 0)
+            ? helperNetRand
+            : userWalletRand;
+          const availableBalance = Number((safeAvailableMinor / 100).toFixed(2));
+          const reservedBalance = Number((safeReservedMinor / 100).toFixed(2));
+          const outstandingCommission = Number((safeOutstandingMinor / 100).toFixed(2));
+          const isNegative = walletBalance < 0;
+          const outstandingAmount = isNegative ? Number(Math.abs(walletBalance).toFixed(2)) : 0;
+          const bankDetails = isNegative
+            ? {
+                bankName: 'Capitec',
+                accountNumber: '1569166828',
+                reference: 'WhatsApp number',
+              }
+            : null;
+          const settlementMessage = isNegative
+            ? `Your wallet balance is negative (-R${outstandingAmount.toFixed(2)} ZAR). Please send the outstanding amount of R${outstandingAmount.toFixed(2)} ZAR to:\n• Bank: Capitec\n• Account Number: 1569166828\n• Reference: WhatsApp number`
+            : '';
+          return {
+            code: 'found',
+            role: 'helper',
+            currency: 'ZAR',
+            walletBalance,
+            availableBalance,
+            reservedBalance,
+            outstandingCommission,
+            isNegative,
+            outstandingAmount,
+            settlementMessage,
+            paymentUrl: '',
+            paymentLinks: [],
+            bankDetails,
+            workspaceUrl: `${getWhatsAppHelperWebBaseUrl()}/earnings`,
+          };
+        }
+
+        const principalUid = String(callerIdentity.linkedFirebaseUid || callerIdentity.guestPrincipalId || '').trim();
+        if (!principalUid) {
+          return { code: 'identity-not-authorized', error: 'Could not find a customer wallet profile for this WhatsApp identity.' };
+        }
+        const userSnap = await db.collection('users').doc(principalUid).get().catch(() => null);
+        const userData = userSnap?.exists ? (userSnap.data() || {}) : {};
+        const rawBalance = Number(userData.wallet?.balance || 0);
+        const walletBalance = Number.isFinite(rawBalance) ? Number(rawBalance.toFixed(2)) : 0;
+        const isNegative = walletBalance < 0;
+        const outstandingAmount = isNegative ? Number(Math.abs(walletBalance).toFixed(2)) : 0;
+        const customerRole = rawRole === 'guest' || !callerIdentity.linkedFirebaseUid ? 'guest' : 'customer';
+
+        if (!isNegative) {
+          return {
+            code: 'found',
+            role: customerRole,
+            currency: 'ZAR',
+            walletBalance,
+            availableBalance: walletBalance,
+            reservedBalance: 0,
+            outstandingCommission: 0,
+            isNegative: false,
+            outstandingAmount: 0,
+            settlementMessage: '',
+            paymentUrl: '',
+            paymentLinks: [],
+            bankDetails: null,
+          };
+        }
+
+        let paymentUrl = '';
+        let primaryRequestId = '';
+        let primaryPublicRef = '';
+        const paymentLinks = [];
+        const baseUrl = String(process.env.CUSTOMER_PAYMENT_URL || 'https://uncedo.bakayise.com/payment').trim().replace(/\/$/, '');
+
+        if (whatsappPaymentsEnabled()) {
+          const history = await listWhatsAppRequests({ db, identity: callerIdentity, perPrincipalLimit: 25, resultLimit: 12 }).catch(() => []);
+          const candidateRequests = (Array.isArray(history) ? history : [])
+            .filter((r) => ['completed', 'canceled', 'cancelled'].includes(String(r.status || '').toLowerCase()))
+            .filter((r) => ['wallet_debt_recorded', 'payment_failed', 'unpaid', 'payment_cancelled', 'payment_expired', 'payment_reconciliation_required', 'awaiting_customer_confirmation'].includes(String(r.paymentStatus || '').toLowerCase()))
+            .sort((a, b) => {
+              const aDebt = String(a.paymentStatus || '').toLowerCase() === 'wallet_debt_recorded' ? 1 : 0;
+              const bDebt = String(b.paymentStatus || '').toLowerCase() === 'wallet_debt_recorded' ? 1 : 0;
+              return bDebt - aDebt;
+            });
+
+          const payableContexts = [];
+          for (const item of candidateRequests.slice(0, 6)) {
+            let ctx = await getWhatsAppPaymentContext({ identityId, identity: callerIdentity, requestId: item.id }).catch(() => null);
+            if (ctx?.code === 'awaiting_customer_confirmation' && ctx.paymentOperation?.activeAttemptId) {
+              await cancelSavedCardPaymentConfirmation({
+                db,
+                admin,
+                requestId: ctx.request.id,
+                customerId: String(ctx.request.customerId || ''),
+                attemptId: String(ctx.paymentOperation.activeAttemptId),
+              }).catch(() => null);
+              ctx = await getWhatsAppPaymentContext({ identityId, identity: callerIdentity, requestId: item.id }).catch(() => null);
+            }
+            if (ctx?.code === 'available' && Number(ctx.amount || 0) > 0) {
+              payableContexts.push(ctx);
+            }
+          }
+
+          payableContexts.sort((a, b) => {
+            const aExact = Math.abs(Number(a.amount || 0) - outstandingAmount) < 0.01 ? 1 : 0;
+            const bExact = Math.abs(Number(b.amount || 0) - outstandingAmount) < 0.01 ? 1 : 0;
+            return bExact - aExact;
+          });
+
+          for (const ctx of payableContexts.slice(0, 3)) {
+            const session = await createWhatsAppPaymentSession(ctx).catch(() => null);
+            if (session?.code === 'created' && session?.token) {
+              const url = `${baseUrl}?token=${encodeURIComponent(session.token)}`;
+              paymentLinks.push({
+                requestId: String(ctx.request.id),
+                publicRequestReference: String(ctx.request.publicRequestReference || ''),
+                serviceSummary: String(ctx.request.serviceSummary || ctx.request.subject || 'Service request'),
+                amount: Number(Number(ctx.amount || 0).toFixed(2)),
+                paymentUrl: url,
+              });
+            }
+          }
+
+          if (paymentLinks.length > 0) {
+            paymentUrl = paymentLinks[0].paymentUrl;
+            primaryRequestId = paymentLinks[0].requestId;
+            primaryPublicRef = paymentLinks[0].publicRequestReference;
+          } else {
+            let paystackSecretKey = '';
+            try { paystackSecretKey = getPaymentsSecrets().PAYSTACK_SECRET_KEY; } catch { paystackSecretKey = ''; }
+            if (paystackSecretKey) {
+              const principalHash = createHash('sha256').update(principalUid).digest('hex').slice(0, 16);
+              const customerEmail = isValidCustomerEmail(userData.email)
+                || isValidCustomerEmail(callerIdentity.email)
+                || `wallet-${principalHash}@guests.uncedo.bakayise.com`;
+              const amountMinor = Math.round(outstandingAmount * 100);
+              const reference = `wa_wallet_${principalHash}_${Date.now().toString(36)}_${randomBytes(3).toString('hex')}`;
+              const nowMs = Date.now();
+              const rootBaseUrl = baseUrl.replace(/\/payment$/, '');
+              try {
+                const payload = await callPaystackApi({
+                  paystackSecretKey,
+                  path: '/transaction/initialize',
+                  method: 'POST',
+                  body: {
+                    email: customerEmail,
+                    amount: amountMinor,
+                    currency: 'ZAR',
+                    reference,
+                    callback_url: `${rootBaseUrl}/?walletPayment=complete`,
+                    channels: ['card'],
+                    metadata: { type: 'customer_wallet_settlement', customer_id: principalUid },
+                  },
+                });
+                const authorizationUrl = String(payload?.data?.authorization_url || '');
+                const checkoutHost = (() => { try { return new URL(authorizationUrl).hostname; } catch { return ''; } })();
+                if (authorizationUrl.startsWith('https://')
+                  && ['checkout.paystack.com', 'checkout.paystack.co'].includes(checkoutHost)
+                  && String(payload?.data?.reference || '') === reference) {
+                  await db.collection('paystackRequestPaymentReferences').doc(reference).set({
+                    type: 'customer_wallet_settlement',
+                    customerId: principalUid,
+                    amount: outstandingAmount,
+                    amountMinor,
+                    currency: 'ZAR',
+                    status: 'processing',
+                    createdAtMs: nowMs,
+                    updatedAtMs: nowMs,
+                  }, { merge: true });
+                  paymentUrl = authorizationUrl;
+                  paymentLinks.push({
+                    requestId: '',
+                    publicRequestReference: 'WALLET',
+                    serviceSummary: 'Wallet balance settlement',
+                    amount: outstandingAmount,
+                    paymentUrl: authorizationUrl,
+                  });
+                }
+              } catch (initError) {
+                logger.warn('whatsapp_wallet_paystack_init_failed', {
+                  principalUid,
+                  error: initError?.message || 'unknown',
+                });
+              }
+            }
+          }
+        }
+
+        const settlementMessage = paymentUrl
+          ? `Your wallet balance is negative (-R${outstandingAmount.toFixed(2)} ZAR). Please pay your outstanding amount of R${outstandingAmount.toFixed(2)} ZAR using this secure payment link: ${paymentUrl}`
+          : `Your wallet balance is negative (-R${outstandingAmount.toFixed(2)} ZAR). Please pay the outstanding amount of R${outstandingAmount.toFixed(2)} ZAR to clear your balance. Reply *pay* or contact support if you need a fresh payment link.`;
+
+        return {
+          code: 'found',
+          role: customerRole,
+          currency: 'ZAR',
+          walletBalance,
+          availableBalance: walletBalance,
+          reservedBalance: 0,
+          outstandingCommission: 0,
+          isNegative: true,
+          outstandingAmount,
+          settlementMessage,
+          paymentUrl,
+          requestId: primaryRequestId,
+          publicRequestReference: primaryPublicRef,
+          paymentLinks,
+          bankDetails: null,
+        };
+      },
     },
   });
 }
@@ -6860,6 +8006,248 @@ function formatWhatsAppToolResult(toolName, result = {}) {
       return 'WhatsApp cancellation is not enabled yet. Please use the Uncedo app or contact support.';
     }
     return result.error || 'I could not complete the cancellation right now. Please check your request in the Uncedo app or contact support.';
+  }
+  if (toolName === 'getCustomerRequestHistory') {
+    const items = Array.isArray(result.requests) ? result.requests : [];
+    const lines = [];
+    if (result.activeDraftServiceId) {
+      lines.push(`📝 *In-progress draft:* ${result.activeDraftServiceId} (${result.activeDraftStatus || 'collecting'})`);
+    }
+    if (!items.length && !lines.length) {
+      return 'I could not find any service requests linked to your WhatsApp profile yet.';
+    }
+    if (items.length) {
+      lines.push('*Your recent Uncedo requests:*');
+      items.slice(0, 6).forEach((item) => {
+        const ref = item.publicRequestReference || item.requestId;
+        const amtText = item.amount !== null && item.amount !== undefined ? ` — R${Number(item.amount).toFixed(2)} ZAR` : '';
+        const helperText = item.helperName ? ` (Helper: ${item.helperName})` : '';
+        lines.push(`• *${ref}* — ${item.serviceSummary || 'Service'} — ${item.statusLabel || item.status}${amtText}${helperText}`);
+      });
+    }
+    return lines.join('\n');
+  }
+  if (toolName === 'getServiceRequestDetails') {
+    if (result.code === 'no-requests' || result.code === 'not-found') {
+      return result.error || 'I could not find a matching service request on your account.';
+    }
+    if (result.code === 'not-authorized') {
+      return result.error || 'You do not have access to view that service request.';
+    }
+    const ref = result.publicRequestReference || result.requestId || 'Current draft';
+    const lines = [
+      `📋 *Request ${ref}*`,
+      `• *Service:* ${result.serviceSummary || 'Service request'}`,
+      `• *Status:* ${result.statusLabel || result.status}`,
+    ];
+    if (result.helperName) lines.push(`• *Helper:* ${result.helperName}`);
+    if (result.customerName) lines.push(`• *Customer:* ${result.customerName}`);
+    if (result.arrivalPin) lines.push(`• *Arrival PIN:* *${result.arrivalPin}* (share with your helper on arrival)`);
+    if (result.finalAmount !== null && result.finalAmount !== undefined) {
+      lines.push(`• *Total amount:* R${Number(result.finalAmount).toFixed(2)} ZAR`);
+    } else if (result.estimatedAmount !== null && result.estimatedAmount !== undefined) {
+      lines.push(`• *Estimated quote:* R${Number(result.estimatedAmount).toFixed(2)} ZAR`);
+    }
+    if (result.paymentStatus) lines.push(`• *Payment:* ${result.paymentStatus.replace(/_/g, ' ')}`);
+    if (result.ratingScore) lines.push(`• *Your rating:* ${result.ratingScore}/5`);
+    if (result.workspaceUrl) lines.push(`\nOpen in Helpers Web: ${result.workspaceUrl}`);
+    return lines.join('\n');
+  }
+  if (toolName === 'getRequestPaymentDetails') {
+    const ref = result.publicRequestReference || result.requestId || 'your request';
+    const amtText = result.amount !== null && result.amount !== undefined ? `R${Number(result.amount).toFixed(2)} ZAR` : '';
+    const walletVal = Number(result.walletBalance || 0);
+    const walletLine = walletVal < 0
+      ? `Wallet balance due: R${Math.abs(walletVal).toFixed(2)} ZAR`
+      : `Wallet balance: R${walletVal.toFixed(2)} ZAR`;
+    if (result.code === 'no-requests') {
+      return `${walletLine}${result.savedCardSummary ? ` • Saved card: ${result.savedCardSummary}` : ''}`;
+    }
+    if (result.code === 'service-not-finalized') {
+      return `Request ${ref} is still in progress. Final payment applies once completed.${amtText ? ` Current amount: ${amtText}.` : ''} (${walletLine})`;
+    }
+    const stateDesc = result.state === 'confirmed'
+      ? `Payment confirmed${amtText ? ` (${amtText})` : ''}${result.settledDate ? ` on ${result.settledDate}` : ''}.`
+      : result.state === 'checking'
+        ? `Payment result is still being verified${amtText ? ` (${amtText})` : ''}.`
+        : result.state === 'not_required'
+          ? 'No payment is required for this request.'
+          : `Payment is due${amtText ? `: ${amtText}` : ''}.${result.cashAllowed ? ' You can pay by card or cash.' : ' Must be paid by card.'}`;
+    return `💳 *Payment status for ${ref}*\n• ${stateDesc}\n• ${walletLine}${result.savedCardSummary ? `\n• Saved card: ${result.savedCardSummary}` : ''}`;
+  }
+  if (toolName === 'createRequestPaymentLink') {
+    if (result.code === 'created') {
+      const ref = result.publicRequestReference || result.requestId;
+      return `💳 Pay *R${Number(result.amount || 0).toFixed(2)} ZAR* for *${result.serviceSummary || 'your request'}* (${ref}) securely using this link:\n${result.paymentUrl}\n\nThe link expires in 20 minutes.`;
+    }
+    if (result.code === 'multiple-unpaid-requests') {
+      const list = (result.pendingRequests || []).map((r) => `• ${r.publicRequestReference || r.requestId} — ${r.serviceSummary} — R${Number(r.amount || 0).toFixed(2)} ZAR`).join('\n');
+      return `You have multiple unpaid requests. Tell me which reference you want a payment link for:\n${list}`;
+    }
+    if (result.code === 'already-paid') {
+      return `Request ${result.publicRequestReference || result.requestId} has already been paid.`;
+    }
+    return result.error || 'I could not generate a payment link right now.';
+  }
+  if (toolName === 'rateServiceHelper') {
+    if (result.code === 'rated') {
+      return `⭐ Thank you! You rated *${result.helperName || 'your helper'}* ${result.score}/5${result.comment ? ` (“${result.comment}”)` : ''}.`;
+    }
+    return result.error || 'I could not submit that rating right now.';
+  }
+  if (toolName === 'escalateToHumanSupport') {
+    if (result.code === 'handed_off') {
+      return `🙋 I’ve logged your message with Uncedo human support (Ticket *${result.ticketId}*). A support agent will assist you shortly.`;
+    }
+    return result.error || 'Human support escalation on WhatsApp is currently unavailable.';
+  }
+  if (toolName === 'getHelperOnboardingStatus') {
+    const missing = Array.isArray(result.missingRequirements) ? result.missingRequirements : [];
+    const lines = [
+      `🛠️ *Helper Onboarding Status*`,
+      `• *Verified helper:* ${result.helperVerified ? 'Yes' : 'Pending'}`,
+      `• *Ready to go online:* ${result.readyToGoOnline ? 'Yes' : 'Not yet'}`,
+      `• *Current availability:* ${result.onlineStatus || 'offline'}`,
+      `• *Payout verified:* ${result.payoutVerified ? 'Yes' : 'No'}`,
+      `• *Helper Agreement:* ${result.agreementCurrent ? 'Signed' : 'Action needed'}`,
+      `• *Police clearance:* ${result.policeClearanceStatus || 'missing'}`,
+    ];
+    if (missing.length) {
+      lines.push(`\n*Remaining steps:*\n${missing.map((m) => `• ${m}`).join('\n')}`);
+    }
+    if (result.onboardingUrl) lines.push(`\nComplete onboarding: ${result.onboardingUrl}`);
+    return lines.join('\n');
+  }
+  if (toolName === 'getHelperWalletAndPayouts') {
+    const lines = [
+      `💰 *Helper Wallet Summary*`,
+      `• *Available balance:* R${Number(result.availableBalance || 0).toFixed(2)} ZAR`,
+      `• *Reserved balance:* R${Number(result.reservedBalance || 0).toFixed(2)} ZAR`,
+      `• *Outstanding cash commission:* R${Number(result.outstandingCommission || 0).toFixed(2)} ZAR`,
+      `• *Payout account verified:* ${result.payoutVerified ? 'Yes' : 'No'}`,
+    ];
+    if (result.pendingCashConfirmationsCount > 0) {
+      lines.push(`• *Pending cash confirmations:* ${result.pendingCashConfirmationsCount}`);
+    }
+    if (Array.isArray(result.recentPayouts) && result.recentPayouts.length) {
+      const latest = result.recentPayouts[0];
+      lines.push(`• *Latest payout:* R${Number(latest.amount || 0).toFixed(2)} ZAR (${latest.status}${latest.date ? `, ${latest.date}` : ''})`);
+    }
+    if (Array.isArray(result.recentTransactions) && result.recentTransactions.length) {
+      lines.push('\n*Recent ledger entries:*');
+      result.recentTransactions.slice(0, 4).forEach((tx) => {
+        lines.push(`• ${tx.entryType.replace(/_/g, ' ')}: R${Number(tx.amount || 0).toFixed(2)} ZAR${tx.date ? ` (${tx.date})` : ''}`);
+      });
+    }
+    if (result.workspaceUrl) lines.push(`\nOpen Wallet: ${result.workspaceUrl}`);
+    return lines.join('\n');
+  }
+  if (toolName === 'getHelperJobsAndOffers') {
+    const lines = [`🚗 *Helper Jobs & Offers*`, `• *Availability:* ${result.onlineStatus || 'offline'}`];
+    if (result.pendingOffer) {
+      const o = result.pendingOffer;
+      lines.push(`\n🔔 *Pending offer:* ${o.serviceSummary} (${o.publicRequestReference || o.requestId}) — Payout R${Number(o.estimatedPayout || 0).toFixed(2)} ZAR (expires in ~${o.expiresInMinutes} min)`);
+    }
+    if (result.activeJob) {
+      const a = result.activeJob;
+      lines.push(`\n⚡ *Active job:* ${a.serviceSummary} (${a.publicRequestReference || a.requestId}) — ${a.status} — Payout R${Number(a.estimatedPayout || 0).toFixed(2)} ZAR`);
+    }
+    if (result.queuedJob) {
+      const q = result.queuedJob;
+      lines.push(`⏳ *Queued next job:* ${q.serviceSummary} (${q.publicRequestReference || q.requestId}) — ${q.status}`);
+    }
+    if (!result.pendingOffer && !result.activeJob && !result.queuedJob) {
+      lines.push('\nNo active jobs or pending offers right now.');
+    }
+    if (result.workspaceUrl) lines.push(`\nHelpers Workspace: ${result.workspaceUrl}`);
+    return lines.join('\n');
+  }
+  if (toolName === 'setHelperAvailability') {
+    if (result.code === 'offline') return 'You are now offline and will not receive new job offers.';
+    if (result.code === 'already-offline') return 'You are already offline.';
+    if (result.code === 'already-online') return 'You are already online and ready to receive job offers.';
+    if (result.code === 'location-required') return `To go online and share your live GPS location for matching, open Helpers Workspace:\n${result.workspaceUrl}`;
+    if (result.code === 'profile-not-ready') {
+      const items = (result.missingRequirements || []).map((m) => `• ${m}`).join('\n');
+      return `You cannot go online yet until these steps are completed (${result.onboardingUrl}):\n${items}`;
+    }
+    if (result.code === 'active-request') return 'You have an active job in progress. Finish it before changing availability.';
+    if (result.code === 'status') return `Your current status is *${result.onlineStatus || 'offline'}*.${result.workspaceUrl ? ` Workspace: ${result.workspaceUrl}` : ''}`;
+    return result.error || 'Could not update your helper availability right now.';
+  }
+  if (toolName === 'respondToHelperJobOffer') {
+    if (result.code === 'accepted') return `✅ Offer accepted for *${result.serviceSummary}* (${result.publicRequestReference || result.requestId}). Open in Helpers Web: ${result.requestUrl}`;
+    if (result.code === 'accepted-queued') return `✅ Queued offer accepted for *${result.serviceSummary}* (${result.publicRequestReference || result.requestId}). It will activate after your current job.`;
+    if (result.code === 'declined') return `Offer declined for *${result.serviceSummary}* (${result.publicRequestReference || result.requestId}).`;
+    return result.error || `Offer action status: ${result.code}`;
+  }
+  if (toolName === 'relayMessageToCustomer') {
+    if (result.code === 'relayed') return `I’ve passed your message to ${result.customerName || 'the customer'} in the active job chat.`;
+    return 'There is no open active job right now to message a customer on.';
+  }
+  if (toolName === 'confirmCashPaymentReceipt') {
+    const ref = result.publicRequestReference || result.requestId || 'the request';
+    const amtText = result.amount !== null && result.amount !== undefined ? ` (R${Number(result.amount).toFixed(2)} ZAR)` : '';
+    if (result.code === 'settled') return `✅ Cash payment confirmed for ${ref}${amtText}. The request is now marked paid.`;
+    if (result.code === 'rejected') return `Cash payment marked as not received for ${ref}${amtText}. The request remains unpaid.`;
+    if (result.code === 'multiple-pending-cash') {
+      const list = (result.pendingRequests || []).map((r) => `• ${r.publicRequestReference || r.requestId} — R${Number(r.amount || 0).toFixed(2)} ZAR`).join('\n');
+      return `You have multiple pending cash confirmations. Specify which request reference:\n${list}`;
+    }
+    return result.error || 'There is no pending cash confirmation for that request.';
+  }
+  if (toolName === 'checkWalletBalance') {
+    const balanceVal = Number(result.walletBalance || 0);
+    const absOutstanding = Number(result.outstandingAmount || Math.abs(balanceVal)).toFixed(2);
+    if (result.role === 'helper') {
+      if (result.isNegative) {
+        const bank = result.bankDetails || { bankName: 'Capitec', accountNumber: '1569166828', reference: 'WhatsApp number' };
+        return [
+          '💰 *Helper Wallet Balance*',
+          `• *Net wallet balance:* -R${absOutstanding} ZAR`,
+          `• *Available balance:* R${Number(result.availableBalance || 0).toFixed(2)} ZAR`,
+          `• *Outstanding cash commission:* R${Number(result.outstandingCommission || 0).toFixed(2)} ZAR`,
+          `• *Amount due:* R${absOutstanding} ZAR`,
+          '',
+          `⚠️ Your wallet balance is negative (-R${absOutstanding} ZAR). Please send the outstanding amount of *R${absOutstanding} ZAR* to:`,
+          `• *Bank:* ${bank.bankName}`,
+          `• *Account Number:* ${bank.accountNumber}`,
+          `• *Reference:* ${bank.reference}`,
+        ].join('\n');
+      }
+      const lines = [
+        '💰 *Helper Wallet Balance*',
+        `• *Net wallet balance:* R${balanceVal.toFixed(2)} ZAR`,
+        `• *Available balance:* R${Number(result.availableBalance || 0).toFixed(2)} ZAR`,
+        `• *Reserved balance:* R${Number(result.reservedBalance || 0).toFixed(2)} ZAR`,
+      ];
+      if (Number(result.outstandingCommission || 0) > 0) {
+        lines.push(`• *Outstanding cash commission:* R${Number(result.outstandingCommission).toFixed(2)} ZAR`);
+      }
+      if (result.workspaceUrl) lines.push(`\nOpen Wallet: ${result.workspaceUrl}`);
+      return lines.join('\n');
+    }
+    if (result.isNegative) {
+      const lines = [
+        '💰 *Wallet Balance*',
+        `• *Current balance:* -R${absOutstanding} ZAR`,
+        `• *Outstanding amount due:* R${absOutstanding} ZAR`,
+        '',
+        `⚠️ ${result.settlementMessage || `Your wallet balance is negative (-R${absOutstanding} ZAR). Please pay R${absOutstanding} ZAR to clear your balance.`}`,
+      ];
+      if (Array.isArray(result.paymentLinks) && result.paymentLinks.length > 1) {
+        lines.push('\n*Additional unpaid requests:*');
+        result.paymentLinks.slice(1).forEach((item) => {
+          lines.push(`• ${item.publicRequestReference || item.requestId || 'Request'} — R${Number(item.amount || 0).toFixed(2)} ZAR: ${item.paymentUrl}`);
+        });
+      }
+      return lines.join('\n');
+    }
+    return [
+      '💰 *Wallet Balance*',
+      `• *Current balance:* R${balanceVal.toFixed(2)} ZAR`,
+      '• You have no outstanding balance on your wallet.',
+    ].join('\n');
   }
   return 'I could not complete that request safely.';
 }
@@ -9580,8 +10968,15 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       geminiModel: String(process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite').trim(),
       ...whatsappGeminiVertexConfig(),
     });
+    const toolPrincipal = await resolveWhatsAppToolAuthorization(identityId, identity);
+    const toolIdentity = toolPrincipal.identity || identity;
+    const toolAuthorization = toolPrincipal.authorization;
     let activeRelayRequestContext = null;
-    const candidateActiveRequestId = String(conversation.activeServiceRequestId || '').trim();
+    let candidateActiveRequestId = String(conversation.activeServiceRequestId || '').trim();
+    if (!candidateActiveRequestId && toolAuthorization.role === 'helper' && toolAuthorization.uid) {
+      const helperUserSnap = await db.collection('users').doc(toolAuthorization.uid).get().catch(() => null);
+      candidateActiveRequestId = String(helperUserSnap?.data()?.activeServiceRequestId || '').trim();
+    }
     if (candidateActiveRequestId) {
       const activeReqSnap = await db.collection('serviceRequests').doc(candidateActiveRequestId).get().catch(() => null);
       if (activeReqSnap?.exists) {
@@ -9593,15 +10988,12 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
             status: String(activeReqData.status || ''),
             serviceSummary: String(activeReqData.serviceSummary || activeReqData.subject || 'Service request'),
             helperName: String(activeReqData.helperAssignment?.helperName || 'Assigned helper'),
+            customerName: String(activeReqData.customerName || 'Customer'),
             isOpen: true,
           };
         }
       }
     }
-
-    const toolPrincipal = await resolveWhatsAppToolAuthorization(identityId, identity);
-    const toolIdentity = toolPrincipal.identity || identity;
-    const toolAuthorization = toolPrincipal.authorization;
     const toolRegistry = buildWhatsAppAssistantToolRegistry({
       identityId, conversationRef, eventId,
       guestAccountMatch: accountResolution.guestAccountMatch || null,
@@ -9666,7 +11058,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           availableTools: (input.availableTools || []).filter((tool) => !completedTools.has(tool.name)),
         };
       },
-      maxToolCalls: 3,
+      maxToolCalls: 4,
       beforeTool: async (call) => {
         const currentConversation = await conversationRef.get();
         if (!currentConversation.exists || String(currentConversation.data()?.lastInboundEventId || '') !== eventId) {
@@ -9748,6 +11140,10 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         'customer_support',
         'booking_status',
         'booking_management',
+        'payment_question',
+        'payment_initiation',
+        'provider_support',
+        'provider_relay',
       ].includes(intentResult.intent)) {
         intentResult.intent = 'service_booking';
         intentResult.serviceId = activeDraft.serviceId;
@@ -9785,7 +11181,28 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       return;
     }
     const hasCompletedServiceTool = executedToolResults.some(
-      (item) => ['sendServicesToUser', 'getServiceDetails', 'initiateServiceBooking', 'applyForHelperService', 'relayMessageToHelper', 'cancelServiceRequest'].includes(item.toolName)
+      (item) => [
+        'sendServicesToUser',
+        'getServiceDetails',
+        'initiateServiceBooking',
+        'applyForHelperService',
+        'relayMessageToHelper',
+        'cancelServiceRequest',
+        'getCustomerRequestHistory',
+        'getServiceRequestDetails',
+        'getRequestPaymentDetails',
+        'createRequestPaymentLink',
+        'rateServiceHelper',
+        'escalateToHumanSupport',
+        'getHelperOnboardingStatus',
+        'getHelperWalletAndPayouts',
+        'getHelperJobsAndOffers',
+        'setHelperAvailability',
+        'respondToHelperJobOffer',
+        'relayMessageToCustomer',
+        'confirmCashPaymentReceipt',
+        'checkWalletBalance',
+      ].includes(item.toolName)
         && item.result && !item.errorCode && !['not-found', 'missing-query'].includes(item.result?.code),
     );
     const shouldFallbackRelayToHelper = (
@@ -9793,10 +11210,11 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       || ['tool-limit', 'repeated-tool-call'].includes(agentOutcome.status)
     )
       && !hasCompletedServiceTool
+      && toolAuthorization.role !== 'helper'
       && Boolean(activeRelayRequestContext?.isOpen)
       && whatsappRelayEnabled()
       && Boolean(commandText)
-      && !['cancellation', 'human_escalation', 'payment_question', 'booking_status', 'service_discovery', 'service_information', 'price_enquiry'].includes(String(intentResult.intent || '').toLowerCase())
+      && !['cancellation', 'human_escalation', 'payment_question', 'payment_initiation', 'booking_status', 'service_discovery', 'service_information', 'price_enquiry'].includes(String(intentResult.intent || '').toLowerCase())
       && !/^(?:cancel|stop|help|support|human|status|pay|payment|menu|services)\b/i.test(commandText);
     if (shouldFallbackRelayToHelper) {
       const directRelay = await relayWhatsAppText({
@@ -10200,7 +11618,17 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           });
           await reply(`I’ve escalated this to Uncedo human support (Ticket *${ticket.ticketId}*). A support agent will review your message and assist you shortly.`);
         }
-      } else await reply(responseText);
+      } else {
+        if (lastToolObservation?.toolName === 'checkWalletBalance' && lastToolObservation?.result?.isNegative) {
+          const walletObs = lastToolObservation.result;
+          const missingCustomerLink = walletObs.role !== 'helper' && walletObs.paymentUrl && !responseText.includes(walletObs.paymentUrl);
+          const missingHelperBank = walletObs.role === 'helper' && (!responseText.includes('1569166828') || !/capitec/i.test(responseText));
+          if (missingCustomerLink || missingHelperBank) {
+            responseText = formatWhatsAppToolResult('checkWalletBalance', walletObs);
+          }
+        }
+        await reply(responseText);
+      }
       await jobRef.set({
         status: 'completed', intent: intentResult.intent,
         lastToolName: lastToolObservation?.toolName || null,
@@ -17685,6 +19113,53 @@ exports.getServicePaymentReceipt = onRequest({ cors: true, invoker: 'public', ma
   return res.status(200).json({ success: true, receipt });
 });
 
+async function verifyAndSettleCustomerWalletPayment({ reference, mapped, paystackSecretKey }) {
+  const amountMinor = Number(mapped?.amountMinor || 0);
+  const customerId = String(mapped?.customerId || '').trim();
+  if (!customerId || !Number.isSafeInteger(amountMinor) || amountMinor <= 0) {
+    return { action: 'invalid' };
+  }
+  const verification = await verifyPaystackTransaction({ paystackSecretKey, reference, amountMinor, currency: 'ZAR' });
+  if (!verification.ok) {
+    return { action: verification.pending ? 'pending' : 'failed' };
+  }
+  const refDoc = db.collection('paystackRequestPaymentReferences').doc(String(reference));
+  const userRef = db.collection('users').doc(customerId);
+  const ledgerRef = db.collection('financialLedger').doc(`wallet_settlement_${createHash('sha256').update(String(reference)).digest('hex').slice(0, 40)}`);
+  const now = Date.now();
+  return db.runTransaction(async (tx) => {
+    const [rSnap, uSnap, lSnap] = await Promise.all([tx.get(refDoc), tx.get(userRef), tx.get(ledgerRef)]);
+    if (lSnap.exists || rSnap.data()?.status === 'settled') return { action: 'already-settled' };
+    const userData = uSnap.data() || {};
+    const wallet = userData.wallet || { balance: 0, currency: 'ZAR' };
+    const oldBalance = Number(wallet.balance || 0);
+    const creditAmount = Number((amountMinor / 100).toFixed(2));
+    const newBalance = Number((oldBalance + creditAmount).toFixed(2));
+    tx.create(ledgerRef, {
+      entryId: ledgerRef.id,
+      userId: customerId,
+      entryType: 'customer_wallet_settlement',
+      amount: creditAmount,
+      currency: 'ZAR',
+      balanceBefore: oldBalance,
+      balanceAfter: newBalance,
+      gatewayReference: String(reference),
+      createdAtMs: now,
+    });
+    tx.set(userRef, {
+      wallet: {
+        ...wallet,
+        balance: newBalance,
+        currency: wallet.currency || 'ZAR',
+        updatedAt: new Date(now).toISOString(),
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    tx.set(refDoc, { status: 'settled', settledAtMs: now, updatedAtMs: now }, { merge: true });
+    return { action: 'settled', amount: creditAmount, balanceAfter: newBalance };
+  });
+}
+
 exports.paystackServicePaymentWebhook = onRequest({ cors: false, invoker: 'public', maxInstances: 3, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
   if (req.method !== 'POST') return res.status(405).send('Method not allowed');
   let secret;
@@ -17714,7 +19189,11 @@ exports.paystackServicePaymentWebhook = onRequest({ cors: false, invoker: 'publi
   });
   if (!lease) return res.status(200).send('Already processing');
   try {
-    await verifyAndSettleRequestPayment({ requestId: String(mapped.requestId || ''), attemptId: String(mapped.attemptId || ''), reference, paystackSecretKey: secret });
+    if (mapped.type === 'customer_wallet_settlement') {
+      await verifyAndSettleCustomerWalletPayment({ reference, mapped, paystackSecretKey: secret });
+    } else {
+      await verifyAndSettleRequestPayment({ requestId: String(mapped.requestId || ''), attemptId: String(mapped.attemptId || ''), reference, paystackSecretKey: secret });
+    }
     await webhookRef.set({ status: 'processed', processedAtMs: Date.now(), leaseExpiresAtMs: null }, { merge: true });
     return res.status(200).send('Accepted');
   } catch (error) {
