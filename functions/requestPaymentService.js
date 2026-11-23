@@ -425,6 +425,60 @@ async function revokeServicePaymentSession({ db, requestId, customerId, tokenHas
   });
 }
 
+function computeRequestPayoutBreakdown({ request = {}, legacy = null, amount = 0, isCanceled = false, helperId = '' } = {}) {
+  const resolvedHelperId = String(request.helperAssignment?.helperId || helperId || '').trim();
+  const rawBreakdown = request.helperPayoutBreakdown
+    || legacy?.settlementData?.helperPayoutBreakdown
+    || legacy?.settlementData?.cancellation?.helperPayoutBreakdown
+    || null;
+  const chargeForBreakdown = Number(amount || request.totalAmount || request.cancellationFeeAmount || 0);
+  const cancellationRuleFallback = request.pricingSnapshot?.cancellationBillingRule
+    || legacy?.settlementData?.cancellation?.cancellationBillingRule
+    || 'booking_fee_only';
+  const cancellationKmFallback = Number(
+    request.pricingSnapshot?.cancellationDistanceKm
+    ?? legacy?.settlementData?.cancellation?.cancellationDistanceKm
+    ?? 0,
+  );
+  const breakdown = (rawBreakdown && typeof rawBreakdown === 'object')
+    ? rawBreakdown
+    : (resolvedHelperId && chargeForBreakdown > 0
+      ? getServiceHelperPayoutBreakdown(
+          (request.pricingSnapshot || request.requestPayload?.pricingSnapshot)
+            ? request
+            : { ...request, pricingSnapshot: { total: chargeForBreakdown } },
+          isCanceled
+            ? {
+                closureType: 'canceled',
+                billingRule: cancellationRuleFallback,
+                travelledKm: cancellationKmFallback,
+                ...(request.pricingSnapshot?.cancellationTravelCharge !== undefined
+                  ? { travelFeeAmount: Number(request.pricingSnapshot.cancellationTravelCharge) }
+                  : {}),
+                ...(request.pricingSnapshot?.bookingFee !== undefined
+                  ? { bookingFeeAmount: Number(request.pricingSnapshot.bookingFee) }
+                  : {}),
+              }
+            : {
+                closureType: 'completed',
+                waitingCost: Number(request.waitingCost || request.pricingSnapshot?.waitingCost || 0),
+              },
+        )
+      : {});
+  const customerChargeAmountMinor = Math.round(Number(breakdown.customerChargeAmount ?? amount ?? 0) * 100);
+  const helperAmountMinor = Math.round(Number(breakdown.helperAmount || 0) * 100);
+  const platformAmountMinor = Math.round(Number(
+    breakdown.platformAmount ?? Math.max(0, (customerChargeAmountMinor - helperAmountMinor) / 100),
+  ) * 100);
+  return {
+    resolvedHelperId,
+    breakdown,
+    customerChargeAmountMinor,
+    helperAmountMinor,
+    platformAmountMinor,
+  };
+}
+
 async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, gatewayTransactionId = '', gatewayReference = '', providerStatus = '', helperId = '', walletEnabled = false, now = Date.now() }) {
   const requestRef = db.collection('serviceRequests').doc(String(requestId || ''));
   const paymentRef = db.collection(PAYMENT_OPERATIONS).doc(String(requestId || ''));
@@ -466,6 +520,33 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
         ? await Promise.all([transaction.get(customerRef), transaction.get(debtLedgerRef)])
         : [null, null];
 
+      const failureState = (shouldApplyWalletDebt || alreadyHasDebt) ? 'wallet_debt_recorded' : 'payment_failed';
+      const totalDebtOutstanding = failureState === 'wallet_debt_recorded';
+      const {
+        resolvedHelperId,
+        customerChargeAmountMinor,
+        helperAmountMinor,
+        platformAmountMinor,
+      } = computeRequestPayoutBreakdown({ request, legacy, amount, isCanceled, helperId });
+
+      // Credit helper wallet BEFORE any writes so Firestore transaction reads precede all writes.
+      let helperWalletCredited = false;
+      if (totalDebtOutstanding && resolvedHelperId && helperAmountMinor > 0) {
+        const walletCredit = await applyHelperPayoutInTransaction({
+          transaction,
+          db,
+          helperId: resolvedHelperId,
+          requestId,
+          helperAmountMinor,
+          platformAmountMinor,
+          customerChargeAmountMinor,
+          isCash: false,
+          closureType: isCanceled ? 'canceled' : 'completed',
+          now,
+        });
+        helperWalletCredited = Boolean(walletCredit.applied || walletCredit.duplicate);
+      }
+
       let walletDebtAppliedNow = false;
       if (shouldApplyWalletDebt && (!debtLedgerSnap || !debtLedgerSnap.exists)) {
         const customer = customerSnap?.data() || {};
@@ -503,8 +584,6 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
         walletDebtAppliedNow = true;
       }
 
-      const failureState = (shouldApplyWalletDebt || alreadyHasDebt) ? 'wallet_debt_recorded' : 'payment_failed';
-      const totalDebtOutstanding = failureState === 'wallet_debt_recorded';
       const recordedDebtAmount = totalDebtOutstanding ? (Number(payment?.walletDebtAmount || legacy?.amount || 0) || amount) : 0;
       transaction.set(attemptRef, { status: 'payment_failed', providerStatus: String(providerStatus || 'failed'), gatewayReference: String(gatewayReference || ''), updatedAtMs: now }, { merge: true });
       transaction.set(paymentRef, {
@@ -528,8 +607,12 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
           updatedAtMs: now,
         }, { merge: true });
       }
-      transaction.update(requestRef, { paymentStatus: failureState, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-      return { action: 'failed', failureState, walletDebtApplied: walletDebtAppliedNow, walletDebtOutstanding: totalDebtOutstanding, amount, customerId };
+      transaction.update(requestRef, {
+        paymentStatus: failureState,
+        ...(helperWalletCredited && Number(request.helperWalletAccountingVersion || 0) !== 1 ? { helperWalletAccountingVersion: 1 } : {}),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      return { action: 'failed', failureState, walletDebtApplied: walletDebtAppliedNow, walletDebtOutstanding: totalDebtOutstanding, helperWalletCredited, amount, customerId };
     }
     if (attempt.method === 'cash' && (!helperId || String(request.helperAssignment?.helperId || '') !== String(helperId))) return { action: 'not-assigned-helper' };
     const customerId = String(request.customerId || '').trim();
@@ -560,24 +643,15 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
     const paymentMethod = String(attempt.method || '');
     const receiptId = `UNC-${digest(`${requestId}:${attemptId}`).slice(0, 16).toUpperCase()}`;
     const isCash = paymentMethod === 'cash';
-    const resolvedHelperId = String(request.helperAssignment?.helperId || helperId || '').trim();
-    const rawBreakdown = request.helperPayoutBreakdown || legacy?.settlementData?.helperPayoutBreakdown || null;
-    const chargeForBreakdown = Number(amount || request.totalAmount || request.cancellationFeeAmount || 0);
-    const breakdown = (rawBreakdown && typeof rawBreakdown === 'object')
-      ? rawBreakdown
-      : (resolvedHelperId && chargeForBreakdown > 0
-        ? getServiceHelperPayoutBreakdown(
-            (request.pricingSnapshot || request.requestPayload?.pricingSnapshot)
-              ? request
-              : { ...request, pricingSnapshot: { total: chargeForBreakdown } },
-            { closureType: isCanceled ? 'canceled' : 'completed' },
-          )
-        : {});
-    const customerChargeAmountMinor = Math.round(Number(breakdown.customerChargeAmount ?? amount ?? 0) * 100);
-    const helperAmountMinor = Math.round(Number(breakdown.helperAmount || 0) * 100);
-    const platformAmountMinor = Math.round(Number(
-      breakdown.platformAmount ?? Math.max(0, (customerChargeAmountMinor - helperAmountMinor) / 100),
-    ) * 100);
+    const {
+      resolvedHelperId,
+      customerChargeAmountMinor,
+      helperAmountMinor,
+      platformAmountMinor,
+    } = computeRequestPayoutBreakdown({ request, legacy, amount, isCanceled, helperId });
+    const cashCollectedMinor = Number.isSafeInteger(Number(attempt.amountMinor))
+      ? Number(attempt.amountMinor)
+      : Math.round(Number(amount || 0) * 100);
 
     let walletMovement = { applied: false, deltaMinor: 0, balanceAfterMinor: 0 };
     if (resolvedHelperId) {
@@ -589,7 +663,8 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
           requestId,
           helperAmountMinor,
           platformAmountMinor,
-          customerChargeAmountMinor,
+          customerChargeAmountMinor: cashCollectedMinor,
+          cashCollectedMinor,
           isCash: true,
           closureType: 'completed',
           now,
@@ -684,7 +759,9 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
     if (legacySnap.exists) transaction.set(legacyRef, canonicalOperationPatch, { merge: true });
     else transaction.create(legacyRef, { ...canonicalOperationPatch, createdAtMs: now });
     const walletBalanceAfterMinor = Number(walletMovement?.balanceAfterMinor ?? walletMovement?.wallet?.balanceMinor ?? 0);
-    const netWalletDeltaMinor = isCash ? (helperAmountMinor - customerChargeAmountMinor) : helperAmountMinor;
+    const netWalletDeltaMinor = Number.isSafeInteger(Number(walletMovement?.deltaMinor))
+      ? Number(walletMovement.deltaMinor)
+      : (isCash ? (helperAmountMinor - platformAmountMinor) : helperAmountMinor);
     transaction.set(requestRef, {
       paymentStatus: 'paid',
       paymentMethod,

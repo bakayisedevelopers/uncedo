@@ -530,6 +530,146 @@ export async function getHelperAgreementBundle(uid) {
   return { document: docData, activeVersion, versions, acceptances };
 }
 
+function toTimestampMillis(val) {
+  if (!val) return 0;
+  if (typeof val === 'number') return Number.isFinite(val) ? val : 0;
+  if (typeof val?.toMillis === 'function') return val.toMillis();
+  if (typeof val?.seconds === 'number') return val.seconds * 1000;
+  const parsed = Date.parse(val);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+export function subscribeToHelperAgreementBundle(uid, onData, onError) {
+  if (!uid) {
+    onData?.({ document: null, activeVersion: null, versions: [], acceptances: [] });
+    return () => {};
+  }
+  const { db, firestoreModule } = getFirebaseClients();
+  let docData = null;
+  let versions = [];
+  let acceptances = [];
+  let loadedParts = 0;
+
+  const emit = () => {
+    const activeVersion =
+      versions.find((v) => v.id === String(docData?.currentVersionId || '').trim())
+      || versions.find((v) => v.version === docData?.currentVersion)
+      || versions[0]
+      || null;
+    onData?.({ document: docData, activeVersion, versions, acceptances, loaded: loadedParts >= 2 });
+  };
+
+  const unsubDoc = firestoreModule.onSnapshot(
+    firestoreModule.doc(db, 'legalDocuments', HELPER_AGREEMENT_DOCUMENT_ID),
+    (docSnap) => {
+      docData = docSnap.exists() ? { id: docSnap.id, ...docSnap.data() } : null;
+      loadedParts += 1;
+      emit();
+    },
+    onError,
+  );
+
+  const unsubVersions = firestoreModule.onSnapshot(
+    firestoreModule.query(
+      firestoreModule.collection(db, 'legalDocumentVersions'),
+      firestoreModule.where('documentId', '==', HELPER_AGREEMENT_DOCUMENT_ID),
+    ),
+    (versionsSnap) => {
+      versions = versionsSnap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .sort((a, b) => toTimestampMillis(b.createdAt || b.effectiveDate) - toTimestampMillis(a.createdAt || a.effectiveDate));
+      loadedParts += 1;
+      emit();
+    },
+    onError,
+  );
+
+  const unsubAcceptances = firestoreModule.onSnapshot(
+    firestoreModule.query(
+      firestoreModule.collection(db, 'userAgreementAcceptances'),
+      firestoreModule.where('userId', '==', uid),
+    ),
+    (acceptancesSnap) => {
+      acceptances = acceptancesSnap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .filter((item) => item.documentId === HELPER_AGREEMENT_DOCUMENT_ID)
+        .sort((a, b) => toTimestampMillis(b.acceptedAt) - toTimestampMillis(a.acceptedAt));
+      emit();
+    },
+    onError,
+  );
+
+  return () => {
+    unsubDoc?.();
+    unsubVersions?.();
+    unsubAcceptances?.();
+  };
+}
+
+export function subscribeToHelperPoliceClearanceReview(helperId, onData, onError) {
+  if (!helperId) {
+    onData?.(null);
+    return () => {};
+  }
+  const { db, firestoreModule } = getFirebaseClients();
+  let recordData = null;
+  let submissions = [];
+  let hasRecordSnap = false;
+  let hasSubsSnap = false;
+
+  const emit = () => {
+    if (!hasRecordSnap && !hasSubsSnap) return;
+    const rawStatus = String(recordData?.status || '').trim().toLowerCase();
+    const currentId = String(recordData?.currentSubmissionId || '').trim();
+    const currentSub = submissions.find((s) => s.id === currentId) || submissions[0] || null;
+    let status = rawStatus || String(currentSub?.status || 'missing').trim().toLowerCase() || 'missing';
+    if (
+      currentSub
+      && ['pending', 'uploading'].includes(String(currentSub.status || '').toLowerCase())
+      && Number(currentSub.reviewDeadlineAtMs || 0) > 0
+      && Date.now() > Number(currentSub.reviewDeadlineAtMs)
+    ) {
+      status = 'expired';
+    }
+    onData?.({
+      required: true,
+      status,
+      submissions,
+      currentSubmissionId: currentId,
+    });
+  };
+
+  const unsubRecord = firestoreModule.onSnapshot(
+    firestoreModule.doc(db, 'helperPoliceClearanceRecords', helperId),
+    (snap) => {
+      hasRecordSnap = true;
+      recordData = snap.exists() ? (snap.data() || {}) : null;
+      emit();
+    },
+    onError,
+  );
+
+  const unsubSubs = firestoreModule.onSnapshot(
+    firestoreModule.query(
+      firestoreModule.collection(db, 'helperPoliceClearanceSubmissions'),
+      firestoreModule.where('helperUid', '==', helperId),
+      firestoreModule.orderBy('createdAtMs', 'desc'),
+      firestoreModule.limit(20),
+    ),
+    (snap) => {
+      hasSubsSnap = true;
+      submissions = snap.docs.map((d) => ({ id: d.id, ...(d.data() || {}) }));
+      emit();
+    },
+    onError,
+  );
+
+  return () => {
+    unsubRecord?.();
+    unsubSubs?.();
+  };
+}
+
 export async function acceptHelperAgreement({ typedSignatureName, expectedVersion }) {
   const { functions, httpsCallable } = getFirebaseClients();
   const call = httpsCallable(functions, 'acceptHelperAgreement');
@@ -635,6 +775,7 @@ export async function getHelperWalletSnapshot() {
     return {
       wallet: { balanceMinor: 0, balance: 0, availableMinor: 0, reservedMinor: 0, outstandingCommissionMinor: 0, currency: 'ZAR' },
       nextPayoutEstimateMinor: 0,
+      legacySummary: { unresolvedAmountMinor: 0, unresolvedAmount: 0, unresolvedJobsCount: 0, hasUnresolvedLegacyJobs: false },
       transactions: [],
     };
   }
@@ -656,8 +797,21 @@ export async function getHelperWalletSnapshot() {
   return {
     wallet: summary.wallet || { balanceMinor: 0, balance: 0, availableMinor: 0, reservedMinor: 0, outstandingCommissionMinor: 0, currency: 'ZAR' },
     nextPayoutEstimateMinor: Math.max(0, Number(summary.nextPayoutEstimateMinor || 0)),
+    legacySummary: summary.legacySummary || {
+      unresolvedAmountMinor: 0,
+      unresolvedAmount: 0,
+      unresolvedJobsCount: 0,
+      hasUnresolvedLegacyJobs: false,
+    },
     transactions: Array.isArray(history.transactions) ? history.transactions : [],
   };
+}
+
+export async function resolveLegacyCompletedJobsWalletApi() {
+  return callPayoutEndpoint('resolveLegacyCompletedJobsWallet', {
+    method: 'POST',
+    body: {},
+  });
 }
 
 export async function syncMyHelperVerificationStatus() {
@@ -920,7 +1074,16 @@ export function resolveHelperPayoutAmount(request = {}) {
       return Number(parsedStored.toFixed(2));
     }
   }
+  const status = String(request?.status || '').trim().toLowerCase();
   const snapshot = request?.pricingSnapshot || request?.requestPayload?.pricingSnapshot || {};
+  if (status === 'canceled' || status === 'cancelled') {
+    const billingRule = String(snapshot?.cancellationBillingRule || '').trim().toLowerCase();
+    if (!billingRule || billingRule === 'booking_fee_only' || billingRule === 'pre_assignment') {
+      return 0;
+    }
+    const travelCharge = Number(snapshot?.cancellationTravelCharge || 0);
+    return Number.isFinite(travelCharge) && travelCharge > 0 ? Number(travelCharge.toFixed(2)) : 0;
+  }
   const customerTotal = Number(
     request?.totalAmount
       ?? snapshot?.finalAmount
@@ -930,7 +1093,9 @@ export function resolveHelperPayoutAmount(request = {}) {
       ?? snapshot?.basePrice
       ?? 0,
   ) || 0;
-  const subtotal = Number(snapshot?.subtotal || 0);
+  const breakdownItems = Array.isArray(snapshot?.serviceBreakdown) ? snapshot.serviceBreakdown : [];
+  const summedSubtotal = breakdownItems.reduce((sum, item) => sum + Math.max(0, Number(item?.subtotal || 0)), 0);
+  const subtotal = Number(snapshot?.subtotal || summedSubtotal || 0);
   const rawTravel = snapshot?.travelFee;
   const travelFee = rawTravel !== null && rawTravel !== undefined && rawTravel !== ''
     && Number.isFinite(Number(rawTravel)) && Number(rawTravel) >= 0
@@ -1035,7 +1200,151 @@ export function subscribeToRequestMessages(requestId, callback) {
   }, () => callback([]));
 }
 
-export function subscribeToHelperServiceRequests(helperId, callback, onError) {
+export function normalizeWalletDocumentData(raw = {}, fallbackMinor = 0) {
+  const resolveMinor = () => {
+    if (raw?.balanceMinor !== undefined && raw?.balanceMinor !== null) {
+      const parsed = Number(raw.balanceMinor);
+      if (Number.isSafeInteger(parsed)) return parsed;
+    }
+    if (raw?.availableMinor !== undefined || raw?.outstandingCommissionMinor !== undefined) {
+      const available = Number.isFinite(Number(raw?.availableMinor)) ? Math.round(Number(raw.availableMinor)) : 0;
+      const outstanding = Number.isFinite(Number(raw?.outstandingCommissionMinor))
+        ? Math.max(0, Math.round(Number(raw.outstandingCommissionMinor)))
+        : 0;
+      return available - outstanding;
+    }
+    return Number.isSafeInteger(Number(fallbackMinor)) ? Number(fallbackMinor) : 0;
+  };
+  const balanceMinor = resolveMinor();
+  return {
+    currency: 'ZAR',
+    balanceMinor,
+    balance: Number((balanceMinor / 100).toFixed(2)),
+    availableMinor: Math.max(0, balanceMinor),
+    reservedMinor: 0,
+    outstandingCommissionMinor: Math.max(0, -balanceMinor),
+    reconciliationBlocked: raw?.reconciliationBlocked === true,
+    updatedAtMs: Number(raw?.updatedAtMs || 0),
+  };
+}
+
+export function subscribeToHelperWallet(helperId, callback, onError) {
+  if (!helperId) {
+    callback?.({ exists: false, wallet: null });
+    return () => {};
+  }
+  const { db, firestoreModule } = getFirebaseClients();
+  return firestoreModule.onSnapshot(
+    firestoreModule.doc(db, 'helperWallets', helperId),
+    (snap) => {
+      if (!snap.exists()) {
+        callback?.({ exists: false, wallet: null });
+        return;
+      }
+      const raw = snap.data() || {};
+      callback?.({ exists: true, wallet: normalizeWalletDocumentData(raw) });
+    },
+    (err) => onError?.(err),
+  );
+}
+
+export function subscribeToHelperWalletTransactions(helperId, callback, onError, limitCount = 50) {
+  if (!helperId) {
+    callback?.([]);
+    return () => {};
+  }
+  const { db, firestoreModule } = getFirebaseClients();
+  const q = firestoreModule.query(
+    firestoreModule.collection(db, 'helperWallets', helperId, 'transactions'),
+    firestoreModule.orderBy('createdAtMs', 'desc'),
+    firestoreModule.limit(limitCount),
+  );
+  return firestoreModule.onSnapshot(
+    q,
+    (snap) => {
+      const transactions = snap.docs.map((document) => {
+        const entry = document.data() || {};
+        const signedDeltaMinor = Number.isSafeInteger(Number(entry.deltaMinor))
+          ? Number(entry.deltaMinor)
+          : (Number(entry.availableDeltaMinor || 0) - Number(entry.outstandingCommissionDeltaMinor || 0));
+        return {
+          id: document.id,
+          entryType: String(entry.entryType || 'wallet_entry'),
+          amountMinor: Math.max(0, Number(entry.amountMinor || 0)),
+          deltaMinor: signedDeltaMinor,
+          balanceBeforeMinor: Number.isSafeInteger(Number(entry.balanceBeforeMinor)) ? Number(entry.balanceBeforeMinor) : null,
+          balanceAfterMinor: Number.isSafeInteger(Number(entry.balanceAfterMinor)) ? Number(entry.balanceAfterMinor) : null,
+          availableDeltaMinor: Number(entry.availableDeltaMinor || 0),
+          reservedDeltaMinor: Number(entry.reservedDeltaMinor || 0),
+          outstandingCommissionDeltaMinor: Number(entry.outstandingCommissionDeltaMinor || 0),
+          description: String(entry.description || ''),
+          requestId: String(entry.requestId || ''),
+          resolvedRequestIds: Array.isArray(entry.resolvedRequestIds) ? entry.resolvedRequestIds : [],
+          payoutId: String(entry.payoutId || ''),
+          status: String(entry.status || ''),
+          closureType: String(entry.closureType || ''),
+          createdAtMs: Number(entry.createdAtMs || 0),
+        };
+      });
+      callback?.(transactions);
+    },
+    (err) => onError?.(err),
+  );
+}
+
+export function subscribeToHelperWeeklyPayouts(helperId, callback, onError, limitCount = 50) {
+  if (!helperId) {
+    callback?.([]);
+    return () => {};
+  }
+  const { db, firestoreModule } = getFirebaseClients();
+  const q = firestoreModule.query(
+    firestoreModule.collection(db, 'helperWeeklyPayouts'),
+    firestoreModule.where('helperId', '==', helperId),
+    firestoreModule.limit(limitCount),
+  );
+  return firestoreModule.onSnapshot(
+    q,
+    (snap) => {
+      const items = snap.docs
+        .map((d) => ({ id: d.id, ...(d.data() || {}) }))
+        .sort((a, b) => (
+          Number(b.createdAtMs || b.processedAtMs || toTimestampMillis(b.createdAt))
+          - Number(a.createdAtMs || a.processedAtMs || toTimestampMillis(a.createdAt))
+        ));
+      callback?.(items);
+    },
+    (err) => onError?.(err),
+  );
+}
+
+export function subscribeToServicePaymentOperationsMap(requestIds = [], callback, onError) {
+  const uniqueIds = Array.from(new Set((Array.isArray(requestIds) ? requestIds : []).map((id) => String(id || '').trim()).filter(Boolean)));
+  if (uniqueIds.length === 0) {
+    callback?.({});
+    return () => {};
+  }
+  const { db, firestoreModule } = getFirebaseClients();
+  const operationsMap = {};
+  const emit = () => callback?.({ ...operationsMap });
+  const unsubs = uniqueIds.map((reqId) => firestoreModule.onSnapshot(
+    firestoreModule.doc(db, 'servicePaymentOperations', reqId),
+    (snap) => {
+      if (snap.exists()) {
+        operationsMap[reqId] = { id: snap.id, ...(snap.data() || {}) };
+      } else {
+        delete operationsMap[reqId];
+      }
+      emit();
+    },
+    (err) => onError?.(err),
+  ));
+  return () => {
+    unsubs.forEach((unsub) => unsub?.());
+  };
+}
+
+export function subscribeToHelperServiceRequests(helperId, callback, onError, limitCount = 100) {
   if (!helperId) {
     callback([]);
     return () => {};
@@ -1045,7 +1354,7 @@ export function subscribeToHelperServiceRequests(helperId, callback, onError) {
     firestoreModule.collection(db, 'serviceRequests'),
     firestoreModule.where('helperAssignment.helperId', '==', helperId),
     firestoreModule.orderBy('createdAt', 'desc'),
-    firestoreModule.limit(30),
+    firestoreModule.limit(limitCount),
   );
   return firestoreModule.onSnapshot(
     q,
@@ -1059,4 +1368,3 @@ export function subscribeToHelperServiceRequests(helperId, callback, onError) {
     },
   );
 }
-

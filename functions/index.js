@@ -63,6 +63,7 @@ const {
   recordPaystackRefundObservation,
   recordServiceGatewayObservation,
   serviceFinancialOperationId,
+  settleCustomerWalletBalancePayment,
   shouldDeferCompletionPayment,
   settleServiceFinancialOperation,
 } = require('./financialOperationService');
@@ -88,16 +89,22 @@ const {
 const { ensureAndSendServiceRequestInvoice } = require('./serviceRequestInvoice');
 const {
   HELPER_WALLETS,
+  computeLegacyCompletedJobResolution,
   creditHelperWalletEarning,
   emptyHelperWallet,
+  helperProfileReference,
   helperWalletReference,
   isWalletEarningEligible,
   minorAmount: normalizeWalletMinor,
   normalizeWalletForClient,
   resolveSignedBalanceMinor,
+  syncHelperWalletDocumentsInTransaction,
   toRandFromMinor,
   walletBalanceIsValid,
   walletFromSnapshot,
+  walletLedgerId,
+  walletLedgerReference,
+  writeWalletLedger,
 } = require('./helperWalletService');
 const { createCategoryPricingEngine } = require('./shared/categoryPricingEngineFactory.cjs');
 const {
@@ -7623,13 +7630,18 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
           };
         }
 
-        const principalUid = String(callerIdentity.linkedFirebaseUid || callerIdentity.guestPrincipalId || '').trim();
-        if (!principalUid) {
+        const rawPrincipalUid = String(callerIdentity.linkedFirebaseUid || callerIdentity.guestPrincipalId || '').trim();
+        if (!rawPrincipalUid) {
           return { code: 'identity-not-authorized', error: 'Could not find a customer wallet profile for this WhatsApp identity.' };
         }
+        const billingOwner = await resolveCustomerBillingOwner(rawPrincipalUid);
+        const principalUid = String(billingOwner.targetUid || rawPrincipalUid).trim();
         const userSnap = await db.collection('users').doc(principalUid).get().catch(() => null);
         const userData = userSnap?.exists ? (userSnap.data() || {}) : {};
-        const rawBalance = Number(userData.wallet?.balance || 0);
+        const rawBalanceMinor = Number(userData.wallet?.balanceMinor);
+        const rawBalance = Number.isSafeInteger(rawBalanceMinor)
+          ? (rawBalanceMinor / 100)
+          : Number(userData.wallet?.balance || 0);
         const walletBalance = Number.isFinite(rawBalance) ? Number(rawBalance.toFixed(2)) : 0;
         const isNegative = walletBalance < 0;
         const outstandingAmount = isNegative ? Number(Math.abs(walletBalance).toFixed(2)) : 0;
@@ -8126,13 +8138,18 @@ function formatWhatsAppToolResult(toolName, result = {}) {
     return lines.join('\n');
   }
   if (toolName === 'getHelperWalletAndPayouts') {
+    const signedBalance = Number(result.walletBalance ?? ((Number(result.availableBalance || 0)) - (Number(result.outstandingCommission || 0))));
+    const formattedBalance = signedBalance < 0
+      ? `-R${Math.abs(signedBalance).toFixed(2)} ZAR`
+      : `R${signedBalance.toFixed(2)} ZAR`;
     const lines = [
       `💰 *Helper Wallet Summary*`,
-      `• *Available balance:* R${Number(result.availableBalance || 0).toFixed(2)} ZAR`,
-      `• *Reserved balance:* R${Number(result.reservedBalance || 0).toFixed(2)} ZAR`,
-      `• *Outstanding cash commission:* R${Number(result.outstandingCommission || 0).toFixed(2)} ZAR`,
+      `• *Wallet balance:* ${formattedBalance}`,
       `• *Payout account verified:* ${result.payoutVerified ? 'Yes' : 'No'}`,
     ];
+    if (signedBalance < 0) {
+      lines.push(`• *Amount due:* R${Math.abs(signedBalance).toFixed(2)} ZAR (settled via future non-cash jobs or EFT to Capitec 1569166828, Ref: WhatsApp number)`);
+    }
     if (result.pendingCashConfirmationsCount > 0) {
       lines.push(`• *Pending cash confirmations:* ${result.pendingCashConfirmationsCount}`);
     }
@@ -18904,12 +18921,222 @@ async function authenticateHelperWalletCaller(req, res) {
   return decoded.uid;
 }
 
+async function loadHelperLegacyResolutionState(helperId) {
+  const safeHelperId = String(helperId || '').trim();
+  const walletRef = helperWalletReference(db, safeHelperId);
+  const [requestsSnap, payoutsSnap, txSnap] = await Promise.all([
+    db.collection('serviceRequests').where('helperAssignment.helperId', '==', safeHelperId).limit(1000).get(),
+    db.collection(HELPER_PAYOUT_COLLECTION).where('helperId', '==', safeHelperId).limit(500).get(),
+    walletRef.collection('transactions').limit(1000).get(),
+  ]);
+  const requests = requestsSnap.docs.map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() || {}) }));
+  const paidWeeklyPayoutRequestIds = new Set();
+  const unpaidLegacyPayoutDocIds = [];
+  for (const payoutDoc of payoutsSnap.docs) {
+    const payout = payoutDoc.data() || {};
+    const status = String(payout.status || '').trim().toLowerCase();
+    if (status === 'paid') {
+      for (const reqId of Array.isArray(payout.requestIds) ? payout.requestIds : []) {
+        const clean = String(reqId || '').trim();
+        if (clean) paidWeeklyPayoutRequestIds.add(clean);
+      }
+      continue;
+    }
+    if (
+      payout.payoutSource !== 'helper_wallet'
+      && Number(payout.walletAccountingVersion || 0) !== 1
+      && status !== 'resolved_to_wallet'
+    ) {
+      unpaidLegacyPayoutDocIds.push(payoutDoc.id);
+    }
+  }
+  const walletTransactions = txSnap.docs.map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() || {}) }));
+  const resolution = computeLegacyCompletedJobResolution({
+    requests,
+    walletTransactions,
+    paidWeeklyPayoutRequestIds,
+  });
+  return {
+    ...resolution,
+    unpaidLegacyPayoutDocIds,
+  };
+}
+
+async function executeLegacyCompletedJobsResolution(helperId) {
+  const safeHelperId = String(helperId || '').trim();
+  const initialState = await loadHelperLegacyResolutionState(safeHelperId);
+  const walletRef = helperWalletReference(db, safeHelperId);
+  const userRef = helperProfileReference(db, safeHelperId);
+
+  if (!initialState.resolvableJobs.length && !initialState.unpaidLegacyPayoutDocIds.length) {
+    const wallet = walletFromSnapshot(await walletRef.get(), safeHelperId);
+    const signedBalanceMinor = resolveSignedBalanceMinor(wallet);
+    return {
+      success: true,
+      action: 'nothing_to_resolve',
+      addedMinor: 0,
+      addedAmount: 0,
+      resolvedCount: 0,
+      wallet: normalizeWalletForClient(wallet),
+      nextPayoutEstimateMinor: wallet.reconciliationBlocked === true ? 0 : Math.max(0, signedBalanceMinor),
+      legacySummary: {
+        unresolvedAmountMinor: 0,
+        unresolvedAmount: 0,
+        unresolvedJobsCount: 0,
+        hasUnresolvedLegacyJobs: false,
+      },
+    };
+  }
+
+  let totalAddedMinor = 0;
+  let totalResolvedCount = 0;
+  const jobs = initialState.resolvableJobs;
+  const BATCH_SIZE = 200;
+  const batches = [];
+  for (let i = 0; i < jobs.length; i += BATCH_SIZE) {
+    batches.push(jobs.slice(i, i + BATCH_SIZE));
+  }
+  if (!batches.length) batches.push([]);
+
+  for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+    const batchJobs = batches[batchIndex];
+    const isLastBatch = batchIndex === batches.length - 1;
+    const unpaidIdsForBatch = isLastBatch ? initialState.unpaidLegacyPayoutDocIds.slice(0, 100) : [];
+    const now = Date.now();
+    const outcome = await db.runTransaction(async (transaction) => {
+      const requestRefs = batchJobs.map((job) => db.collection('serviceRequests').doc(job.requestId));
+      const unpaidPayoutRefs = unpaidIdsForBatch.map((id) => db.collection(HELPER_PAYOUT_COLLECTION).doc(id));
+      const [walletSnap, userSnap, ...restSnaps] = await Promise.all([
+        transaction.get(walletRef),
+        transaction.get(userRef),
+        ...requestRefs.map((ref) => transaction.get(ref)),
+        ...unpaidPayoutRefs.map((ref) => transaction.get(ref)),
+      ]);
+      const requestSnaps = restSnaps.slice(0, requestRefs.length);
+      const payoutSnaps = restSnaps.slice(requestRefs.length);
+
+      const currentWallet = walletFromSnapshot(walletSnap, safeHelperId, now);
+      if (currentWallet.reconciliationBlocked || !walletBalanceIsValid(currentWallet)) {
+        return { error: currentWallet.reconciliationBlocked ? 'reconciliation-blocked' : 'invalid-wallet-balance' };
+      }
+
+      const verifiedJobs = [];
+      for (let idx = 0; idx < batchJobs.length; idx += 1) {
+        const snap = requestSnaps[idx];
+        if (!snap?.exists) continue;
+        const data = snap.data() || {};
+        if (Number(data.legacyWalletResolvedAtMs || 0) > 0) continue;
+        verifiedJobs.push({ ...batchJobs[idx], ref: snap.ref, data });
+      }
+
+      const batchAddedMinor = verifiedJobs.reduce((sum, item) => sum + item.helperAmountMinor, 0);
+      if (batchAddedMinor > 0 && verifiedJobs.length > 0) {
+        const balanceBeforeMinor = resolveSignedBalanceMinor(currentWallet);
+        const balanceAfterMinor = balanceBeforeMinor + batchAddedMinor;
+        syncHelperWalletDocumentsInTransaction({
+          transaction,
+          walletRef,
+          userRef,
+          userSnap,
+          helperId: safeHelperId,
+          current: currentWallet,
+          nextBalanceMinor: balanceAfterMinor,
+          now,
+        });
+        const sortedIds = verifiedJobs.map((item) => item.requestId).sort();
+        const ledgerRef = walletLedgerReference(
+          walletRef,
+          walletLedgerId(`legacy_resolve:${safeHelperId}:${sortedIds.join('|')}:${now}`, 'legacy_resolved'),
+        );
+        writeWalletLedger(transaction, ledgerRef, {
+          operationId: `legacy_resolve:${safeHelperId}:${now}`,
+          helperId: safeHelperId,
+          entryType: 'legacy_completed_jobs_resolved',
+          amountMinor: batchAddedMinor,
+          deltaMinor: batchAddedMinor,
+          balanceBeforeMinor,
+          balanceAfterMinor,
+          resolvedCount: verifiedJobs.length,
+          resolvedRequestIds: sortedIds,
+          description: `Resolved ${verifiedJobs.length} legacy completed job${verifiedJobs.length === 1 ? '' : 's'} into wallet balance.`,
+          createdAtMs: now,
+        });
+        for (const item of verifiedJobs) {
+          transaction.set(item.ref, {
+            legacyWalletResolvedAtMs: now,
+            legacyWalletResolvedAmountMinor: item.helperAmountMinor,
+            ...(Number(item.data?.helperWalletAccountingVersion || 0) !== 1 ? { helperWalletAccountingVersion: 1 } : {}),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+        }
+      }
+
+      for (const payoutSnap of payoutSnaps) {
+        if (!payoutSnap?.exists) continue;
+        const payoutData = payoutSnap.data() || {};
+        const status = String(payoutData.status || '').trim().toLowerCase();
+        if (status === 'paid' || payoutData.payoutSource === 'helper_wallet') continue;
+        transaction.set(payoutSnap.ref, {
+          status: 'resolved_to_wallet',
+          resolvedToWalletAtMs: now,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+      }
+
+      return { addedMinor: batchAddedMinor, resolvedCount: verifiedJobs.length };
+    });
+
+    if (outcome?.error) {
+      throw new Error(
+        outcome.error === 'reconciliation-blocked'
+          ? 'Your wallet currently requires reconciliation before resolving legacy balances.'
+          : 'Unable to resolve legacy completed jobs due to an invalid wallet balance.',
+      );
+    }
+    totalAddedMinor += Number(outcome?.addedMinor || 0);
+    totalResolvedCount += Number(outcome?.resolvedCount || 0);
+  }
+
+  const [finalWalletSnap, finalLegacyState] = await Promise.all([
+    walletRef.get(),
+    loadHelperLegacyResolutionState(safeHelperId).catch(() => ({
+      unresolvedAmountMinor: 0,
+      unresolvedAmount: 0,
+      unresolvedJobsCount: 0,
+    })),
+  ]);
+  const finalWallet = walletFromSnapshot(finalWalletSnap, safeHelperId);
+  const signedBalanceMinor = resolveSignedBalanceMinor(finalWallet);
+  return {
+    success: true,
+    action: totalAddedMinor > 0 ? 'resolved' : 'nothing_to_resolve',
+    addedMinor: totalAddedMinor,
+    addedAmount: toRandFromMinor(totalAddedMinor),
+    resolvedCount: totalResolvedCount,
+    wallet: normalizeWalletForClient(finalWallet),
+    nextPayoutEstimateMinor: finalWallet.reconciliationBlocked === true ? 0 : Math.max(0, signedBalanceMinor),
+    legacySummary: {
+      unresolvedAmountMinor: finalLegacyState.unresolvedAmountMinor,
+      unresolvedAmount: finalLegacyState.unresolvedAmount,
+      unresolvedJobsCount: finalLegacyState.unresolvedJobsCount,
+      hasUnresolvedLegacyJobs: finalLegacyState.unresolvedJobsCount > 0 && finalLegacyState.unresolvedAmountMinor > 0,
+    },
+  };
+}
+
 exports.getHelperWallet = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...MICRO_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
   if (req.method !== 'GET') return res.status(405).json({ success: false, message: 'Method not allowed.' });
   const helperId = await authenticateHelperWalletCaller(req, res);
   if (!helperId) return;
   const walletRef = helperWalletReference(db, helperId);
-  const walletSnapshot = await walletRef.get();
+  const [walletSnapshot, legacyState] = await Promise.all([
+    walletRef.get(),
+    loadHelperLegacyResolutionState(helperId).catch(() => ({
+      unresolvedAmountMinor: 0,
+      unresolvedAmount: 0,
+      unresolvedJobsCount: 0,
+    })),
+  ]);
   const wallet = walletFromSnapshot(walletSnapshot, helperId);
   const signedBalanceMinor = resolveSignedBalanceMinor(wallet);
   return res.status(200).json({
@@ -18918,6 +19145,12 @@ exports.getHelperWallet = onRequest({ cors: true, invoker: 'public', maxInstance
     nextPayoutEstimateMinor: wallet.reconciliationBlocked === true
       ? 0
       : Math.max(0, signedBalanceMinor),
+    legacySummary: {
+      unresolvedAmountMinor: legacyState.unresolvedAmountMinor,
+      unresolvedAmount: legacyState.unresolvedAmount,
+      unresolvedJobsCount: legacyState.unresolvedJobsCount,
+      hasUnresolvedLegacyJobs: legacyState.unresolvedJobsCount > 0 && legacyState.unresolvedAmountMinor > 0,
+    },
   });
 });
 
@@ -18953,6 +19186,22 @@ exports.getHelperWalletTransactions = onRequest({ cors: true, invoker: 'public',
     };
   });
   return res.status(200).json({ success: true, transactions });
+});
+
+exports.resolveLegacyCompletedJobsWallet = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...MICRO_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  const helperId = await authenticateHelperWalletCaller(req, res);
+  if (!helperId) return;
+  try {
+    const result = await executeLegacyCompletedJobsResolution(helperId);
+    return res.status(200).json(result);
+  } catch (error) {
+    logger.error('resolve_legacy_completed_jobs_wallet_failed', { helperId, error: error.message });
+    return res.status(409).json({
+      success: false,
+      message: error?.message || 'Unable to resolve legacy completed jobs into your wallet right now.',
+    });
+  }
 });
 
 exports.prepareSavedCardServicePayment = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
@@ -19122,49 +19371,28 @@ exports.getServicePaymentReceipt = onRequest({ cors: true, invoker: 'public', ma
 
 async function verifyAndSettleCustomerWalletPayment({ reference, mapped, paystackSecretKey }) {
   const amountMinor = Number(mapped?.amountMinor || 0);
-  const customerId = String(mapped?.customerId || '').trim();
-  if (!customerId || !Number.isSafeInteger(amountMinor) || amountMinor <= 0) {
+  const rawCustomerId = String(mapped?.customerId || '').trim();
+  if (!rawCustomerId || !Number.isSafeInteger(amountMinor) || amountMinor <= 0) {
     return { action: 'invalid' };
   }
   const verification = await verifyPaystackTransaction({ paystackSecretKey, reference, amountMinor, currency: 'ZAR' });
-  if (!verification.ok) {
-    return { action: verification.pending ? 'pending' : 'failed' };
+  if (verification.outcome === 'pending' || verification.outcome === 'unknown') {
+    return { action: 'pending', verification };
   }
-  const refDoc = db.collection('paystackRequestPaymentReferences').doc(String(reference));
-  const userRef = db.collection('users').doc(customerId);
-  const ledgerRef = db.collection('financialLedger').doc(`wallet_settlement_${createHash('sha256').update(String(reference)).digest('hex').slice(0, 40)}`);
-  const now = Date.now();
-  return db.runTransaction(async (tx) => {
-    const [rSnap, uSnap, lSnap] = await Promise.all([tx.get(refDoc), tx.get(userRef), tx.get(ledgerRef)]);
-    if (lSnap.exists || rSnap.data()?.status === 'settled') return { action: 'already-settled' };
-    const userData = uSnap.data() || {};
-    const wallet = userData.wallet || { balance: 0, currency: 'ZAR' };
-    const oldBalance = Number(wallet.balance || 0);
-    const creditAmount = Number((amountMinor / 100).toFixed(2));
-    const newBalance = Number((oldBalance + creditAmount).toFixed(2));
-    tx.create(ledgerRef, {
-      entryId: ledgerRef.id,
-      userId: customerId,
-      entryType: 'customer_wallet_settlement',
-      amount: creditAmount,
-      currency: 'ZAR',
-      balanceBefore: oldBalance,
-      balanceAfter: newBalance,
-      gatewayReference: String(reference),
-      createdAtMs: now,
-    });
-    tx.set(userRef, {
-      wallet: {
-        ...wallet,
-        balance: newBalance,
-        currency: wallet.currency || 'ZAR',
-        updatedAt: new Date(now).toISOString(),
-      },
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
-    tx.set(refDoc, { status: 'settled', settledAtMs: now, updatedAtMs: now }, { merge: true });
-    return { action: 'settled', amount: creditAmount, balanceAfter: newBalance };
+  if (verification.outcome !== 'success') {
+    return { action: 'failed', verification };
+  }
+  const billingOwner = await resolveCustomerBillingOwner(rawCustomerId);
+  const customerId = String(billingOwner.targetUid || rawCustomerId).trim();
+  const result = await settleCustomerWalletBalancePayment({
+    db,
+    admin,
+    reference,
+    customerId,
+    amountMinor,
+    verificationOutcome: verification.outcome,
   });
+  return { ...result, verification };
 }
 
 exports.paystackServicePaymentWebhook = onRequest({ cors: false, invoker: 'public', maxInstances: 3, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
@@ -19178,28 +19406,71 @@ exports.paystackServicePaymentWebhook = onRequest({ cors: false, invoker: 'publi
   const actual = Buffer.from(supplied, 'hex');
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return res.status(401).send('Invalid signature');
   const event = req.body && typeof req.body === 'object' ? req.body : {};
-  if (String(event.event || '') !== 'charge.success') return res.status(200).send('Ignored');
+  const eventName = String(event.event || '').trim();
+  const isChargeSuccess = eventName === 'charge.success';
+  const isTransferEvent = ['transfer.success', 'transfer.failed', 'transfer.reversed'].includes(eventName);
+  if (!isChargeSuccess && !isTransferEvent) return res.status(200).send('Ignored');
+
   const reference = String(event.data?.reference || '').trim();
   if (!reference) return res.status(200).send('Ignored');
-  const refSnap = await db.collection('paystackRequestPaymentReferences').doc(reference).get();
+
+  const refDocPromise = isTransferEvent
+    ? db.collection(PAYSTACK_TRANSFER_REFERENCES_COLLECTION).doc(reference).get()
+    : db.collection('paystackRequestPaymentReferences').doc(reference).get();
+  const refSnap = await refDocPromise;
   if (!refSnap.exists) return res.status(200).send('Unlinked');
   const mapped = refSnap.data() || {};
-  const eventId = createHash('sha256').update(`${String(event.event)}:${reference}:${String(event.data?.id || '')}`).digest('hex');
+
+  const eventId = createHash('sha256').update(`${eventName}:${reference}:${String(event.data?.id || '')}`).digest('hex');
   const webhookRef = db.collection('paystackWebhookEvents').doc(eventId);
   const lease = await db.runTransaction(async (tx) => {
     const snap = await tx.get(webhookRef);
     const current = snap.data() || {};
     if (snap.exists && current.status === 'processed') return false;
     if (snap.exists && Number(current.leaseExpiresAtMs || 0) > Date.now()) return false;
-    tx.set(webhookRef, { eventId, eventName: String(event.event), reference, status: 'processing', leaseExpiresAtMs: Date.now() + 60_000, updatedAtMs: Date.now() }, { merge: true });
+    tx.set(webhookRef, { eventId, eventName, reference, status: 'processing', leaseExpiresAtMs: Date.now() + 60_000, updatedAtMs: Date.now() }, { merge: true });
     return true;
   });
   if (!lease) return res.status(200).send('Already processing');
   try {
-    if (mapped.type === 'customer_wallet_settlement') {
-      await verifyAndSettleCustomerWalletPayment({ reference, mapped, paystackSecretKey: secret });
+    if (isTransferEvent) {
+      const payoutId = String(mapped.payoutId || '').trim();
+      if (payoutId) {
+        const payoutRef = db.collection(HELPER_PAYOUT_COLLECTION).doc(payoutId);
+        const payoutSnap = await payoutRef.get();
+        if (payoutSnap.exists) {
+          const payoutData = payoutSnap.data() || {};
+          const attemptNo = Number(mapped.attemptNo || payoutData.transferAttempts || 1);
+          const reconciled = await reconcilePayoutTransfer({
+            payout: { id: payoutSnap.id, ...payoutData },
+            payoutRef,
+            attemptNo,
+            reference,
+            paystackSecretKey: secret,
+            checkNo: 1,
+            fallbackTransfer: event.data,
+          });
+          if (['pending', 'unknown'].includes(reconciled?.verification?.outcome)) {
+            const err = new Error('Transfer verification pending');
+            err.code = 'verification_pending';
+            throw err;
+          }
+        }
+      }
+    } else if (mapped.type === 'customer_wallet_settlement') {
+      const walletResult = await verifyAndSettleCustomerWalletPayment({ reference, mapped, paystackSecretKey: secret });
+      if (walletResult?.action === 'pending') {
+        const err = new Error('Customer wallet verification pending');
+        err.code = 'verification_pending';
+        throw err;
+      }
     } else {
-      await verifyAndSettleRequestPayment({ requestId: String(mapped.requestId || ''), attemptId: String(mapped.attemptId || ''), reference, paystackSecretKey: secret });
+      const reqResult = await verifyAndSettleRequestPayment({ requestId: String(mapped.requestId || ''), attemptId: String(mapped.attemptId || ''), reference, paystackSecretKey: secret });
+      if (reqResult?.action === 'pending' || ['pending', 'unknown'].includes(reqResult?.verification?.outcome)) {
+        const err = new Error('Request payment verification pending');
+        err.code = 'verification_pending';
+        throw err;
+      }
     }
     await webhookRef.set({ status: 'processed', processedAtMs: Date.now(), leaseExpiresAtMs: null }, { merge: true });
     return res.status(200).send('Accepted');
@@ -20886,6 +21157,19 @@ async function notifyCashPaymentToHelper({ requestId, attemptId, helperId, amoun
   }
 }
 
+const UNPAID_LEGACY_PAYMENT_STATUSES = new Set([
+  'unpaid',
+  'wallet_debt_recorded',
+  'payment_failed',
+  'payment_cancelled',
+  'payment_expired',
+  'payment_reconciliation_required',
+  'awaiting_cash_confirmation',
+  'awaiting_customer_confirmation',
+  'cash_selected',
+  'not_applicable',
+]);
+
 async function syncBackendHelperWeeklyPayoutRecords() {
   const startWindow = Date.now() - (PAYOUT_LOOKBACK_WEEKS * 7 * 24 * 60 * 60 * 1000);
   const currentWeekStart = getWeekRange(new Date()).weekStart.getTime();
@@ -20901,8 +21185,16 @@ async function syncBackendHelperWeeklyPayoutRecords() {
     if (!helperId) continue;
     // New explicit-payment requests earn wallet funds only after settlement.
     // Direct-to-helper cash is already paid to the helper and is never payable again.
-    if (Number(request.helperWalletAccountingVersion) === 1 && !isWalletEarningEligible(request)) continue;
+    const isVersionedWalletRequest = Number(request.helperWalletAccountingVersion) === 1;
+    if (isVersionedWalletRequest && !isWalletEarningEligible(request)) continue;
     if (String(request.cashPayment?.status || '').toLowerCase() === 'helper_confirmed') continue;
+    const normalizedPaymentStatus = String(request.paymentStatus || '').trim().toLowerCase();
+    const usesExplicitWalletFlow = isVersionedWalletRequest
+      || String(request.paymentFlowVersion || '').trim().toLowerCase() === 'explicit_v1'
+      || Boolean(request.financialOperationId);
+    if (!isVersionedWalletRequest && (usesExplicitWalletFlow || UNPAID_LEGACY_PAYMENT_STATUSES.has(normalizedPaymentStatus))) {
+      continue;
+    }
 
     const settledAtMs = timestampToMillis(
       request.endedAt
@@ -20910,12 +21202,12 @@ async function syncBackendHelperWeeklyPayoutRecords() {
       || request.canceledAt
       || request.updatedAt,
     );
-    const isVersionedWalletRequest = Number(request.helperWalletAccountingVersion) === 1;
     if (!settledAtMs || settledAtMs < startWindow) continue;
     if (!isVersionedWalletRequest && settledAtMs >= currentWeekStart) continue;
 
     const payoutBreakdown = computeStoredHelperPayoutBreakdown(request);
     if (!payoutBreakdown) continue;
+    if (!isVersionedWalletRequest && Number(payoutBreakdown.helperAmount || 0) <= 0) continue;
 
     const settledDate = new Date(settledAtMs);
     const weekKey = getWeekKey(settledDate);
@@ -21191,7 +21483,7 @@ async function markZeroValuePayoutPaid(payout, payoutRef) {
     }, { merge: true });
     return true;
   });
-  if (changed) await notifyPayoutOutcome(payout, 'paid').catch(() => null);
+  if (changed && Number(payout.helperAmount || 0) > 0) await notifyPayoutOutcome(payout, 'paid').catch(() => null);
   return changed;
 }
 
@@ -21217,6 +21509,53 @@ async function recordPayoutConfigurationFailure(payout, payoutRef, runKey) {
   return changed;
 }
 
+async function syncMissingWalletEarningsToWallets() {
+  const startWindow = Date.now() - (PAYOUT_LOOKBACK_WEEKS * 7 * 24 * 60 * 60 * 1000);
+  const [completedSnap, canceledSnap] = await Promise.all([
+    db.collection('serviceRequests').where('status', '==', 'completed').limit(1000).get(),
+    db.collection('serviceRequests').where('status', '==', 'canceled').limit(1000).get(),
+  ]);
+
+  for (const requestDoc of [...completedSnap.docs, ...canceledSnap.docs]) {
+    const request = { id: requestDoc.id, ...(requestDoc.data() || {}) };
+    const helperId = String(request?.helperAssignment?.helperId || '').trim();
+    if (!helperId) continue;
+    if (Number(request.helperWalletAccountingVersion) !== 1) continue;
+    if (!isWalletEarningEligible(request)) continue;
+
+    const settledAtMs = timestampToMillis(
+      request.endedAt
+      || request.completedAt
+      || request.canceledAt
+      || request.updatedAt,
+    );
+    if (!settledAtMs || settledAtMs < startWindow) continue;
+
+    const payoutBreakdown = computeStoredHelperPayoutBreakdown(request);
+    if (!payoutBreakdown) continue;
+    const amountMinor = normalizeWalletMinor(Math.round(Number(payoutBreakdown.helperAmount || 0) * 100));
+    if (!amountMinor || amountMinor <= 0) continue;
+
+    const platformAmountMinor = normalizeWalletMinor(Math.round(Number(payoutBreakdown.platformAmount || 0) * 100)) ?? 0;
+    const customerChargeAmountMinor = normalizeWalletMinor(Math.round(Number(payoutBreakdown.customerChargeAmount || 0) * 100)) ?? 0;
+    const closureType = String(request.status || '').trim().toLowerCase() === 'canceled' ? 'canceled' : 'completed';
+    const weekKey = getWeekKey(new Date(settledAtMs));
+    const earning = await creditHelperWalletEarning({
+      db,
+      helperId,
+      requestId: request.id,
+      amountMinor,
+      platformAmountMinor,
+      customerChargeAmountMinor,
+      closureType,
+      sourceWeekKey: weekKey,
+    });
+    if (earning.action === 'reconciliation-blocked') {
+      logger.error('helper_wallet_earning_blocked_for_reconciliation', { helperId, requestId: request.id });
+    }
+  }
+}
+
 exports.processWeeklyHelperPayouts = onSchedule({
   schedule: '0 0 * * 1',
   timeZone: 'Africa/Johannesburg',
@@ -21232,9 +21571,8 @@ exports.processWeeklyHelperPayouts = onSchedule({
     return;
   }
 
-  const legacyPayouts = await syncBackendHelperWeeklyPayoutRecords();
-  const walletPayouts = await syncHelperWalletPayoutCandidates(getWeekKey(new Date()));
-  const syncedRecords = [...legacyPayouts, ...walletPayouts];
+  await syncMissingWalletEarningsToWallets();
+  const syncedRecords = await syncHelperWalletPayoutCandidates(getWeekKey(new Date()));
   const runKey = `weekly-${getWeekKey(new Date())}`;
   let paidCount = 0;
   let failedCount = 0;
@@ -21245,12 +21583,7 @@ exports.processWeeklyHelperPayouts = onSchedule({
     const amount = Number(payout.helperAmount || 0);
     const payoutRef = db.collection(HELPER_PAYOUT_COLLECTION).doc(payout.id);
     if (amount <= 0) {
-      if (payout.walletAccountingVersion === 1 || payout.payoutSource === 'helper_wallet') {
-        skippedCount += 1;
-        continue;
-      }
-      if (await markZeroValuePayoutPaid(payout, payoutRef)) paidCount += 1;
-      else skippedCount += 1;
+      skippedCount += 1;
       continue;
     }
 
@@ -21775,6 +22108,55 @@ exports.updateWebHelperLiveLocation = onCall({ maxInstances: 2, ...MICRO_CPU_OPT
       });
     } catch (err) {
       logger.warn('rtdb_helper_tracking_sync_failed', { uid, error: err.message });
+    }
+  }
+
+  const activeRequestId = String(existingHelper.activeServiceRequestId || '').trim();
+  if (activeRequestId) {
+    try {
+      const activeReqSnap = await db.collection('serviceRequests').doc(activeRequestId).get();
+      if (activeReqSnap.exists) {
+        const activeReq = activeReqSnap.data() || {};
+        const activeStatus = String(activeReq.status || '').trim().toLowerCase();
+        if (['accepted', 'driving', 'en_route', 'buying_resources', 'arrived', 'work_started'].includes(activeStatus)
+          && String(activeReq.helperAssignment?.helperId || '').trim() === uid) {
+          const reqTrackingRef = admin.database().ref(`liveTracking/serviceRequests/${activeRequestId}`);
+          const reqTrackingSnap = await reqTrackingRef.get();
+          const reqTracking = reqTrackingSnap.exists ? (reqTrackingSnap.val() || {}) : {};
+          const prevLoc = reqTracking.helperLocation || null;
+          const prevMeters = Math.max(0, Number(reqTracking.distanceTravelledMeters || 0));
+          let nextMeters = prevMeters;
+          if (['driving', 'en_route', 'buying_resources'].includes(activeStatus)
+            && prevLoc
+            && Number.isFinite(Number(prevLoc.latitude))
+            && Number.isFinite(Number(prevLoc.longitude))) {
+            const stepMeters = Math.round(calculateDistanceKm(
+              Number(prevLoc.latitude),
+              Number(prevLoc.longitude),
+              location.latitude,
+              location.longitude,
+            ) * 1000);
+            const prevUpdatedMs = Number(prevLoc.updatedAtMs || reqTracking.updatedAtMs || 0);
+            const elapsedSeconds = prevUpdatedMs > 0 && nowMs > prevUpdatedMs
+              ? Math.max(1, (nowMs - prevUpdatedMs) / 1000)
+              : 60;
+            const maxPlausibleMeters = Math.max(500, Math.round(elapsedSeconds * 55) + 150);
+            const gpsAccuracy = Number(location.accuracy);
+            const accurateEnough = !Number.isFinite(gpsAccuracy) || gpsAccuracy <= 250;
+            if (accurateEnough && stepMeters >= 5 && stepMeters <= maxPlausibleMeters) {
+              nextMeters = prevMeters + stepMeters;
+            }
+          }
+          await reqTrackingRef.update({
+            helperLocation: location,
+            distanceTravelledMeters: nextMeters,
+            status: activeStatus,
+            updatedAtMs: nowMs,
+          });
+        }
+      }
+    } catch (err) {
+      logger.warn('rtdb_service_request_tracking_sync_failed', { uid, activeRequestId, error: err?.message || 'unknown' });
     }
   }
 

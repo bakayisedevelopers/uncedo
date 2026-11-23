@@ -1,15 +1,22 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  getHelperAgreementBundle,
+  getHelperCashPaymentConfirmationsApi,
   getHelperWalletSnapshot,
-  getMyPoliceClearanceReview,
+  normalizeWalletDocumentData,
   reportHelperAppVisibility,
+  resolveHelperPayoutAmount,
   respondToServiceRequestOfferApi,
   subscribeToActiveServiceRequest,
+  subscribeToHelperAgreementBundle,
   subscribeToHelperOfferings,
+  subscribeToHelperPoliceClearanceReview,
   subscribeToHelperServiceRequests,
+  subscribeToHelperWallet,
+  subscribeToHelperWalletTransactions,
+  subscribeToHelperWeeklyPayouts,
   subscribeToPendingHelperOffers,
   subscribeToServiceCatalog,
+  subscribeToServicePaymentOperationsMap,
   subscribeToUserProfile,
   syncMyHelperVerificationStatus,
   updateWebHelperLiveLocation,
@@ -20,11 +27,11 @@ import {
   reverseGeocodeCoords,
 } from '../services/locationGeocodeService';
 import {
-  getMasteryConfig,
   subscribeToHelperOptionRatings,
   subscribeToHelperServiceMastery,
   subscribeToHelperServiceOptionMastery,
   subscribeToHelperServiceRatings,
+  subscribeToMasteryConfig,
   subscribeToRewardAccount,
 } from '../services/helperMasteryService';
 import { DEFAULT_MASTERY_CONFIG } from '../utils/masteryModel';
@@ -112,6 +119,13 @@ function playOfferAlert(offer) {
   }
 }
 
+const EMPTY_LEGACY_SUMMARY = {
+  unresolvedAmountMinor: 0,
+  unresolvedAmount: 0,
+  unresolvedJobsCount: 0,
+  hasUnresolvedLegacyJobs: false,
+};
+
 const EMPTY_WALLET_SNAPSHOT = {
   wallet: {
     balanceMinor: 0,
@@ -123,8 +137,92 @@ const EMPTY_WALLET_SNAPSHOT = {
     currency: 'ZAR',
   },
   nextPayoutEstimateMinor: 0,
+  legacySummary: EMPTY_LEGACY_SUMMARY,
   transactions: [],
 };
+
+const ACCOUNTED_WALLET_ENTRY_TYPES = new Set([
+  'job_earning_credit',
+  'weekly_earning_credit',
+  'cancellation_earning_credit',
+  'cash_commission_assessed',
+  'legacy_job_resolved',
+]);
+
+const PENDING_EXPLICIT_PAYMENT_STATUSES = new Set([
+  'unpaid',
+  'cash_selected',
+  'awaiting_cash_confirmation',
+  'awaiting_customer_confirmation',
+  'payment_processing',
+  'payment_reconciliation_required',
+]);
+
+function computeLiveLegacySummary({ requests = [], transactions = [], weeklyPayouts = [] } = {}) {
+  const paidIds = new Set();
+  for (const payout of Array.isArray(weeklyPayouts) ? weeklyPayouts : []) {
+    if (String(payout?.status || '').trim().toLowerCase() === 'paid') {
+      for (const reqId of Array.isArray(payout?.requestIds) ? payout.requestIds : []) {
+        const clean = String(reqId || '').trim();
+        if (clean) paidIds.add(clean);
+      }
+    }
+  }
+  const accountedIds = new Set();
+  for (const tx of Array.isArray(transactions) ? transactions : []) {
+    const entryType = String(tx?.entryType || '').trim().toLowerCase();
+    const reqId = String(tx?.requestId || '').trim();
+    if (reqId && ACCOUNTED_WALLET_ENTRY_TYPES.has(entryType)) {
+      accountedIds.add(reqId);
+    }
+    if (Array.isArray(tx?.resolvedRequestIds)) {
+      for (const resolvedId of tx.resolvedRequestIds) {
+        const clean = String(resolvedId || '').trim();
+        if (clean) accountedIds.add(clean);
+      }
+    }
+  }
+
+  let unresolvedAmountMinor = 0;
+  let unresolvedJobsCount = 0;
+  for (const job of Array.isArray(requests) ? requests : []) {
+    const jobId = String(job?.id || '').trim();
+    if (!jobId) continue;
+    const st = String(job?.status || '').trim().toLowerCase();
+    if (st !== 'completed' && st !== 'canceled' && st !== 'cancelled') continue;
+    if (Number(job?.legacyWalletResolvedAtMs || 0) > 0) continue;
+    if (paidIds.has(jobId) || accountedIds.has(jobId)) continue;
+    if (Number(job?.helperWalletAccountingVersion || 0) === 1) continue;
+    const paymentMethod = String(job?.paymentMethod || '').trim().toLowerCase();
+    const paymentStatus = String(job?.paymentStatus || '').trim().toLowerCase();
+    if (
+      String(job?.cashPayment?.status || '').trim().toLowerCase() === 'helper_confirmed'
+      || (paymentMethod === 'cash' && paymentStatus === 'paid')
+    ) {
+      continue;
+    }
+    if (
+      String(job?.paymentFlowVersion || '').trim() === 'explicit_v1'
+      && PENDING_EXPLICIT_PAYMENT_STATUSES.has(paymentStatus)
+    ) {
+      continue;
+    }
+    const helperAmountMajor = st === 'completed'
+      ? resolveHelperPayoutAmount(job)
+      : Number(job?.helperPayoutBreakdown?.helperAmount ?? resolveHelperPayoutAmount(job) ?? 0);
+    const minor = Math.round((Number.isFinite(helperAmountMajor) ? helperAmountMajor : 0) * 100);
+    if (minor <= 0) continue;
+    unresolvedAmountMinor += minor;
+    unresolvedJobsCount += 1;
+  }
+
+  return {
+    unresolvedAmountMinor,
+    unresolvedAmount: Number((unresolvedAmountMinor / 100).toFixed(2)),
+    unresolvedJobsCount,
+    hasUnresolvedLegacyJobs: unresolvedJobsCount > 0 && unresolvedAmountMinor > 0,
+  };
+}
 
 function readCurrentGeoPosition(options = { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }) {
   return new Promise((resolve, reject) => {
@@ -160,8 +258,14 @@ export function HelperSessionProvider({ user, children }) {
   const [activeRequest, setActiveRequest] = useState(null);
   const [queuedRequest, setQueuedRequest] = useState(null);
   const [clearanceReview, setClearanceReview] = useState(null);
+  const [agreementBundle, setAgreementBundle] = useState(null);
   const [activeAgreement, setActiveAgreement] = useState(null);
-  const [walletSnapshot, setWalletSnapshot] = useState(EMPTY_WALLET_SNAPSHOT);
+  const [liveWalletState, setLiveWalletState] = useState(null);
+  const [liveWalletTransactions, setLiveWalletTransactions] = useState(null);
+  const [weeklyPayouts, setWeeklyPayouts] = useState([]);
+  const [paymentOperationsMap, setPaymentOperationsMap] = useState({});
+  const [cashConfirmations, setCashConfirmations] = useState([]);
+  const [serverWalletSnapshot, setServerWalletSnapshot] = useState(EMPTY_WALLET_SNAPSHOT);
   const [walletLoading, setWalletLoading] = useState(false);
   const [walletError, setWalletError] = useState('');
   const [serviceOptionMastery, setServiceOptionMastery] = useState([]);
@@ -236,19 +340,36 @@ export function HelperSessionProvider({ user, children }) {
     }
   }, []);
 
-  const refreshWallet = useCallback(async () => {
+  const refreshWallet = useCallback(async ({ silent = false } = {}) => {
     if (!user?.uid) return null;
-    setWalletLoading(true);
-    setWalletError('');
+    if (!silent) {
+      setWalletLoading(true);
+      setWalletError('');
+    }
     try {
       const snap = await getHelperWalletSnapshot();
-      setWalletSnapshot(snap);
+      setServerWalletSnapshot(snap);
       return snap;
     } catch (err) {
-      setWalletError(err?.message || 'Unable to load wallet balance right now.');
+      if (!silent) {
+        setWalletError(err?.message || 'Unable to load wallet balance right now.');
+      }
       return null;
     } finally {
-      setWalletLoading(false);
+      if (!silent) {
+        setWalletLoading(false);
+      }
+    }
+  }, [user?.uid]);
+
+  const refreshCashConfirmations = useCallback(async () => {
+    if (!user?.uid) return [];
+    try {
+      const list = await getHelperCashPaymentConfirmationsApi();
+      setCashConfirmations(Array.isArray(list) ? list : []);
+      return list;
+    } catch {
+      return [];
     }
   }, [user?.uid]);
 
@@ -261,6 +382,19 @@ export function HelperSessionProvider({ user, children }) {
     const unsubCatalog = subscribeToServiceCatalog(setCatalog);
     const unsubOffers = subscribeToPendingHelperOffers(user.uid, setOffers);
     const unsubHistory = subscribeToHelperServiceRequests(user.uid, setJobHistory);
+    const unsubWallet = subscribeToHelperWallet(user.uid, setLiveWalletState);
+    const unsubWalletTx = subscribeToHelperWalletTransactions(user.uid, setLiveWalletTransactions);
+    const unsubWeeklyPayouts = subscribeToHelperWeeklyPayouts(user.uid, setWeeklyPayouts);
+    const unsubClearance = subscribeToHelperPoliceClearanceReview(user.uid, (nextReview) => {
+      if (nextReview) setClearanceReview(nextReview);
+    });
+    const unsubAgreement = subscribeToHelperAgreementBundle(user.uid, (nextBundle) => {
+      if (nextBundle) {
+        setAgreementBundle(nextBundle);
+        if (nextBundle.activeVersion) setActiveAgreement(nextBundle.activeVersion);
+      }
+    });
+    const unsubMasteryConfig = subscribeToMasteryConfig(setMasteryConfig);
     const unsubOptionMastery = subscribeToHelperServiceOptionMastery(user.uid, setServiceOptionMastery, () => setServiceOptionMastery([]));
     const unsubServiceMastery = subscribeToHelperServiceMastery(user.uid, setServiceMastery, () => setServiceMastery([]));
     const unsubOptionRatings = subscribeToHelperOptionRatings(user.uid, setServiceOptionRatings, () => setServiceOptionRatings([]));
@@ -269,16 +403,12 @@ export function HelperSessionProvider({ user, children }) {
 
     let active = true;
     Promise.all([
-      getMyPoliceClearanceReview().catch(() => null),
-      getHelperAgreementBundle(user.uid).catch(() => null),
       getHelperWalletSnapshot().catch(() => null),
-      getMasteryConfig().catch(() => DEFAULT_MASTERY_CONFIG),
-    ]).then(([reviewData, agreementData, walletData, nextMasteryConfig]) => {
+      getHelperCashPaymentConfirmationsApi().catch(() => []),
+    ]).then(([walletData, cashList]) => {
       if (!active) return;
-      if (reviewData) setClearanceReview(reviewData);
-      if (agreementData?.activeVersion) setActiveAgreement(agreementData.activeVersion);
-      if (walletData) setWalletSnapshot(walletData);
-      if (nextMasteryConfig) setMasteryConfig(nextMasteryConfig);
+      if (walletData) setServerWalletSnapshot(walletData);
+      if (Array.isArray(cashList)) setCashConfirmations(cashList);
       setLoadingInitial(false);
     });
 
@@ -289,6 +419,12 @@ export function HelperSessionProvider({ user, children }) {
       unsubCatalog?.();
       unsubOffers?.();
       unsubHistory?.();
+      unsubWallet?.();
+      unsubWalletTx?.();
+      unsubWeeklyPayouts?.();
+      unsubClearance?.();
+      unsubAgreement?.();
+      unsubMasteryConfig?.();
       unsubOptionMastery?.();
       unsubServiceMastery?.();
       unsubOptionRatings?.();
@@ -296,6 +432,190 @@ export function HelperSessionProvider({ user, children }) {
       unsubRewardAccount?.();
     };
   }, [user?.uid]);
+
+  // Watch servicePaymentOperations for recent completed unpaid jobs so cash confirmations update in real time
+  const completedUnpaidRequestIds = useMemo(
+    () =>
+      (Array.isArray(jobHistory) ? jobHistory : [])
+        .filter((job) => {
+          const st = String(job?.status || '').trim().toLowerCase();
+          const paySt = String(job?.paymentStatus || '').trim().toLowerCase();
+          return st === 'completed' && paySt !== 'paid';
+        })
+        .slice(0, 25)
+        .map((job) => String(job.id || '').trim())
+        .filter(Boolean),
+    [jobHistory],
+  );
+  const completedUnpaidIdsKey = completedUnpaidRequestIds.join(',');
+
+  useEffect(() => {
+    if (!completedUnpaidIdsKey) {
+      setPaymentOperationsMap({});
+      return undefined;
+    }
+    const ids = completedUnpaidIdsKey.split(',').filter(Boolean);
+    const unsubOps = subscribeToServicePaymentOperationsMap(ids, setPaymentOperationsMap);
+    return () => unsubOps?.();
+  }, [completedUnpaidIdsKey]);
+
+  const cashSyncTriggerKey = useMemo(() => {
+    const jobPart = (Array.isArray(jobHistory) ? jobHistory : [])
+      .filter((job) => String(job?.status || '').trim().toLowerCase() === 'completed')
+      .slice(0, 25)
+      .map((job) => `${job.id}:${String(job.paymentStatus || '').toLowerCase()}`)
+      .join('|');
+    const opsPart = Object.values(paymentOperationsMap || {})
+      .map((op) => `${op.id}:${String(op.status || '').toLowerCase()}:${String(op.activeAttemptId || '')}`)
+      .sort()
+      .join('|');
+    return `${jobPart}__${opsPart}`;
+  }, [jobHistory, paymentOperationsMap]);
+
+  useEffect(() => {
+    if (!user?.uid) return undefined;
+    const timer = window.setTimeout(() => {
+      refreshCashConfirmations();
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [cashSyncTriggerKey, refreshCashConfirmations, user?.uid]);
+
+  // Keep serverWalletSnapshot legacySummary reconciled silently whenever wallet/tx/jobs change
+  const walletSyncKey = useMemo(() => {
+    const terminalSignature = (Array.isArray(jobHistory) ? jobHistory : [])
+      .filter((job) => {
+        const st = String(job?.status || '').trim().toLowerCase();
+        return st === 'completed' || st === 'canceled' || st === 'cancelled';
+      })
+      .slice(0, 30)
+      .map((j) => `${j.id}:${j.status}:${j.paymentStatus || ''}:${j.legacyWalletResolvedAtMs || 0}`)
+      .join('|');
+    const txLen = Array.isArray(liveWalletTransactions) ? liveWalletTransactions.length : 0;
+    const latestTxId = Array.isArray(liveWalletTransactions) && liveWalletTransactions[0]?.id ? liveWalletTransactions[0].id : '';
+    const payoutSig = (Array.isArray(weeklyPayouts) ? weeklyPayouts : [])
+      .slice(0, 10)
+      .map((p) => `${p.id}:${p.status || ''}`)
+      .join('|');
+    return `${liveWalletState?.wallet?.updatedAtMs || 0}:${txLen}:${latestTxId}:${payoutSig}:${terminalSignature}`;
+  }, [jobHistory, liveWalletState?.wallet?.updatedAtMs, liveWalletTransactions, weeklyPayouts]);
+
+  useEffect(() => {
+    if (!user?.uid || loadingInitial) return undefined;
+    const timer = window.setTimeout(() => {
+      refreshWallet({ silent: true });
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [loadingInitial, refreshWallet, user?.uid, walletSyncKey]);
+
+  const walletSnapshot = useMemo(() => {
+    const hasProfileWallet =
+      profile?.wallet && typeof profile.wallet === 'object'
+      && (
+        Number.isSafeInteger(Number(profile.wallet.balanceMinor))
+        || Number.isFinite(Number(profile.wallet.balance))
+      );
+    const profileFallbackMinor = Number.isSafeInteger(Number(profile?.wallet?.balanceMinor))
+      ? Number(profile.wallet.balanceMinor)
+      : Math.round(Number(profile?.wallet?.balance || 0) * 100);
+
+    const activeWallet = liveWalletState?.exists && liveWalletState.wallet
+      ? liveWalletState.wallet
+      : hasProfileWallet
+        ? normalizeWalletDocumentData(profile.wallet, profileFallbackMinor)
+        : (serverWalletSnapshot?.wallet || EMPTY_WALLET_SNAPSHOT.wallet);
+
+    const activeTransactions = Array.isArray(liveWalletTransactions)
+      ? liveWalletTransactions
+      : (Array.isArray(serverWalletSnapshot?.transactions) ? serverWalletSnapshot.transactions : []);
+
+    const liveLegacy = computeLiveLegacySummary({
+      requests: jobHistory,
+      transactions: activeTransactions,
+      weeklyPayouts,
+    });
+
+    const serverLegacy = serverWalletSnapshot?.legacySummary;
+    const txAccountedIds = new Set();
+    for (const tx of activeTransactions) {
+      if (tx?.requestId && ACCOUNTED_WALLET_ENTRY_TYPES.has(String(tx.entryType || '').toLowerCase())) {
+        txAccountedIds.add(String(tx.requestId));
+      }
+      if (Array.isArray(tx?.resolvedRequestIds)) {
+        tx.resolvedRequestIds.forEach((id) => {
+          if (id) txAccountedIds.add(String(id));
+        });
+      }
+    }
+
+    const legacySummary = (serverLegacy && liveLegacy.unresolvedAmountMinor === 0 && Number(serverLegacy.unresolvedAmountMinor || 0) > 0)
+      ? (() => {
+          const allJobsInWindowAccounted = jobHistory.some((j) => txAccountedIds.has(String(j.id)) || Number(j?.legacyWalletResolvedAtMs || 0) > 0);
+          const hasLegacyResolutionTx = activeTransactions.some((t) => String(t?.entryType || '').toLowerCase() === 'legacy_job_resolved');
+          if (hasLegacyResolutionTx && !liveLegacy.hasUnresolvedLegacyJobs && allJobsInWindowAccounted) {
+            return EMPTY_LEGACY_SUMMARY;
+          }
+          return serverLegacy;
+        })()
+      : liveLegacy;
+
+    const signedMinor = Number(activeWallet?.balanceMinor || 0);
+    return {
+      wallet: activeWallet,
+      nextPayoutEstimateMinor: activeWallet?.reconciliationBlocked === true ? 0 : Math.max(0, signedMinor),
+      legacySummary,
+      transactions: activeTransactions,
+    };
+  }, [
+    jobHistory,
+    liveWalletState,
+    liveWalletTransactions,
+    profile?.wallet,
+    serverWalletSnapshot,
+    weeklyPayouts,
+  ]);
+
+  const effectiveCashConfirmations = useMemo(() => {
+    const serverList = Array.isArray(cashConfirmations) ? cashConfirmations : [];
+    const byRequestId = new Map(serverList.map((item) => [String(item.requestId), item]));
+
+    // Immediately reflect any live awaiting_cash_confirmation seen in servicePaymentOperations or serviceRequests
+    for (const job of Array.isArray(jobHistory) ? jobHistory : []) {
+      const reqId = String(job?.id || '').trim();
+      if (!reqId) continue;
+      const op = paymentOperationsMap?.[reqId];
+      const st = String(job?.status || '').trim().toLowerCase();
+      const opStatus = String(op?.status || '').trim().toLowerCase();
+      const jobPayStatus = String(job?.paymentStatus || '').trim().toLowerCase();
+
+      if (st !== 'completed' || opStatus === 'paid' || jobPayStatus === 'paid') {
+        byRequestId.delete(reqId);
+        continue;
+      }
+      if (op && opStatus !== 'awaiting_cash_confirmation' && jobPayStatus !== 'awaiting_cash_confirmation') {
+        byRequestId.delete(reqId);
+        continue;
+      }
+      if (opStatus === 'awaiting_cash_confirmation' || jobPayStatus === 'awaiting_cash_confirmation') {
+        if (!byRequestId.has(reqId)) {
+          byRequestId.set(reqId, {
+            requestId: reqId,
+            requestReference: String(job.publicRequestReference || job.requestReference || reqId),
+            service: String(job.subject || job.serviceSummary || job.serviceName || 'Uncedo service'),
+            amount: Number(op?.amount ?? job?.totalAmount ?? job?.pricingSnapshot?.finalAmount ?? 0),
+            currency: 'ZAR',
+            attemptId: String(op?.activeAttemptId || ''),
+            customerReportedAtMs: Number(op?.updatedAtMs || 0),
+          });
+        } else if (op?.activeAttemptId && !byRequestId.get(reqId)?.attemptId) {
+          byRequestId.set(reqId, {
+            ...byRequestId.get(reqId),
+            attemptId: String(op.activeAttemptId),
+          });
+        }
+      }
+    }
+    return Array.from(byRequestId.values());
+  }, [cashConfirmations, jobHistory, paymentOperationsMap]);
 
   useEffect(() => {
     if (!activeRequestId) {
@@ -913,8 +1233,12 @@ export function HelperSessionProvider({ user, children }) {
       activeRequest,
       queuedRequest,
       clearanceReview,
+      agreementBundle,
       activeAgreement,
       walletSnapshot,
+      weeklyPayouts,
+      cashConfirmations: effectiveCashConfirmations,
+      refreshCashConfirmations,
       walletLoading,
       walletError,
       refreshWallet,
@@ -962,8 +1286,12 @@ export function HelperSessionProvider({ user, children }) {
       activeRequest,
       queuedRequest,
       clearanceReview,
+      agreementBundle,
       activeAgreement,
       walletSnapshot,
+      weeklyPayouts,
+      effectiveCashConfirmations,
+      refreshCashConfirmations,
       walletLoading,
       walletError,
       refreshWallet,

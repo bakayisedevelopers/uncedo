@@ -316,11 +316,12 @@ test('concurrent helper cash confirmations atomically settle payment and assess 
   ]);
   assert.equal(request.paymentStatus, 'paid');
   assert.equal(payment.status, 'paid');
-  assert.equal(wallet.balanceMinor, -500);
-  assert.equal(wallet.balance, -5);
-  assert.equal(helperUser.wallet.balanceMinor, -500);
-  assert.equal(helperUser.wallet.balance, -5);
+  assert.equal(wallet.balanceMinor, 8000);
+  assert.equal(wallet.balance, 80);
+  assert.equal(helperUser.wallet.balanceMinor, 8000);
+  assert.equal(helperUser.wallet.balance, 80);
   const ledger = await walletRef.collection('transactions').get();
+  assert.equal(ledger.docs.filter((document) => document.data().entryType === 'job_earning_credit').length, 1);
   assert.equal(ledger.docs.filter((document) => document.data().entryType === 'cash_commission_assessed').length, 1);
 });
 

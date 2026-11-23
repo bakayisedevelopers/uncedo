@@ -13,6 +13,7 @@ import {
   getMyPoliceClearanceReview,
   getMyPoliceClearanceViewUrl,
   submitWebHelperPoliceClearance,
+  subscribeToHelperPoliceClearanceReview,
 } from '../../services/helperDataService';
 
 function formatBytes(bytes = 0) {
@@ -53,7 +54,19 @@ export function StepPoliceClearance({ profile, onReviewLoaded, onCompleteNext })
 
   useEffect(() => {
     loadReview();
-  }, [loadReview]);
+    if (!profile?.uid) return undefined;
+    const unsub = subscribeToHelperPoliceClearanceReview(profile.uid, (liveData) => {
+      if (!liveData) return;
+      setReview((prev) => ({
+        required: prev?.required !== false,
+        status: liveData.status || prev?.status || 'missing',
+        submissions: Array.isArray(liveData.submissions) ? liveData.submissions : (prev?.submissions || []),
+      }));
+      onReviewLoaded?.(liveData);
+      setLoading(false);
+    });
+    return () => unsub?.();
+  }, [loadReview, onReviewLoaded, profile?.uid]);
 
   const status = String(review?.status || profile?.policeClearanceStatus || 'missing').trim().toLowerCase();
   const required = review?.required !== false;

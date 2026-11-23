@@ -12,8 +12,35 @@ import {
 } from '../../utils/payouts';
 
 export function EarningsScreen({ navigate, goBack }) {
-  const { paymentSummary, weeklyGroups, helperWalletSnapshot, helperWalletLoading, helperWalletError, refreshHelperWallet, profile } = useHelpersApp();
+  const { paymentSummary, weeklyGroups, helperWalletSnapshot, helperWalletLoading, helperWalletError, refreshHelperWallet, profile, actions } = useHelpersApp();
   const [expandedWeekKey, setExpandedWeekKey] = useState('');
+  const [resolvingLegacy, setResolvingLegacy] = useState(false);
+  const [legacyResolveNotice, setLegacyResolveNotice] = useState('');
+  const [legacyResolveError, setLegacyResolveError] = useState('');
+  const serverLegacyMinor = helperWalletSnapshot?.legacySummary?.unresolvedAmountMinor;
+  const unresolvedLegacyMinor = typeof serverLegacyMinor === 'number'
+    ? Math.max(0, serverLegacyMinor)
+    : Math.max(0, Math.round(Number(paymentSummary.unpaidAmount || 0) * 100));
+
+  const handleResolveLegacy = async () => {
+    setResolvingLegacy(true);
+    setLegacyResolveNotice('');
+    setLegacyResolveError('');
+    try {
+      const result = await actions.resolveLegacyWallet();
+      const addedMinor = Number(result?.addedMinor || 0);
+      const count = Number(result?.resolvedCount || 0);
+      setLegacyResolveNotice(
+        addedMinor > 0
+          ? `Added ${moneyMinor(addedMinor)} from ${count} completed job${count === 1 ? '' : 's'} to your wallet balance.`
+          : 'All eligible completed jobs are already resolved into your wallet.',
+      );
+    } catch (error) {
+      setLegacyResolveError(error?.message || 'Unable to resolve legacy completed jobs right now.');
+    } finally {
+      setResolvingLegacy(false);
+    }
+  };
   const wallet = helperWalletSnapshot?.wallet || {};
   const rawBalanceMinor = wallet?.balanceMinor;
   const profileMinor = profile?.wallet?.balanceMinor;
@@ -108,18 +135,27 @@ export function EarningsScreen({ navigate, goBack }) {
       <Card>
         <SectionHeading
           title="Legacy weekly earnings history"
-          subtitle="This request-based summary excludes new wallet-accounted earnings. Use the wallet above as your single balance."
+          subtitle="Move any remaining legacy completed job total directly into your wallet balance."
+          action={unresolvedLegacyMinor > 0 ? (
+            <ActionButton
+              label={resolvingLegacy ? 'Resolving…' : 'Resolve'}
+              disabled={resolvingLegacy || helperWalletLoading}
+              onPress={handleResolveLegacy}
+            />
+          ) : null}
         />
         <View style={styles.metricGrid}>
+          <MetricCard label="Completed jobs total" value={moneyMinor(unresolvedLegacyMinor)} accent={unresolvedLegacyMinor > 0 ? 'brand' : 'muted'} />
           <MetricCard label="Legacy helper earnings" value={formatCurrency(paymentSummary.lifetimeHelperEarnings)} />
-          <MetricCard label="Legacy unpaid amount" value={formatCurrency(paymentSummary.unpaidAmount)} />
           <MetricCard label="Legacy paid amount" value={formatCurrency(paymentSummary.paidAmount)} accent="success" />
           <MetricCard label="Legacy current week" value={formatCurrency(paymentSummary.currentWeekAmount)} />
         </View>
+        {legacyResolveNotice ? <View style={styles.noteCard}><Text style={styles.noteText}>{legacyResolveNotice}</Text></View> : null}
+        {legacyResolveError ? <Text style={styles.walletError}>{legacyResolveError}</Text> : null}
         <View style={styles.ruleCard}>
           <Text style={styles.ruleText}>The platform gets 25% and you as a helper get 75%.</Text>
           <Text style={styles.ruleText}>The 75% applies to the labor amount only. You also receive the full travel fee for the service.</Text>
-          <Text style={styles.ruleText}>The booking fee belongs to the platform. If a customer cancels before you start traveling, you receive R0 and the booking fee still stays with the platform.</Text>
+          <Text style={styles.ruleText}>The booking fee belongs to the platform. If a customer cancels while you are traveling, you receive R4 per km traveled; if they cancel after you arrive or start, you receive the full travel fee.</Text>
         </View>
       </Card>
 

@@ -459,7 +459,7 @@ async function settleServiceFinancialOperation({
     const platformAmountMinor = Math.round(Number(breakdown?.platformAmount || 0) * 100);
     const customerChargeAmountMinor = Math.round(Number(breakdown?.customerChargeAmount ?? operationAmount ?? 0) * 100);
     let helperWalletCredited = false;
-    if (paymentStatus === 'paid' && resolvedHelperId && helperAmountMinor > 0) {
+    if (['paid', 'wallet_debt_recorded'].includes(paymentStatus) && resolvedHelperId && helperAmountMinor > 0) {
       const walletCredit = await applyHelperPayoutInTransaction({
         transaction,
         db,
@@ -514,9 +514,15 @@ async function settleServiceFinancialOperation({
       walletDebtOutstanding = delta < 0;
     }
 
+    const shouldStampWalletAccountingVersion = helperWalletCredited
+      || Boolean(
+        resolvedHelperId
+        && ['completion', 'customer_cancellation'].includes(operationType)
+        && (helperAmountMinor > 0 || operationAmount > 0),
+      );
     const requestPatch = {
       ...(settlementData.requestPatch || {}),
-      ...(helperWalletCredited ? { helperWalletAccountingVersion: 1 } : {}),
+      ...(shouldStampWalletAccountingVersion ? { helperWalletAccountingVersion: 1 } : {}),
     };
     if (operationType === 'customer_cancellation' && operationAmount > 0) {
       const formattedAmount = `R${operationAmount.toFixed(2)}`;
@@ -949,6 +955,73 @@ async function claimServiceWebhookEvent({ db, eventId, eventName, reference, now
   });
 }
 
+async function settleCustomerWalletBalancePayment({
+  db,
+  admin,
+  reference,
+  customerId,
+  amountMinor,
+  verificationOutcome,
+  now = Date.now(),
+}) {
+  const safeCustomerId = String(customerId || '').trim();
+  const safeReference = String(reference || '').trim();
+  const safeAmountMinor = Number(amountMinor);
+  if (!safeCustomerId || !safeReference || !Number.isSafeInteger(safeAmountMinor) || safeAmountMinor <= 0) {
+    return { action: 'invalid' };
+  }
+  const outcome = String(verificationOutcome || '').trim().toLowerCase();
+  if (outcome === 'pending' || outcome === 'unknown') {
+    return { action: 'pending' };
+  }
+  if (outcome !== 'success') {
+    return { action: 'failed' };
+  }
+
+  const refDoc = db.collection('paystackRequestPaymentReferences').doc(safeReference);
+  const userRef = db.collection('users').doc(safeCustomerId);
+  const ledgerRef = db.collection(FINANCIAL_LEDGER_COLLECTION).doc(
+    `wallet_settlement_${createHash('sha256').update(safeReference).digest('hex').slice(0, 40)}`,
+  );
+
+  return db.runTransaction(async (tx) => {
+    const [rSnap, uSnap, lSnap] = await Promise.all([tx.get(refDoc), tx.get(userRef), tx.get(ledgerRef)]);
+    if (lSnap.exists || rSnap.data()?.status === 'settled') return { action: 'already-settled' };
+    const userData = uSnap.data() || {};
+    const wallet = userData.wallet || { balance: 0, currency: 'ZAR' };
+    const oldBalance = Number(wallet.balance || 0);
+    const creditAmount = Number((safeAmountMinor / 100).toFixed(2));
+    const newBalance = Number((oldBalance + creditAmount).toFixed(2));
+    const nextBalanceMinor = Number.isSafeInteger(Number(wallet.balanceMinor))
+      ? Number(wallet.balanceMinor) + safeAmountMinor
+      : null;
+
+    tx.create(ledgerRef, {
+      entryId: ledgerRef.id,
+      userId: safeCustomerId,
+      entryType: 'customer_wallet_settlement',
+      amount: creditAmount,
+      currency: 'ZAR',
+      balanceBefore: oldBalance,
+      balanceAfter: newBalance,
+      gatewayReference: safeReference,
+      createdAtMs: now,
+    });
+    tx.set(userRef, {
+      wallet: {
+        ...wallet,
+        balance: newBalance,
+        ...(nextBalanceMinor !== null ? { balanceMinor: nextBalanceMinor } : {}),
+        currency: wallet.currency || 'ZAR',
+        updatedAt: new Date(now).toISOString(),
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    tx.set(refDoc, { status: 'settled', settledAtMs: now, updatedAtMs: now }, { merge: true });
+    return { action: 'settled', amount: creditAmount, balanceAfter: newBalance };
+  });
+}
+
 module.exports = {
   FINANCIAL_LEDGER_COLLECTION,
   FINANCIAL_OPERATIONS_COLLECTION,
@@ -971,6 +1044,7 @@ module.exports = {
   recordPaystackRefundObservation,
   recordServiceGatewayObservation,
   serviceFinancialOperationId,
+  settleCustomerWalletBalancePayment,
   shouldDeferCompletionPayment,
   settleServiceFinancialOperation,
 };

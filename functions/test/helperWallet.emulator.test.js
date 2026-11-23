@@ -34,7 +34,7 @@ test('non-cash earning credit is idempotent under concurrent retries and offsets
   await userRef.set({ uid: helperId, wallet: { balance: 0, balanceMinor: 0, currency: 'ZAR' } });
   await walletRef.set({ ...emptyHelperWallet(helperId), balanceMinor: 0 });
 
-  // Simulate R7 cash commission owed (net delta -700)
+  // Simulate R50 cash job (R43 helper payout + R7 commission -> +4300 - 700 = +3600)
   await db.runTransaction((transaction) => applyHelperPayoutInTransaction({
     transaction,
     db,
@@ -52,11 +52,12 @@ test('non-cash earning credit is idempotent under concurrent retries and offsets
   assert.equal(results.filter((result) => result.action === 'credited').length, 1);
   const wallet = (await walletRef.get()).data();
   const user = (await userRef.get()).data();
-  assert.equal(wallet.balanceMinor, 300);
-  assert.equal(wallet.balance, 3);
-  assert.equal(user.wallet.balanceMinor, 300);
+  assert.equal(wallet.balanceMinor, 4600);
+  assert.equal(wallet.balance, 46);
+  assert.equal(user.wallet.balanceMinor, 4600);
   const ledger = await walletRef.collection('transactions').get();
   assert.equal(ledger.docs.filter((doc) => doc.data().entryType === 'weekly_earning_credit').length, 1);
+  assert.equal(ledger.docs.filter((doc) => doc.data().entryType === 'job_earning_credit').length, 1);
   assert.equal(ledger.docs.filter((doc) => doc.data().entryType === 'cash_commission_assessed').length, 1);
 });
 

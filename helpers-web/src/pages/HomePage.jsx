@@ -20,6 +20,8 @@ export function HomePage({ onNavigate }) {
     offerNotice,
     setOfferNotice,
     evaluation,
+    walletSnapshot,
+    cashConfirmations = [],
     isOnline,
     gpsStatus,
     gpsError,
@@ -27,6 +29,17 @@ export function HomePage({ onNavigate }) {
     liveAddress,
     locationAccuracyMeters,
   } = useHelperSession();
+
+  const rawWalletMinor = walletSnapshot?.wallet?.balanceMinor;
+  const profileWalletMinor = profile?.wallet?.balanceMinor;
+  const signedWalletMinor = Number.isSafeInteger(Number(rawWalletMinor))
+    ? Number(rawWalletMinor)
+    : Number.isSafeInteger(Number(profileWalletMinor))
+      ? Number(profileWalletMinor)
+      : Math.round(Number(profile?.wallet?.balance || 0) * 100);
+  const formattedWalletBalance = signedWalletMinor < 0
+    ? `-R${(Math.abs(signedWalletMinor) / 100).toFixed(2)}`
+    : `R${(signedWalletMinor / 100).toFixed(2)}`;
 
   const firstName =
     String(profile?.firstName || '').trim()
@@ -261,7 +274,10 @@ export function HomePage({ onNavigate }) {
               <div className="min-w-0">
                 <div className="text-sm font-bold text-ink-900">Payments &amp; Earnings</div>
                 <div className="text-xs text-ink-500 truncate">
-                  View wallet balance, incoming incomes, and payout account
+                  Wallet: <span className={`tabular-nums-mono font-bold ${signedWalletMinor < 0 ? 'text-red-700' : 'text-tealbrand-700'}`}>{formattedWalletBalance}</span>
+                  {cashConfirmations.length > 0
+                    ? ` · ${cashConfirmations.length} cash confirmation${cashConfirmations.length === 1 ? '' : 's'} pending`
+                    : ' · Incoming incomes and payout account'}
                 </div>
               </div>
             </div>

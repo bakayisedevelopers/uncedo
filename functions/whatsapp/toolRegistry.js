@@ -442,6 +442,7 @@ const TOOL_DEFINITIONS = Object.freeze({
     outputSchema: resultSchema({
       code: stringSchema,
       currency: stringSchema,
+      walletBalance: Object.freeze({ type: 'number' }),
       availableBalance: Object.freeze({ type: 'number' }),
       reservedBalance: Object.freeze({ type: 'number' }),
       outstandingCommission: Object.freeze({ type: 'number' }),
@@ -453,6 +454,7 @@ const TOOL_DEFINITIONS = Object.freeze({
         items: resultSchema({
           entryType: stringSchema,
           amount: Object.freeze({ type: 'number' }),
+          delta: Object.freeze({ type: 'number' }),
           description: stringSchema,
           date: stringSchema,
         }, ['entryType', 'amount']),

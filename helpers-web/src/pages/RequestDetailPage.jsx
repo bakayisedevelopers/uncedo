@@ -108,6 +108,7 @@ export function RequestDetailPage({ requestId, onNavigate }) {
   }, [messages]);
 
   const status = String(request?.status || '').toLowerCase();
+  const isTerminalRequest = ['completed', 'canceled', 'cancelled', 'closed'].includes(status);
   const arrivedAtMs = normalizeTimestampMs(request?.arrivedAt || request?.helperAssignment?.arrivedAt);
 
   useEffect(() => {
@@ -294,7 +295,7 @@ export function RequestDetailPage({ requestId, onNavigate }) {
 
   const sendMessageText = async (text) => {
     const clean = String(text || '').trim();
-    if (!clean) return;
+    if (!clean || isTerminalRequest) return;
     setActionError('');
     try {
       await sendHelperRequestMessage({ requestId, text: clean });
@@ -400,15 +401,17 @@ export function RequestDetailPage({ requestId, onNavigate }) {
             </p>
           </div>
         </div>
-        <a
-          href={mapsUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="px-3.5 sm:px-4 py-2 bg-tealbrand-600 hover:bg-tealbrand-700 text-white rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 shrink-0 min-h-[40px]"
-        >
-          <Navigation className="w-3.5 h-3.5 shrink-0" />
-          <span>Directions</span>
-        </a>
+        {!isTerminalRequest && (
+          <a
+            href={mapsUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-3.5 sm:px-4 py-2 bg-tealbrand-600 hover:bg-tealbrand-700 text-white rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 shrink-0 min-h-[40px]"
+          >
+            <Navigation className="w-3.5 h-3.5 shrink-0" />
+            <span>Directions</span>
+          </a>
+        )}
       </header>
 
       <main className="w-full max-w-6xl min-w-0 mx-auto px-4 md:px-6 py-6 sm:py-8 space-y-6">
@@ -438,7 +441,13 @@ export function RequestDetailPage({ requestId, onNavigate }) {
           </div>
         )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start w-full min-w-0">
+        <div
+          className={
+            isTerminalRequest
+              ? 'grid grid-cols-1 gap-6 items-start w-full max-w-3xl mx-auto min-w-0'
+              : 'grid grid-cols-1 lg:grid-cols-2 gap-6 items-start w-full min-w-0'
+          }
+        >
           {/* Job Details, Trip Controls & Settlement */}
           <div className="min-w-0 w-full space-y-6">
             <div className="min-w-0 w-full bg-surface rounded-xl border border-border p-5 sm:p-6 space-y-4 overflow-hidden">
@@ -913,108 +922,110 @@ export function RequestDetailPage({ requestId, onNavigate }) {
           </div>
 
           {/* Customer Chat (WhatsApp Bridge) */}
-          <div className="min-w-0 w-full max-w-full bg-surface rounded-xl border border-border flex flex-col h-[540px] overflow-hidden">
-            <div className="px-4 sm:px-5 py-3.5 border-b border-border flex items-center justify-between gap-2 min-w-0">
-              <div className="flex items-center gap-2 min-w-0 flex-1">
-                <MessageSquare className="w-4 h-4 text-tealbrand-700 shrink-0" />
-                <h2 className="text-sm font-bold text-ink-900 truncate">Customer Chat (WhatsApp Bridge)</h2>
-              </div>
-              <span className="text-xs text-tealbrand-700 font-semibold shrink-0">Live Sync</span>
-            </div>
-
-            <div className="flex-1 min-w-0 w-full p-4 overflow-y-auto overflow-x-hidden space-y-3 bg-well/40">
-              {messages.length === 0 ? (
-                <div className="text-center py-12">
-                  <p className="text-xs text-ink-500">
-                    No messages yet. Customer replies from WhatsApp appear here in real time.
-                  </p>
+          {!isTerminalRequest && (
+            <div className="min-w-0 w-full max-w-full bg-surface rounded-xl border border-border flex flex-col h-[540px] overflow-hidden">
+              <div className="px-4 sm:px-5 py-3.5 border-b border-border flex items-center justify-between gap-2 min-w-0">
+                <div className="flex items-center gap-2 min-w-0 flex-1">
+                  <MessageSquare className="w-4 h-4 text-tealbrand-700 shrink-0" />
+                  <h2 className="text-sm font-bold text-ink-900 truncate">Customer Chat (WhatsApp Bridge)</h2>
                 </div>
-              ) : (
-                messages.map((msg) => {
-                  const isHelper = msg.senderRole === 'helper';
-                  return (
-                    <div key={msg.id} className={`flex min-w-0 ${isHelper ? 'justify-end' : 'justify-start'}`}>
-                      <div
-                        className={`min-w-0 max-w-[82%] rounded-xl px-4 py-2.5 text-xs ${
-                          isHelper
-                            ? 'bg-tealbrand-700 text-white rounded-br-none'
-                            : 'bg-surface text-ink-900 border border-border rounded-bl-none'
-                        }`}
-                      >
-                        <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{msg.text}</p>
+                <span className="text-xs text-tealbrand-700 font-semibold shrink-0">Live Sync</span>
+              </div>
+
+              <div className="flex-1 min-w-0 w-full p-4 overflow-y-auto overflow-x-hidden space-y-3 bg-well/40">
+                {messages.length === 0 ? (
+                  <div className="text-center py-12">
+                    <p className="text-xs text-ink-500">
+                      No messages yet. Customer replies from WhatsApp appear here in real time.
+                    </p>
+                  </div>
+                ) : (
+                  messages.map((msg) => {
+                    const isHelper = msg.senderRole === 'helper';
+                    return (
+                      <div key={msg.id} className={`flex min-w-0 ${isHelper ? 'justify-end' : 'justify-start'}`}>
                         <div
-                          className={`mt-1 flex flex-wrap items-center gap-1 text-[10px] ${
-                            isHelper ? 'text-tealbrand-100 justify-end' : 'text-ink-400'
+                          className={`min-w-0 max-w-[82%] rounded-xl px-4 py-2.5 text-xs ${
+                            isHelper
+                              ? 'bg-tealbrand-700 text-white rounded-br-none'
+                              : 'bg-surface text-ink-900 border border-border rounded-bl-none'
                           }`}
                         >
-                          {!isHelper && msg.channel === 'whatsapp' && (
-                            <span className="font-semibold text-tealbrand-700">WhatsApp ·</span>
-                          )}
-                          <span>
-                            {new Date(msg.createdAtMs || Date.now()).toLocaleTimeString([], {
-                              hour: '2-digit',
-                              minute: '2-digit',
-                            })}
-                          </span>
-                          {isHelper && <span>· {msg.deliveryStatus || 'sent'}</span>}
+                          <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{msg.text}</p>
+                          <div
+                            className={`mt-1 flex flex-wrap items-center gap-1 text-[10px] ${
+                              isHelper ? 'text-tealbrand-100 justify-end' : 'text-ink-400'
+                            }`}
+                          >
+                            {!isHelper && msg.channel === 'whatsapp' && (
+                              <span className="font-semibold text-tealbrand-700">WhatsApp ·</span>
+                            )}
+                            <span>
+                              {new Date(msg.createdAtMs || Date.now()).toLocaleTimeString([], {
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              })}
+                            </span>
+                            {isHelper && <span>· {msg.deliveryStatus || 'sent'}</span>}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  );
-                })
-              )}
-              <div ref={chatScrollRef} />
-            </div>
+                    );
+                  })
+                )}
+                <div ref={chatScrollRef} />
+              </div>
 
-            <div className="w-full max-w-full min-w-0 px-3.5 py-2 border-t border-border bg-surface flex items-center gap-2 overflow-x-auto">
-              <button
-                type="button"
-                onClick={() => sendMessageText("I'm on my way to your location now.")}
-                className="shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg border border-border bg-well text-ink-700 hover:bg-border/60 whitespace-nowrap"
-              >
-                On my way
-              </button>
-              <button
-                type="button"
-                onClick={() => sendMessageText('Stopping quickly to pick up the required resources for your job.')}
-                className="shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg border border-border bg-well text-ink-700 hover:bg-border/60 whitespace-nowrap"
-              >
-                Buying resources
-              </button>
-              <button
-                type="button"
-                onClick={() => sendMessageText('I have arrived outside your location.')}
-                className="shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg border border-border bg-well text-ink-700 hover:bg-border/60 whitespace-nowrap"
-              >
-                I have arrived
-              </button>
-              <button
-                type="button"
-                onClick={() => sendMessageText('Running 5 minutes behind due to traffic.')}
-                className="shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg border border-border bg-well text-ink-700 hover:bg-border/60 whitespace-nowrap"
-              >
-                5 mins behind
-              </button>
-            </div>
+              <div className="w-full max-w-full min-w-0 px-3.5 py-2 border-t border-border bg-surface flex items-center gap-2 overflow-x-auto">
+                <button
+                  type="button"
+                  onClick={() => sendMessageText("I'm on my way to your location now.")}
+                  className="shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg border border-border bg-well text-ink-700 hover:bg-border/60 whitespace-nowrap"
+                >
+                  On my way
+                </button>
+                <button
+                  type="button"
+                  onClick={() => sendMessageText('Stopping quickly to pick up the required resources for your job.')}
+                  className="shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg border border-border bg-well text-ink-700 hover:bg-border/60 whitespace-nowrap"
+                >
+                  Buying resources
+                </button>
+                <button
+                  type="button"
+                  onClick={() => sendMessageText('I have arrived outside your location.')}
+                  className="shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg border border-border bg-well text-ink-700 hover:bg-border/60 whitespace-nowrap"
+                >
+                  I have arrived
+                </button>
+                <button
+                  type="button"
+                  onClick={() => sendMessageText('Running 5 minutes behind due to traffic.')}
+                  className="shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg border border-border bg-well text-ink-700 hover:bg-border/60 whitespace-nowrap"
+                >
+                  5 mins behind
+                </button>
+              </div>
 
-            <form onSubmit={handleSendMessage} className="w-full min-w-0 p-3.5 border-t border-border bg-surface flex items-center gap-2.5">
-              <input
-                type="text"
-                value={inputText}
-                onChange={(e) => setInputText(e.target.value)}
-                placeholder="Type a message to customer WhatsApp…"
-                className="min-w-0 w-full flex-1 px-3.5 py-2.5 rounded-lg border border-border text-xs focus:outline-none focus:border-tealbrand-700 min-h-[44px]"
-              />
-              <button
-                type="submit"
-                disabled={!inputText.trim()}
-                aria-label="Send message"
-                className="p-2.5 rounded-lg bg-tealbrand-600 hover:bg-tealbrand-700 disabled:opacity-50 text-white min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0"
-              >
-                <Send className="w-4 h-4" />
-              </button>
-            </form>
-          </div>
+              <form onSubmit={handleSendMessage} className="w-full min-w-0 p-3.5 border-t border-border bg-surface flex items-center gap-2.5">
+                <input
+                  type="text"
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  placeholder="Type a message to customer WhatsApp…"
+                  className="min-w-0 w-full flex-1 px-3.5 py-2.5 rounded-lg border border-border text-xs focus:outline-none focus:border-tealbrand-700 min-h-[44px]"
+                />
+                <button
+                  type="submit"
+                  disabled={!inputText.trim()}
+                  aria-label="Send message"
+                  className="p-2.5 rounded-lg bg-tealbrand-600 hover:bg-tealbrand-700 disabled:opacity-50 text-white min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0"
+                >
+                  <Send className="w-4 h-4" />
+                </button>
+              </form>
+            </div>
+          )}
         </div>
       </main>
 

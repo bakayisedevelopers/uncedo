@@ -12,6 +12,8 @@ const {
   paystackTransferReference,
   recordPayoutObservation,
   serviceFinancialOperationId,
+  settleCustomerWalletBalancePayment,
+  settleServiceFinancialOperation,
   shouldDeferCompletionPayment,
 } = require('./financialOperationService');
 
@@ -190,6 +192,52 @@ test('only newly versioned requests defer completion-time card charging; legacy 
   assert.equal(shouldDeferCompletionPayment({ paymentFlowVersion: 'explicit_v1' }, { settlementData: { deferredPaymentSelection: true } }), true);
 });
 
+test('arrived cancellation travel fee credits helper wallet immediately even when no saved card is charged', async () => {
+  const reqId = 'rq-arrived-cancel-1';
+  const opId = serviceFinancialOperationId(reqId);
+  const db = new MemoryDb({
+    [`serviceRequests/${reqId}`]: {
+      customerId: 'customer-arrived',
+      status: 'arrived',
+      helperAssignment: { helperId: 'helper-arrived' },
+    },
+    'users/customer-arrived': { uid: 'customer-arrived', wallet: { balance: 0, currency: 'ZAR' } },
+    'users/helper-arrived': { uid: 'helper-arrived', wallet: { balance: 10, balanceMinor: 1000, currency: 'ZAR' } },
+    'helperWallets/helper-arrived': { helperId: 'helper-arrived', balance: 10, balanceMinor: 1000, schemaVersion: 2, currency: 'ZAR' },
+    [`financialOperations/${opId}`]: {
+      operationId: opId,
+      requestId: reqId,
+      operationType: 'customer_cancellation',
+      status: 'gateway_failed_confirmed',
+      amount: 37,
+      amountMinor: 3700,
+      currency: 'ZAR',
+      settlementData: {
+        customerId: 'customer-arrived',
+        helperId: 'helper-arrived',
+        cancellation: {
+          cancellationBillingRule: 'travel_fee_plus_booking_fee',
+          helperPayoutBreakdown: { customerChargeAmount: 37, helperAmount: 35, platformAmount: 2 },
+        },
+        requestPatch: {
+          status: 'canceled',
+          canceledBy: 'customer',
+          cancellationFeeAmount: 37,
+          helperPayoutBreakdown: { customerChargeAmount: 37, helperAmount: 35, platformAmount: 2 },
+        },
+      },
+    },
+  });
+
+  const settled = await settleServiceFinancialOperation({
+    db, admin, operationRef: db.collection('financialOperations').doc(opId), requestRef: db.collection('serviceRequests').doc(reqId), outcome: 'failed_confirmed', now: 12_000,
+  });
+  assert.equal(settled.applied, true);
+  assert.equal((await db.collection('users').doc('customer-arrived').get()).data().wallet.balance, -37);
+  assert.equal((await db.collection('helperWallets').doc('helper-arrived').get()).data().balanceMinor, 4500);
+  assert.equal((await db.collection('users').doc('helper-arrived').get()).data().wallet.balanceMinor, 4500);
+});
+
 test('Monday wallet payout skips zero and negative balances and keeps balance untouched if transfer is rejected or fails', async () => {
   const db = new MemoryDb({
     'helperWallets/helper-zero': { helperId: 'helper-zero', balanceMinor: 0, balance: 0, schemaVersion: 2, currency: 'ZAR' },
@@ -260,3 +308,44 @@ test('Monday wallet payout skips zero and negative balances and keeps balance un
   assert.equal((await db.collection('helperWallets').doc('helper-pos').get()).data().balanceMinor, 12345);
   assert.equal((await db.collection('users').doc('helper-pos').get()).data().wallet.balanceMinor, 12345);
 });
+
+test('settleCustomerWalletBalancePayment gates on Paystack verification outcome and credits customer wallet idempotently', async () => {
+  const db = new MemoryDb({
+    'users/cust-debt': { uid: 'cust-debt', wallet: { balance: -75, currency: 'ZAR' } },
+    'paystackRequestPaymentReferences/wa_wallet_ref_1': {
+      type: 'customer_wallet_settlement',
+      customerId: 'cust-debt',
+      amount: 75,
+      amountMinor: 7500,
+      status: 'processing',
+    },
+  });
+
+  const pending = await settleCustomerWalletBalancePayment({
+    db, admin, reference: 'wa_wallet_ref_1', customerId: 'cust-debt', amountMinor: 7500, verificationOutcome: 'pending',
+  });
+  const unknown = await settleCustomerWalletBalancePayment({
+    db, admin, reference: 'wa_wallet_ref_1', customerId: 'cust-debt', amountMinor: 7500, verificationOutcome: 'unknown',
+  });
+  const failed = await settleCustomerWalletBalancePayment({
+    db, admin, reference: 'wa_wallet_ref_1', customerId: 'cust-debt', amountMinor: 7500, verificationOutcome: 'failed_confirmed',
+  });
+  assert.equal(pending.action, 'pending');
+  assert.equal(unknown.action, 'pending');
+  assert.equal(failed.action, 'failed');
+  assert.equal((await db.collection('users').doc('cust-debt').get()).data().wallet.balance, -75);
+
+  const settled = await settleCustomerWalletBalancePayment({
+    db, admin, reference: 'wa_wallet_ref_1', customerId: 'cust-debt', amountMinor: 7500, verificationOutcome: 'success', now: 5_000,
+  });
+  const replay = await settleCustomerWalletBalancePayment({
+    db, admin, reference: 'wa_wallet_ref_1', customerId: 'cust-debt', amountMinor: 7500, verificationOutcome: 'success', now: 6_000,
+  });
+  assert.equal(settled.action, 'settled');
+  assert.equal(settled.balanceAfter, 0);
+  assert.equal(replay.action, 'already-settled');
+  assert.equal((await db.collection('users').doc('cust-debt').get()).data().wallet.balance, 0);
+  assert.equal((await db.collection('paystackRequestPaymentReferences').doc('wa_wallet_ref_1').get()).data().status, 'settled');
+});
+
+

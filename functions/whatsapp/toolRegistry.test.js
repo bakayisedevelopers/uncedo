@@ -810,6 +810,41 @@ test('checkWalletBalance enforces self-profile authorization and validates negat
   });
 });
 
+test('getHelperWalletAndPayouts permits signed walletBalance and transaction delta in strict outputSchema', async () => {
+  const helperContext = { role: 'helper', authorization: linkedHelper };
+  const registry = createWhatsAppToolRegistry({
+    handlers: {
+      getHelperWalletAndPayouts: async () => ({
+        code: 'found',
+        currency: 'ZAR',
+        walletBalance: -15.5,
+        availableBalance: 0,
+        reservedBalance: 0,
+        outstandingCommission: 15.5,
+        payoutVerified: true,
+        reconciliationBlocked: false,
+        pendingCashConfirmationsCount: 0,
+        recentTransactions: [
+          {
+            entryType: 'cash_commission_assessed',
+            amount: 15.5,
+            delta: -15.5,
+            description: 'Cash commission deducted from wallet balance.',
+            date: '2026-11-23',
+          },
+        ],
+        recentPayouts: [{ status: 'unsuccessful', amount: 120, date: '2026-11-16' }],
+        workspaceUrl: 'https://helpers.example.test/earnings',
+      }),
+    },
+  });
+
+  const walletSummary = await registry.execute('getHelperWalletAndPayouts', {}, helperContext);
+  assert.equal(walletSummary.walletBalance, -15.5);
+  assert.equal(walletSummary.recentTransactions[0].delta, -15.5);
+});
+
+
 
 
 

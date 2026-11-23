@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import { ArrowRight, Banknote, CheckCircle2, ChevronLeft, CreditCard, MapPin, RefreshCw, XCircle } from 'lucide-react';
 import { StepAgreement } from '../components/steps/StepAgreement';
 import { StepBasics } from '../components/steps/StepBasics';
@@ -7,8 +7,8 @@ import { StepPoliceClearance } from '../components/steps/StepPoliceClearance';
 import { StepProfilePhoto } from '../components/steps/StepProfilePhoto';
 import { useHelperSession } from '../context/HelperSessionContext';
 import {
-  getHelperCashPaymentConfirmationsApi,
   resolveHelperPayoutAmount,
+  resolveLegacyCompletedJobsWalletApi,
   respondToCashServicePaymentApi,
   signOutHelperAccount,
 } from '../services/helperDataService';
@@ -43,6 +43,8 @@ export function ProfileSectionPage({ section = 'details', isTopLevel = false, on
     profile,
     evaluation,
     walletSnapshot,
+    cashConfirmations = [],
+    refreshCashConfirmations,
     walletLoading,
     walletError,
     refreshWallet,
@@ -56,33 +58,68 @@ export function ProfileSectionPage({ section = 'details', isTopLevel = false, on
     setActiveAgreement,
   } = useHelperSession();
 
-  const completedJobs = jobHistory.filter(
-    (job) => String(job.status || '').toLowerCase() === 'completed',
+  const fallbackUnresolvedJobs = jobHistory.filter((job) => {
+    const st = String(job.status || '').toLowerCase();
+    if (st !== 'completed' && st !== 'canceled' && st !== 'cancelled') return false;
+    if (Number(job?.legacyWalletResolvedAtMs || 0) > 0) return false;
+    if (Number(job?.helperWalletAccountingVersion || 0) === 1) return false;
+    if (String(job?.cashPayment?.status || '').toLowerCase() === 'helper_confirmed') return false;
+    if (String(job?.paymentMethod || '').toLowerCase() === 'cash' && String(job?.paymentStatus || '').toLowerCase() === 'paid') return false;
+    if (
+      String(job?.paymentFlowVersion || '') === 'explicit_v1'
+      && ['unpaid', 'cash_selected', 'awaiting_cash_confirmation', 'awaiting_customer_confirmation', 'payment_processing', 'payment_reconciliation_required'].includes(String(job?.paymentStatus || '').toLowerCase())
+    ) {
+      return false;
+    }
+    return st === 'completed' ? getJobAmount(job) > 0 : Number(job?.helperPayoutBreakdown?.helperAmount || 0) > 0;
+  });
+  const fallbackUnresolvedMinor = Math.round(
+    fallbackUnresolvedJobs.reduce(
+      (sum, job) => sum + (String(job.status || '').toLowerCase() === 'completed' ? getJobAmount(job) : Number(job?.helperPayoutBreakdown?.helperAmount || 0)),
+      0,
+    ) * 100,
   );
-  const completedEarnings = completedJobs.reduce(
-    (sum, job) => sum + getJobAmount(job),
-    0,
-  );
+  const serverLegacySummary = walletSnapshot?.legacySummary;
+  const unresolvedLegacyMinor = (serverLegacySummary && typeof serverLegacySummary.unresolvedAmountMinor === 'number')
+    ? Math.max(0, serverLegacySummary.unresolvedAmountMinor)
+    : fallbackUnresolvedMinor;
+  const unresolvedLegacyJobsCount = (serverLegacySummary && typeof serverLegacySummary.unresolvedJobsCount === 'number')
+    ? serverLegacySummary.unresolvedJobsCount
+    : fallbackUnresolvedJobs.length;
   const wallet = walletSnapshot?.wallet || {};
   const transactions = Array.isArray(walletSnapshot?.transactions) ? walletSnapshot.transactions : [];
   const recentJobs = jobHistory.slice(0, 8);
-  const [cashConfirmations, setCashConfirmations] = useState([]);
   const [cashBusyId, setCashBusyId] = useState('');
   const [cashFeedback, setCashFeedback] = useState('');
+  const [resolvingLegacy, setResolvingLegacy] = useState(false);
+  const [legacyFeedback, setLegacyFeedback] = useState('');
+  const [legacyError, setLegacyError] = useState('');
 
-  const loadCashConfirmations = useCallback(async () => {
-    if (section !== 'payouts' || !user?.uid) return;
+  const handleResolveLegacyJobs = async () => {
+    setResolvingLegacy(true);
+    setLegacyFeedback('');
+    setLegacyError('');
     try {
-      const list = await getHelperCashPaymentConfirmationsApi();
-      setCashConfirmations(list);
-    } catch {
-      // Ignore transient load error so wallet summary stays visible
+      const result = await resolveLegacyCompletedJobsWalletApi();
+      await refreshWallet();
+      const addedMinor = Number(result?.addedMinor || 0);
+      const count = Number(result?.resolvedCount || 0);
+      if (addedMinor > 0) {
+        setLegacyFeedback(`Added ${moneyMinor(addedMinor)} from ${count} completed job${count === 1 ? '' : 's'} to your wallet balance.`);
+      } else {
+        setLegacyFeedback('All eligible completed jobs are already resolved into your wallet.');
+      }
+    } catch (err) {
+      setLegacyError(err?.message || 'Unable to resolve legacy completed jobs into your wallet.');
+    } finally {
+      setResolvingLegacy(false);
     }
-  }, [section, user?.uid]);
+  };
 
-  useEffect(() => {
-    loadCashConfirmations();
-  }, [loadCashConfirmations]);
+  const loadCashConfirmations = async () => {
+    if (section !== 'payouts' || !user?.uid) return;
+    await refreshCashConfirmations?.();
+  };
 
   const handleCashResponse = async (item, action) => {
     setCashBusyId(`${item.requestId}:${action}`);
@@ -243,13 +280,40 @@ export function ProfileSectionPage({ section = 'details', isTopLevel = false, on
                           : 'Payouts only run when your wallet balance is above R0.00.'}
                       </div>
                     </div>
-                    <div className="rounded-2xl border border-border bg-surface p-3.5">
-                      <div className="text-[11px] font-bold uppercase text-ink-400">Completed jobs total</div>
-                      <div className="tabular-nums-mono text-lg font-extrabold text-ink-900 mt-1">
-                        R{completedEarnings.toFixed(2)}
+                    <div className="rounded-2xl border border-border bg-surface p-3.5 space-y-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="text-[11px] font-bold uppercase text-ink-400">Completed jobs total</div>
+                          <div className="tabular-nums-mono text-lg font-extrabold text-ink-900 mt-1">
+                            {moneyMinor(unresolvedLegacyMinor)}
+                          </div>
+                        </div>
+                        {unresolvedLegacyMinor > 0 && (
+                          <button
+                            type="button"
+                            onClick={handleResolveLegacyJobs}
+                            disabled={resolvingLegacy || walletLoading}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-tealbrand-600 hover:bg-tealbrand-700 text-xs font-bold text-white disabled:opacity-50 shrink-0"
+                          >
+                            <span>{resolvingLegacy ? 'Resolving…' : 'Resolve'}</span>
+                          </button>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-ink-500">
+                        {unresolvedLegacyMinor > 0
+                          ? `${unresolvedLegacyJobsCount} unresolved completed job${unresolvedLegacyJobsCount === 1 ? '' : 's'} ready to add to your wallet balance.`
+                          : 'All completed job earnings have been synced to your wallet.'}
                       </div>
                     </div>
                   </div>
+                  {legacyFeedback && (
+                    <p className="text-xs font-semibold text-tealbrand-800 bg-surface rounded-xl border border-border px-3.5 py-2.5">
+                      {legacyFeedback}
+                    </p>
+                  )}
+                  {legacyError && (
+                    <p className="text-xs font-medium text-red-700">{legacyError}</p>
+                  )}
                 </>
               );
             })()}

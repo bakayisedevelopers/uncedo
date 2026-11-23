@@ -130,7 +130,7 @@ test('an unreported cash choice can be cancelled before the customer reports pay
   assert.equal((await db.collection('servicePaymentOperations').doc('rq_123456').collection('attempts').doc('attempt-1').get()).data().status, 'cancelled_by_customer');
 });
 
-test('concurrent helper confirmations settle once, reconcile legacy debt, and deduct platform commission from helper wallet atomically', async () => {
+test('concurrent helper confirmations settle once, reconcile legacy debt, add helper payout, and deduct platform commission atomically', async () => {
   const db = new MemoryDb({
     'serviceRequests/rq_123456': {
       customerId: 'customer-1', status: 'completed', paymentStatus: 'awaiting_cash_confirmation', totalAmount: 100,
@@ -154,18 +154,18 @@ test('concurrent helper confirmations settle once, reconcile legacy debt, and de
   const helperUser = (await db.collection('users').doc('helper-1').get()).data();
   assert.equal(request.paymentStatus, 'paid');
   assert.equal(request.cashPayment.status, 'helper_confirmed');
-  assert.equal(request.cashPayment.commissionStatus, 'negative_balance');
-  assert.equal(request.cashPayment.netWalletDeltaMinor, -1500);
-  assert.equal(request.cashPayment.walletBalanceAfterMinor, -1500);
+  assert.equal(request.cashPayment.commissionStatus, 'settled');
+  assert.equal(request.cashPayment.netWalletDeltaMinor, 7000);
+  assert.equal(request.cashPayment.walletBalanceAfterMinor, 7000);
   assert.equal(legacy.status, 'settled_success');
   assert.equal(legacy.finalOutcomeSource, 'request_payment');
   assert.equal(legacy.walletDebtOutstanding, false);
   assert.equal(payment.status, 'paid');
   assert.equal(customer.wallet.balance, 0);
-  assert.equal(helperWallet.balanceMinor, -1500);
-  assert.equal(helperWallet.balance, -15);
-  assert.equal(helperUser.wallet.balanceMinor, -1500);
-  assert.equal(helperUser.wallet.balance, -15);
+  assert.equal(helperWallet.balanceMinor, 7000);
+  assert.equal(helperWallet.balance, 70);
+  assert.equal(helperUser.wallet.balanceMinor, 7000);
+  assert.equal(helperUser.wallet.balance, 70);
   const reversals = [...db.records.entries()].filter(([path, value]) => path.startsWith('financialLedger/') && value.entryType === 'service_charge_debt_reversal');
   const paymentEntries = [...db.records.entries()].filter(([path, value]) => path.startsWith('financialLedger/') && value.entryType === 'direct_cash_payment');
   const policyReviews = [...db.records.entries()].filter(([path]) => path.startsWith('financialPolicyReviews/'));
@@ -174,7 +174,7 @@ test('concurrent helper confirmations settle once, reconcile legacy debt, and de
   assert.equal(policyReviews.length, 0);
 });
 
-test('cash settlement deducts net commission once from single balance and goes negative on shortfall without separate obligations', async () => {
+test('cash settlement adds helper payout and deducts commission once on single wallet balance', async () => {
   const db = new MemoryDb({
     'serviceRequests/rq_123456': {
       customerId: 'customer-1', status: 'completed', paymentStatus: 'awaiting_cash_confirmation', totalAmount: 100,
@@ -193,25 +193,28 @@ test('cash settlement deducts net commission once from single balance and goes n
   assert.equal(results.filter((result) => result.action === 'already-paid').length, 4);
   const wallet = (await db.collection('helperWallets').doc('helper-1').get()).data();
   const helperUser = (await db.collection('users').doc('helper-1').get()).data();
-  assert.equal(wallet.balanceMinor, -500);
-  assert.equal(wallet.balance, -5);
-  assert.equal(helperUser.wallet.balanceMinor, -500);
-  assert.equal(helperUser.wallet.balance, -5);
+  assert.equal(wallet.balanceMinor, 8000);
+  assert.equal(wallet.balance, 80);
+  assert.equal(helperUser.wallet.balanceMinor, 8000);
+  assert.equal(helperUser.wallet.balance, 80);
   const obligationPaths = [...db.records.keys()].filter((path) => path.startsWith('helperWallets/helper-1/commissionObligations/'));
+  const earningEntries = [...db.records.entries()].filter(([path, entry]) => path.startsWith('helperWallets/helper-1/transactions/') && entry.entryType === 'job_earning_credit');
   const commissionEntries = [...db.records.entries()].filter(([path, entry]) => path.startsWith('helperWallets/helper-1/transactions/') && entry.entryType === 'cash_commission_assessed');
   assert.equal(obligationPaths.length, 0);
+  assert.equal(earningEntries.length, 1);
+  assert.equal(earningEntries[0][1].deltaMinor, 8500);
   assert.equal(commissionEntries.length, 1);
   assert.equal(commissionEntries[0][1].deltaMinor, -1500);
   const request = (await db.collection('serviceRequests').doc('rq_123456').get()).data();
-  assert.equal(request.cashPayment.commissionStatus, 'negative_balance');
+  assert.equal(request.cashPayment.commissionStatus, 'settled');
   assert.equal(request.cashPayment.commissionMinor, 1500);
   assert.equal(request.cashPayment.helperAmountMinor, 8500);
-  assert.equal(request.cashPayment.netWalletDeltaMinor, -1500);
-  assert.equal(request.cashPayment.walletBalanceAfterMinor, -500);
+  assert.equal(request.cashPayment.netWalletDeltaMinor, 7000);
+  assert.equal(request.cashPayment.walletBalanceAfterMinor, 8000);
   assert.equal([...db.records.values()].filter((entry) => entry.type === 'direct_cash_platform_commission').length, 0);
 });
 
-test('cash settlement stays positive when wallet balance covers the platform commission', async () => {
+test('cash settlement marks negative_balance if wallet balance stays below zero after payout credit and commission deduction', async () => {
   const db = new MemoryDb({
     'serviceRequests/rq_123456': {
       customerId: 'customer-1', status: 'completed', totalAmount: 100,
@@ -219,8 +222,8 @@ test('cash settlement stays positive when wallet balance covers the platform com
     },
     'servicePaymentOperations/rq_123456': { status: 'awaiting_cash_confirmation', activeAttemptId: 'attempt-1' },
     'servicePaymentOperations/rq_123456/attempts/attempt-1': { method: 'cash', status: 'awaiting_cash_confirmation', amount: 100, customerId: 'customer-1' },
-    'helperWallets/helper-1': { helperId: 'helper-1', balanceMinor: 3000, balance: 30, schemaVersion: 2, currency: 'ZAR' },
-    'users/helper-1': { uid: 'helper-1', wallet: { balance: 30, balanceMinor: 3000, currency: 'ZAR' } },
+    'helperWallets/helper-1': { helperId: 'helper-1', balanceMinor: -8000, balance: -80, schemaVersion: 2, currency: 'ZAR' },
+    'users/helper-1': { uid: 'helper-1', wallet: { balance: -80, balanceMinor: -8000, currency: 'ZAR' } },
   });
   const result = await settleRequestPayment({
     db, admin, requestId: 'rq_123456', attemptId: 'attempt-1', outcome: 'success', helperId: 'helper-1',
@@ -229,10 +232,11 @@ test('cash settlement stays positive when wallet balance covers the platform com
   const wallet = (await db.collection('helperWallets').doc('helper-1').get()).data();
   const helperUser = (await db.collection('users').doc('helper-1').get()).data();
   const request = (await db.collection('serviceRequests').doc('rq_123456').get()).data();
-  assert.equal(wallet.balanceMinor, 1500);
-  assert.equal(wallet.balance, 15);
-  assert.equal(helperUser.wallet.balanceMinor, 1500);
-  assert.equal(request.cashPayment.commissionStatus, 'settled');
+  assert.equal(wallet.balanceMinor, -1000);
+  assert.equal(wallet.balance, -10);
+  assert.equal(helperUser.wallet.balanceMinor, -1000);
+  assert.equal(request.cashPayment.commissionStatus, 'negative_balance');
+  assert.equal([...db.records.values()].filter((entry) => entry.entryType === 'job_earning_credit').length, 1);
   assert.equal([...db.records.values()].filter((entry) => entry.entryType === 'cash_commission_assessed').length, 1);
   assert.equal([...db.records.keys()].filter((path) => path.includes('/commissionObligations/')).length, 0);
 });
@@ -606,3 +610,181 @@ test('paid driving cancellation credits travelledKm * 4 helperAmount atomically 
   assert.equal(helperUser.wallet.balanceMinor, 2400);
   assert.equal(helperUser.wallet.balance, 24);
 });
+
+test('cash settlement with reward-point discount adds helper payout and deducts platform commission', async () => {
+  // Total = R200 (helper share R158.75, platform share R41.25).
+  // Customer applies R20 service credit and pays R180 cash to helper.
+  // Net helper delta adds +158.75 helper payout and subtracts -41.25 platform commission = +117.50 (+11750 minor).
+  const db = new MemoryDb({
+    'serviceRequests/rq_cash_discount': {
+      customerId: 'customer-1',
+      status: 'completed',
+      paymentStatus: 'awaiting_cash_confirmation',
+      totalAmount: 200,
+      helperAssignment: { helperId: 'helper-1' },
+      helperPayoutBreakdown: {
+        customerChargeAmount: 200,
+        helperAmount: 158.75,
+        platformAmount: 41.25,
+      },
+    },
+    'servicePaymentOperations/rq_cash_discount': { status: 'awaiting_cash_confirmation', activeAttemptId: 'attempt-cash-discount' },
+    'servicePaymentOperations/rq_cash_discount/attempts/attempt-cash-discount': {
+      method: 'cash',
+      status: 'awaiting_cash_confirmation',
+      amount: 180,
+      amountMinor: 18000,
+      customerId: 'customer-1',
+    },
+    'helperWallets/helper-1': { helperId: 'helper-1', balanceMinor: 5000, balance: 50, schemaVersion: 2, currency: 'ZAR' },
+    'users/helper-1': { uid: 'helper-1', wallet: { balance: 50, balanceMinor: 5000, currency: 'ZAR' } },
+  });
+
+  const result = await settleRequestPayment({
+    db, admin, requestId: 'rq_cash_discount', attemptId: 'attempt-cash-discount', outcome: 'success', helperId: 'helper-1',
+  });
+  assert.equal(result.action, 'settled');
+  const wallet = (await db.collection('helperWallets').doc('helper-1').get()).data();
+  const request = (await db.collection('serviceRequests').doc('rq_cash_discount').get()).data();
+  assert.equal(wallet.balanceMinor, 16750);
+  assert.equal(wallet.balance, 167.5);
+  assert.equal(request.cashPayment.netWalletDeltaMinor, 11750);
+});
+
+test('wallet_debt_recorded cancellation immediately credits helper wallet and never double-credits on later card repayment', async () => {
+  const reqId = 'rq_cancel_debt_later_paid';
+  const opId = serviceFinancialOperationId(reqId);
+  const db = new MemoryDb({
+    [`serviceRequests/${reqId}`]: {
+      customerId: 'customer-1',
+      status: 'driving',
+      helperAssignment: { helperId: 'helper-3' },
+      pricingSnapshot: { travelFee: 35, bookingFee: 2 },
+    },
+    [`users/customer-1`]: { uid: 'customer-1', wallet: { balance: 0, currency: 'ZAR' } },
+    [`users/helper-3`]: { uid: 'helper-3', wallet: { balance: 0, balanceMinor: 0, currency: 'ZAR' } },
+    [`financialOperations/${opId}`]: {
+      operationId: opId,
+      requestId: reqId,
+      operationType: 'customer_cancellation',
+      status: 'gateway_failed_confirmed',
+      amount: 26,
+      amountMinor: 2600,
+      currency: 'ZAR',
+      settlementData: {
+        customerId: 'customer-1',
+        helperId: 'helper-3',
+        cancellation: {
+          cancellationBillingRule: 'travelled_distance_plus_booking_fee',
+          cancellationDistanceKm: 6,
+          helperPayoutBreakdown: { customerChargeAmount: 26, helperAmount: 24, platformAmount: 2 },
+        },
+        requestPatch: {
+          status: 'canceled',
+          canceledBy: 'customer',
+          cancellationFeeAmount: 26,
+          helperPayoutBreakdown: { customerChargeAmount: 26, helperAmount: 24, platformAmount: 2 },
+        },
+      },
+    },
+  });
+
+  const failedCancel = await settleServiceFinancialOperation({
+    db, admin, operationRef: db.collection('financialOperations').doc(opId), requestRef: db.collection('serviceRequests').doc(reqId), outcome: 'failed_confirmed', now: 10_000,
+  });
+  assert.equal(failedCancel.applied, true);
+  assert.equal((await db.collection('serviceRequests').doc(reqId).get()).data().helperWalletAccountingVersion, 1);
+  assert.equal((await db.collection('users').doc('customer-1').get()).data().wallet.balance, -26);
+  const walletAfterCancel = (await db.collection('helperWallets').doc('helper-3').get()).data();
+  assert.equal(walletAfterCancel.balanceMinor, 2400);
+  assert.equal(walletAfterCancel.balance, 24);
+
+  db.records.set(`servicePaymentOperations/${reqId}`, {
+    status: 'payment_processing',
+    activeAttemptId: 'attempt-card-1',
+    walletDebtOutstanding: true,
+    debtApplied: true,
+    walletDebtAmount: 26,
+  });
+  db.records.set(`servicePaymentOperations/${reqId}/attempts/attempt-card-1`, {
+    method: 'paystack_checkout',
+    status: 'processing',
+    amount: 26,
+    amountMinor: 2600,
+    customerId: 'customer-1',
+    gatewayReference: 'ref-cancel-card',
+  });
+
+  const paid = await settleRequestPayment({
+    db, admin, requestId: reqId, attemptId: 'attempt-card-1', outcome: 'success', gatewayReference: 'ref-cancel-card', gatewayTransactionId: 'tx-cancel-1', now: 20_000,
+  });
+  assert.equal(paid.action, 'settled');
+  assert.equal(paid.debtReversed, true);
+  assert.equal((await db.collection('users').doc('customer-1').get()).data().wallet.balance, 0);
+  const helperWallet = (await db.collection('helperWallets').doc('helper-3').get()).data();
+  assert.equal(helperWallet.balanceMinor, 2400);
+  assert.equal(helperWallet.balance, 24);
+});
+
+test('failed explicit card completion credits helper wallet immediately and deducts only platform fee if customer switches to cash', async () => {
+  const reqId = 'rq_card_fail_then_cash';
+  const db = new MemoryDb({
+    [`serviceRequests/${reqId}`]: {
+      customerId: 'customer-9',
+      status: 'completed',
+      paymentFlowVersion: 'explicit_v1',
+      paymentStatus: 'payment_processing',
+      totalAmount: 100,
+      helperAssignment: { helperId: 'helper-9' },
+      helperPayoutBreakdown: {
+        customerChargeAmount: 100,
+        helperAmount: 75,
+        platformAmount: 25,
+      },
+    },
+    [`users/customer-9`]: { uid: 'customer-9', wallet: { balance: 0, currency: 'ZAR' } },
+    [`users/helper-9`]: { uid: 'helper-9', wallet: { balance: 0, balanceMinor: 0, currency: 'ZAR' } },
+    [`servicePaymentOperations/${reqId}`]: { status: 'payment_processing', activeAttemptId: 'attempt-card-fail' },
+    [`servicePaymentOperations/${reqId}/attempts/attempt-card-fail`]: {
+      method: 'saved_card',
+      status: 'processing',
+      amount: 100,
+      amountMinor: 10000,
+      customerId: 'customer-9',
+    },
+  });
+
+  const failedCard = await settleRequestPayment({
+    db, admin, requestId: reqId, attemptId: 'attempt-card-fail', outcome: 'failed_confirmed', now: 10_000,
+  });
+  assert.equal(failedCard.action, 'failed');
+  assert.equal(failedCard.failureState, 'wallet_debt_recorded');
+  assert.equal(failedCard.helperWalletCredited, true);
+  assert.equal((await db.collection('helperWallets').doc('helper-9').get()).data().balanceMinor, 7500);
+  assert.equal((await db.collection('users').doc('customer-9').get()).data().wallet.balance, -100);
+
+  db.records.set(`servicePaymentOperations/${reqId}`, {
+    ...(await db.collection('servicePaymentOperations').doc(reqId).get()).data(),
+    status: 'awaiting_cash_confirmation',
+    activeAttemptId: 'attempt-cash-switch',
+  });
+  db.records.set(`servicePaymentOperations/${reqId}/attempts/attempt-cash-switch`, {
+    method: 'cash',
+    status: 'awaiting_cash_confirmation',
+    amount: 100,
+    amountMinor: 10000,
+    customerId: 'customer-9',
+  });
+
+  const cashSettled = await settleRequestPayment({
+    db, admin, requestId: reqId, attemptId: 'attempt-cash-switch', outcome: 'success', helperId: 'helper-9', now: 20_000,
+  });
+  assert.equal(cashSettled.action, 'settled');
+  assert.equal(cashSettled.debtReversed, true);
+  assert.equal((await db.collection('users').doc('customer-9').get()).data().wallet.balance, 0);
+  // Cumulative helper wallet balance = +7500 - 2500 = +5000 (R50) without double-crediting the R75 payout
+  assert.equal((await db.collection('helperWallets').doc('helper-9').get()).data().balanceMinor, 5000);
+  assert.equal((await db.collection('helperWallets').doc('helper-9').get()).data().balance, 50);
+});
+
+

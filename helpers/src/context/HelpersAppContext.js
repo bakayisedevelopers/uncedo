@@ -7,7 +7,7 @@ import { deleteUploadedFile, uploadLocalFile } from '../services/storageService'
 import { groupCompletedJobsByWeek, HELPER_PAYOUT_RATE, PLATFORM_FEE_RATE, shouldIncludeJobInPayouts } from '../utils/payouts';
 import { acceptHelperAgreement as acceptHelperAgreementRequest } from '../services/legalAgreementService';
 import { subscribeToHelperWeeklyPayouts } from '../services/helperPayoutService';
-import { getHelperWalletSnapshot } from '../services/helperWalletService';
+import { getHelperWalletSnapshot, resolveLegacyCompletedJobsWallet } from '../services/helperWalletService';
 import { getMyPoliceClearanceReview } from '../services/policeClearanceService';
 import {
   requestHelperLocationPermission,
@@ -93,6 +93,7 @@ const INITIAL_WEEKLY_PAYOUTS = [];
 const EMPTY_HELPER_WALLET = {
   wallet: { balanceMinor: 0, balance: 0, availableMinor: 0, reservedMinor: 0, outstandingCommissionMinor: 0, reconciliationBlocked: false, currency: 'ZAR' },
   nextPayoutEstimateMinor: 0,
+  legacySummary: { unresolvedAmountMinor: 0, unresolvedAmount: 0, unresolvedJobsCount: 0, hasUnresolvedLegacyJobs: false },
   transactions: [],
 };
 
@@ -319,6 +320,12 @@ export function HelpersAppProvider({ children }) {
       setHelperWalletLoading(false);
     }
   }, [user?.uid]);
+
+  const resolveLegacyWallet = useCallback(async () => {
+    const result = await resolveLegacyCompletedJobsWallet();
+    await refreshHelperWallet();
+    return result;
+  }, [refreshHelperWallet]);
 
   useEffect(() => {
     refreshHelperWallet();
@@ -1025,6 +1032,7 @@ export function HelpersAppProvider({ children }) {
       acceptAgreement,
       updateProfileBasics,
       updatePayoutDetails,
+      resolveLegacyWallet,
     },
   }), [
     activeJob,

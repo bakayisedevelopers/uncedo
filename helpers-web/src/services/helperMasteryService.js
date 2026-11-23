@@ -88,3 +88,18 @@ export async function getMasteryConfig() {
   }
   return mergeMasteryConfig(snap.data());
 }
+
+export function subscribeToMasteryConfig(onData, onError) {
+  const { db, firestoreModule } = getFirebaseClients();
+  return firestoreModule.onSnapshot(
+    firestoreModule.doc(db, 'rewardConfig', 'mastery'),
+    (snap) => {
+      onData?.(mergeMasteryConfig(snap.exists() ? snap.data() : null));
+    },
+    (error) => {
+      onError?.(error);
+      onData?.(mergeMasteryConfig(null));
+    },
+  );
+}
+

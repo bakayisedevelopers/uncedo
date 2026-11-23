@@ -5,6 +5,7 @@ import {
   acceptWhatsAppHelperAgreement,
   getHelperAgreementBundle,
   getWhatsAppHelperAgreementSession,
+  subscribeToHelperAgreementBundle,
 } from '../../services/helperDataService';
 
 function cleanInlineMarkdown(line = '') {
@@ -36,11 +37,11 @@ export function StepAgreement({ user, profile, whatsappAgreementToken = '', onAg
 
   useEffect(() => {
     let active = true;
-    const load = async () => {
-      setLoading(true);
-      setError('');
-      try {
-        if (whatsappAgreementToken) {
+    if (whatsappAgreementToken) {
+      const load = async () => {
+        setLoading(true);
+        setError('');
+        try {
           const session = await getWhatsAppHelperAgreementSession(whatsappAgreementToken);
           if (!active) return;
           setBundle({
@@ -50,20 +51,37 @@ export function StepAgreement({ user, profile, whatsappAgreementToken = '', onAg
           });
           onAgreementLoaded?.(session?.activeVersion || null);
           if (session?.accepted === true) setCheckboxAccepted(true);
-        } else {
-          const data = await getHelperAgreementBundle(user.uid);
-          if (!active) return;
-          setBundle(data);
-          onAgreementLoaded?.(data?.activeVersion || null);
+        } catch (err) {
+          if (active) setError(err?.message || 'Unable to load Helper Agreement.');
+        } finally {
+          if (active) setLoading(false);
         }
-      } catch (err) {
-        if (active) setError(err?.message || 'Unable to load Helper Agreement.');
-      } finally {
-        if (active) setLoading(false);
-      }
+      };
+      load();
+      return () => { active = false; };
+    }
+
+    setLoading(true);
+    setError('');
+    const unsub = subscribeToHelperAgreementBundle(
+      user.uid,
+      (data) => {
+        if (!active || !data) return;
+        setBundle(data);
+        onAgreementLoaded?.(data?.activeVersion || null);
+        if (data?.loaded || data?.activeVersion) setLoading(false);
+      },
+      (err) => {
+        if (active) {
+          setError(err?.message || 'Unable to load Helper Agreement.');
+          setLoading(false);
+        }
+      },
+    );
+    return () => {
+      active = false;
+      unsub?.();
     };
-    load();
-    return () => { active = false; };
   }, [onAgreementLoaded, user.uid, whatsappAgreementToken]);
 
   const activeVersion = bundle?.activeVersion || null;

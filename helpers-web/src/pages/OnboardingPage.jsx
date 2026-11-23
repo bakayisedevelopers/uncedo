@@ -10,10 +10,10 @@ import { StepPoliceClearance } from '../components/steps/StepPoliceClearance';
 import { StepPayoutDetails } from '../components/steps/StepPayoutDetails';
 import { StepVerificationStatus } from '../components/steps/StepVerificationStatus';
 import {
-  getHelperAgreementBundle,
-  getMyPoliceClearanceReview,
   signOutHelperAccount,
+  subscribeToHelperAgreementBundle,
   subscribeToHelperOfferings,
+  subscribeToHelperPoliceClearanceReview,
   subscribeToServiceCatalog,
   subscribeToUserProfile,
   syncMyHelperVerificationStatus,
@@ -70,23 +70,21 @@ export function OnboardingPage({
     });
     const unsubOfferings = subscribeToHelperOfferings(user.uid, setOfferings);
     const unsubCatalog = subscribeToServiceCatalog(setCatalog);
-
-    let active = true;
-    Promise.all([
-      getMyPoliceClearanceReview().catch(() => null),
-      getHelperAgreementBundle(user.uid).catch(() => null),
-    ]).then(([reviewData, agreementData]) => {
-      if (!active) return;
+    const unsubClearance = subscribeToHelperPoliceClearanceReview(user.uid, (reviewData) => {
       if (reviewData) setClearanceReview(reviewData);
-      if (agreementData?.activeVersion) setActiveAgreement(agreementData.activeVersion);
       setLoadingInitial(false);
+    });
+    const unsubAgreement = subscribeToHelperAgreementBundle(user.uid, (agreementData) => {
+      if (agreementData?.activeVersion) setActiveAgreement(agreementData.activeVersion);
+      if (agreementData?.loaded) setLoadingInitial(false);
     });
 
     return () => {
-      active = false;
       unsubProfile?.();
       unsubOfferings?.();
       unsubCatalog?.();
+      unsubClearance?.();
+      unsubAgreement?.();
     };
   }, [user.uid]);
 
