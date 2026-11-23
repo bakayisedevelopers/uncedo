@@ -1,4 +1,4 @@
-import { getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
+import { firebaseConfigured, getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
 
 export const HELPER_AGREEMENT_DOCUMENT_ID = 'helper_agreement';
 export const WHATSAPP_CHAT_URL = 'https://wa.me/27605239926';
@@ -97,7 +97,19 @@ function buildDefaultHelperProfile({ uid, email, fullName }) {
 }
 
 export function subscribeToAuthSession(onUser, onError) {
-  const { auth, authModule, db, firestoreModule } = getFirebaseClients();
+  if (!firebaseConfigured) {
+    onUser(null);
+    return () => {};
+  }
+  let clients;
+  try {
+    clients = getFirebaseClients();
+  } catch (err) {
+    onError?.(err);
+    onUser(null);
+    return () => {};
+  }
+  const { auth, authModule, db, firestoreModule } = clients;
   return authModule.onAuthStateChanged(
     auth,
     async (firebaseUser) => {
@@ -621,7 +633,7 @@ export async function getHelperWalletSnapshot() {
   const token = await auth.currentUser?.getIdToken();
   if (!token) {
     return {
-      wallet: { availableMinor: 0, reservedMinor: 0, outstandingCommissionMinor: 0, currency: 'ZAR' },
+      wallet: { balanceMinor: 0, balance: 0, availableMinor: 0, reservedMinor: 0, outstandingCommissionMinor: 0, currency: 'ZAR' },
       nextPayoutEstimateMinor: 0,
       transactions: [],
     };
@@ -642,7 +654,7 @@ export async function getHelperWalletSnapshot() {
     fetchJson('getHelperWalletTransactions'),
   ]);
   return {
-    wallet: summary.wallet || { availableMinor: 0, reservedMinor: 0, outstandingCommissionMinor: 0, currency: 'ZAR' },
+    wallet: summary.wallet || { balanceMinor: 0, balance: 0, availableMinor: 0, reservedMinor: 0, outstandingCommissionMinor: 0, currency: 'ZAR' },
     nextPayoutEstimateMinor: Math.max(0, Number(summary.nextPayoutEstimateMinor || 0)),
     transactions: Array.isArray(history.transactions) ? history.transactions : [],
   };

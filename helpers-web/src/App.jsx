@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Component, useCallback, useEffect, useState } from 'react';
 import { AppShell } from './components/AppShell';
 import { HelperOfferOverlay } from './components/HelperOfferOverlay';
 import { OfflineIndicator } from './components/OfflineIndicator';
@@ -51,7 +51,7 @@ const APP_PAGE_TITLES = {
   '/profile/legal': 'Agreement and legal',
 };
 
-export default function App() {
+function AppContent() {
   useState(() => {
     capturePendingWhatsAppSignup();
     capturePendingWhatsAppAccountLink();
@@ -68,17 +68,23 @@ export default function App() {
   const pwa = usePWAInstall();
 
   useEffect(() => {
-    const unsub = subscribeToAuthSession(
-      (sessionUser) => {
-        setUser(sessionUser);
-        setAuthReady(true);
-      },
-      (err) => {
-        setAuthError(err?.message || 'Authentication error.');
-        setAuthReady(true);
-      },
-    );
-    return () => unsub?.();
+    try {
+      const unsub = subscribeToAuthSession(
+        (sessionUser) => {
+          setUser(sessionUser);
+          setAuthReady(true);
+        },
+        (err) => {
+          setAuthError(err?.message || 'Authentication error.');
+          setAuthReady(true);
+        },
+      );
+      return () => unsub?.();
+    } catch (err) {
+      setAuthError(err?.message || 'Authentication initialization failed.');
+      setAuthReady(true);
+      return undefined;
+    }
   }, []);
 
   useEffect(() => {
@@ -241,5 +247,47 @@ export default function App() {
         onDismiss={pwa.dismissPopup}
       />
     </>
+  );
+}
+
+class AppErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="min-h-screen bg-canvas flex items-center justify-center p-6">
+          <div className="max-w-md w-full rounded-2xl border border-border bg-surface p-6 text-center space-y-3 shadow-sm">
+            <h1 className="font-display text-lg font-bold text-ink-900">Unable to load Uncedo Helpers</h1>
+            <p className="text-sm text-ink-600">
+              {this.state.error?.message || 'An unexpected error occurred while starting the app.'}
+            </p>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="inline-flex items-center justify-center rounded-xl bg-tealbrand-700 px-4 py-2 text-sm font-semibold text-white hover:bg-tealbrand-800"
+            >
+              Reload page
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+export default function App() {
+  return (
+    <AppErrorBoundary>
+      <AppContent />
+    </AppErrorBoundary>
   );
 }

@@ -94,6 +94,10 @@ const {
   isWalletEarningEligible,
   minorAmount: normalizeWalletMinor,
   normalizeWalletForClient,
+  resolveSignedBalanceMinor,
+  toRandFromMinor,
+  walletBalanceIsValid,
+  walletFromSnapshot,
 } = require('./helperWalletService');
 const { createCategoryPricingEngine } = require('./shared/categoryPricingEngineFactory.cjs');
 const {
@@ -7111,15 +7115,24 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
           db.collection(HELPER_PAYOUT_COLLECTION).where('helperId', '==', helperUid).limit(5).get().catch(() => null),
           db.collection(PAYMENT_OPERATIONS).where('helperId', '==', helperUid).where('status', '==', 'awaiting_cash_confirmation').limit(10).get().catch(() => null),
         ]);
-        const wallet = normalizeWalletForClient(walletFromSnapshot(walletSnap, helperUid));
+        const walletSnapshot = walletFromSnapshot(walletSnap, helperUid);
         const profile = profileSnap?.exists ? (profileSnap.data() || {}) : {};
+        const profileWalletMinor = Number(profile.wallet?.balanceMinor);
+        const signedMinor = walletSnap?.exists
+          ? resolveSignedBalanceMinor(walletSnapshot)
+          : (Number.isSafeInteger(profileWalletMinor) ? profileWalletMinor : Math.round(Number(profile.wallet?.balance || 0) * 100));
+        const wallet = normalizeWalletForClient({ ...walletSnapshot, balanceMinor: signedMinor });
         const minorToMajor = (minor) => Number((Number(minor || 0) / 100).toFixed(2));
         const recentTransactions = (txSnap?.docs || []).map((docSnap) => {
           const data = docSnap.data() || {};
           const amtMinor = Number(data.amountMinor || 0);
+          const deltaMinor = Number.isSafeInteger(Number(data.deltaMinor))
+            ? Number(data.deltaMinor)
+            : Number(data.availableDeltaMinor || 0);
           return {
             entryType: String(data.entryType || 'entry'),
             amount: minorToMajor(amtMinor),
+            delta: minorToMajor(deltaMinor),
             description: String(data.description || '').slice(0, 160),
             date: Number(data.createdAtMs || 0) > 0 ? new Date(Number(data.createdAtMs)).toISOString().slice(0, 10) : '',
           };
@@ -7145,8 +7158,9 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
         return {
           code: 'found',
           currency: 'ZAR',
+          walletBalance: minorToMajor(wallet.balanceMinor),
           availableBalance: minorToMajor(wallet.availableMinor),
-          reservedBalance: minorToMajor(wallet.reservedMinor),
+          reservedBalance: 0,
           outstandingCommission: minorToMajor(wallet.outstandingCommissionMinor),
           payoutVerified: getHelperPayoutVerificationStatus(profile) === 'verified',
           reconciliationBlocked: wallet.reconciliationBlocked === true,
@@ -7570,24 +7584,17 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
             db.collection('users').doc(helperUid).get().catch(() => null),
             walletRef.get().catch(() => null),
           ]);
-          const rawWallet = walletSnap?.exists ? (walletSnap.data() || {}) : {};
-          const rawAvailableMinor = Number(rawWallet.availableMinor ?? 0);
-          const rawReservedMinor = Number(rawWallet.reservedMinor ?? 0);
-          const rawOutstandingMinor = Number(rawWallet.outstandingCommissionMinor ?? 0);
-          const safeAvailableMinor = Number.isFinite(rawAvailableMinor) ? rawAvailableMinor : 0;
-          const safeReservedMinor = Number.isFinite(rawReservedMinor) ? Math.max(0, rawReservedMinor) : 0;
-          const safeOutstandingMinor = Number.isFinite(rawOutstandingMinor) ? Math.max(0, rawOutstandingMinor) : 0;
-          const helperNetRand = Number(((safeAvailableMinor - safeOutstandingMinor) / 100).toFixed(2));
-          const userWalletNum = Number(profileSnap?.data()?.wallet?.balance || 0);
-          const userWalletRand = Number.isFinite(userWalletNum) ? Number(userWalletNum.toFixed(2)) : 0;
-          const walletBalance = (safeAvailableMinor !== 0 || safeOutstandingMinor !== 0 || userWalletRand === 0)
-            ? helperNetRand
-            : userWalletRand;
-          const availableBalance = Number((safeAvailableMinor / 100).toFixed(2));
-          const reservedBalance = Number((safeReservedMinor / 100).toFixed(2));
-          const outstandingCommission = Number((safeOutstandingMinor / 100).toFixed(2));
+          const profileData = profileSnap?.exists ? (profileSnap.data() || {}) : {};
+          const walletFromDoc = walletSnap?.exists ? walletFromSnapshot(walletSnap, helperUid) : null;
+          const profileMinor = Number(profileData.wallet?.balanceMinor);
+          const signedMinor = walletFromDoc
+            ? resolveSignedBalanceMinor(walletFromDoc)
+            : (Number.isSafeInteger(profileMinor) ? profileMinor : Math.round(Number(profileData.wallet?.balance || 0) * 100));
+          const walletBalance = toRandFromMinor(signedMinor);
+          const availableBalance = Math.max(0, walletBalance);
+          const outstandingCommission = walletBalance < 0 ? Number(Math.abs(walletBalance).toFixed(2)) : 0;
           const isNegative = walletBalance < 0;
-          const outstandingAmount = isNegative ? Number(Math.abs(walletBalance).toFixed(2)) : 0;
+          const outstandingAmount = isNegative ? outstandingCommission : 0;
           const bankDetails = isNegative
             ? {
                 bankName: 'Capitec',
@@ -7604,7 +7611,7 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
             currency: 'ZAR',
             walletBalance,
             availableBalance,
-            reservedBalance,
+            reservedBalance: 0,
             outstandingCommission,
             isNegative,
             outstandingAmount,
@@ -8204,12 +8211,10 @@ function formatWhatsAppToolResult(toolName, result = {}) {
         const bank = result.bankDetails || { bankName: 'Capitec', accountNumber: '1569166828', reference: 'WhatsApp number' };
         return [
           '💰 *Helper Wallet Balance*',
-          `• *Net wallet balance:* -R${absOutstanding} ZAR`,
-          `• *Available balance:* R${Number(result.availableBalance || 0).toFixed(2)} ZAR`,
-          `• *Outstanding cash commission:* R${Number(result.outstandingCommission || 0).toFixed(2)} ZAR`,
+          `• *Wallet balance:* -R${absOutstanding} ZAR`,
           `• *Amount due:* R${absOutstanding} ZAR`,
           '',
-          `⚠️ Your wallet balance is negative (-R${absOutstanding} ZAR). Please send the outstanding amount of *R${absOutstanding} ZAR* to:`,
+          `⚠️ Your wallet balance is negative (-R${absOutstanding} ZAR). Please complete non-cash jobs to balance it or send R${absOutstanding} ZAR to:`,
           `• *Bank:* ${bank.bankName}`,
           `• *Account Number:* ${bank.accountNumber}`,
           `• *Reference:* ${bank.reference}`,
@@ -8217,13 +8222,8 @@ function formatWhatsAppToolResult(toolName, result = {}) {
       }
       const lines = [
         '💰 *Helper Wallet Balance*',
-        `• *Net wallet balance:* R${balanceVal.toFixed(2)} ZAR`,
-        `• *Available balance:* R${Number(result.availableBalance || 0).toFixed(2)} ZAR`,
-        `• *Reserved balance:* R${Number(result.reservedBalance || 0).toFixed(2)} ZAR`,
+        `• *Wallet balance:* R${balanceVal.toFixed(2)} ZAR`,
       ];
-      if (Number(result.outstandingCommission || 0) > 0) {
-        lines.push(`• *Outstanding cash commission:* R${Number(result.outstandingCommission).toFixed(2)} ZAR`);
-      }
       if (result.workspaceUrl) lines.push(`\nOpen Wallet: ${result.workspaceUrl}`);
       return lines.join('\n');
     }
@@ -18910,13 +18910,14 @@ exports.getHelperWallet = onRequest({ cors: true, invoker: 'public', maxInstance
   if (!helperId) return;
   const walletRef = helperWalletReference(db, helperId);
   const walletSnapshot = await walletRef.get();
-  const wallet = walletSnapshot.exists ? walletSnapshot.data() || {} : emptyHelperWallet(helperId);
+  const wallet = walletFromSnapshot(walletSnapshot, helperId);
+  const signedBalanceMinor = resolveSignedBalanceMinor(wallet);
   return res.status(200).json({
     success: true,
     wallet: normalizeWalletForClient(wallet),
     nextPayoutEstimateMinor: wallet.reconciliationBlocked === true
       ? 0
-      : Math.max(0, Number(wallet.availableMinor || 0) - Number(wallet.outstandingCommissionMinor || 0)),
+      : Math.max(0, signedBalanceMinor),
   });
 });
 
@@ -18932,10 +18933,16 @@ exports.getHelperWalletTransactions = onRequest({ cors: true, invoker: 'public',
     .get();
   const transactions = snapshot.docs.map((document) => {
     const entry = document.data() || {};
+    const signedDeltaMinor = Number.isSafeInteger(Number(entry.deltaMinor))
+      ? Number(entry.deltaMinor)
+      : (Number(entry.availableDeltaMinor || 0) - Number(entry.outstandingCommissionDeltaMinor || 0));
     return {
       id: document.id,
       entryType: String(entry.entryType || 'wallet_entry'),
       amountMinor: Math.max(0, Number(entry.amountMinor || 0)),
+      deltaMinor: signedDeltaMinor,
+      balanceBeforeMinor: Number.isSafeInteger(Number(entry.balanceBeforeMinor)) ? Number(entry.balanceBeforeMinor) : null,
+      balanceAfterMinor: Number.isSafeInteger(Number(entry.balanceAfterMinor)) ? Number(entry.balanceAfterMinor) : null,
       availableDeltaMinor: Number(entry.availableDeltaMinor || 0),
       reservedDeltaMinor: Number(entry.reservedDeltaMinor || 0),
       outstandingCommissionDeltaMinor: Number(entry.outstandingCommissionDeltaMinor || 0),
@@ -20903,7 +20910,9 @@ async function syncBackendHelperWeeklyPayoutRecords() {
       || request.canceledAt
       || request.updatedAt,
     );
-    if (!settledAtMs || settledAtMs < startWindow || settledAtMs >= currentWeekStart) continue;
+    const isVersionedWalletRequest = Number(request.helperWalletAccountingVersion) === 1;
+    if (!settledAtMs || settledAtMs < startWindow) continue;
+    if (!isVersionedWalletRequest && settledAtMs >= currentWeekStart) continue;
 
     const payoutBreakdown = computeStoredHelperPayoutBreakdown(request);
     if (!payoutBreakdown) continue;
@@ -20911,14 +20920,20 @@ async function syncBackendHelperWeeklyPayoutRecords() {
     const settledDate = new Date(settledAtMs);
     const weekKey = getWeekKey(settledDate);
     const { weekStart, weekEnd } = getWeekRange(settledDate);
-    if (Number(request.helperWalletAccountingVersion) === 1) {
+    if (isVersionedWalletRequest) {
       const amountMinor = normalizeWalletMinor(Math.round(Number(payoutBreakdown.helperAmount || 0) * 100));
+      const platformAmountMinor = normalizeWalletMinor(Math.round(Number(payoutBreakdown.platformAmount || 0) * 100)) ?? 0;
+      const customerChargeAmountMinor = normalizeWalletMinor(Math.round(Number(payoutBreakdown.customerChargeAmount || 0) * 100)) ?? 0;
+      const closureType = String(request.status || '').trim().toLowerCase() === 'canceled' ? 'canceled' : 'completed';
       if (amountMinor > 0) {
         const earning = await creditHelperWalletEarning({
           db,
           helperId,
           requestId: request.id,
           amountMinor,
+          platformAmountMinor,
+          customerChargeAmountMinor,
+          closureType,
           sourceWeekKey: weekKey,
         });
         if (earning.action === 'reconciliation-blocked') logger.error('helper_wallet_earning_blocked_for_reconciliation', { helperId, requestId: request.id });
@@ -21001,13 +21016,16 @@ async function syncHelperWalletPayoutCandidates(weekKey) {
       const payoutRef = db.collection(HELPER_PAYOUT_COLLECTION).doc(payoutId);
       const outcome = await db.runTransaction(async (transaction) => {
         const [walletSnapshot, payoutSnapshot] = await Promise.all([transaction.get(walletDoc.ref), transaction.get(payoutRef)]);
-        const wallet = walletSnapshot.data() || {};
+        const wallet = walletFromSnapshot(walletSnapshot, helperId);
         const existing = payoutSnapshot.exists ? payoutSnapshot.data() || {} : null;
-        if (wallet.reconciliationBlocked === true || Number(wallet.availableMinor || 0) <= 0) return { action: 'no-balance' };
-        if (existing && ['paid', 'processing', 'pending_reconciliation', 'reconciliation_required', 'wallet_recovery'].includes(String(existing.status || '').toLowerCase())) {
+        const balanceMinor = resolveSignedBalanceMinor(wallet);
+        if (wallet.reconciliationBlocked === true || !walletBalanceIsValid(wallet) || balanceMinor <= 0) {
+          return { action: 'no-balance' };
+        }
+        if (existing && ['paid', 'processing', 'pending_reconciliation', 'reconciliation_required'].includes(String(existing.status || '').toLowerCase())) {
           return { action: 'existing', record: { id: payoutId, ...existing } };
         }
-        const amountMinor = Math.max(0, Number(wallet.availableMinor || 0));
+        const amountMinor = balanceMinor;
         const record = {
           id: payoutId,
           helperId,
@@ -21129,7 +21147,7 @@ async function reconcilePayoutTransfer({ payout, payoutRef, attemptNo, reference
     await notifyPayoutOutcome(payout, 'reversed', reference, 'Please contact support if you need help.').catch(() => null);
   } else if (verification.outcome === 'failed_confirmed') {
     const message = payout.walletAccountingVersion === 1
-      ? 'Paystack confirmed the transfer failed. The reserved funds are available in your Uncedo wallet for a later weekly payout.'
+      ? 'Paystack confirmed the transfer failed. Your Uncedo wallet balance remains unchanged and will be included in the next payout run.'
       : 'Paystack confirmed the transfer failed. It may be retried in a later payout run.';
     await notifyPayoutOutcome(payout, 'failed', reference, message).catch(() => null);
     if (payout.walletAccountingVersion === 1 && checkNo < 6) {
@@ -21227,6 +21245,10 @@ exports.processWeeklyHelperPayouts = onSchedule({
     const amount = Number(payout.helperAmount || 0);
     const payoutRef = db.collection(HELPER_PAYOUT_COLLECTION).doc(payout.id);
     if (amount <= 0) {
+      if (payout.walletAccountingVersion === 1 || payout.payoutSource === 'helper_wallet') {
+        skippedCount += 1;
+        continue;
+      }
       if (await markZeroValuePayoutPaid(payout, payoutRef)) paidCount += 1;
       else skippedCount += 1;
       continue;

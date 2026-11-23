@@ -375,10 +375,11 @@ export function PolicyPage({ policyKey = 'privacy', user = null, onNavigate }) {
 
                 <PolicySection title="2. Weekly Monday ZAR Payouts via Paystack">
                   <p>
-                    Verified helper wallet earnings settle weekly on Mondays via direct ZAR bank transfer through
-                    Paystack to your verified South African cheque or savings account. Your verified bank holder details,
-                    ID/passport/CIPC registration number, and signed Helper Agreement must remain current and active for
-                    transfers to succeed.
+                    Every Monday, Uncedo checks your single helper wallet balance. Whenever your wallet balance is
+                    greater than R0.00, Paystack sends that amount to your verified South African cheque or savings
+                    account and resets your wallet balance to R0.00 once the transfer succeeds. If a transfer fails or
+                    is rejected, your wallet balance stays unchanged. When your balance is R0.00 or negative, no payout
+                    transfer is initiated.
                   </p>
                 </PolicySection>
 
@@ -387,8 +388,9 @@ export function PolicyPage({ policyKey = 'privacy', user = null, onNavigate }) {
                     When a customer selects <strong>Pay with Cash</strong> after job completion and marks payment handed
                     over, the request appears under <strong>Payments → Cash Confirmations</strong>. Only tap{' '}
                     <em>Confirm Received</em> once you physically hold the full cash amount; tap <em>Not Received</em>{' '}
-                    otherwise. Platform commission on confirmed cash jobs is reconciled against your helper wallet
-                    ledger.
+                    otherwise. Because you collected both your payout and Uncedo’s platform commission directly in cash,
+                    Uncedo deducts the platform share from your wallet balance (which can temporarily make your balance
+                    negative until offset by card jobs).
                   </p>
                 </PolicySection>
 
@@ -434,8 +436,8 @@ export function PolicyPage({ policyKey = 'privacy', user = null, onNavigate }) {
                   <p>
                     If Uncedo approves a customer refund due to non-delivery, verified quality failure, duplicate card
                     billing, false status marking, or a card chargeback, Uncedo may deduct, reverse, or offset the
-                    corresponding amount from your reserved or available helper wallet balance. You may request human
-                    review of any adjustment through Uncedo support.
+                    corresponding amount from your helper wallet balance. You may request human review of any adjustment
+                    through Uncedo support.
                   </p>
                 </PolicySection>
               </>

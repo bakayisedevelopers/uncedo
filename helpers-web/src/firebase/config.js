@@ -52,6 +52,17 @@ const firebaseConfig = {
     : {}),
 };
 
+const requiredFirebaseFields = [
+  firebaseConfig.apiKey,
+  firebaseConfig.authDomain,
+  firebaseConfig.projectId,
+  firebaseConfig.appId,
+];
+
+export const firebaseConfigured = requiredFirebaseFields.every(
+  (value) => typeof value === 'string' && value.trim().length > 0 && !value.includes('PASTE_'),
+);
+
 const useEmulators = !import.meta.env.PROD && import.meta.env.VITE_USE_FIREBASE_EMULATORS === 'true';
 const emulatorHost = import.meta.env.VITE_FIREBASE_EMULATOR_HOST || 'localhost';
 
@@ -59,6 +70,9 @@ let cached = null;
 
 export function getFirebaseClients() {
   if (cached) return cached;
+  if (!firebaseConfigured) {
+    throw new Error('Firebase is not configured for this environment. Add your VITE_FIREBASE_* environment variables to enable sign-in and live sync.');
+  }
 
   const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
   const auth = getAuth(app);

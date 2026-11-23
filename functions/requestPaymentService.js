@@ -1,7 +1,8 @@
 'use strict';
 
 const { createHash, randomBytes } = require('node:crypto');
-const { applyCashCommissionInTransaction } = require('./helperWalletService');
+const { applyHelperPayoutInTransaction } = require('./helperWalletService');
+const { getServiceHelperPayoutBreakdown } = require('./serviceRequestBilling');
 
 const PAYMENT_OPERATIONS = 'servicePaymentOperations';
 const PAYMENT_SESSIONS = 'servicePaymentSessions';
@@ -559,16 +560,60 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
     const paymentMethod = String(attempt.method || '');
     const receiptId = `UNC-${digest(`${requestId}:${attemptId}`).slice(0, 16).toUpperCase()}`;
     const isCash = paymentMethod === 'cash';
-    const helperIdForCash = String(request.helperAssignment?.helperId || '');
-    const breakdown = request.helperPayoutBreakdown || legacy?.settlementData?.helperPayoutBreakdown || {};
-    const useHelperWallet = walletEnabled || Number(request.helperWalletAccountingVersion) === 1;
-    let cashCommission = { applied: false, recoveredMinor: 0, outstandingMinor: 0 };
-    const commissionMinor = Math.round(Number(breakdown.platformAmount || 0) * 100);
-    if (isCash && !isCanceled && useHelperWallet && commissionMinor > 0) {
-      cashCommission = await applyCashCommissionInTransaction({
-        transaction, db, helperId: helperIdForCash, requestId, commissionMinor, now,
-      });
-      if (!cashCommission.applied && !cashCommission.duplicate) return { action: 'commission-conflict', reason: cashCommission.reason || 'cash-commission-not-applied' };
+    const resolvedHelperId = String(request.helperAssignment?.helperId || helperId || '').trim();
+    const rawBreakdown = request.helperPayoutBreakdown || legacy?.settlementData?.helperPayoutBreakdown || null;
+    const chargeForBreakdown = Number(amount || request.totalAmount || request.cancellationFeeAmount || 0);
+    const breakdown = (rawBreakdown && typeof rawBreakdown === 'object')
+      ? rawBreakdown
+      : (resolvedHelperId && chargeForBreakdown > 0
+        ? getServiceHelperPayoutBreakdown(
+            (request.pricingSnapshot || request.requestPayload?.pricingSnapshot)
+              ? request
+              : { ...request, pricingSnapshot: { total: chargeForBreakdown } },
+            { closureType: isCanceled ? 'canceled' : 'completed' },
+          )
+        : {});
+    const customerChargeAmountMinor = Math.round(Number(breakdown.customerChargeAmount ?? amount ?? 0) * 100);
+    const helperAmountMinor = Math.round(Number(breakdown.helperAmount || 0) * 100);
+    const platformAmountMinor = Math.round(Number(
+      breakdown.platformAmount ?? Math.max(0, (customerChargeAmountMinor - helperAmountMinor) / 100),
+    ) * 100);
+
+    let walletMovement = { applied: false, deltaMinor: 0, balanceAfterMinor: 0 };
+    if (resolvedHelperId) {
+      if (isCash && !isCanceled) {
+        walletMovement = await applyHelperPayoutInTransaction({
+          transaction,
+          db,
+          helperId: resolvedHelperId,
+          requestId,
+          helperAmountMinor,
+          platformAmountMinor,
+          customerChargeAmountMinor,
+          isCash: true,
+          closureType: 'completed',
+          now,
+        });
+        if (!walletMovement.applied && !walletMovement.duplicate && walletMovement.reason !== 'zero-delta') {
+          return { action: 'commission-conflict', reason: walletMovement.reason || 'cash-commission-not-applied' };
+        }
+      } else if (!isCash && helperAmountMinor > 0) {
+        walletMovement = await applyHelperPayoutInTransaction({
+          transaction,
+          db,
+          helperId: resolvedHelperId,
+          requestId,
+          helperAmountMinor,
+          platformAmountMinor,
+          customerChargeAmountMinor,
+          isCash: false,
+          closureType: isCanceled ? 'canceled' : 'completed',
+          now,
+        });
+        if (!walletMovement.applied && !walletMovement.duplicate && walletMovement.reason !== 'zero-delta') {
+          return { action: 'wallet-conflict', reason: walletMovement.reason || 'wallet-credit-not-applied' };
+        }
+      }
     }
     if (!ledgerSnap.exists) {
       transaction.create(customerLedgerRef, {
@@ -638,24 +683,8 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
     };
     if (legacySnap.exists) transaction.set(legacyRef, canonicalOperationPatch, { merge: true });
     else transaction.create(legacyRef, { ...canonicalOperationPatch, createdAtMs: now });
-    if (isCash && !isCanceled && !useHelperWallet && Number(breakdown.platformAmount || 0) > 0) {
-      const policyReviewRef = db.collection('financialPolicyReviews').doc(`direct_cash_${digest(requestId).slice(0, 40)}`);
-      transaction.set(policyReviewRef, {
-        reviewId: policyReviewRef.id,
-        requestId,
-        helperId: String(request.helperAssignment?.helperId || ''),
-        type: 'direct_cash_platform_commission',
-        status: 'open',
-        grossCustomerPayment: amount,
-        recordedPlatformAmount: Number(breakdown.platformAmount || 0),
-        recordedHelperAmount: Number(breakdown.helperAmount || 0),
-        paymentAttemptId: attemptId,
-        policyDecisionRequired: true,
-        automatedCommissionRecovery: false,
-        createdAtMs: now,
-        updatedAtMs: now,
-      }, { merge: true });
-    }
+    const walletBalanceAfterMinor = Number(walletMovement?.balanceAfterMinor ?? walletMovement?.wallet?.balanceMinor ?? 0);
+    const netWalletDeltaMinor = isCash ? (helperAmountMinor - customerChargeAmountMinor) : helperAmountMinor;
     transaction.set(requestRef, {
       paymentStatus: 'paid',
       paymentMethod,
@@ -663,17 +692,20 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
       paymentReference: String(gatewayReference || '') || null,
       paymentReceiptId: receiptId,
       paymentSettledAtMs: now,
+      ...(resolvedHelperId && Number(request.helperWalletAccountingVersion || 0) !== 1 ? { helperWalletAccountingVersion: 1 } : {}),
       ...(isCash ? {
         cashPayment: {
-          status: 'helper_confirmed', helperId, amount, currency: 'ZAR',
-          helperConfirmedAtMs: now, commissionReviewRequired: !useHelperWallet && Number(breakdown.platformAmount || 0) > 0,
-          platformAmountForPolicyReview: Number(breakdown.platformAmount || 0),
-          ...(useHelperWallet && commissionMinor > 0 ? {
-            commissionStatus: cashCommission.outstandingMinor > 0 ? 'partially_outstanding' : 'recovered',
-            commissionMinor,
-            commissionRecoveredMinor: cashCommission.recoveredMinor,
-            commissionOutstandingMinor: cashCommission.outstandingMinor,
-          } : {}),
+          status: 'helper_confirmed',
+          helperId: resolvedHelperId || helperId,
+          amount,
+          currency: 'ZAR',
+          helperConfirmedAtMs: now,
+          commissionReviewRequired: false,
+          commissionStatus: walletBalanceAfterMinor < 0 ? 'negative_balance' : 'settled',
+          commissionMinor: platformAmountMinor,
+          helperAmountMinor,
+          netWalletDeltaMinor,
+          walletBalanceAfterMinor,
         },
       } : {}),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -694,9 +726,9 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
       settlement: { receiptId, amount, method: paymentMethod, paidAtMs: now, gatewayReference: String(gatewayReference || '') },
       gatewayReference: String(gatewayReference || '') || null, gatewayTransactionId: String(gatewayTransactionId || '') || null,
       settledAtMs: now, updatedAtMs: now,
-      ...(isCash ? { platformCommissionReviewRequired: !useHelperWallet && Number(breakdown.platformAmount || 0) > 0 } : {}),
+      ...(isCash ? { platformCommissionReviewRequired: false } : {}),
     }, { merge: true });
-    return { action: 'settled', receiptId, amount, method: paymentMethod, customerId, helperId: String(request.helperAssignment?.helperId || ''), requestStatus, debtReversed: Boolean(reversedDebtNow) };
+    return { action: 'settled', receiptId, amount, method: paymentMethod, customerId, helperId: resolvedHelperId, requestStatus, debtReversed: Boolean(reversedDebtNow) };
   });
 }
 

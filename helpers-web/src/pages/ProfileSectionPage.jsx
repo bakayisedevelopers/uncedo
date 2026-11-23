@@ -204,33 +204,55 @@ export function ProfileSectionPage({ section = 'details', isTopLevel = false, on
               </button>
             </div>
 
-            <div>
-              <div className="tabular-nums-mono text-3xl font-extrabold text-ink-900">
-                {moneyMinor(wallet.availableMinor)}
-              </div>
-              <div className="text-xs font-semibold text-ink-500 mt-0.5">Available balance</div>
-            </div>
+            {(() => {
+              const rawMinor = wallet?.balanceMinor;
+              const profileMinor = profile?.wallet?.balanceMinor;
+              const signedBalanceMinor = Number.isSafeInteger(Number(rawMinor))
+                ? Number(rawMinor)
+                : Number.isSafeInteger(Number(profileMinor))
+                  ? Number(profileMinor)
+                  : (wallet?.availableMinor !== undefined || wallet?.outstandingCommissionMinor !== undefined)
+                    ? (Number(wallet?.availableMinor || 0) - Number(wallet?.outstandingCommissionMinor || 0))
+                    : Math.round(Number(profile?.wallet?.balance || 0) * 100);
+              const nextMondayMinor = wallet?.reconciliationBlocked ? 0 : Math.max(0, signedBalanceMinor);
+              const formattedBalance = signedBalanceMinor < 0
+                ? `-R${(Math.abs(signedBalanceMinor) / 100).toFixed(2)}`
+                : moneyMinor(signedBalanceMinor);
+              return (
+                <>
+                  <div>
+                    <div className={`tabular-nums-mono text-3xl font-extrabold ${signedBalanceMinor < 0 ? 'text-red-700' : 'text-ink-900'}`}>
+                      {formattedBalance}
+                    </div>
+                    <div className="text-xs font-semibold text-ink-500 mt-0.5">
+                      {signedBalanceMinor < 0
+                        ? 'Wallet balance (negative — platform share owed from cash jobs, offset by upcoming card earnings)'
+                        : 'Wallet balance'}
+                    </div>
+                  </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div className="rounded-2xl border border-border bg-surface p-3.5">
-                <div className="text-[11px] font-bold uppercase text-ink-400">Reserved for payout</div>
-                <div className="tabular-nums-mono text-lg font-extrabold text-ink-900 mt-1">
-                  {moneyMinor(wallet.reservedMinor)}
-                </div>
-              </div>
-              <div className="rounded-2xl border border-border bg-surface p-3.5">
-                <div className="text-[11px] font-bold uppercase text-ink-400">Next payout estimate</div>
-                <div className="tabular-nums-mono text-lg font-extrabold text-tealbrand-700 mt-1">
-                  {moneyMinor(walletSnapshot?.nextPayoutEstimateMinor)}
-                </div>
-              </div>
-              <div className="rounded-2xl border border-border bg-surface p-3.5">
-                <div className="text-[11px] font-bold uppercase text-ink-400">Completed jobs total</div>
-                <div className="tabular-nums-mono text-lg font-extrabold text-ink-900 mt-1">
-                  R{completedEarnings.toFixed(2)}
-                </div>
-              </div>
-            </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="rounded-2xl border border-border bg-surface p-3.5">
+                      <div className="text-[11px] font-bold uppercase text-ink-400">Next Monday payout</div>
+                      <div className="tabular-nums-mono text-lg font-extrabold text-tealbrand-700 mt-1">
+                        {moneyMinor(nextMondayMinor)}
+                      </div>
+                      <div className="text-[11px] text-ink-500 mt-0.5">
+                        {nextMondayMinor > 0
+                          ? 'Paid out via Paystack on Monday and reset to R0.00 once confirmed.'
+                          : 'Payouts only run when your wallet balance is above R0.00.'}
+                      </div>
+                    </div>
+                    <div className="rounded-2xl border border-border bg-surface p-3.5">
+                      <div className="text-[11px] font-bold uppercase text-ink-400">Completed jobs total</div>
+                      <div className="tabular-nums-mono text-lg font-extrabold text-ink-900 mt-1">
+                        R{completedEarnings.toFixed(2)}
+                      </div>
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
 
             {walletError && (
               <p className="text-xs font-medium text-red-700">{walletError}</p>
@@ -378,8 +400,10 @@ export function ProfileSectionPage({ section = 'details', isTopLevel = false, on
             ) : (
               <div className="divide-y divide-border rounded-2xl border border-border overflow-hidden">
                 {transactions.slice(0, 10).map((tx, idx) => {
-                  const minor = Number(tx.amountMinor ?? tx.amount ?? 0);
-                  const txType = String(tx.type || tx.category || 'Income').replace(/_/g, ' ');
+                  const deltaMinor = Number.isSafeInteger(Number(tx.deltaMinor))
+                    ? Number(tx.deltaMinor)
+                    : Number(tx.availableDeltaMinor ?? tx.amountMinor ?? tx.amount ?? 0);
+                  const txType = String(tx.entryType || tx.type || tx.category || 'Income').replace(/_/g, ' ');
                   return (
                     <div key={tx.id || idx} className="p-3.5 sm:px-4 flex items-center justify-between gap-3 bg-surface">
                       <div className="min-w-0 space-y-0.5">
@@ -396,8 +420,8 @@ export function ProfileSectionPage({ section = 'details', isTopLevel = false, on
                           )}
                         </div>
                       </div>
-                      <span className={`tabular-nums-mono text-sm font-extrabold shrink-0 ${minor < 0 ? 'text-ink-700' : 'text-tealbrand-700'}`}>
-                        {minor < 0 ? '-' : '+'}{moneyMinor(Math.abs(minor))}
+                      <span className={`tabular-nums-mono text-sm font-extrabold shrink-0 ${deltaMinor < 0 ? 'text-red-700' : 'text-tealbrand-700'}`}>
+                        {deltaMinor < 0 ? '-' : '+'}{moneyMinor(Math.abs(deltaMinor))}
                       </span>
                     </div>
                   );

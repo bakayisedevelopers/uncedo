@@ -114,6 +114,8 @@ function playOfferAlert(offer) {
 
 const EMPTY_WALLET_SNAPSHOT = {
   wallet: {
+    balanceMinor: 0,
+    balance: 0,
     availableMinor: 0,
     reservedMinor: 0,
     outstandingCommissionMinor: 0,

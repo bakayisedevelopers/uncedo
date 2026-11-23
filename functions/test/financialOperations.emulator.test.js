@@ -14,7 +14,7 @@ const {
   settleServiceFinancialOperation,
 } = require('../financialOperationService');
 const { settleRequestPayment } = require('../requestPaymentService');
-const { emptyHelperWallet, helperWalletReference, walletObligationReference } = require('../helperWalletService');
+const { emptyHelperWallet, helperWalletReference } = require('../helperWalletService');
 
 const emulatorAvailable = Boolean(process.env.FIRESTORE_EMULATOR_HOST);
 let db;
@@ -287,6 +287,7 @@ test('concurrent helper cash confirmations atomically settle payment and assess 
   const paymentRef = db.collection('servicePaymentOperations').doc(requestId);
   const attemptRef = paymentRef.collection('attempts').doc(attemptId);
   const walletRef = helperWalletReference(db, helperId);
+  const helperUserRef = db.collection('users').doc(helperId);
   await requestRef.set({
     customerId,
     status: 'completed',
@@ -298,7 +299,8 @@ test('concurrent helper cash confirmations atomically settle payment and assess 
   });
   await paymentRef.set({ status: 'awaiting_cash_confirmation', activeAttemptId: attemptId });
   await attemptRef.set({ method: 'cash', status: 'awaiting_cash_confirmation', amount: 100, customerId });
-  await walletRef.set({ ...emptyHelperWallet(helperId), availableMinor: 1000 });
+  await helperUserRef.set({ uid: helperId, wallet: { balance: 10, balanceMinor: 1000, currency: 'ZAR' } });
+  await walletRef.set({ ...emptyHelperWallet(helperId), balanceMinor: 1000, balance: 10 });
 
   const confirm = () => settleRequestPayment({
     db, admin, requestId, attemptId, outcome: 'success', helperId, providerStatus: 'helper_confirmed',
@@ -306,19 +308,18 @@ test('concurrent helper cash confirmations atomically settle payment and assess 
   const results = await Promise.all(Array.from({ length: 5 }, confirm));
   assert.equal(results.filter((result) => result.action === 'settled').length, 1);
   assert.equal(results.filter((result) => result.action === 'already-paid').length, 4);
-  const [request, payment, wallet, obligation] = await Promise.all([
+  const [request, payment, wallet, helperUser] = await Promise.all([
     requestRef.get().then((snapshot) => snapshot.data()),
     paymentRef.get().then((snapshot) => snapshot.data()),
     walletRef.get().then((snapshot) => snapshot.data()),
-    walletObligationReference(walletRef, requestId).get().then((snapshot) => snapshot.data()),
+    helperUserRef.get().then((snapshot) => snapshot.data()),
   ]);
   assert.equal(request.paymentStatus, 'paid');
   assert.equal(payment.status, 'paid');
-  assert.equal(wallet.availableMinor, 0);
-  assert.equal(wallet.outstandingCommissionMinor, 500);
-  assert.equal(obligation.originalMinor, 1500);
-  assert.equal(obligation.recoveredMinor, 1000);
-  assert.equal(obligation.outstandingMinor, 500);
+  assert.equal(wallet.balanceMinor, -500);
+  assert.equal(wallet.balance, -5);
+  assert.equal(helperUser.wallet.balanceMinor, -500);
+  assert.equal(helperUser.wallet.balance, -5);
   const ledger = await walletRef.collection('transactions').get();
   assert.equal(ledger.docs.filter((document) => document.data().entryType === 'cash_commission_assessed').length, 1);
 });

@@ -21,7 +21,7 @@ export async function getHelperWalletSnapshot() {
     callHelperWalletEndpoint('getHelperWalletTransactions'),
   ]);
   return {
-    wallet: summary.wallet || { availableMinor: 0, reservedMinor: 0, outstandingCommissionMinor: 0, currency: 'ZAR' },
+    wallet: summary.wallet || { balanceMinor: 0, balance: 0, availableMinor: 0, reservedMinor: 0, outstandingCommissionMinor: 0, currency: 'ZAR' },
     nextPayoutEstimateMinor: Math.max(0, Number(summary.nextPayoutEstimateMinor || 0)),
     transactions: Array.isArray(history.transactions) ? history.transactions : [],
   };

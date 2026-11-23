@@ -119,15 +119,19 @@ export function ProfilePage({ onNavigate, pwa }) {
   const safeMetrics = profile?.metrics && typeof profile.metrics === 'object' ? profile.metrics : {};
   const homeAddress = String(profile?.homeAddress || '').trim() || 'Add your home address';
 
-  const walletMinor = Number(walletSnapshot?.wallet?.availableMinor || 0);
-  const completedEarnings = jobHistory
-    .filter((job) => String(job.status || '').toLowerCase() === 'completed')
-    .reduce(
-      (sum, job) => sum + resolveHelperPayoutAmount(job),
-      0,
-    );
+  const rawBalanceMinor = walletSnapshot?.wallet?.balanceMinor;
+  const profileWalletMinor = profile?.wallet?.balanceMinor;
+  const signedWalletMinor = Number.isSafeInteger(Number(rawBalanceMinor))
+    ? Number(rawBalanceMinor)
+    : Number.isSafeInteger(Number(profileWalletMinor))
+      ? Number(profileWalletMinor)
+      : (walletSnapshot?.wallet?.availableMinor !== undefined || walletSnapshot?.wallet?.outstandingCommissionMinor !== undefined)
+        ? (Number(walletSnapshot?.wallet?.availableMinor || 0) - Number(walletSnapshot?.wallet?.outstandingCommissionMinor || 0))
+        : Math.round(Number(profile?.wallet?.balance || 0) * 100);
   const displayWalletText =
-    walletMinor > 0 ? `R${(walletMinor / 100).toFixed(2)}` : `R${completedEarnings.toFixed(2)}`;
+    signedWalletMinor < 0
+      ? `-R${(Math.abs(signedWalletMinor) / 100).toFixed(2)}`
+      : `R${(signedWalletMinor / 100).toFixed(2)}`;
 
   const overallRating = Number(safeMetrics.overallRating || profile?.rating || 0);
 

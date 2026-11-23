@@ -12,18 +12,30 @@ import {
 } from '../../utils/payouts';
 
 export function EarningsScreen({ navigate, goBack }) {
-  const { paymentSummary, weeklyGroups, helperWalletSnapshot, helperWalletLoading, helperWalletError, refreshHelperWallet } = useHelpersApp();
+  const { paymentSummary, weeklyGroups, helperWalletSnapshot, helperWalletLoading, helperWalletError, refreshHelperWallet, profile } = useHelpersApp();
   const [expandedWeekKey, setExpandedWeekKey] = useState('');
   const wallet = helperWalletSnapshot?.wallet || {};
-  const moneyMinor = (minor) => `R${(Math.max(0, Number(minor || 0)) / 100).toFixed(2)}`;
-  const transactionDetail = (entry) => {
-    if (entry.entryType === 'cash_commission_assessed') {
-      const deductedMinor = Math.max(0, -Number(entry.availableDeltaMinor || 0));
-      const owingMinor = Math.max(0, Number(entry.outstandingCommissionDeltaMinor || 0));
-      return `Deducted ${moneyMinor(deductedMinor)}${owingMinor ? ` · ${moneyMinor(owingMinor)} remains outstanding` : ''}`;
-    }
-    return entry.description || 'Wallet transaction';
+  const rawBalanceMinor = wallet?.balanceMinor;
+  const profileMinor = profile?.wallet?.balanceMinor;
+  const signedBalanceMinor = Number.isSafeInteger(Number(rawBalanceMinor))
+    ? Number(rawBalanceMinor)
+    : Number.isSafeInteger(Number(profileMinor))
+      ? Number(profileMinor)
+      : (wallet?.availableMinor !== undefined || wallet?.outstandingCommissionMinor !== undefined)
+        ? (Number(wallet?.availableMinor || 0) - Number(wallet?.outstandingCommissionMinor || 0))
+        : Math.round(Number(profile?.wallet?.balance || 0) * 100);
+  const nextMondayPayoutMinor = wallet.reconciliationBlocked ? 0 : Math.max(0, signedBalanceMinor);
+  const moneyMinor = (minor) => {
+    const num = Number(minor || 0);
+    const absText = `R${(Math.abs(num) / 100).toFixed(2)}`;
+    return num < 0 ? `-${absText}` : absText;
   };
+  const signedDeltaMinorFor = (entry = {}) => (
+    Number.isSafeInteger(Number(entry.deltaMinor))
+      ? Number(entry.deltaMinor)
+      : Number(entry.availableDeltaMinor || 0) - Number(entry.outstandingCommissionDeltaMinor || 0)
+  );
+  const transactionDetail = (entry) => entry.description || 'Wallet transaction';
 
   return (
     <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false}>
@@ -34,21 +46,30 @@ export function EarningsScreen({ navigate, goBack }) {
 
       <View style={styles.header}>
         <Text style={styles.title}>Payment</Text>
-        <Text style={styles.copy}>Track weekly helper earnings, cancellation outcomes, unpaid wallet balance, and payout status from the same request records used for billing.</Text>
+        <Text style={styles.copy}>Track your single wallet balance, weekly Monday Paystack payouts, and completed or cancelled job settlements.</Text>
       </View>
 
       <Card style={styles.walletCard}>
         <SectionHeading
           title="Wallet"
-          subtitle="These server-recorded wallet funds are separate from the legacy weekly request earnings below."
+          subtitle="All helper job payouts and cash commission deductions flow into this single wallet balance."
           action={<ActionButton label={helperWalletLoading ? 'Refreshing…' : 'Refresh'} tone="secondary" disabled={helperWalletLoading} onPress={refreshHelperWallet} />}
         />
-        <Text style={styles.walletAmount}>{moneyMinor(wallet.availableMinor)}</Text>
-        <Text style={styles.walletLabel}>Available balance</Text>
+        <Text style={styles.walletAmount}>{moneyMinor(signedBalanceMinor)}</Text>
+        <Text style={styles.walletLabel}>
+          {signedBalanceMinor < 0
+            ? 'Wallet balance (negative — platform share owed from cash jobs)'
+            : 'Wallet balance'}
+        </Text>
         <View style={styles.metricGrid}>
-          <MetricCard label="Reserved for payout" value={moneyMinor(wallet.reservedMinor)} helper="Held while Paystack confirms an active transfer." accent="muted" />
-          <MetricCard label="Cash commissions outstanding" value={moneyMinor(wallet.outstandingCommissionMinor)} helper="Recovered from future eligible wallet credits." accent={Number(wallet.outstandingCommissionMinor || 0) > 0 ? 'warning' : 'muted'} />
-          <MetricCard label="Next weekly payout estimate" value={moneyMinor(helperWalletSnapshot?.nextPayoutEstimateMinor)} helper="Available wallet funds; final payout is subject to payout eligibility and provider confirmation." accent="success" />
+          <MetricCard
+            label="Next Monday payout"
+            value={moneyMinor(nextMondayPayoutMinor)}
+            helper={nextMondayPayoutMinor > 0
+              ? 'Paid out via Paystack on Monday and reset to R0.00 if successful; stays in your wallet if unsuccessful.'
+              : 'Monday payouts only run when your wallet balance is greater than R0.00.'}
+            accent={nextMondayPayoutMinor > 0 ? 'success' : 'muted'}
+          />
         </View>
         {wallet.reconciliationBlocked ? (
           <View style={styles.noteCard}><Text style={styles.noteText}>A payout needs financial reconciliation. New wallet payouts are paused while Uncedo reviews it.</Text></View>
@@ -56,17 +77,22 @@ export function EarningsScreen({ navigate, goBack }) {
         {helperWalletError ? <Text style={styles.walletError}>{helperWalletError}</Text> : null}
         <View style={styles.transactionList}>
           <Text style={styles.transactionHeading}>Recent wallet transactions</Text>
-          {helperWalletSnapshot?.transactions?.length ? helperWalletSnapshot.transactions.map((entry) => (
-            <View key={entry.id} style={styles.transactionRow}>
-              <View style={styles.transactionCopy}>
-                <Text style={styles.transactionTitle}>{transactionDetail(entry)}</Text>
-                <Text style={styles.transactionMeta}>{formatDate(entry.createdAtMs)} · {entry.entryType.replace(/_/g, ' ')}</Text>
-                {entry.requestId ? <Text style={styles.transactionMeta}>Request {entry.requestId}</Text> : null}
+          {helperWalletSnapshot?.transactions?.length ? helperWalletSnapshot.transactions.map((entry) => {
+            const deltaMinor = signedDeltaMinorFor(entry);
+            return (
+              <View key={entry.id} style={styles.transactionRow}>
+                <View style={styles.transactionCopy}>
+                  <Text style={styles.transactionTitle}>{transactionDetail(entry)}</Text>
+                  <Text style={styles.transactionMeta}>{formatDate(entry.createdAtMs)} · {entry.entryType.replace(/_/g, ' ')}</Text>
+                  {entry.requestId ? <Text style={styles.transactionMeta}>Request {entry.requestId}</Text> : null}
+                </View>
+                <Text style={styles.transactionAmount}>
+                  {deltaMinor < 0 ? `-${moneyMinor(Math.abs(deltaMinor))}` : `+${moneyMinor(deltaMinor)}`}
+                </Text>
               </View>
-              <Text style={styles.transactionAmount}>{moneyMinor(entry.amountMinor)}</Text>
-            </View>
-          )) : (
-            <Text style={styles.transactionEmpty}>Wallet credits and adjustments will appear here. Legacy unpaid payouts were not imported into this wallet.</Text>
+            );
+          }) : (
+            <Text style={styles.transactionEmpty}>Wallet credits, cash commission deductions, and Monday payouts will appear here.</Text>
           )}
         </View>
       </Card>
@@ -82,7 +108,7 @@ export function EarningsScreen({ navigate, goBack }) {
       <Card>
         <SectionHeading
           title="Legacy weekly earnings history"
-          subtitle="This request-based summary excludes new wallet-accounted earnings. Use the wallet above as the source for available, reserved, and outstanding funds."
+          subtitle="This request-based summary excludes new wallet-accounted earnings. Use the wallet above as your single balance."
         />
         <View style={styles.metricGrid}>
           <MetricCard label="Legacy helper earnings" value={formatCurrency(paymentSummary.lifetimeHelperEarnings)} />

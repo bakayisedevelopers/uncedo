@@ -3,15 +3,75 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  claimPayoutTransfer,
   classifyPaystackTransaction,
   classifyPaystackTransfer,
   executePayoutTransferAttempt,
   executeServiceChargeAttempt,
   paystackChargeReference,
   paystackTransferReference,
+  recordPayoutObservation,
   serviceFinancialOperationId,
   shouldDeferCompletionPayment,
 } = require('./financialOperationService');
+
+class Snapshot {
+  constructor(ref, data) {
+    this.ref = ref;
+    this.id = ref.id;
+    this.exists = data !== undefined;
+    this.value = data === undefined ? undefined : structuredClone(data);
+  }
+  data() { return this.value === undefined ? undefined : structuredClone(this.value); }
+}
+
+class DocumentRef {
+  constructor(db, path) { this.db = db; this.path = path; this.id = path.split('/').at(-1); }
+  collection(name) { return new CollectionRef(this.db, `${this.path}/${name}`); }
+  async get() { return new Snapshot(this, this.db.records.get(this.path)); }
+}
+
+class CollectionRef {
+  constructor(db, path) { this.db = db; this.path = path; }
+  doc(id) { return new DocumentRef(this.db, `${this.path}/${String(id)}`); }
+}
+
+class MemoryDb {
+  constructor(seed = {}) {
+    this.records = new Map(Object.entries(seed).map(([path, value]) => [path, structuredClone(value)]));
+    this.lock = Promise.resolve();
+  }
+  collection(name) { return new CollectionRef(this, name); }
+  async runTransaction(callback) {
+    const previous = this.lock;
+    let release;
+    this.lock = new Promise((resolve) => { release = resolve; });
+    await previous;
+    const writes = [];
+    const transaction = {
+      get: async (ref) => new Snapshot(ref, this.records.get(ref.path)),
+      create: (ref, data) => writes.push({ kind: 'create', ref, data: structuredClone(data) }),
+      set: (ref, data, options = {}) => writes.push({ kind: 'set', ref, data: structuredClone(data), merge: options.merge === true }),
+      update: (ref, data) => writes.push({ kind: 'update', ref, data: structuredClone(data) }),
+    };
+    try {
+      const result = await callback(transaction);
+      for (const write of writes) {
+        const previousValue = this.records.get(write.ref.path);
+        if (write.kind === 'create' && previousValue !== undefined) throw new Error(`already-exists:${write.ref.path}`);
+        if (write.kind === 'update' && previousValue === undefined) throw new Error(`not-found:${write.ref.path}`);
+        const shouldMerge = write.kind === 'update' || write.merge;
+        const next = shouldMerge && previousValue ? { ...previousValue, ...write.data } : write.data;
+        this.records.set(write.ref.path, next);
+      }
+      return result;
+    } finally {
+      release();
+    }
+  }
+}
+
+const admin = { firestore: { FieldValue: { serverTimestamp: () => 'server-time', delete: () => null } } };
 
 test('service charge uses one stable reference and verifies after a timed out request', async () => {
   const operationId = serviceFinancialOperationId('request-123');
@@ -118,6 +178,8 @@ test('Paystack classifiers require matching reference, exact amount and currency
   assert.equal(classifyPaystackTransaction({ status: true, data: transaction }, { reference: 'other-ref', amountMinor: 1234, currency: 'ZAR' }).outcome, 'unknown');
   assert.equal(classifyPaystackTransaction({ status: true, data: transaction }, { reference: 'charge-ref', amountMinor: 1235, currency: 'ZAR' }).outcome, 'unknown');
   assert.equal(classifyPaystackTransfer({ status: true, data: { ...transaction, status: 'received' } }, { reference: 'charge-ref', amountMinor: 1234, currency: 'ZAR' }).outcome, 'pending');
+  assert.equal(classifyPaystackTransfer({ status: true, data: { ...transaction, status: 'rejected' } }, { reference: 'charge-ref', amountMinor: 1234, currency: 'ZAR' }).outcome, 'failed_confirmed');
+  assert.equal(classifyPaystackTransfer({ status: true, data: { ...transaction, status: 'blocked' } }, { reference: 'charge-ref', amountMinor: 1234, currency: 'ZAR' }).outcome, 'failed_confirmed');
   assert.equal(classifyPaystackTransfer({ status: true, data: { ...transaction, status: 'reversed' } }, { reference: 'charge-ref', amountMinor: 1234, currency: 'ZAR' }).outcome, 'reversed');
 });
 
@@ -126,4 +188,75 @@ test('only newly versioned requests defer completion-time card charging; legacy 
   assert.equal(shouldDeferCompletionPayment({}), false);
   assert.equal(shouldDeferCompletionPayment({ paymentFlowVersion: 'explicit_v1' }, { status: 'processing' }), false);
   assert.equal(shouldDeferCompletionPayment({ paymentFlowVersion: 'explicit_v1' }, { settlementData: { deferredPaymentSelection: true } }), true);
+});
+
+test('Monday wallet payout skips zero and negative balances and keeps balance untouched if transfer is rejected or fails', async () => {
+  const db = new MemoryDb({
+    'helperWallets/helper-zero': { helperId: 'helper-zero', balanceMinor: 0, balance: 0, schemaVersion: 2, currency: 'ZAR' },
+    'helperWeeklyPayouts/wallet_2026-W47_helper-zero': { id: 'wallet_2026-W47_helper-zero', helperId: 'helper-zero', weekKey: '2026-W47', walletAccountingVersion: 1, helperAmount: 0, status: 'unpaid', transferAttempts: 0 },
+    'helperWallets/helper-neg': { helperId: 'helper-neg', balanceMinor: -1500, balance: -15, schemaVersion: 2, currency: 'ZAR' },
+    'helperWeeklyPayouts/wallet_2026-W47_helper-neg': { id: 'wallet_2026-W47_helper-neg', helperId: 'helper-neg', weekKey: '2026-W47', walletAccountingVersion: 1, helperAmount: 0, status: 'unpaid', transferAttempts: 0 },
+    'users/helper-neg': { uid: 'helper-neg', wallet: { balance: -15, balanceMinor: -1500, currency: 'ZAR' } },
+    'helperWallets/helper-pos': { helperId: 'helper-pos', balanceMinor: 12345, balance: 123.45, schemaVersion: 2, currency: 'ZAR' },
+    'users/helper-pos': { uid: 'helper-pos', wallet: { balance: 123.45, balanceMinor: 12345, currency: 'ZAR' } },
+    'helperWeeklyPayouts/wallet_2026-W47_helper-pos': { id: 'wallet_2026-W47_helper-pos', helperId: 'helper-pos', weekKey: '2026-W47', walletAccountingVersion: 1, helperAmount: 123.45, status: 'unpaid', transferAttempts: 0 },
+  });
+
+  const zeroClaim = await claimPayoutTransfer({
+    db, admin, payoutRef: db.collection('helperWeeklyPayouts').doc('wallet_2026-W47_helper-zero'),
+    payoutId: 'wallet_2026-W47_helper-zero', helperId: 'helper-zero', weekKey: '2026-W47', runKey: 'run-1', amount: 0, recipientCode: '',
+  });
+  assert.equal(zeroClaim.action, 'no_wallet_balance');
+
+  const negClaim = await claimPayoutTransfer({
+    db, admin, payoutRef: db.collection('helperWeeklyPayouts').doc('wallet_2026-W47_helper-neg'),
+    payoutId: 'wallet_2026-W47_helper-neg', helperId: 'helper-neg', weekKey: '2026-W47', runKey: 'run-1', amount: 0, recipientCode: '',
+  });
+  assert.equal(negClaim.action, 'no_wallet_balance');
+  assert.equal((await db.collection('helperWallets').doc('helper-neg').get()).data().balanceMinor, -1500);
+
+  // Positive balance claim does NOT reserve/deduct wallet upfront
+  const posPayoutRef = db.collection('helperWeeklyPayouts').doc('wallet_2026-W47_helper-pos');
+  const firstClaim = await claimPayoutTransfer({
+    db, admin, payoutRef: posPayoutRef,
+    payoutId: 'wallet_2026-W47_helper-pos', helperId: 'helper-pos', weekKey: '2026-W47', runKey: 'run-1', amount: 123.45, recipientCode: 'RCP_pos',
+  });
+  assert.equal(firstClaim.action, 'transfer');
+  assert.equal(firstClaim.attempt.walletFundsReserved, false);
+  assert.equal((await db.collection('helperWallets').doc('helper-pos').get()).data().balanceMinor, 12345);
+
+  // If Paystack rejects or fails the transfer, balance stays untouched in wallet and status becomes 'unsuccessful'
+  const failObs = await recordPayoutObservation({
+    db, admin, payoutRef: posPayoutRef, transferAttemptRef: firstClaim.transferAttemptRef, referenceRef: firstClaim.referenceRef,
+    reference: firstClaim.attempt.reference, outcome: 'failed_confirmed', transfer: { status: 'rejected', reference: firstClaim.attempt.reference, amount: 12345, currency: 'ZAR' },
+  });
+  assert.equal(failObs.updated, true);
+  assert.equal((await posPayoutRef.get()).data().status, 'unsuccessful');
+  assert.equal((await db.collection('helperWallets').doc('helper-pos').get()).data().balanceMinor, 12345);
+  assert.equal((await db.collection('users').doc('helper-pos').get()).data().wallet.balanceMinor, 12345);
+
+  // Next Monday run pays out the retained balance and confirmed success resets balance to 0
+  const retryClaim = await claimPayoutTransfer({
+    db, admin, payoutRef: posPayoutRef,
+    payoutId: 'wallet_2026-W47_helper-pos', helperId: 'helper-pos', weekKey: '2026-W47', runKey: 'run-2', amount: 123.45, recipientCode: 'RCP_pos',
+  });
+  assert.equal(retryClaim.action, 'transfer');
+  const successObs = await recordPayoutObservation({
+    db, admin, payoutRef: posPayoutRef, transferAttemptRef: retryClaim.transferAttemptRef, referenceRef: retryClaim.referenceRef,
+    reference: retryClaim.attempt.reference, outcome: 'success', transfer: { id: 'tr-1', status: 'success', reference: retryClaim.attempt.reference, amount: 12345, currency: 'ZAR' },
+  });
+  assert.equal(successObs.updated, true);
+  assert.equal((await posPayoutRef.get()).data().status, 'paid');
+  assert.equal((await db.collection('helperWallets').doc('helper-pos').get()).data().balanceMinor, 0);
+  assert.equal((await db.collection('users').doc('helper-pos').get()).data().wallet.balanceMinor, 0);
+
+  // If Paystack subsequently reverses a debited transfer, balance is restored to the wallet
+  const reversedObs = await recordPayoutObservation({
+    db, admin, payoutRef: posPayoutRef, transferAttemptRef: retryClaim.transferAttemptRef, referenceRef: retryClaim.referenceRef,
+    reference: retryClaim.attempt.reference, outcome: 'reversed', transfer: { id: 'tr-1', status: 'reversed', reference: retryClaim.attempt.reference, amount: 12345, currency: 'ZAR' },
+  });
+  assert.equal(reversedObs.updated, true);
+  assert.equal((await posPayoutRef.get()).data().status, 'unsuccessful');
+  assert.equal((await db.collection('helperWallets').doc('helper-pos').get()).data().balanceMinor, 12345);
+  assert.equal((await db.collection('users').doc('helper-pos').get()).data().wallet.balanceMinor, 12345);
 });

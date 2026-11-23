@@ -91,7 +91,7 @@ const FALLBACK_PROFILE = {
 
 const INITIAL_WEEKLY_PAYOUTS = [];
 const EMPTY_HELPER_WALLET = {
-  wallet: { availableMinor: 0, reservedMinor: 0, outstandingCommissionMinor: 0, reconciliationBlocked: false, currency: 'ZAR' },
+  wallet: { balanceMinor: 0, balance: 0, availableMinor: 0, reservedMinor: 0, outstandingCommissionMinor: 0, reconciliationBlocked: false, currency: 'ZAR' },
   nextPayoutEstimateMinor: 0,
   transactions: [],
 };

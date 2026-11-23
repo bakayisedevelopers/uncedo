@@ -16,9 +16,9 @@ This folder contains the Expo React Native app for helpers.
 - Android active-job guidance now uses the Google Navigation SDK through the official React Native package, while the helper dashboard uses a stable static map preview and the existing live-tracking pipeline still keeps customer/helper tracking in sync.
 - Accepted jobs seed `liveTracking/serviceRequests/{requestId}` in Realtime Database immediately, then update helper movement, destination, route geometry, and closure status through the same tracking node.
 - Provider offer acceptance and decline use the authenticated `respondToServiceRequestOffer` Cloud Function. Responses include the current offer token and revision so the backend can reject stale and expired actions; Cloud Tasks expires pending offers after the existing 30-second window.
-- Earnings history grouped by week, plus an authenticated server-read helper wallet showing available and reserved funds, outstanding cash commissions, and recent immutable wallet transactions
-- Automatic Monday helper payout batching backed by Firestore payout records
-- New wallet-accounted earnings are kept out of the legacy request-based earnings summary so the same amount is not counted twice. Failed new wallet payouts return to available wallet funds after Paystack confirms failure; pending outcomes remain reserved.
+- Earnings history grouped by week, plus an authenticated server-read helper wallet displaying a single signed wallet balance (synced onto the helper profile), cash commission deductions, and immutable wallet ledger transactions
+- Automatic Monday helper payout batching backed by Firestore payout records (transfers only run when `balanceMinor > 0`)
+- New wallet-accounted earnings are settled directly to the single wallet balance (reset to zero upon Paystack confirmation; kept unchanged if a transfer fails or is rejected) and excluded from the legacy request-based earnings summary so the same amount is not counted twice.
 - Map-driven job and route views
 - Browser onboarding and account routes (`/`, `/sign-in`, `/sign-up`, `/onboarding`, `/sign-agreement`, `/service-photos`, `/profile-photo`, `/payout-details`, `/whatsapp-link`) are served from Firebase Hosting `helpers/dist`, built by the dedicated React + Vite web portal in `../helpers-web`. It shares the same Firebase project, Firestore schemas, Cloud Functions, and verification rules while providing a dedicated 7-step web onboarding UI separate from the mobile app.
 
