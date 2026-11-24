@@ -74,6 +74,7 @@ const {
   cancelCashPaymentSelection,
   cancelSavedCardPaymentConfirmation,
   claimSavedCardPayment,
+  createPaymentToken,
   createServicePaymentSession,
   getFinalPayableAmount,
   normalizeMinorAmount,
@@ -136,11 +137,14 @@ const {
 } = require('./busyHelperFallbackLogic');
 const {
   PRIVATE_COLLECTION: PAYMENT_AUTHORIZATIONS_COLLECTION,
+  deleteTemporaryRequestPaymentAuthorization,
   getServerPaymentMethod,
   getServerPaymentMethods,
+  getTemporaryRequestPaymentAuthorization,
   migrateLegacyPaymentMethods,
   publicPaymentMethod,
   storeReusablePaymentMethod,
+  storeTemporaryRequestPaymentAuthorization,
   updateSavedPaymentMethod,
 } = require('./paymentMethodStore');
 const { createOrAppendWhatsAppSupportMessage } = require('./whatsapp/supportTicketService');
@@ -152,7 +156,11 @@ const {
 const {
   formatVerifiedWhatsAppNextQuestion,
   formatWhatsAppBookingConfirmation,
+  formatWhatsAppCompletionCardFailureRecovery,
   formatWhatsAppNextQuestion,
+  formatWhatsAppPreBookingPaymentPrompt,
+  formatWhatsAppPreBookingSavedCardMenu,
+  formatWhatsAppRecoverySavedCardMenu,
   formatWhatsAppRequestExpiredMessage,
   formatWhatsAppServiceOptionPrompt,
   formatWhatsAppSubmittedRequestConfirmation,
@@ -7027,6 +7035,7 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
           if (targetConvRef) {
             await targetConvRef.set({
               pendingRatingComment: admin.firestore.FieldValue.delete(),
+              pendingRatingPrompt: admin.firestore.FieldValue.delete(),
               updatedAt: admin.firestore.FieldValue.serverTimestamp(),
             }, { merge: true }).catch(() => null);
           }
@@ -9348,7 +9357,48 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       await jobRef.set({ status: 'completed', intent: 'cash_payment_report', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
     }
-    if (['wa_payment_cash', 'wa_payment_card', 'wa_payment_saved'].includes(buttonId)) {
+    if (buttonId === 'wa_cash_switch_card') {
+      const pending = conversation.pendingCashPayment || {};
+      if (pending.identityId !== identityId || Number(pending.expiresAtMs || 0) <= Date.now() || !pending.requestId) {
+        await reply('That cash payment prompt expired. Send “pay” to choose how to pay for your request.');
+        await jobRef.set({ status: 'completed', intent: 'cash_switch_card_expired', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      if (pending.attemptId) {
+        await cancelCashPaymentSelection({
+          db,
+          admin,
+          requestId: pending.requestId,
+          customerId: String(identity.linkedFirebaseUid || identity.guestPrincipalId || ''),
+          attemptId: pending.attemptId,
+        }).catch(() => null);
+      }
+      const context = await getWhatsAppPaymentContext({ identityId, identity, requestId: pending.requestId });
+      if (context.code !== 'available') {
+        await conversationRef.set({
+          pendingCashPayment: admin.firestore.FieldValue.delete(),
+          pendingPaymentSelection: admin.firestore.FieldValue.delete(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        await reply(context.code === 'already-paid' ? 'This request is already paid.' : 'This request is no longer payable. Send “payment status” or contact support.');
+      } else {
+        const session = await createWhatsAppPaymentSession(context);
+        if (session.code === 'created') {
+          const paymentUrl = `${String(process.env.CUSTOMER_PAYMENT_URL || 'https://uncedo.bakayise.com/payment').replace(/\/$/, '')}?token=${encodeURIComponent(session.token)}`;
+          await conversationRef.set({
+            pendingCashPayment: admin.firestore.FieldValue.delete(),
+            pendingPaymentSelection: admin.firestore.FieldValue.delete(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+          await reply(`Pay R${formatWholeRandDisplay(context.amount)} securely by card using this request-specific Uncedo payment link: ${paymentUrl}\nThe link expires in 20 minutes.`);
+        } else {
+          await reply('I could not create a card payment link right now. Please try again or reply “pay”.');
+        }
+      }
+      await jobRef.set({ status: 'completed', intent: 'cash_switch_card', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
+    if (['wa_payment_cash', 'wa_payment_card', 'wa_payment_saved', 'wa_recover_saved', 'wa_recover_add_card'].includes(buttonId)) {
       const pending = conversation.pendingPaymentSelection || {};
       if (pending.identityId !== identityId || Number(pending.expiresAtMs || 0) <= Date.now()) {
         await reply('That payment selection expired. Send “payment methods” again to review the current request.');
@@ -9361,6 +9411,14 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         await jobRef.set({ status: 'completed', intent: 'payment_selection', reason: context.code, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         return;
       }
+      const failedCardIds = new Set(
+        (Array.isArray(context.request?.failedCardIds) ? context.request.failedCardIds : [])
+          .map((id) => String(id || '').trim())
+          .filter(Boolean),
+      );
+      const untriedCards = (Array.isArray(context.cards) ? context.cards : [])
+        .filter((card) => card && card.id && !failedCardIds.has(String(card.id).trim()));
+
       if (buttonId === 'wa_payment_cash') {
         if (context.isCanceled) {
           await reply('Cancellation fees must be paid by card. Tap “Pay with Card” or open your payment link.');
@@ -9385,18 +9443,21 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
             ] },
           });
         }
-      } else if (buttonId === 'wa_payment_card') {
+      } else if (buttonId === 'wa_payment_card' || buttonId === 'wa_recover_add_card') {
         const session = await createWhatsAppPaymentSession(context);
         if (session.code === 'created') {
           const paymentUrl = `${String(process.env.CUSTOMER_PAYMENT_URL || 'https://uncedo.bakayise.com/payment').replace(/\/$/, '')}?token=${encodeURIComponent(session.token)}`;
           await conversationRef.set({ pendingPaymentSelection: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
           await reply(`Pay R${formatWholeRandDisplay(context.amount)} securely by card using this request-specific Uncedo payment link: ${paymentUrl}\nThe link expires in 20 minutes.`);
         } else await reply('I could not create a payment link for this request. Please try again or contact support.');
-      } else if (context.cards.length) {
+      } else if (untriedCards.length) {
         await conversationRef.set({ pendingPaymentSelection: { ...pending, selectingSavedCard: true }, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-        await reply('Choose a saved card. I will show the amount and ask you to confirm before any charge is attempted.', {
-          type: 'list', body: { text: `Request ${pending.requestId} · R${formatWholeRandDisplay(context.amount)} ZAR` }, action: { button: 'Choose card', sections: [{ title: 'Saved cards', rows: context.cards.slice(0, 10).map((card) => ({ id: `wa_saved_card_${card.id}`, title: `${card.brand} •••• ${card.last4}`.slice(0, 24), description: card.isDefault ? 'Default payment card' : 'Saved payment card' })) }] },
+        const recoveryMenu = formatWhatsAppRecoverySavedCardMenu({
+          serviceName: context.request?.serviceSummary || context.request?.subject || 'Uncedo service',
+          wholeTotalDisplay: formatWholeRandDisplay(context.amount),
+          untriedCards,
         });
+        await reply(recoveryMenu.text, recoveryMenu.interactive);
       } else {
         await conversationRef.set({
           pendingPaymentSelection: { identityId, requestId: pending.requestId, amount: context.amount, expiresAtMs: Date.now() + 10 * 60 * 1000 },
@@ -9405,14 +9466,14 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         }, { merge: true });
         const fallbackButtons = context.isCanceled
-          ? [{ type: 'reply', reply: { id: 'wa_payment_card', title: 'Pay with Card' } }]
+          ? [{ type: 'reply', reply: { id: 'wa_payment_card', title: 'Add new card' } }]
           : [
-              { type: 'reply', reply: { id: 'wa_payment_cash', title: 'Pay with Cash' } },
-              { type: 'reply', reply: { id: 'wa_payment_card', title: 'Pay with Card' } },
+              { type: 'reply', reply: { id: 'wa_payment_card', title: 'Add new card' } },
+              { type: 'reply', reply: { id: 'wa_payment_cash', title: 'Pay cash' } },
             ];
-        await reply(`There are no eligible saved cards linked to this WhatsApp identity. How would you like to pay R${formatWholeRandDisplay(context.amount)} ZAR?`, {
+        await reply(`There are no other saved cards available for this request. How would you like to pay R${formatWholeRandDisplay(context.amount)} ZAR?`, {
           type: 'button',
-          body: { text: `No saved card available. Pay R${formatWholeRandDisplay(context.amount)} ZAR:` },
+          body: { text: `No other saved cards available. Pay R${formatWholeRandDisplay(context.amount)} ZAR:` },
           action: {
             buttons: fallbackButtons,
           },
@@ -9461,16 +9522,17 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
             }).catch(() => null);
           }
           await conversationRef.set({
-            pendingRatingComment: {
-              identityId,
-              requestId: targetRequest.id,
-              score,
-              helperName,
-              expiresAtMs: Date.now() + 10 * 60 * 1000,
-            },
+            pendingRatingComment: admin.firestore.FieldValue.delete(),
+            pendingRatingPrompt: admin.firestore.FieldValue.delete(),
+            ...(String(conversation.currentMode || '').toLowerCase() === 'payment'
+              ? { currentMode: 'assistant', currentIntent: null }
+              : {}),
+            ...(String(conversation.activeServiceRequestId || '') === String(targetRequest.id)
+              ? { activeServiceRequestId: null }
+              : {}),
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           }, { merge: true });
-          await reply(`Thank you for rating *${helperName}* ${score}/5! If you would like to add a brief comment about your experience, reply with your comment now.`);
+          await reply(`Thank you for rating *${helperName}* ${score}/5! Feel free to message anytime when you need help or want to book again.`);
         } catch (ratingError) {
           await reply(ratingError?.message || 'Unable to save your rating right now.');
         }
@@ -9487,7 +9549,12 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         return;
       }
       const context = await getWhatsAppPaymentContext({ identityId, identity, requestId: pending.requestId });
-      const card = context.cards?.find((item) => item.id === savedCardChoice[1]);
+      const failedCardIdsForSelection = new Set(
+        (Array.isArray(context.request?.failedCardIds) ? context.request.failedCardIds : [])
+          .map((id) => String(id || '').trim())
+          .filter(Boolean),
+      );
+      const card = context.cards?.find((item) => item.id === savedCardChoice[1] && !failedCardIdsForSelection.has(String(item.id || '').trim()));
       const allowedOwnerUid = String(identity.linkedFirebaseUid || (!identity.linkedFirebaseUid ? identity.guestPrincipalId : '') || '').trim();
       if (!card || !context.ownerUid || !allowedOwnerUid || context.ownerUid !== allowedOwnerUid) {
         await conversationRef.set({
@@ -9742,18 +9809,62 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
                 await issueFailedRequestPaymentPostEffects({ requestId: pending.requestId, attemptId: pending.attemptId, paymentResult: result }).catch(() => null);
               }
               if (result.action === 'settled' || result.action === 'already-paid') {
-                await conversationRef.set({ pendingSavedCardPayment: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+                await conversationRef.set({
+                  pendingSavedCardPayment: admin.firestore.FieldValue.delete(),
+                  pendingPaymentSelection: admin.firestore.FieldValue.delete(),
+                  pendingCashPayment: admin.firestore.FieldValue.delete(),
+                  pendingRatingComment: admin.firestore.FieldValue.delete(),
+                  currentMode: 'assistant',
+                  currentIntent: null,
+                  updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                }, { merge: true });
                 await reply(`Payment confirmed. Receipt ${result.receiptId || 'recorded'}.`);
               } else if (result.action === 'failed') {
-                await offerAlternativePaymentPrompt({
-                  requestId: pending.requestId,
-                  introMessage: result.walletDebtApplied
-                    ? `Your saved-card payment failed, so R${formatWholeRandDisplay(result.amount)} ZAR has been deducted from your wallet.`
-                    : 'Your saved-card payment failed.',
-                  bodyText: context.isCanceled
-                    ? 'Saved-card payment failed and the amount was deducted from your wallet. Please pay with a new card:'
-                    : 'Saved-card payment failed and the amount was deducted from your wallet. Choose Pay with Cash or Pay with Card:',
-                });
+                await db.collection('serviceRequests').doc(pending.requestId).set({
+                  failedCardIds: admin.firestore.FieldValue.arrayUnion(selectedCardId),
+                  updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                }, { merge: true }).catch(() => null);
+                const updatedFailedIds = new Set([
+                  ...(Array.isArray(context.request?.failedCardIds) ? context.request.failedCardIds : []),
+                  selectedCardId,
+                ].map((id) => String(id || '').trim()).filter(Boolean));
+                const remainingRecoveryCards = (Array.isArray(context.cards) ? context.cards : [])
+                  .filter((item) => item && item.id && !updatedFailedIds.has(String(item.id).trim()));
+                if (!context.isCanceled && remainingRecoveryCards.length >= 0) {
+                  await conversationRef.set({
+                    pendingSavedCardPayment: admin.firestore.FieldValue.delete(),
+                    pendingCashPayment: admin.firestore.FieldValue.delete(),
+                    pendingPaymentSelection: {
+                      identityId,
+                      requestId: pending.requestId,
+                      amount: Number(context.amount || result.amount || 0),
+                      recoveryMode: true,
+                      expiresAtMs: Date.now() + 24 * 60 * 60 * 1000,
+                    },
+                    currentMode: 'payment',
+                    currentIntent: 'payment_method_selection',
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                  }, { merge: true });
+                  const refCode = String(context.request?.publicRequestReference || context.request?.requestReference || '').trim();
+                  const recoveryPrompt = formatWhatsAppCompletionCardFailureRecovery({
+                    refPrefix: refCode ? `[*${refCode}*] ` : '',
+                    serviceName: context.request?.serviceSummary || context.request?.subject || 'your Uncedo service',
+                    wholeTotalDisplay: formatWholeRandDisplay(result.amount || context.amount),
+                    failedCardSummary: { brand: card.brand, last4: card.last4 },
+                    untriedCards: remainingRecoveryCards,
+                  });
+                  await reply(recoveryPrompt.text, recoveryPrompt.interactive);
+                } else {
+                  await offerAlternativePaymentPrompt({
+                    requestId: pending.requestId,
+                    introMessage: result.walletDebtApplied
+                      ? `Your saved-card payment failed, so R${formatWholeRandDisplay(result.amount)} ZAR has been deducted from your wallet.`
+                      : 'Your saved-card payment failed.',
+                    bodyText: context.isCanceled
+                      ? 'Saved-card payment failed and the amount was deducted from your wallet. Please pay with a new card:'
+                      : 'Saved-card payment failed and the amount was deducted from your wallet. Choose Pay with Cash or Pay with Card:',
+                  });
+                }
               } else {
                 await conversationRef.set({ pendingSavedCardPayment: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
                 await reply('Paystack has not confirmed the result yet. I will not retry the charge while it is uncertain.');
@@ -10135,6 +10246,23 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           if (context.code === 'available' && Number(context.amount || 0) > 0) candidates.push(context);
         }
       }
+      if (candidates.length === 0 && conversation.currentMode === 'booking_payment_selection' && conversation.activeDraftId) {
+        const currentDraftSnap = await db.collection('serviceRequestDrafts').doc(String(conversation.activeDraftId)).get().catch(() => null);
+        const currentDraft = currentDraftSnap?.exists ? currentDraftSnap.data() || {} : null;
+        if (currentDraft && currentDraft.status === 'quoted') {
+          const preCardCtx = await resolveWhatsAppPreBookingCardContext({ identityId, identity, draft: currentDraft });
+          const { draftService, draftOption } = await buildWhatsAppDraftConfirmationPromptData({ draft: currentDraft });
+          const prompt = formatWhatsAppPreBookingPaymentPrompt({
+            service: draftService,
+            selectedOption: draftOption,
+            quote: currentDraft.quoteSnapshot || {},
+            cards: preCardCtx.cards,
+          });
+          await reply(prompt.text, prompt.interactive);
+          await jobRef.set({ status: 'completed', intent: 'prebooking_payment_prompt', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          return;
+        }
+      }
       if (candidates.length !== 1) {
         await reply(candidates.length > 1
           ? 'You have more than one unpaid request. Send “payment status request <reference>” and use the reference from your booking history, or open the request-specific payment link in the Uncedo app.'
@@ -10143,12 +10271,19 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         return;
       }
       const context = candidates[0];
+      const failedCardIds = new Set(
+        (Array.isArray(context.request?.failedCardIds) ? context.request.failedCardIds : [])
+          .map((id) => String(id || '').trim())
+          .filter(Boolean),
+      );
+      const untriedCards = (Array.isArray(context.cards) ? context.cards : [])
+        .filter((card) => card && card.id && !failedCardIds.has(String(card.id).trim()));
       const pendingPaymentSelection = { identityId, requestId: context.request.id, amount: context.amount, expiresAtMs: Date.now() + 10 * 60 * 1000 };
       await conversationRef.set({ pendingPaymentSelection, currentMode: 'payment', currentIntent: 'payment_method_selection', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       const methodButtons = [
         ...(context.isCanceled ? [] : [{ type: 'reply', reply: { id: 'wa_payment_cash', title: 'Pay with Cash' } }]),
         { type: 'reply', reply: { id: 'wa_payment_card', title: 'Pay with Card' } },
-        ...(context.cards.length ? [{ type: 'reply', reply: { id: 'wa_payment_saved', title: 'Saved card' } }] : []),
+        ...(untriedCards.length ? [{ type: 'reply', reply: { id: 'wa_payment_saved', title: 'Saved card' } }] : []),
       ];
       await reply(`Choose how to pay for request ${context.request.publicRequestReference || context.request.id}. Amount due: R${formatWholeRandDisplay(context.amount)} ZAR.`, {
         type: 'button', body: { text: context.isCanceled ? 'Cancellation fees must be paid by card.' : 'Choose Pay with Cash or Pay with Card.' }, action: { buttons: methodButtons },
@@ -10157,32 +10292,97 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       return;
     }
 
-    const pendingRating = conversation.pendingRatingComment || null;
-    if (inbound.type === 'text'
-      && pendingRating
-      && pendingRating.identityId === identityId
-      && Number(pendingRating.expiresAtMs || 0) > Date.now()
-      && commandText
-      && !command
-      && !/^(?:hi|hello|hey|book|request|cancel|status|receipt|history|menu|pay|payment|help|assistant|\/assistant|talk to helper|message helper|yes|no|back)\b/i.test(commandText)) {
-      const access = await getWhatsAppRequestForIdentity({ db, identity, requestId: pendingRating.requestId });
-      if (access.code === 'found') {
-        await submitServiceRequestRating({
-          db,
-          admin,
-          requestId: access.request.id,
-          raterUserId: String(access.request.customerId || ''),
-          score: pendingRating.score,
-          comment: commandText,
-        }).catch(() => null);
+    const pendingRatingPrompt = conversation.pendingRatingPrompt || null;
+    const hasLegacyPendingRatingComment = Boolean(conversation.pendingRatingComment);
+    if (hasLegacyPendingRatingComment || pendingRatingPrompt) {
+      const quickRatingMatch = inbound.type === 'text'
+        && pendingRatingPrompt
+        && pendingRatingPrompt.identityId === identityId
+        && Number(pendingRatingPrompt.expiresAtMs || 0) > Date.now()
+        && !conversation.activeDraftId
+        && !conversation.pendingCashPayment
+        && !conversation.pendingPaymentSelection
+        && !conversation.pendingSavedCardPayment
+        && !['active_booking', 'provider_relay', 'booking_intake', 'booking_payment_selection', 'quote_pending'].includes(String(conversation.currentMode || '').toLowerCase())
+        ? commandText.match(/^([1-5])(?:\s*(?:stars?|\/\s*5))?$/i)
+        : null;
+      if (quickRatingMatch) {
+        const quickScore = Number(quickRatingMatch[1]);
+        const access = await getWhatsAppRequestForIdentity({ db, identity, requestId: pendingRatingPrompt.requestId });
+        if (access.code === 'found' && isServiceRequestEligibleForRating(access.request || {}) && !access.request?.ratings?.customer && !access.request?.customerRatedHelper) {
+          const targetRequest = access.request || {};
+          const helperName = String(targetRequest.helperAssignment?.helperName || pendingRatingPrompt.helperName || 'your helper').trim();
+          try {
+            const ratingResult = await submitServiceRequestRating({
+              db,
+              admin,
+              requestId: targetRequest.id,
+              raterUserId: String(targetRequest.customerId || ''),
+              score: quickScore,
+              comment: '',
+            });
+            await recalculateMembership({
+              db,
+              admin,
+              userId: ratingResult.ratedUserId,
+              accountType: ACCOUNT_TYPES.HELPER,
+            }).catch(() => null);
+            for (const serviceId of ratingResult.expandedServiceIds || []) {
+              await recalculateMastery({ db, admin, helperId: ratingResult.ratedUserId, serviceId }).catch(() => null);
+            }
+            for (const optionTarget of ratingResult.serviceOptions || []) {
+              await recalculateServiceOptionMastery({
+                db,
+                admin,
+                helperId: ratingResult.ratedUserId,
+                serviceId: optionTarget.serviceId,
+                optionId: optionTarget.optionId,
+                optionTitle: optionTarget.optionTitle,
+                masteryKey: optionTarget.masteryKey,
+              }).catch(() => null);
+            }
+            await conversationRef.set({
+              pendingRatingPrompt: admin.firestore.FieldValue.delete(),
+              pendingRatingComment: admin.firestore.FieldValue.delete(),
+              ...(String(conversation.currentMode || '').toLowerCase() === 'payment'
+                ? { currentMode: 'assistant', currentIntent: null }
+                : {}),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            }, { merge: true });
+            await reply(`Thank you for rating *${helperName}* ${quickScore}/5! Feel free to message anytime when you need help or want to book again.`);
+            await jobRef.set({ status: 'completed', intent: 'customer_rating', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            return;
+          } catch (_) {
+            // Fall through after clearing stale rating state so optional rating never blocks the user.
+          }
+        }
       }
+      const shouldNormalizeStalePaymentMode = String(conversation.currentMode || '').toLowerCase() === 'payment'
+        && !conversation.pendingCashPayment
+        && !conversation.pendingPaymentSelection
+        && !conversation.pendingSavedCardPayment;
       await conversationRef.set({
         pendingRatingComment: admin.firestore.FieldValue.delete(),
+        pendingRatingPrompt: admin.firestore.FieldValue.delete(),
+        ...(shouldNormalizeStalePaymentMode ? { currentMode: 'assistant', currentIntent: null } : {}),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      }, { merge: true });
-      await reply(`Thank you! Your comment has been added to your ${pendingRating.score}/5 rating for *${pendingRating.helperName || 'your helper'}*.`);
-      await jobRef.set({ status: 'completed', intent: 'customer_rating_comment', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-      return;
+      }, { merge: true }).catch(() => null);
+      conversation = {
+        ...conversation,
+        pendingRatingComment: null,
+        pendingRatingPrompt: null,
+        ...(shouldNormalizeStalePaymentMode ? { currentMode: 'assistant', currentIntent: null } : {}),
+      };
+    } else if (String(conversation.currentMode || '').toLowerCase() === 'payment'
+      && !conversation.pendingCashPayment
+      && !conversation.pendingPaymentSelection
+      && !conversation.pendingSavedCardPayment) {
+      await conversationRef.set({
+        currentMode: 'assistant',
+        currentIntent: null,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true }).catch(() => null);
+      conversation = { ...conversation, currentMode: 'assistant', currentIntent: null };
     }
 
     const relayCommand = inbound.type === 'text'
@@ -10266,19 +10466,269 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       await jobRef.set({ status: 'completed', intent: 'ai_consent_declined', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
     }
+    const activeDraftPaymentState = String(activeDraft?.paymentSelectionStatus || '').trim().toLowerCase();
+    const typedPreBookingChoice = inbound.type === 'text'
+      && activeDraft?.status === 'quoted'
+      && ['pending', 'awaiting_card_setup'].includes(activeDraftPaymentState)
+      ? (() => {
+          const t = String(inbound.text || '').trim().toLowerCase();
+          if (/^(?:cash|pay cash|pay with cash|use cash)$/i.test(t)) return 'wa_book_pay_cash';
+          if (/^(?:add new card|new card|card|pay by card|pay with card)$/i.test(t)) return 'wa_book_pay_card';
+          if (/^(?:saved card|use saved card|existing card)$/i.test(t)) return 'wa_book_pay_saved';
+          return '';
+        })()
+      : '';
+    const effectivePreBookingActionId = buttonId || typedPreBookingChoice;
+    const preBookingSavedCardMatch = effectivePreBookingActionId.match(/^wa_book_saved_card_([A-Za-z0-9_-]{1,128})$/);
+    if (['wa_book_pay_saved', 'wa_book_pay_card', 'wa_book_add_new_card', 'wa_book_pay_cash'].includes(effectivePreBookingActionId) || preBookingSavedCardMatch) {
+      if (!activeDraft || !activeDraftRef || !['quoted', 'collecting'].includes(String(activeDraft.status || '').toLowerCase())) {
+        await reply('There is no active service quotation right now. Tell me which service you want to book.');
+        await jobRef.set({ status: 'completed', intent: 'prebooking_payment_no_draft', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      if (effectivePreBookingActionId === 'wa_book_pay_saved') {
+        const cardCtx = await resolveWhatsAppPreBookingCardContext({ identityId, identity, draft: activeDraft });
+        if (cardCtx.cards.length > 0) {
+          const menu = formatWhatsAppPreBookingSavedCardMenu({
+            service: { label: activeDraft.selectedOptionTitle || activeDraft.serviceId || 'Uncedo service' },
+            quote: activeDraft.quoteSnapshot || {},
+            cards: cardCtx.cards,
+          });
+          await reply(menu.text, menu.interactive);
+        } else {
+          const prompt = formatWhatsAppPreBookingPaymentPrompt({
+            service: { label: activeDraft.serviceId || 'Selected service' },
+            selectedOption: activeDraft.selectedOptionTitle ? { title: activeDraft.selectedOptionTitle } : null,
+            quote: activeDraft.quoteSnapshot || {},
+            cards: [],
+          });
+          await reply(prompt.text, prompt.interactive);
+        }
+        await jobRef.set({ status: 'completed', intent: 'prebooking_saved_card_menu', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      if (effectivePreBookingActionId === 'wa_book_pay_card' || effectivePreBookingActionId === 'wa_book_add_new_card') {
+        const { draftService, draftOption } = await buildWhatsAppDraftConfirmationPromptData({ draft: activeDraft });
+        const setupSession = await createPreBookingCardSetupSession({
+          identityId,
+          identity,
+          draftRef: activeDraftRef,
+          draft: activeDraft,
+          serviceLabel: draftService.label || activeDraft.serviceId || 'Uncedo service',
+          selectedOptionTitle: draftOption?.title || activeDraft.selectedOptionTitle || '',
+        });
+        await Promise.all([
+          activeDraftRef.set({
+            paymentSelectionStatus: 'awaiting_card_setup',
+            preSelectedPaymentType: null,
+            preSelectedCardMode: null,
+            preSelectedCardId: null,
+            preSelectedCardSummary: null,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true }),
+          conversationRef.set({
+            currentMode: 'booking_payment_selection',
+            currentIntent: 'service_booking',
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true }),
+        ]);
+        const emailNote = setupSession.requiresEmail
+          ? ' Because your profile does not have a billing email yet, the page will ask for your email once and save it for future use.'
+          : '';
+        await reply(
+          `💳 *Add your card for this booking*\n\nOpen this secure Uncedo link to verify your card with Paystack:\n${setupSession.url}\n\nPaystack runs a temporary *R1.00* check only to confirm your card exists and is valid — the R1.00 is *refunded immediately* back to your card.${emailNote}\n\nYour service is not booked yet until you tap *Confirm* after your card is verified. The link expires in 30 minutes.`,
+        );
+        await jobRef.set({ status: 'completed', intent: 'prebooking_card_setup_link', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      if (effectivePreBookingActionId === 'wa_book_pay_cash') {
+        const requestId = String(activeDraft.requestId || '').trim();
+        await Promise.all([
+          activeDraftRef.set({
+            status: 'quoted',
+            paymentSelectionStatus: 'selected',
+            preSelectedPaymentType: 'cash',
+            preSelectedCardMode: null,
+            preSelectedCardId: null,
+            preSelectedCardSummary: null,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true }),
+          requestId ? db.collection('serviceRequests').doc(requestId).set({
+            preSelectedPaymentType: 'cash',
+            preSelectedCardMode: null,
+            preSelectedCardId: null,
+            preSelectedCardSummary: null,
+            selectedCardId: null,
+            requestPayload: {
+              preSelectedPaymentType: 'cash',
+              preSelectedCardMode: null,
+              preSelectedCardId: null,
+              preSelectedCardSummary: null,
+              selectedCardId: null,
+            },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true }) : Promise.resolve(),
+          conversationRef.set({
+            currentMode: 'quote_pending',
+            currentIntent: 'service_booking',
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true }),
+        ]);
+        if (requestId) await deleteTemporaryRequestPaymentAuthorization({ db, requestId }).catch(() => null);
+        const updatedDraft = {
+          ...activeDraft,
+          status: 'quoted',
+          paymentSelectionStatus: 'selected',
+          preSelectedPaymentType: 'cash',
+          preSelectedCardMode: null,
+          preSelectedCardId: null,
+          preSelectedCardSummary: null,
+        };
+        const { confirmation } = await buildWhatsAppDraftConfirmationPromptData({
+          draft: updatedDraft,
+          paymentSelection: { type: 'cash' },
+        });
+        await reply(confirmation.text, {
+          type: 'button',
+          body: { text: confirmation.buttonBody },
+          action: {
+            buttons: [
+              { type: 'reply', reply: { id: 'wa_draft_confirm', title: 'Confirm' } },
+              { type: 'reply', reply: { id: 'wa_draft_edit', title: 'Edit details' } },
+            ],
+          },
+        });
+        await jobRef.set({ status: 'completed', intent: 'prebooking_cash_selected', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      if (preBookingSavedCardMatch) {
+        const chosenCardId = preBookingSavedCardMatch[1];
+        const cardCtx = await resolveWhatsAppPreBookingCardContext({ identityId, identity, draft: activeDraft });
+        const chosenCard = cardCtx.cards.find((item) => item.id === chosenCardId);
+        if (!chosenCard) {
+          const prompt = formatWhatsAppPreBookingPaymentPrompt({
+            service: { label: activeDraft.serviceId || 'Selected service' },
+            selectedOption: activeDraft.selectedOptionTitle ? { title: activeDraft.selectedOptionTitle } : null,
+            quote: activeDraft.quoteSnapshot || {},
+            cards: cardCtx.cards,
+          });
+          await reply('That saved card is no longer available on your profile. Please choose another payment option below.', prompt.interactive);
+          await jobRef.set({ status: 'completed', intent: 'prebooking_saved_card_missing', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          return;
+        }
+        const requestId = String(activeDraft.requestId || '').trim();
+        const cardSummary = { brand: chosenCard.brand, last4: chosenCard.last4, temporary: false };
+        await Promise.all([
+          activeDraftRef.set({
+            status: 'quoted',
+            paymentSelectionStatus: 'selected',
+            preSelectedPaymentType: 'card',
+            preSelectedCardMode: 'saved_card',
+            preSelectedCardId: chosenCard.id,
+            preSelectedCardSummary: cardSummary,
+            ...(chosenCard.payerEmail ? { customerEmail: chosenCard.payerEmail } : {}),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true }),
+          requestId ? db.collection('serviceRequests').doc(requestId).set({
+            preSelectedPaymentType: 'card',
+            preSelectedCardMode: 'saved_card',
+            preSelectedCardId: chosenCard.id,
+            preSelectedCardSummary: cardSummary,
+            selectedCardId: chosenCard.id,
+            ...(chosenCard.payerEmail ? { customerEmail: chosenCard.payerEmail } : {}),
+            requestPayload: {
+              preSelectedPaymentType: 'card',
+              preSelectedCardMode: 'saved_card',
+              preSelectedCardId: chosenCard.id,
+              preSelectedCardSummary: cardSummary,
+              selectedCardId: chosenCard.id,
+            },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true }) : Promise.resolve(),
+          conversationRef.set({
+            currentMode: 'quote_pending',
+            currentIntent: 'service_booking',
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true }),
+        ]);
+        if (requestId) await deleteTemporaryRequestPaymentAuthorization({ db, requestId }).catch(() => null);
+        const updatedDraft = {
+          ...activeDraft,
+          status: 'quoted',
+          paymentSelectionStatus: 'selected',
+          preSelectedPaymentType: 'card',
+          preSelectedCardMode: 'saved_card',
+          preSelectedCardId: chosenCard.id,
+          preSelectedCardSummary: cardSummary,
+        };
+        const { confirmation } = await buildWhatsAppDraftConfirmationPromptData({
+          draft: updatedDraft,
+          paymentSelection: { type: 'card', cardSummary },
+        });
+        await reply(confirmation.text, {
+          type: 'button',
+          body: { text: confirmation.buttonBody },
+          action: {
+            buttons: [
+              { type: 'reply', reply: { id: 'wa_draft_confirm', title: 'Confirm' } },
+              { type: 'reply', reply: { id: 'wa_draft_edit', title: 'Edit details' } },
+            ],
+          },
+        });
+        await jobRef.set({ status: 'completed', intent: 'prebooking_saved_card_selected', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+    }
+
     if (buttonId === 'wa_draft_edit') {
       if (!activeDraft || !activeDraftRef) {
         await reply('There is no active quotation to edit. Tell me which service you need.');
       } else {
-        await activeDraftRef.set({ status: 'collecting', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        if (activeDraft.requestId) {
+          await deleteTemporaryRequestPaymentAuthorization({ db, requestId: String(activeDraft.requestId) }).catch(() => null);
+        }
+        await Promise.all([
+          activeDraftRef.set({
+            status: 'collecting',
+            paymentSelectionStatus: null,
+            preSelectedPaymentType: null,
+            preSelectedCardMode: null,
+            preSelectedCardId: null,
+            preSelectedCardSummary: null,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true }),
+          conversationRef.set({
+            currentMode: 'booking_intake',
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true }),
+        ]);
         await reply('Tell me what you would like to change, and I will update the service details.');
       }
       await jobRef.set({ status: 'completed', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       return;
     }
-    if (buttonId === 'wa_draft_confirm' || (activeDraft?.status === 'quoted' && /^(yes|confirm|confirm booking|book it)$/i.test(String(inbound.text || '').trim()))) {
+    const draftConfirmTyped = inbound.type === 'text'
+      && activeDraft?.status === 'quoted'
+      && activeDraft?.paymentSelectionStatus === 'selected'
+      && /^(yes|confirm|confirm booking|book it)$/i.test(String(inbound.text || '').trim());
+    if (buttonId === 'wa_draft_confirm' || draftConfirmTyped) {
       if (!activeDraft || !activeDraftRef) {
         await reply('I could not find the current quotation. Please tell me which service you want to book.');
+      } else if (activeDraft.paymentSelectionStatus !== 'selected' || !activeDraft.preSelectedPaymentType) {
+        const cardCtx = await resolveWhatsAppPreBookingCardContext({ identityId, identity, draft: activeDraft });
+        const { draftService, draftOption } = await buildWhatsAppDraftConfirmationPromptData({ draft: activeDraft });
+        const paymentPrompt = formatWhatsAppPreBookingPaymentPrompt({
+          service: draftService,
+          selectedOption: draftOption,
+          quote: activeDraft.quoteSnapshot || {},
+          cards: cardCtx.cards,
+        });
+        await conversationRef.set({
+          currentMode: 'booking_payment_selection',
+          currentIntent: 'service_booking',
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        await reply(paymentPrompt.text, paymentPrompt.interactive);
       } else {
         const confirmation = await confirmWhatsAppServiceDraft({ identityId, identity, conversationRef, draftRef: activeDraftRef });
         if (confirmation.code === 'confirmed' || confirmation.code === 'already-confirmed') {
@@ -10313,10 +10763,12 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           await reply(confirmedSummaryMessage);
         } else if (confirmation.code === 'quote-changed') {
           const quote = confirmation.quote || {};
-          const currentQuoteText = `R${Number(quote.total || 0).toFixed(2)} ${quote.currency || 'ZAR'}`;
-          await reply(`The service details or quote have changed. The current quote is *${currentQuoteText}*. Please review it and confirm again.`, {
+          const { confirmation: updatedConfirm } = await buildWhatsAppDraftConfirmationPromptData({
+            draft: { ...activeDraft, quoteSnapshot: quote },
+          });
+          await reply(`The service details or quote have changed. Please review the updated quote and confirm again.\n\n${updatedConfirm.text}`, {
             type: 'button',
-            body: { text: `*Current quote: ${currentQuoteText}*\nConfirm to submit this request or edit the details.` },
+            body: { text: updatedConfirm.buttonBody },
             action: { buttons: [
               { type: 'reply', reply: { id: 'wa_draft_confirm', title: 'Confirm' } },
               { type: 'reply', reply: { id: 'wa_draft_edit', title: 'Edit details' } },
@@ -11697,6 +12149,9 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     const currentMediaAssetId = String(inbound.media?.assetId || '').trim();
     const currentMediaAssetRef = currentMediaAssetId ? db.collection('whatsappMediaAssets').doc(currentMediaAssetId) : null;
 
+    if (activeDraft?.serviceId && activeDraft.serviceId !== service.id && activeDraft.requestId) {
+      await deleteTemporaryRequestPaymentAuthorization({ db, requestId: String(activeDraft.requestId) }).catch(() => null);
+    }
     if (serviceHasOptions && !selectedOption) {
       await db.runTransaction(async (transaction) => {
         transaction.set(draftRef, {
@@ -11711,6 +12166,13 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           selectedOptionId: '',
           selectedOptionTitle: '',
           awaitingServiceOption: true,
+          ...(activeDraft?.serviceId !== service.id ? {
+            paymentSelectionStatus: null,
+            preSelectedPaymentType: null,
+            preSelectedCardMode: null,
+            preSelectedCardId: null,
+            preSelectedCardSummary: null,
+          } : {}),
           requestId: activeDraft?.serviceId === service.id ? String(activeDraft.requestId || '').trim() || null : null,
           structuredAnswers: activeDraft?.serviceId === service.id ? (activeDraft.structuredAnswers || {}) : {},
           ...(currentMediaAssetId ? { mediaAssetIds: admin.firestore.FieldValue.arrayUnion(currentMediaAssetId) } : {}),
@@ -12047,6 +12509,20 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       bookingConfirmation = formatWhatsAppBookingConfirmation({ service, selectedOption, questions: applicableQuestions, answers: validation.answers, quote });
       replyText = bookingConfirmation.text;
     }
+    let preBookingPaymentPrompt = null;
+    if (isBooking) {
+      const preBookingCardCtx = await resolveWhatsAppPreBookingCardContext({
+        identityId,
+        identity,
+        draft: activeDraft || {},
+      }).catch(() => ({ cards: [] }));
+      preBookingPaymentPrompt = formatWhatsAppPreBookingPaymentPrompt({
+        service,
+        selectedOption,
+        quote,
+        cards: preBookingCardCtx.cards || [],
+      });
+    }
     await db.runTransaction(async (transaction) => {
       transaction.set(draftRef, {
         identityId,
@@ -12062,6 +12538,13 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         awaitingServiceOption: false,
         requestId: canonicalRequestId || null,
         structuredAnswers: structuredAnswersUpdate,
+        ...(isBooking ? {
+          paymentSelectionStatus: 'pending',
+          preSelectedPaymentType: null,
+          preSelectedCardMode: null,
+          preSelectedCardId: null,
+          preSelectedCardSummary: null,
+        } : {}),
         ...(currentMediaAssetId ? { mediaAssetIds: admin.firestore.FieldValue.arrayUnion(currentMediaAssetId) } : {}),
         missingQuestionIds: [],
         locationPinRequired: false,
@@ -12079,22 +12562,15 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         associatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
       transaction.set(conversationRef, {
-        currentMode: isBooking ? 'quote_pending' : 'public_information',
+        currentMode: isBooking ? 'booking_payment_selection' : 'public_information',
         currentIntent: intentResult.intent,
         activeDraftId: draftId,
         ...(isBooking ? { pendingServiceLocation: admin.firestore.FieldValue.delete() } : {}),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
     });
-    if (isBooking) {
-      await reply(replyText, {
-        type: 'button',
-        body: { text: bookingConfirmation.buttonBody },
-        action: { buttons: [
-          { type: 'reply', reply: { id: 'wa_draft_confirm', title: 'Confirm' } },
-          { type: 'reply', reply: { id: 'wa_draft_edit', title: 'Edit details' } },
-        ] },
-      });
+    if (isBooking && preBookingPaymentPrompt) {
+      await reply(preBookingPaymentPrompt.text, preBookingPaymentPrompt.interactive);
     } else {
       await reply(replyText);
     }
@@ -13183,6 +13659,7 @@ exports.expireServiceRequestOnNoHelperAvailable = onTaskDispatched({
 
   if (expiredRequestData) {
     logger.info('service_request_expired_due_to_no_helper', { requestId });
+    await deleteTemporaryRequestPaymentAuthorization({ db, requestId }).catch(() => null);
     await sendWhatsAppCustomerRequestExpiredNotification({ requestId, request: expiredRequestData })
       .catch((err) => logger.warn('whatsapp_expiry_notify_error', { requestId, error: err?.message }));
 
@@ -17502,17 +17979,124 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
     }
 
     const totalDueAmount = Number(after.pricingSnapshot?.cashChargeAmount ?? after.totalAmount ?? after.pricingSnapshot?.finalAmount ?? after.pricingSnapshot?.total ?? 0);
-    const shouldSendCompletedPaymentPrompt = inServiceWindow
+    const preSelectedType = String(after.preSelectedPaymentType || after.requestPayload?.preSelectedPaymentType || '').trim().toLowerCase();
+    const shouldCheckCompletedUnpaid = inServiceWindow
       && recipient.eventRole === 'customer'
       && beforeStatus !== status
       && status === 'completed'
       && afterPaymentStatus === 'unpaid'
       && totalDueAmount > 0;
+    const isPreCashCompletion = shouldCheckCompletedUnpaid && preSelectedType === 'cash';
+    const shouldSendCardRecoveryPrompt = inServiceWindow
+      && recipient.eventRole === 'customer'
+      && status === 'completed'
+      && ['wallet_debt_recorded', 'payment_failed'].includes(afterPaymentStatus)
+      && (beforeStatus !== status || paymentChanged)
+      && totalDueAmount > 0;
 
+    let preCashAttemptId = '';
+    let preCashInteractive = null;
+    let effectiveMessageBody = messageBody;
+    let shouldSendPreCashPrompt = false;
+    let cardRecoveryInteractive = null;
+
+    if (isPreCashCompletion) {
+      const cashCustomerId = String(after.customerId || '').trim();
+      const cashPrincipalId = String(identity.linkedFirebaseUid || identity.guestPrincipalId || cashCustomerId).trim();
+      const preCashSession = cashCustomerId && cashPrincipalId
+        ? await createServicePaymentSession({
+            db,
+            requestId,
+            customerId: cashCustomerId,
+            principalId: cashPrincipalId,
+            principalType: identity.linkedFirebaseUid ? 'firebase_uid' : 'whatsapp_guest',
+            expiresInMs: 24 * 60 * 60 * 1000,
+          }).catch(() => null)
+        : null;
+      const resolvedPreCash = preCashSession?.code === 'created'
+        ? await resolveServicePaymentSession({ db, token: preCashSession.token }).catch(() => null)
+        : null;
+      const begunPreCash = resolvedPreCash?.code === 'available'
+        ? await beginServicePaymentAttempt({
+            db,
+            admin,
+            sessionRef: resolvedPreCash.sessionRef,
+            session: resolvedPreCash.session,
+            method: 'cash',
+            idempotencyKey: `wa-precash:${requestId}`,
+          }).catch(() => null)
+        : null;
+      if (begunPreCash && ['created', 'existing'].includes(begunPreCash.action) && begunPreCash.attempt?.attemptId) {
+        preCashAttemptId = String(begunPreCash.attempt.attemptId);
+        shouldSendPreCashPrompt = true;
+        const serviceName = String(after.serviceSummary || after.subject || 'your Uncedo service').trim();
+        const helperName = String(after.helperAssignment?.helperName || 'your helper').trim() || 'your helper';
+        const refCode = String(after.publicRequestReference || after.requestReference || '').trim();
+        const refPrefix = refCode ? `[*${refCode}*] ` : '';
+        const wholeTotalDisplay = formatWholeRandDisplay(totalDueAmount);
+        effectiveMessageBody = `${refPrefix}🎉 Your *${serviceName}* service with *${helperName}* is complete!\n\nHave you paid *${helperName}* *R${wholeTotalDisplay} ZAR* in cash?`;
+        preCashInteractive = {
+          type: 'button',
+          body: { text: formatWhatsAppText(effectiveMessageBody).slice(0, 1024) },
+          action: {
+            buttons: [
+              { type: 'reply', reply: { id: `wa_cash_paid_${preCashAttemptId}`, title: 'I have paid' } },
+              { type: 'reply', reply: { id: 'wa_cash_switch_card', title: 'Pay by card instead' } },
+            ],
+          },
+        };
+      }
+    }
+
+    if (shouldSendCardRecoveryPrompt) {
+      const recoveryCustomerId = String(after.customerId || '').trim();
+      const recoveryOwnerUid = String(identity.linkedFirebaseUid || '').trim();
+      const { billingOwner, methods: linkedCards } = recoveryCustomerId
+        ? await getBillingMethodsForCustomer({ customerId: recoveryCustomerId, preferredUid: recoveryOwnerUid }).catch(() => ({ billingOwner: { targetUid: recoveryOwnerUid }, methods: [] }))
+        : { billingOwner: { targetUid: '' }, methods: [] };
+      const ownerDocUid = String(billingOwner?.targetUid || recoveryOwnerUid || recoveryCustomerId).trim();
+      const ownerSnap = ownerDocUid ? await db.collection('users').doc(ownerDocUid).get().catch(() => null) : null;
+      const fallbackEmail = isValidCustomerEmail(ownerSnap?.data()?.email || identity.email || after.customerEmail);
+      const eligibleCards = (Array.isArray(linkedCards) ? linkedCards : [])
+        .filter((card) => card?.reusable === true && String(card.paystackAuthorizationCode || '').trim() && Boolean(isValidCustomerEmail(card.payerEmail || fallbackEmail)))
+        .map((card) => ({
+          id: String(card.id || ''),
+          brand: String(card.brand || 'Card').slice(0, 40),
+          last4: String(card.last4 || '').slice(-4),
+          isDefault: card.isDefault === true,
+        }))
+        .filter((card) => card.id);
+      const preSelectedCardId = String(after.preSelectedCardId || after.requestPayload?.preSelectedCardId || '').trim();
+      const failedIds = new Set(
+        [
+          ...(Array.isArray(after.failedCardIds) ? after.failedCardIds : []),
+          ...(preSelectedCardId && preSelectedCardId !== 'request_temp' ? [preSelectedCardId] : []),
+        ]
+          .map((id) => String(id || '').trim())
+          .filter(Boolean),
+      );
+      const untriedCards = eligibleCards.filter((card) => !failedIds.has(card.id));
+      const matchedFailedCard = preSelectedCardId && preSelectedCardId !== 'request_temp'
+        ? eligibleCards.find((card) => card.id === preSelectedCardId)
+        : null;
+      const failedCardSummary = after.preSelectedCardSummary || after.requestPayload?.preSelectedCardSummary || matchedFailedCard || null;
+      const refCode = String(after.publicRequestReference || after.requestReference || '').trim();
+      const recoveryPrompt = formatWhatsAppCompletionCardFailureRecovery({
+        refPrefix: refCode ? `[*${refCode}*] ` : '',
+        serviceName: String(after.serviceSummary || after.subject || 'your Uncedo service').trim(),
+        wholeTotalDisplay: formatWholeRandDisplay(totalDueAmount),
+        failedCardSummary,
+        untriedCards,
+      });
+      effectiveMessageBody = recoveryPrompt.text;
+      cardRecoveryInteractive = recoveryPrompt.interactive;
+    }
+
+    const shouldSendCompletedPaymentPrompt = shouldCheckCompletedUnpaid && !isPreCashCompletion;
     const completedPaymentInteractive = shouldSendCompletedPaymentPrompt ? {
       type: 'button',
       body: {
-        text: formatWhatsAppText(messageBody).slice(0, 1024),
+        text: formatWhatsAppText(effectiveMessageBody).slice(0, 1024),
       },
       action: {
         buttons: [
@@ -17531,34 +18115,49 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
       && afterPaymentStatus === 'not_applicable';
     const shouldPromptCustomerRating = inServiceWindow
       && !shouldSendCompletedPaymentPrompt
+      && !shouldSendPreCashPrompt
+      && !shouldSendCardRecoveryPrompt
       && recipient.eventRole === 'customer'
       && ratingEligible
       && (ratingPaymentReady || ratingCancelZeroFeeReady)
       && Boolean(after.helperAssignment?.helperId)
       && !after.ratings?.customer
       && !after.customerRatedHelper;
-    const ratingInteractive = shouldPromptCustomerRating ? {
+    const sendRatingAfterInvoice = isNewlyPaidForCustomer && shouldPromptCustomerRating && inServiceWindow;
+    const ratingHelperName = String(after.helperAssignment?.helperName || 'your helper').trim() || 'your helper';
+    const buildRatingListAction = () => ({
+      button: 'Rate helper',
+      sections: [
+        {
+          title: 'Rate your helper',
+          rows: [
+            { id: `wa_rate_${requestId}_5`, title: '5 Stars - Excellent', description: 'Outstanding service' },
+            { id: `wa_rate_${requestId}_4`, title: '4 Stars - Good', description: 'Great experience' },
+            { id: `wa_rate_${requestId}_3`, title: '3 Stars - Okay', description: 'Satisfactory service' },
+            { id: `wa_rate_${requestId}_2`, title: '2 Stars - Fair', description: 'Needs improvement' },
+            { id: `wa_rate_${requestId}_1`, title: '1 Star - Poor', description: 'Unsatisfactory experience' },
+          ],
+        },
+      ],
+    });
+    const ratingInteractive = (!isNewlyPaidForCustomer && shouldPromptCustomerRating) ? {
       type: 'list',
       body: {
-        text: formatWhatsAppText(`${messageBody}\n\nHow was your experience with *${String(after.helperAssignment?.helperName || 'your helper').trim() || 'your helper'}*? Tap *Rate helper* below to rate (1–5 stars).`).slice(0, 1000),
+        text: formatWhatsAppText(`${effectiveMessageBody}\n\nHow was your experience with *${ratingHelperName}*? Tap *Rate helper* below to rate (1–5 stars). Rating is optional — you can ignore this and message us anytime.`).slice(0, 1000),
       },
-      action: {
-        button: 'Rate helper',
-        sections: [
-          {
-            title: 'Rate your helper',
-            rows: [
-              { id: `wa_rate_${requestId}_5`, title: '5 Stars - Excellent', description: 'Outstanding service' },
-              { id: `wa_rate_${requestId}_4`, title: '4 Stars - Good', description: 'Great experience' },
-              { id: `wa_rate_${requestId}_3`, title: '3 Stars - Okay', description: 'Satisfactory service' },
-              { id: `wa_rate_${requestId}_2`, title: '2 Stars - Fair', description: 'Needs improvement' },
-              { id: `wa_rate_${requestId}_1`, title: '1 Star - Poor', description: 'Unsatisfactory experience' },
-            ],
-          },
-        ],
-      },
+      action: buildRatingListAction(),
     } : null;
-    const interactivePayload = completedPaymentInteractive || ratingInteractive;
+    const postInvoiceRatingBody = sendRatingAfterInvoice
+      ? formatWhatsAppText(`How was your experience with *${ratingHelperName}*?\n\nTap *Rate helper* below to rate (1–5 stars). Rating is optional — you can ignore this and message us anytime.`).slice(0, 1000)
+      : '';
+    const postInvoiceRatingInteractive = sendRatingAfterInvoice ? {
+      type: 'list',
+      body: {
+        text: postInvoiceRatingBody,
+      },
+      action: buildRatingListAction(),
+    } : null;
+    const interactivePayload = preCashInteractive || cardRecoveryInteractive || completedPaymentInteractive || ratingInteractive;
     const sendMode = inServiceWindow ? (interactivePayload ? 'interactive' : 'text') : 'template';
 
     const notificationId = stableEventId(`lifecycle:${requestId}:${eventKey}:${recipient.identityId}`);
@@ -17571,7 +18170,7 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
       transaction.create(outboundRef, {
         eventId: notificationId, identityId: recipient.identityId, requestId, phoneNumberId: secrets.phoneNumberId,
         to: identity.waId, direction: 'outbound', type: sendMode, status: 'sending',
-        ...(sendMode === 'template' ? { templateName } : { text: messageBody }),
+        ...(sendMode === 'template' ? { templateName } : { text: effectiveMessageBody }),
         createdAtMs: Date.now(),
         retentionExpiresAtMs: Date.now() + whatsappRetentionDays('WHATSAPP_MESSAGE_RETENTION_DAYS', 180) * 24 * 60 * 60 * 1000,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -17583,12 +18182,12 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
       const delivery = sendMode === 'interactive' && interactivePayload
         ? await client.sendInteractive({ to: identity.waId, interactive: interactivePayload, lastInboundAtMs })
         : sendMode === 'text'
-          ? await client.sendText({ to: identity.waId, text: messageBody, lastInboundAtMs })
+          ? await client.sendText({ to: identity.waId, text: effectiveMessageBody, lastInboundAtMs })
           : await client.sendTemplate({
               to: identity.waId, name: templateName, languageCode,
               components: buildServiceUpdateTemplateComponents({
                 service: String(after.serviceSummary || after.subject || 'Uncedo service').slice(0, 180),
-                update: String(messageBody || eventConfig.description).slice(0, 240),
+                update: String(effectiveMessageBody || eventConfig.description).slice(0, 240),
               }),
             });
       await outboundRef.set({ status: 'sent', metaMessageId: delivery.messageId || null, sentAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
@@ -17611,33 +18210,154 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
           });
         });
       }
-      if (sendMode !== 'template') {
+      let sentPostInvoiceRating = false;
+      if (sendRatingAfterInvoice && postInvoiceRatingInteractive) {
+        const ratingNotificationId = stableEventId(`lifecycle:${requestId}:${eventKey}:${recipient.identityId}:rating`);
+        const ratingOutboundRef = db.collection('whatsappMessages').doc(ratingNotificationId);
+        const ratingClaimed = await db.runTransaction(async (transaction) => {
+          const [ratingSnap, currentRequestSnap] = await Promise.all([
+            transaction.get(ratingOutboundRef),
+            transaction.get(db.collection('serviceRequests').doc(requestId)),
+          ]);
+          if (ratingSnap.exists || !currentRequestSnap.exists) return false;
+          const current = currentRequestSnap.data() || {};
+          if (current.ratings?.customer || current.customerRatedHelper) return false;
+          transaction.create(ratingOutboundRef, {
+            eventId: ratingNotificationId,
+            identityId: recipient.identityId,
+            requestId,
+            phoneNumberId: secrets.phoneNumberId,
+            to: identity.waId,
+            direction: 'outbound',
+            type: 'interactive',
+            status: 'sending',
+            text: postInvoiceRatingBody,
+            createdAtMs: Date.now(),
+            retentionExpiresAtMs: Date.now() + whatsappRetentionDays('WHATSAPP_MESSAGE_RETENTION_DAYS', 180) * 24 * 60 * 60 * 1000,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+          return true;
+        });
+        if (ratingClaimed) {
+          try {
+            const ratingDelivery = await client.sendInteractive({
+              to: identity.waId,
+              interactive: postInvoiceRatingInteractive,
+              lastInboundAtMs,
+            });
+            sentPostInvoiceRating = true;
+            await ratingOutboundRef.set({
+              status: 'sent',
+              metaMessageId: ratingDelivery.messageId || null,
+              sentAt: admin.firestore.FieldValue.serverTimestamp(),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            }, { merge: true });
+            await reconcileWhatsAppDeliveryStatuses({
+              metaMessageId: ratingDelivery.messageId,
+              recipientId: identity.waId,
+              messageRef: ratingOutboundRef,
+            });
+          } catch (ratingSendError) {
+            const ratingDeliveryStatus = classifyMetaDeliveryError(ratingSendError);
+            await ratingOutboundRef.set({
+              status: ratingDeliveryStatus,
+              deliveryStatus: ratingDeliveryStatus,
+              errorCode: String(ratingSendError?.code || 'meta_delivery_unknown').slice(0, 100),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            }, { merge: true });
+            logger.warn('whatsapp_post_invoice_rating_delivery_failed', {
+              requestId,
+              deliveryStatus: ratingDeliveryStatus,
+              errorCode: String(ratingSendError?.code || 'unknown').slice(0, 80),
+            });
+          }
+        }
+      }
+      if (sendMode !== 'template' || (isNewlyPaidForCustomer && recipient.eventRole === 'customer')) {
         await db.runTransaction(async (transaction) => {
           const convSnap = await transaction.get(conversationRef);
           const currentConv = convSnap.exists ? convSnap.data() || {} : {};
-          const memory = appendBoundedConversationTurn({
+          const currentModeLower = String(currentConv.currentMode || '').toLowerCase();
+          const inActiveNewBooking = ['booking_intake', 'booking_payment_selection', 'quote_pending'].includes(currentModeLower);
+          let memory = {
             recentHistory: currentConv.recentHistory,
             conversationSummary: currentConv.conversationSummary || {},
-            turn: {
-              role: 'assistant',
-              text: messageBody,
-              timestampMs: Date.now(),
-            },
-          });
+          };
+          if (sendMode !== 'template') {
+            memory = appendBoundedConversationTurn({
+              recentHistory: memory.recentHistory,
+              conversationSummary: memory.conversationSummary,
+              turn: {
+                role: 'assistant',
+                text: effectiveMessageBody,
+                timestampMs: Date.now(),
+              },
+            });
+            if (sentPostInvoiceRating && postInvoiceRatingBody) {
+              memory = appendBoundedConversationTurn({
+                recentHistory: memory.recentHistory,
+                conversationSummary: memory.conversationSummary,
+                turn: {
+                  role: 'assistant',
+                  text: postInvoiceRatingBody,
+                  timestampMs: Date.now(),
+                },
+              });
+            }
+          }
+          const paidCustomerCleanup = isNewlyPaidForCustomer && recipient.eventRole === 'customer'
+            ? {
+                pendingCashPayment: admin.firestore.FieldValue.delete(),
+                pendingPaymentSelection: admin.firestore.FieldValue.delete(),
+                pendingSavedCardPayment: admin.firestore.FieldValue.delete(),
+                pendingRatingComment: admin.firestore.FieldValue.delete(),
+                ...(sentPostInvoiceRating ? {
+                  pendingRatingPrompt: {
+                    identityId: recipient.identityId,
+                    requestId,
+                    helperName: ratingHelperName,
+                    expiresAtMs: Date.now() + 24 * 60 * 60 * 1000,
+                  },
+                } : {
+                  pendingRatingPrompt: admin.firestore.FieldValue.delete(),
+                }),
+                ...(!inActiveNewBooking ? {
+                  currentMode: 'assistant',
+                  currentIntent: null,
+                } : {}),
+                ...(String(currentConv.activeServiceRequestId || '') === requestId ? {
+                  activeServiceRequestId: null,
+                } : {}),
+              }
+            : {};
           transaction.set(conversationRef, {
-            recentHistory: memory.recentHistory,
-            conversationSummary: memory.conversationSummary,
-            lastMessageAtMs: Date.now(),
-            ...(shouldSendCompletedPaymentPrompt ? {
+            ...(sendMode !== 'template' ? {
+              recentHistory: memory.recentHistory,
+              conversationSummary: memory.conversationSummary,
+              lastMessageAtMs: Date.now(),
+            } : {}),
+            ...(shouldSendPreCashPrompt ? {
+              pendingCashPayment: {
+                identityId: recipient.identityId,
+                requestId,
+                attemptId: preCashAttemptId,
+                amount: totalDueAmount,
+                expiresAtMs: Date.now() + 24 * 60 * 60 * 1000,
+              },
+              pendingPaymentSelection: admin.firestore.FieldValue.delete(),
+              currentMode: 'payment',
+              currentIntent: 'cash_payment_report',
+            } : (shouldSendCompletedPaymentPrompt || shouldSendCardRecoveryPrompt) ? {
               pendingPaymentSelection: {
                 identityId: recipient.identityId,
                 requestId,
                 amount: totalDueAmount,
+                ...(shouldSendCardRecoveryPrompt ? { recoveryMode: true } : {}),
                 expiresAtMs: Date.now() + 24 * 60 * 60 * 1000,
               },
               currentMode: 'payment',
               currentIntent: 'payment_method_selection',
-            } : {}),
+            } : paidCustomerCleanup),
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           }, { merge: true });
         }).catch(() => null);
@@ -18468,6 +19188,547 @@ async function saveReusablePaystackAuthorization({
   });
 }
 
+const PREBOOKING_CARD_SETUP_SESSIONS = 'preBookingCardSetupSessions';
+
+function hashOpaqueSetupToken(token = '') {
+  return createHash('sha256').update(String(token || '').trim()).digest('hex');
+}
+
+async function persistMissingCustomerBillingEmail({
+  email = '',
+  ownerUid = '',
+  identityId = '',
+  requestId = '',
+  draftId = '',
+} = {}) {
+  const normalizedEmail = isValidCustomerEmail(email);
+  if (!normalizedEmail) return '';
+  const ops = [];
+  const safeOwnerUid = String(ownerUid || '').trim();
+  if (safeOwnerUid) {
+    ops.push((async () => {
+      const userRef = db.collection('users').doc(safeOwnerUid);
+      const userSnap = await userRef.get().catch(() => null);
+      const existingEmail = isValidCustomerEmail(userSnap?.data()?.email);
+      if (!existingEmail) {
+        await userRef.set({
+          ...(safeOwnerUid.startsWith('guest_') && !userSnap?.exists ? {
+            uid: safeOwnerUid,
+            isGuest: true,
+            wallet: { balance: 0, currency: 'ZAR' },
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          } : {}),
+          email: normalizedEmail,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true }).catch(() => null);
+      }
+    })());
+  }
+  const safeIdentityId = String(identityId || '').trim();
+  if (safeIdentityId) {
+    ops.push((async () => {
+      const idRef = db.collection('whatsappIdentities').doc(safeIdentityId);
+      const idSnap = await idRef.get().catch(() => null);
+      if (idSnap?.exists && !isValidCustomerEmail(idSnap.data()?.email)) {
+        await idRef.set({
+          email: normalizedEmail,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true }).catch(() => null);
+      }
+    })());
+  }
+  const safeRequestId = String(requestId || '').trim();
+  if (safeRequestId) {
+    ops.push(db.collection('serviceRequests').doc(safeRequestId).set({
+      customerEmail: normalizedEmail,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true }).catch(() => null));
+  }
+  const safeDraftId = String(draftId || '').trim();
+  if (safeDraftId) {
+    ops.push(db.collection('serviceRequestDrafts').doc(safeDraftId).set({
+      customerEmail: normalizedEmail,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true }).catch(() => null));
+  }
+  await Promise.all(ops);
+  return normalizedEmail;
+}
+
+async function resolveWhatsAppPreBookingCardContext({ identityId = '', identity = {}, draft = {} } = {}) {
+  const principalId = String(draft?.principalId || identity?.linkedFirebaseUid || identity?.guestPrincipalId || '').trim();
+  const preferredUid = String(identity?.linkedFirebaseUid || '').trim();
+  const { billingOwner, methods } = principalId
+    ? await getBillingMethodsForCustomer({ customerId: principalId, preferredUid }).catch(() => ({ billingOwner: { targetUid: principalId }, methods: [] }))
+    : { billingOwner: { targetUid: '' }, methods: [] };
+  const ownerUid = String(billingOwner?.targetUid || principalId || '').trim();
+  const userSnap = ownerUid ? await db.collection('users').doc(ownerUid).get().catch(() => null) : null;
+  const userData = userSnap?.exists ? userSnap.data() || {} : {};
+  const profileEmail = isValidCustomerEmail(userData.email || identity?.email || draft?.customerEmail);
+  const cards = (Array.isArray(methods) ? methods : [])
+    .filter((card) => (
+      card?.reusable === true
+      && String(card.paystackAuthorizationCode || '').trim()
+      && Boolean(isValidCustomerEmail(card.payerEmail || profileEmail))
+    ))
+    .map((card) => ({
+      id: String(card.id || ''),
+      brand: String(card.brand || 'Card').slice(0, 40),
+      last4: String(card.last4 || '').slice(-4),
+      isDefault: card.isDefault === true,
+      payerEmail: isValidCustomerEmail(card.payerEmail || profileEmail),
+    }))
+    .filter((card) => card.id);
+  return {
+    principalId,
+    ownerUid,
+    profileEmail,
+    cards,
+  };
+}
+
+async function buildWhatsAppDraftConfirmationPromptData({ draft = {}, paymentSelection = null } = {}) {
+  const catalogEntries = await getLiveServiceCatalogEntries().catch(() => []);
+  const draftService = catalogEntries.find((item) => item.id === draft.serviceId)
+    || { id: draft.serviceId || 'service', label: draft.serviceId || 'Selected service' };
+  const draftOption = resolveSelectedServiceOption(draftService, draft.selectedOptionId)
+    || (draft.selectedOptionTitle ? { id: draft.selectedOptionId || '', title: draft.selectedOptionTitle } : null);
+  const allQuestions = catalogEntries.length
+    ? getQuestionnaireForSelection({
+        services: getWhatsAppQuestionnaireServices(draftService, catalogEntries),
+        selectedPackageId: draftService.id,
+        selectedOptionId: draftOption?.id || '',
+      })
+    : [];
+  const applicableQuestions = allQuestions.filter((question) => isQuestionApplicable(
+    question,
+    draft.structuredAnswers || {},
+    allQuestions,
+  ));
+  const resolvedSelection = paymentSelection || (draft.preSelectedPaymentType
+    ? { type: draft.preSelectedPaymentType, cardSummary: draft.preSelectedCardSummary || null }
+    : null);
+  const confirmation = formatWhatsAppBookingConfirmation({
+    service: draftService,
+    selectedOption: draftOption,
+    questions: applicableQuestions,
+    answers: draft.structuredAnswers || {},
+    quote: draft.quoteSnapshot || {},
+    paymentSelection: resolvedSelection,
+  });
+  return { draftService, draftOption, confirmation };
+}
+
+async function issueImmediateCardVerificationRefund({
+  reference,
+  userId,
+  amountMinor = 100,
+  currency = 'ZAR',
+  paystackSecretKey,
+} = {}) {
+  const safeRef = String(reference || '').trim();
+  const safeUserId = String(userId || '').trim();
+  if (!safeRef || !safeUserId || !paystackSecretKey) {
+    return { refundAccepted: false, refundStatus: 'failed', gatewayStatus: 'unavailable', reason: 'invalid_refund_input' };
+  }
+  try {
+    const refundClaim = await claimPaystackRefund({
+      db,
+      reference: safeRef,
+      userId: safeUserId,
+      amountMinor: Number(amountMinor || 100),
+      currency: String(currency || 'ZAR').toUpperCase(),
+    });
+    if (refundClaim.action === 'conflict') {
+      return { refundAccepted: false, refundStatus: 'conflict', gatewayStatus: 'conflict', reason: 'refund_claim_conflict' };
+    }
+    let gatewayStatus = String(refundClaim.operation?.gatewayStatus || '').toLowerCase();
+    if (refundClaim.action === 'submit') {
+      let refundPayload = null;
+      let refundOutcome = 'unknown';
+      let refundReason = null;
+      try {
+        const refundResponse = await fetch('https://api.paystack.co/refund', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${paystackSecretKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ transaction: safeRef }),
+          signal: AbortSignal.timeout(20_000),
+        });
+        refundPayload = await refundResponse.json().catch(() => null);
+        gatewayStatus = String(refundPayload?.data?.status || '').trim().toLowerCase();
+        if (refundResponse.ok && refundPayload?.status === true && ['processed', 'success'].includes(gatewayStatus)) {
+          refundOutcome = 'success';
+        } else if (refundResponse.ok && refundPayload?.status === true && ['pending', 'processing'].includes(gatewayStatus)) {
+          refundOutcome = 'unknown';
+          refundReason = 'Refund submitted to Paystack and processing.';
+        } else if (refundResponse.ok && refundPayload?.status === true && ['failed', 'rejected'].includes(gatewayStatus)) {
+          refundOutcome = 'failed_confirmed';
+        } else {
+          refundOutcome = 'unknown';
+          refundReason = refundPayload?.message || `Refund response status ${refundResponse.status} requires reconciliation.`;
+        }
+      } catch (refundError) {
+        refundReason = String(refundError?.code || 'refund_request_outcome_unknown').slice(0, 120);
+      }
+      await recordPaystackRefundObservation({
+        db,
+        operationRef: refundClaim.operationRef,
+        outcome: refundOutcome,
+        refund: refundPayload?.data || null,
+        reason: refundReason,
+      });
+    }
+    const snap = await refundClaim.operationRef.get();
+    const op = snap.data() || {};
+    const opStatus = String(op.status || '').toLowerCase();
+    const finalGateway = String(op.gatewayStatus || gatewayStatus || '').toLowerCase();
+    const refundAccepted = opStatus === 'refunded' || ['pending', 'processing', 'processed', 'success'].includes(finalGateway);
+    const refundStatus = opStatus === 'refunded'
+      ? 'refunded'
+      : refundAccepted
+        ? 'submitted'
+        : opStatus === 'failed_confirmed'
+          ? 'failed'
+          : 'reconciliation_required';
+    return {
+      refundAccepted,
+      refundStatus,
+      gatewayStatus: finalGateway || opStatus,
+      reason: op.reconciliationReason || null,
+    };
+  } catch (error) {
+    logger.error('prebooking_card_verification_refund_error', { reference: safeRef, error: error?.message });
+    return { refundAccepted: false, refundStatus: 'reconciliation_required', gatewayStatus: 'error', reason: error?.message || 'refund_error' };
+  }
+}
+
+async function createPreBookingCardSetupSession({
+  identityId,
+  identity = {},
+  draftRef,
+  draft = {},
+  serviceLabel = '',
+  selectedOptionTitle = '',
+  expiresInMs = 30 * 60 * 1000,
+} = {}) {
+  const { token, tokenHash } = createPaymentToken();
+  const cardCtx = await resolveWhatsAppPreBookingCardContext({ identityId, identity, draft });
+  const now = Date.now();
+  const expiresAtMs = now + Math.max(60_000, Number(expiresInMs) || 30 * 60 * 1000);
+  const requestId = String(draft.requestId || '').trim();
+  const customerId = String(draft.principalId || identity.linkedFirebaseUid || identity.guestPrincipalId || '').trim();
+  await db.collection(PREBOOKING_CARD_SETUP_SESSIONS).doc(tokenHash).set({
+    sessionId: tokenHash,
+    identityId: String(identityId || ''),
+    draftId: String(draftRef?.id || ''),
+    requestId,
+    customerId,
+    ownerUid: cardCtx.ownerUid || customerId,
+    status: 'active',
+    serviceLabel: String(serviceLabel || draft.serviceId || 'Uncedo service').slice(0, 140),
+    selectedOptionTitle: String(selectedOptionTitle || draft.selectedOptionTitle || '').slice(0, 120),
+    amount: Number(draft.quoteSnapshot?.total || 0),
+    currency: String(draft.quoteSnapshot?.currency || 'ZAR').toUpperCase(),
+    verificationAmountMinor: 100,
+    email: cardCtx.profileEmail || '',
+    saveCardConsent: true,
+    expiresAtMs,
+    createdAtMs: now,
+    updatedAtMs: now,
+  });
+  const baseUrl = String(process.env.CUSTOMER_PAYMENT_URL || 'https://uncedo.bakayise.com/payment').trim().replace(/\/$/, '');
+  return {
+    token,
+    sessionId: tokenHash,
+    expiresAtMs,
+    requiresEmail: !cardCtx.profileEmail,
+    url: `${baseUrl}?mode=card_setup&token=${encodeURIComponent(token)}`,
+  };
+}
+
+async function resolvePreBookingCardSetupSession({ token = '', allowVerified = true } = {}) {
+  const safeToken = String(token || '').trim();
+  if (!safeToken) return { code: 'invalid' };
+  const sessionId = hashOpaqueSetupToken(safeToken);
+  const sessionRef = db.collection(PREBOOKING_CARD_SETUP_SESSIONS).doc(sessionId);
+  const snap = await sessionRef.get();
+  if (!snap.exists) return { code: 'not-found' };
+  const session = snap.data() || {};
+  if (session.status === 'verified' && allowVerified) {
+    return { code: 'verified', sessionId, sessionRef, session };
+  }
+  if (Number(session.expiresAtMs || 0) <= Date.now()) {
+    return { code: 'expired', sessionId, sessionRef, session };
+  }
+  const draftId = String(session.draftId || '').trim();
+  const draftRef = draftId ? db.collection('serviceRequestDrafts').doc(draftId) : null;
+  const draftSnap = draftRef ? await draftRef.get().catch(() => null) : null;
+  if (!draftSnap?.exists) return { code: 'draft-not-found', sessionId, sessionRef, session };
+  const draft = draftSnap.data() || {};
+  if (!['quoted', 'collecting'].includes(String(draft.status || '').toLowerCase())) {
+    return { code: 'draft-unavailable', sessionId, sessionRef, session, draft };
+  }
+  return { code: 'available', sessionId, sessionRef, session, draftRef, draft };
+}
+
+async function verifyAndCompletePreBookingCardSetup({ sessionId, reference, paystackSecretKey }) {
+  const safeSessionId = String(sessionId || '').trim();
+  const safeRef = String(reference || '').trim();
+  if (!safeSessionId || !safeRef) return { success: false, code: 'invalid-input', message: 'Missing card verification details.' };
+  const sessionRef = db.collection(PREBOOKING_CARD_SETUP_SESSIONS).doc(safeSessionId);
+  const sessionSnap = await sessionRef.get();
+  if (!sessionSnap.exists) return { success: false, code: 'not-found', message: 'Card setup session not found.' };
+  const session = sessionSnap.data() || {};
+  const whatsappReturnUrl = buildWhatsAppReturnUrl();
+  if (session.status === 'verified' && String(session.verifiedReference || '') === safeRef) {
+    return {
+      success: true,
+      verified: true,
+      status: 'verified',
+      cardSummary: session.cardSummary || null,
+      refundStatus: session.refundStatus || 'submitted',
+      whatsappReturnUrl,
+    };
+  }
+  if (String(session.activeReference || '') !== safeRef) {
+    return { success: false, code: 'reference-mismatch', message: 'This Paystack verification reference does not match your current session.' };
+  }
+
+  const verification = await verifyPaystackTransaction({
+    paystackSecretKey,
+    reference: safeRef,
+    amountMinor: 100,
+    currency: 'ZAR',
+  });
+  if (verification.outcome === 'pending' || verification.outcome === 'unknown') {
+    return { success: true, verified: false, status: 'processing', whatsappReturnUrl };
+  }
+  if (verification.outcome !== 'success') {
+    return { success: false, verified: false, status: 'failed', message: 'Card verification on Paystack did not succeed. Please try again.' };
+  }
+
+  const transactionData = verification.transaction || {};
+  const authorization = transactionData.authorization || {};
+  const customerId = String(session.customerId || '').trim();
+  const ownerUid = String(session.saveCardOwnerUid || session.ownerUid || customerId).trim();
+  const identityId = String(session.identityId || '').trim();
+  const requestId = String(session.requestId || '').trim();
+  const draftId = String(session.draftId || '').trim();
+
+  // Immediately refund the R1 verification check via Paystack regardless of card reusability.
+  const refundResult = await issueImmediateCardVerificationRefund({
+    reference: safeRef,
+    userId: ownerUid || customerId || identityId,
+    amountMinor: 100,
+    currency: 'ZAR',
+    paystackSecretKey,
+  });
+
+  if (!authorization.authorization_code || authorization.reusable !== true) {
+    return {
+      success: false,
+      verified: false,
+      status: 'not_reusable',
+      refundStatus: refundResult.refundStatus,
+      message: 'This card is not reusable for automatic completion payment. Your R1.00 verification charge has been refunded immediately. Please try another card.',
+      whatsappReturnUrl,
+    };
+  }
+
+  const verifiedEmail = await persistMissingCustomerBillingEmail({
+    email: transactionData.customer?.email || session.email,
+    ownerUid,
+    identityId,
+    requestId,
+    draftId,
+  });
+
+  const now = Date.now();
+  const saveFuture = session.saveCardConsent === true;
+  let storedCard = null;
+  if (saveFuture && ownerUid) {
+    const resolvedOwner = await resolveCustomerBillingOwner(ownerUid);
+    const targetOwnerUid = resolvedOwner.targetUid || ownerUid;
+    const saved = await saveReusablePaystackAuthorization({
+      uid: targetOwnerUid,
+      transaction: transactionData,
+      consentAtMs: now,
+      payerEmail: verifiedEmail,
+      allowCreateGuestProfile: targetOwnerUid.startsWith('guest_'),
+    });
+    if (saved?.saved && saved.card) {
+      storedCard = {
+        id: String(saved.card.id),
+        brand: String(saved.card.brand || authorization.brand || 'Card').slice(0, 40),
+        last4: String(saved.card.last4 || authorization.last4 || '').slice(-4),
+        temporary: false,
+      };
+    }
+  }
+  if (!storedCard) {
+    const tempSaved = await storeTemporaryRequestPaymentAuthorization({
+      db,
+      admin,
+      requestId,
+      customerId,
+      authorization,
+      payerEmail: verifiedEmail,
+      consentAtMs: now,
+      now,
+    });
+    if (!tempSaved.saved) {
+      return {
+        success: false,
+        verified: false,
+        status: 'save_failed',
+        refundStatus: refundResult.refundStatus,
+        message: 'Your card was checked and the R1.00 charge is being refunded, but we could not prepare the authorization for your booking. Please try again.',
+        whatsappReturnUrl,
+      };
+    }
+    storedCard = {
+      id: 'request_temp',
+      brand: String(tempSaved.card.brand || 'Card').slice(0, 40),
+      last4: String(tempSaved.card.last4 || '').slice(-4),
+      temporary: true,
+    };
+  }
+
+  const preSelectedCardId = storedCard.id;
+  const preSelectedCardSummary = {
+    brand: storedCard.brand,
+    last4: storedCard.last4,
+    temporary: storedCard.temporary === true,
+  };
+  const draftRef = draftId ? db.collection('serviceRequestDrafts').doc(draftId) : null;
+  const requestRef = requestId ? db.collection('serviceRequests').doc(requestId) : null;
+
+  await Promise.all([
+    sessionRef.set({
+      status: 'verified',
+      verifiedReference: safeRef,
+      verifiedAtMs: now,
+      cardSummary: preSelectedCardSummary,
+      preSelectedCardId,
+      refundStatus: refundResult.refundStatus,
+      refundGatewayStatus: refundResult.gatewayStatus,
+      refundAccepted: refundResult.refundAccepted,
+      email: verifiedEmail || session.email || '',
+      updatedAtMs: now,
+    }, { merge: true }),
+    draftRef ? draftRef.set({
+      status: 'quoted',
+      preSelectedPaymentType: 'card',
+      preSelectedCardMode: 'new_card',
+      preSelectedCardId,
+      preSelectedCardSummary,
+      paymentSelectionStatus: 'selected',
+      ...(verifiedEmail ? { customerEmail: verifiedEmail } : {}),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true }) : Promise.resolve(),
+    requestRef ? db.runTransaction(async (tx) => {
+      const snap = await tx.get(requestRef);
+      if (!snap.exists) return;
+      const reqData = snap.data() || {};
+      tx.set(requestRef, {
+        preSelectedPaymentType: 'card',
+        preSelectedCardMode: 'new_card',
+        preSelectedCardId,
+        preSelectedCardSummary,
+        ...(preSelectedCardId !== 'request_temp' ? { selectedCardId: preSelectedCardId } : { selectedCardId: null }),
+        ...(verifiedEmail ? { customerEmail: verifiedEmail } : {}),
+        requestPayload: {
+          ...(reqData.requestPayload || {}),
+          preSelectedPaymentType: 'card',
+          preSelectedCardMode: 'new_card',
+          preSelectedCardId,
+          preSelectedCardSummary,
+          ...(preSelectedCardId !== 'request_temp' ? { selectedCardId: preSelectedCardId } : { selectedCardId: null }),
+        },
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+    }) : Promise.resolve(),
+  ]);
+
+  // Refresh quote expiry if the customer spent time verifying their card on Paystack, then send WhatsApp Confirm / Edit details.
+  if (draftRef && identityId) {
+    let draftSnap = await draftRef.get().catch(() => null);
+    let draft = draftSnap?.exists ? draftSnap.data() || {} : null;
+    if (draft && draft.status === 'quoted') {
+      if (Number(draft.quoteExpiresAtMs || 0) < now + 5 * 60 * 1000 && requestId && customerId) {
+        const refreshedQuote = await marketplaceRequestOperations.quoteDraft({ requestId, principalId: customerId }).catch(() => null);
+        if (refreshedQuote?.code === 'quoted') {
+          await draftRef.set({
+            quoteSnapshot: refreshedQuote.quote,
+            quoteExpiresAtMs: refreshedQuote.quoteExpiresAtMs,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+          draft = { ...draft, quoteSnapshot: refreshedQuote.quote, quoteExpiresAtMs: refreshedQuote.quoteExpiresAtMs };
+        }
+      }
+      const identitySnap = await db.collection('whatsappIdentities').doc(identityId).get().catch(() => null);
+      const identity = identitySnap?.exists ? { id: identitySnap.id, ...(identitySnap.data() || {}) } : null;
+      const conversationRef = db.collection('whatsappConversations').doc(identityId);
+      if (identity) {
+        await conversationRef.set({
+          currentMode: 'quote_pending',
+          currentIntent: 'service_booking',
+          activeDraftId: draftId,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true }).catch(() => null);
+        const { confirmation } = await buildWhatsAppDraftConfirmationPromptData({
+          draft,
+          paymentSelection: { type: 'card', cardSummary: preSelectedCardSummary },
+        });
+        const refundLine = refundResult.refundAccepted
+          ? 'Your R1.00 verification check has been refunded immediately.'
+          : 'Your R1.00 verification refund has been submitted.';
+        const fullConfirmText = formatWhatsAppText(
+          `✅ *Card verified (${preSelectedCardSummary.brand} •••• ${preSelectedCardSummary.last4})*\n${refundLine}\n\n${confirmation.text}`,
+        );
+        const buttonBodyText = formatWhatsAppText(
+          `✅ Card verified (${preSelectedCardSummary.brand} •••• ${preSelectedCardSummary.last4}) · R1 refunded\n\n${confirmation.buttonBody}`,
+        ).slice(0, 1024);
+        await persistWhatsAppAssistantReply({
+          sourceEventId: stableEventId(`prebooking_card_verified:${safeSessionId}:${safeRef}`),
+          identityId,
+          identity,
+          conversationRef,
+          text: fullConfirmText,
+          requireCurrentInbound: false,
+          purpose: 'prebooking_card_verified_confirmation',
+          interactive: {
+            type: 'button',
+            body: { text: buttonBodyText },
+            action: {
+              buttons: [
+                { type: 'reply', reply: { id: 'wa_draft_confirm', title: 'Confirm' } },
+                { type: 'reply', reply: { id: 'wa_draft_edit', title: 'Edit details' } },
+              ],
+            },
+          },
+        }).catch((err) => logger.warn('prebooking_card_verified_whatsapp_send_failed', {
+          sessionId: safeSessionId,
+          error: String(err?.message || 'send_failed').slice(0, 120),
+        }));
+      }
+    }
+  }
+
+  return {
+    success: true,
+    verified: true,
+    status: 'verified',
+    cardSummary: preSelectedCardSummary,
+    refundStatus: refundResult.refundStatus,
+    refundAccepted: refundResult.refundAccepted,
+    whatsappReturnUrl,
+  };
+}
+
 async function issueFailedRequestPaymentPostEffects({ requestId, attemptId = '', paymentResult }) {
   if (paymentResult?.action !== 'failed') return;
   const requestSnap = await db.collection('serviceRequests').doc(requestId).get();
@@ -18496,6 +19757,7 @@ async function issueFailedRequestPaymentPostEffects({ requestId, attemptId = '',
 
 async function issuePaidRequestPostEffects({ requestId, paymentResult }) {
   if (paymentResult?.action !== 'settled') return;
+  await deleteTemporaryRequestPaymentAuthorization({ db, requestId }).catch(() => null);
   const requestSnap = await db.collection('serviceRequests').doc(requestId).get();
   if (!requestSnap.exists) return;
   const request = { id: requestSnap.id, ...(requestSnap.data() || {}) };
@@ -18709,6 +19971,11 @@ exports.startServicePaystackCheckout = onRequest({ cors: true, invoker: 'public'
     ? isValidCustomerEmail(caller.email || (await db.collection('users').doc(caller.uid).get()).data()?.email) || isValidCustomerEmail(req.body?.email)
     : isValidCustomerEmail(req.body?.email || resolved.request.customerEmail);
   if (!email) return res.status(422).json({ success: false, code: 'email-required', message: 'Enter a valid email address to continue to Paystack.' });
+  await persistMissingCustomerBillingEmail({
+    email,
+    ownerUid: isOwnerAuthenticated ? caller.uid : (billingOwner.targetUid || resolved.session.customerId),
+    requestId: resolved.session.requestId,
+  });
   const idempotencyKey = String(req.body?.idempotencyKey || randomUUID());
   const begun = await beginServicePaymentAttempt({ db, admin, sessionRef: resolved.sessionRef, session: resolved.session, method: 'paystack_checkout', idempotencyKey, saveCardConsent, now: Date.now() });
   if (!['created', 'existing'].includes(begun.action)) return res.status(begun.action === 'already-paid' ? 409 : 409).json({ success: false, code: begun.action, message: begun.action === 'already-paid' ? 'This request has already been paid.' : 'Another payment attempt is active or this request is no longer payable.' });
@@ -18783,6 +20050,187 @@ exports.verifyServicePaystackCheckout = onRequest({ cors: true, invoker: 'public
         : 'payment_reconciliation_required';
   const updated = await resolveServicePaymentSession({ db, token });
   return res.status(200).json({ success: true, status, receipt: status === 'paid' ? safePaymentReceipt({ requestId: updated.request.id, operation: updated.paymentOperation, request: updated.request }) : null });
+});
+
+exports.getPreBookingCardSetupSession = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 15 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  const token = String(req.body?.token || '').trim();
+  const resolved = await resolvePreBookingCardSetupSession({ token, allowVerified: true });
+  if (resolved.code !== 'available' && resolved.code !== 'verified') {
+    const isExpired = resolved.code === 'expired';
+    return res.status(isExpired ? 410 : 404).json({
+      success: false,
+      code: resolved.code,
+      message: isExpired ? 'This card setup link has expired. Request a new link on WhatsApp.' : 'This card setup link is unavailable.',
+    });
+  }
+  const session = resolved.session || {};
+  const whatsappReturnUrl = buildWhatsAppReturnUrl();
+  if (resolved.code === 'verified') {
+    return res.status(200).json({
+      success: true,
+      mode: 'card_setup',
+      verified: true,
+      service: session.serviceLabel || 'Uncedo service',
+      selectedOptionTitle: session.selectedOptionTitle || '',
+      quoteAmount: Number(session.amount || 0),
+      verificationAmount: 1,
+      currency: session.currency || 'ZAR',
+      email: isValidCustomerEmail(session.email),
+      requiresEmail: false,
+      canSaveCard: true,
+      cardSummary: session.cardSummary || null,
+      refundStatus: session.refundStatus || 'submitted',
+      whatsappReturnUrl,
+    });
+  }
+  const identitySnap = session.identityId ? await db.collection('whatsappIdentities').doc(String(session.identityId)).get().catch(() => null) : null;
+  const ownerUid = String(session.ownerUid || session.customerId || '').trim();
+  const userSnap = ownerUid ? await db.collection('users').doc(ownerUid).get().catch(() => null) : null;
+  const knownEmail = isValidCustomerEmail(session.email || userSnap?.data()?.email || identitySnap?.data()?.email);
+  res.set('Cache-Control', 'no-store, private');
+  res.set('Referrer-Policy', 'no-referrer');
+  return res.status(200).json({
+    success: true,
+    mode: 'card_setup',
+    verified: false,
+    service: session.serviceLabel || 'Uncedo service',
+    selectedOptionTitle: session.selectedOptionTitle || '',
+    quoteAmount: Number(session.amount || 0),
+    verificationAmount: 1,
+    currency: session.currency || 'ZAR',
+    email: knownEmail,
+    requiresEmail: !knownEmail,
+    canSaveCard: true,
+    whatsappReturnUrl,
+  });
+});
+
+exports.startPreBookingCardSetupCheckout = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  let paystackSecretKey = '';
+  try { paystackSecretKey = getPaymentsSecrets().PAYSTACK_SECRET_KEY; } catch { return res.status(503).json({ success: false, code: 'payments-unavailable', message: 'Card checkout is not configured yet.' }); }
+  const token = String(req.body?.token || '').trim();
+  const resolved = await resolvePreBookingCardSetupSession({ token, allowVerified: true });
+  if (resolved.code === 'verified') {
+    return res.status(200).json({
+      success: true,
+      verified: true,
+      cardSummary: resolved.session?.cardSummary || null,
+      refundStatus: resolved.session?.refundStatus || 'submitted',
+      whatsappReturnUrl: buildWhatsAppReturnUrl(),
+    });
+  }
+  if (resolved.code !== 'available') {
+    return res.status(resolved.code === 'expired' ? 410 : 404).json({
+      success: false,
+      code: resolved.code,
+      message: resolved.code === 'expired' ? 'This card setup link has expired.' : 'This card setup link is unavailable.',
+    });
+  }
+
+  const session = resolved.session || {};
+  const sessionRef = resolved.sessionRef;
+  const caller = await getOptionalPaymentCaller(req);
+  const ownerUid = String(session.ownerUid || session.customerId || '').trim();
+  const identityId = String(session.identityId || '').trim();
+  const requestId = String(session.requestId || '').trim();
+  const draftId = String(session.draftId || '').trim();
+  const userSnap = ownerUid ? await db.collection('users').doc(ownerUid).get().catch(() => null) : null;
+  const email = isValidCustomerEmail(req.body?.email || session.email || userSnap?.data()?.email || caller?.email);
+  if (!email) {
+    return res.status(422).json({ success: false, code: 'email-required', message: 'Enter a valid email address so we can verify your card via Paystack.' });
+  }
+  const saveCardConsent = req.body?.saveCardConsent === true;
+  await persistMissingCustomerBillingEmail({ email, ownerUid, identityId, requestId, draftId });
+
+  const now = Date.now();
+  const nonce = randomBytes(6).toString('hex');
+  const reference = `uncedo-cardsetup-${resolved.sessionId.slice(0, 14)}-${nonce}`;
+  await Promise.all([
+    sessionRef.set({
+      activeReference: reference,
+      email,
+      saveCardConsent,
+      saveCardOwnerUid: ownerUid || session.customerId || '',
+      updatedAtMs: now,
+    }, { merge: true }),
+    db.collection('paystackRequestPaymentReferences').doc(reference).set({
+      type: 'pre_booking_card_setup',
+      sessionId: resolved.sessionId,
+      requestId,
+      draftId,
+      identityId,
+      customerId: String(session.customerId || ''),
+      createdAtMs: now,
+    }, { merge: true }),
+  ]);
+
+  try {
+    const baseUrl = String(process.env.CUSTOMER_PAYMENT_URL || 'https://uncedo.bakayise.com/payment').trim().replace(/\/$/, '');
+    const callbackUrl = `${baseUrl}?mode=card_setup&reference=${encodeURIComponent(reference)}`;
+    const payload = await callPaystackApi({
+      paystackSecretKey,
+      path: '/transaction/initialize',
+      method: 'POST',
+      body: {
+        email,
+        amount: 100,
+        currency: 'ZAR',
+        reference,
+        callback_url: callbackUrl,
+        channels: ['card'],
+        metadata: {
+          flow: 'whatsapp_pre_booking_card_setup',
+          uncedo_request_id: requestId,
+          uncedo_session_id: resolved.sessionId,
+          save_card_consent: saveCardConsent,
+        },
+      },
+    });
+    const authorizationUrl = String(payload.data?.authorization_url || '');
+    const checkoutHost = (() => { try { return new URL(authorizationUrl).hostname; } catch { return ''; } })();
+    if (!authorizationUrl.startsWith('https://') || !['checkout.paystack.com', 'checkout.paystack.co'].includes(checkoutHost) || String(payload.data?.reference || '') !== reference) {
+      return res.status(502).json({ success: false, code: 'checkout-response-invalid', message: 'Paystack did not return a valid secure checkout link.' });
+    }
+    await sessionRef.set({ authorizationUrl, updatedAtMs: Date.now() }, { merge: true });
+    return res.status(200).json({ success: true, authorizationUrl, reference });
+  } catch (error) {
+    logger.warn('prebooking_card_setup_init_failed', { sessionId: resolved.sessionId, error: String(error?.message || 'init_failed').slice(0, 120) });
+    return res.status(502).json({ success: false, code: 'checkout-init-failed', message: 'Unable to open Paystack checkout right now. Please try again.' });
+  }
+});
+
+exports.verifyPreBookingCardSetupCheckout = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  let paystackSecretKey = '';
+  try { paystackSecretKey = getPaymentsSecrets().PAYSTACK_SECRET_KEY; } catch { return res.status(503).json({ success: false, code: 'payments-unavailable' }); }
+  const token = String(req.body?.token || '').trim();
+  const reference = String(req.body?.reference || '').trim();
+  if (!token || !reference) return res.status(400).json({ success: false, code: 'invalid-input', message: 'Missing card verification reference.' });
+  const resolved = await resolvePreBookingCardSetupSession({ token, allowVerified: true });
+  if (!['available', 'verified'].includes(resolved.code)) {
+    return res.status(resolved.code === 'expired' ? 410 : 404).json({
+      success: false,
+      code: resolved.code,
+      message: resolved.code === 'expired' ? 'This card setup link has expired.' : 'This card setup link is unavailable.',
+    });
+  }
+  const outcome = await verifyAndCompletePreBookingCardSetup({
+    sessionId: resolved.sessionId,
+    reference,
+    paystackSecretKey,
+  });
+  if (!outcome.success) {
+    return res.status(outcome.status === 'reference-mismatch' ? 409 : 400).json({
+      success: false,
+      code: outcome.status || outcome.code || 'verification-failed',
+      message: outcome.message || 'Card verification could not be completed.',
+      refundStatus: outcome.refundStatus || null,
+      whatsappReturnUrl: outcome.whatsappReturnUrl || buildWhatsAppReturnUrl(),
+    });
+  }
+  return res.status(200).json(outcome);
 });
 
 exports.requestCashServicePayment = onRequest({ cors: true, invoker: 'public', maxInstances: 5, ...HALF_CPU_OPTIONS, timeoutSeconds: 30 }, async (req, res) => {
@@ -19461,6 +20909,17 @@ exports.paystackServicePaymentWebhook = onRequest({ cors: false, invoker: 'publi
       const walletResult = await verifyAndSettleCustomerWalletPayment({ reference, mapped, paystackSecretKey: secret });
       if (walletResult?.action === 'pending') {
         const err = new Error('Customer wallet verification pending');
+        err.code = 'verification_pending';
+        throw err;
+      }
+    } else if (mapped.type === 'pre_booking_card_setup') {
+      const setupResult = await verifyAndCompletePreBookingCardSetup({
+        sessionId: String(mapped.sessionId || ''),
+        reference,
+        paystackSecretKey: secret,
+      });
+      if (setupResult?.status === 'processing') {
+        const err = new Error('Pre-booking card verification pending');
         err.code = 'verification_pending';
         throw err;
       }
@@ -20235,6 +21694,12 @@ async function runServiceFinancialPostEffects(operationRef) {
       metadata: { paymentStatus: 'paid' },
     }).catch(() => null);
   }
+  const canDeleteTempAuth = success
+    || (operation.operationType === 'customer_cancellation'
+      && (Number(settlementData.cancellation?.cancellationAmount || 0) <= 0 || paymentStatus === 'paid'));
+  if (canDeleteTempAuth) {
+    await deleteTemporaryRequestPaymentAuthorization({ db, requestId }).catch(() => null);
+  }
 }
 
 async function isCustomerRequestPrincipalOwnedByUid(uid, customerId) {
@@ -20333,20 +21798,33 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, invoker: 'public
         serviceCreditAmount = toWholeRand(serviceCreditPoints / pointsPerRand);
       }
       cashChargeAmount = toWholeRand(Math.max(0, totalAmount - serviceCreditAmount));
+      const preSelectedPaymentType = String(request.preSelectedPaymentType || request.requestPayload?.preSelectedPaymentType || '').trim().toLowerCase();
+      const preSelectedCardId = String(request.preSelectedCardId || request.requestPayload?.preSelectedCardId || '').trim();
       if (!deferCompletionPayment && customerId) {
         const { billingOwner, methods: paymentMethods } = await getBillingMethodsForCustomer({ customerId });
         const ownerDocId = billingOwner.targetUid || customerId;
         const customerSnap = await db.collection('users').doc(ownerDocId).get().catch(() => null);
         customerData = customerSnap?.exists ? customerSnap.data() || {} : {};
-        const usableCards = paymentMethods.filter((card) => Boolean(
-          String(card.paystackAuthorizationCode || '').trim()
-          && isValidCustomerEmail(card.payerEmail || customerData.email || request.customerEmail),
-        ));
-        const selectedCardId = request.selectedCardId || request.requestPayload?.selectedCardId || null;
-        selectedCard = usableCards.find((card) => card.id === selectedCardId)
-          || usableCards.find((card) => card.isDefault)
-          || usableCards[0]
-          || null;
+        if (preSelectedCardId === 'request_temp') {
+          const tempCard = await getTemporaryRequestPaymentAuthorization({ db, requestId });
+          if (tempCard && isValidCustomerEmail(tempCard.payerEmail || customerData.email || request.customerEmail)) {
+            selectedCard = tempCard;
+          }
+        } else {
+          const usableCards = paymentMethods.filter((card) => Boolean(
+            String(card.paystackAuthorizationCode || '').trim()
+            && isValidCustomerEmail(card.payerEmail || customerData.email || request.customerEmail),
+          ));
+          if (preSelectedPaymentType === 'card' && preSelectedCardId) {
+            selectedCard = usableCards.find((card) => card.id === preSelectedCardId) || null;
+          } else {
+            const selectedCardId = request.selectedCardId || request.requestPayload?.selectedCardId || null;
+            selectedCard = usableCards.find((card) => card.id === selectedCardId)
+              || usableCards.find((card) => card.isDefault)
+              || usableCards[0]
+              || null;
+          }
+        }
       }
       settlementData = {
         customerId,
@@ -20361,6 +21839,7 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, invoker: 'public
         serviceCreditPoints,
         redemptionId: redemptionId || null,
         selectedCardId: selectedCard?.id || null,
+        attemptedCardId: preSelectedCardId || selectedCard?.id || null,
         chargedCardLast4: selectedCard?.last4 || null,
         helperPayoutBreakdown: { ...helperPayoutBreakdown, finalizedAt: new Date(endedAt).toISOString() },
         requestPatch: {
@@ -20639,12 +22118,15 @@ async function clearWhatsAppConversationCancellationState({
         }
       }
     }
-    if (['booking_intake', 'quote_pending', 'active_booking'].includes(String(current.currentMode || '').toLowerCase())) {
+    if (['booking_intake', 'booking_payment_selection', 'quote_pending', 'active_booking'].includes(String(current.currentMode || '').toLowerCase())) {
       patch.currentMode = 'assistant';
       patch.currentIntent = 'cancellation';
     }
     transaction.set(conversationRef, patch, { merge: true });
   }).catch(() => null);
+  if (canceledRequestId) {
+    await deleteTemporaryRequestPaymentAuthorization({ db, requestId: String(canceledRequestId) }).catch(() => null);
+  }
 }
 
 async function getWhatsAppCustomerCancellationPreview({ identityId, identity, requestId }) {
@@ -20806,17 +22288,25 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
       const bookingCharge = toWholeRand(bookingFee);
       const customerSnap = ownerDocId ? await db.collection('users').doc(ownerDocId).get().catch(() => null) : null;
       customerData = customerSnap?.exists ? customerSnap.data() || {} : {};
+      const cancelPreSelectedCardId = String(request.preSelectedCardId || request.requestPayload?.preSelectedCardId || '').trim();
       if (cancellationAmount > 0 && customerId) {
-        const { methods: paymentMethods } = await getBillingMethodsForCustomer({ customerId });
-        const usableCards = paymentMethods.filter((method) => Boolean(
-          String(method.paystackAuthorizationCode || '').trim()
-          && isValidCustomerEmail(method.payerEmail || customerData.email || request.customerEmail),
-        ));
-        const selectedCardId = request.selectedCardId || request.requestPayload?.selectedCardId || null;
-        selectedCard = usableCards.find((card) => card.id === selectedCardId)
-          || usableCards.find((card) => card.isDefault)
-          || usableCards[0]
-          || null;
+        if (cancelPreSelectedCardId === 'request_temp') {
+          const tempCard = await getTemporaryRequestPaymentAuthorization({ db, requestId });
+          if (tempCard && isValidCustomerEmail(tempCard.payerEmail || customerData.email || request.customerEmail)) {
+            selectedCard = tempCard;
+          }
+        } else {
+          const { methods: paymentMethods } = await getBillingMethodsForCustomer({ customerId });
+          const usableCards = paymentMethods.filter((method) => Boolean(
+            String(method.paystackAuthorizationCode || '').trim()
+            && isValidCustomerEmail(method.payerEmail || customerData.email || request.customerEmail),
+          ));
+          const selectedCardId = cancelPreSelectedCardId || request.selectedCardId || request.requestPayload?.selectedCardId || null;
+          selectedCard = usableCards.find((card) => card.id === selectedCardId)
+            || usableCards.find((card) => card.isDefault)
+            || usableCards[0]
+            || null;
+        }
       }
       const pricingSnapshot = {
         ...(request.pricingSnapshot || {}),

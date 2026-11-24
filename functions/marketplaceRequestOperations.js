@@ -467,6 +467,25 @@ function createMarketplaceRequestOperations({ db, admin }) {
           bookingFeeAmount: confirmedQuote.bookingFee,
         },
       );
+      const preSelectedPaymentType = String(
+        request.preSelectedPaymentType || request.requestPayload?.preSelectedPaymentType || '',
+      ).trim().toLowerCase() || null;
+      const preSelectedCardMode = String(
+        request.preSelectedCardMode || request.requestPayload?.preSelectedCardMode || '',
+      ).trim().toLowerCase() || null;
+      const preSelectedCardId = String(
+        request.preSelectedCardId || request.requestPayload?.preSelectedCardId || '',
+      ).trim() || null;
+      const preSelectedCardSummary = (
+        request.preSelectedCardSummary && typeof request.preSelectedCardSummary === 'object'
+          ? request.preSelectedCardSummary
+          : (request.requestPayload?.preSelectedCardSummary && typeof request.requestPayload.preSelectedCardSummary === 'object'
+            ? request.requestPayload.preSelectedCardSummary
+            : null)
+      );
+      const resolvedSelectedCardId = preSelectedCardId && preSelectedCardId !== 'request_temp'
+        ? preSelectedCardId
+        : (String(request.selectedCardId || request.requestPayload?.selectedCardId || '').trim() || null);
       const nextPayload = {
         ...(request.requestPayload || {}), categoryId, serviceIds, selectedPackageId,
         selectedOptionId: optionId, selectedOptionTitle: optionTitle,
@@ -474,6 +493,11 @@ function createMarketplaceRequestOperations({ db, admin }) {
         selectedPortfolioReferences: request.selectedPortfolioReferences || request.requestPayload?.selectedPortfolioReferences || [],
         attachments: request.referenceAttachments || request.requestPayload?.attachments || [],
         pricingSnapshot: confirmedQuote, totalAmount: confirmedTotalAmount, timingPreference, scheduledForText, scheduledForAtMs, location, serviceAddress,
+        ...(preSelectedPaymentType ? { preSelectedPaymentType } : {}),
+        ...(preSelectedCardMode ? { preSelectedCardMode } : {}),
+        ...(preSelectedCardId ? { preSelectedCardId } : {}),
+        ...(preSelectedCardSummary ? { preSelectedCardSummary } : {}),
+        ...(resolvedSelectedCardId ? { selectedCardId: resolvedSelectedCardId } : {}),
         quoteExpiresAtMs: null,
       };
       const submitEventRef = db.collection('customerServiceEvents').doc(`request_submitted_${requestId}`);
@@ -497,6 +521,11 @@ function createMarketplaceRequestOperations({ db, admin }) {
         helperAssignment: null, matchingStartedAtMs: timingPreference === 'later' ? null : now,
         ...(paymentFlowVersion === 'explicit_v1' ? { paymentFlowVersion: 'explicit_v1' } : {}),
         ...(Number(walletAccountingVersion) === 1 ? { helperWalletAccountingVersion: 1 } : {}),
+        ...(preSelectedPaymentType ? { preSelectedPaymentType } : {}),
+        ...(preSelectedCardMode ? { preSelectedCardMode } : {}),
+        ...(preSelectedCardId ? { preSelectedCardId } : {}),
+        ...(preSelectedCardSummary ? { preSelectedCardSummary } : {}),
+        ...(resolvedSelectedCardId ? { selectedCardId: resolvedSelectedCardId } : {}),
         location, serviceAddress, requestPayload: nextPayload, updatedAt: timestamp,
       });
       if (!submitEventSnap.exists) {

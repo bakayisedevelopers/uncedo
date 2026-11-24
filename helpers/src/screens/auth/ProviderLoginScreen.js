@@ -6,8 +6,8 @@ import { colors } from '../../theme/colors';
 import { completeWhatsAppSignupLink } from '../../services/authService';
 
 const LEGAL_URLS = {
-  terms: 'https://bakayise-uncedo-latest-helpers.web.app/terms',
-  privacy: 'https://bakayise-uncedo-latest-helpers.web.app/privacy-policy',
+  terms: 'https://helpers.bakayise.com/terms',
+  privacy: 'https://helpers.bakayise.com/privacy-policy',
 };
 
 const nativeSocialButtons = [

@@ -185,10 +185,14 @@ test('Paystack classifiers require matching reference, exact amount and currency
   assert.equal(classifyPaystackTransfer({ status: true, data: { ...transaction, status: 'reversed' } }, { reference: 'charge-ref', amountMinor: 1234, currency: 'ZAR' }).outcome, 'reversed');
 });
 
-test('only newly versioned requests defer completion-time card charging; legacy and in-flight card operations keep their behavior', () => {
+test('only newly versioned requests defer completion-time card charging; pre-selected card executes automatically while cash defers', () => {
   assert.equal(shouldDeferCompletionPayment({ paymentFlowVersion: 'explicit_v1' }), true);
+  assert.equal(shouldDeferCompletionPayment({ paymentFlowVersion: 'explicit_v1', preSelectedPaymentType: 'cash' }), true);
+  assert.equal(shouldDeferCompletionPayment({ paymentFlowVersion: 'explicit_v1', preSelectedPaymentType: 'card' }), false);
+  assert.equal(shouldDeferCompletionPayment({ paymentFlowVersion: 'explicit_v1', requestPayload: { preSelectedPaymentType: 'card' } }), false);
   assert.equal(shouldDeferCompletionPayment({}), false);
-  assert.equal(shouldDeferCompletionPayment({ paymentFlowVersion: 'explicit_v1' }, { status: 'processing' }), false);
+  assert.equal(shouldDeferCompletionPayment({ paymentFlowVersion: 'explicit_v1', preSelectedPaymentType: 'card' }, { status: 'processing', deferredPaymentSelection: false }), false);
+  assert.equal(shouldDeferCompletionPayment({ paymentFlowVersion: 'explicit_v1', preSelectedPaymentType: 'card' }, { deferredPaymentSelection: true }), true);
   assert.equal(shouldDeferCompletionPayment({ paymentFlowVersion: 'explicit_v1' }, { settlementData: { deferredPaymentSelection: true } }), true);
 });
 
@@ -347,5 +351,54 @@ test('settleCustomerWalletBalancePayment gates on Paystack verification outcome 
   assert.equal((await db.collection('users').doc('cust-debt').get()).data().wallet.balance, 0);
   assert.equal((await db.collection('paystackRequestPaymentReferences').doc('wa_wallet_ref_1').get()).data().status, 'settled');
 });
+
+test('completion card failure records attemptedCardId into failedCardIds without duplicates', async () => {
+  const reqId = 'rq-failed-card-1';
+  const opId = serviceFinancialOperationId(reqId);
+  const db = new MemoryDb({
+    [`serviceRequests/${reqId}`]: {
+      customerId: 'customer-card-fail',
+      status: 'work_completed',
+      preSelectedPaymentType: 'card',
+      preSelectedCardId: 'card_1',
+      failedCardIds: ['card_0'],
+      helperAssignment: { helperId: 'helper-card-fail' },
+    },
+    'users/customer-card-fail': { uid: 'customer-card-fail', wallet: { balance: 0, currency: 'ZAR' } },
+    'users/helper-card-fail': { uid: 'helper-card-fail', wallet: { balance: 0, balanceMinor: 0, currency: 'ZAR' } },
+    'helperWallets/helper-card-fail': { helperId: 'helper-card-fail', balance: 0, balanceMinor: 0, schemaVersion: 2, currency: 'ZAR' },
+    [`financialOperations/${opId}`]: {
+      operationId: opId,
+      requestId: reqId,
+      operationType: 'completion',
+      status: 'processing',
+      amount: 150,
+      amountMinor: 15000,
+      currency: 'ZAR',
+      settlementData: {
+        customerId: 'customer-card-fail',
+        helperId: 'helper-card-fail',
+        attemptedCardId: 'card_1',
+        helperPayoutBreakdown: { customerChargeAmount: 150, helperAmount: 112.5, platformAmount: 37.5 },
+        requestPatch: { status: 'completed' },
+      },
+    },
+  });
+
+  const settled = await settleServiceFinancialOperation({
+    db,
+    admin,
+    operationRef: db.collection('financialOperations').doc(opId),
+    requestRef: db.collection('serviceRequests').doc(reqId),
+    outcome: 'failed_confirmed',
+    now: 25_000,
+  });
+
+  assert.equal(settled.applied, true);
+  assert.equal(settled.paymentStatus, 'wallet_debt_recorded');
+  const updatedReq = (await db.collection('serviceRequests').doc(reqId).get()).data();
+  assert.deepEqual(updatedReq.failedCardIds, ['card_0', 'card_1']);
+});
+
 
 

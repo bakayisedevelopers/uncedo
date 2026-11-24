@@ -97,7 +97,7 @@ function AppContent() {
 
   const navigate = useCallback((toPath) => {
     const raw = String(toPath || '/');
-    const url = new URL(raw, typeof window !== 'undefined' ? window.location.origin : 'https://bakayise-uncedo-latest-helpers.web.app');
+    const url = new URL(raw, typeof window !== 'undefined' ? window.location.origin : 'https://helpers.bakayise.com');
     const nextPath = normalizePath(url.pathname);
     const fullTarget = `${nextPath}${url.search}${url.hash}`;
     const currentFull = `${window.location.pathname}${window.location.search}${window.location.hash}`;

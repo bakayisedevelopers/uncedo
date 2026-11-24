@@ -4,11 +4,11 @@ import { ActionButton, Card } from '../../components/app/HelperUi';
 import { colors } from '../../theme/colors';
 
 const LEGAL_LINKS = [
-  { href: 'https://bakayise-uncedo-latest-helpers.web.app/privacy-policy', label: 'Privacy Policy & POPIA Notice' },
-  { href: 'https://bakayise-uncedo-latest-helpers.web.app/terms', label: 'Helper Terms and Conditions' },
-  { href: 'https://bakayise-uncedo-latest-helpers.web.app/payment-pricing-policy', label: 'Helper Payout, Pricing & Cash Policy' },
-  { href: 'https://bakayise-uncedo-latest-helpers.web.app/refund-policy', label: 'Cancellation, Refund & Adjustment Policy' },
-  { href: 'https://bakayise-uncedo-latest-helpers.web.app/data-voice-policy', label: 'Location, Data & WhatsApp Policy' },
+  { href: 'https://helpers.bakayise.com/privacy-policy', label: 'Privacy Policy & POPIA Notice' },
+  { href: 'https://helpers.bakayise.com/terms', label: 'Helper Terms and Conditions' },
+  { href: 'https://helpers.bakayise.com/payment-pricing-policy', label: 'Helper Payout, Pricing & Cash Policy' },
+  { href: 'https://helpers.bakayise.com/refund-policy', label: 'Cancellation, Refund & Adjustment Policy' },
+  { href: 'https://helpers.bakayise.com/data-voice-policy', label: 'Location, Data & WhatsApp Policy' },
 ];
 
 export function ProviderLegalScreen({ goBack, navigate }) {

@@ -89,12 +89,12 @@ export function PWAInstallPrompt({
               <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-2 leading-relaxed">
                 Install from{' '}
                 <a
-                  href="https://bakayise-uncedo-latest-helpers.web.app"
+                  href="https://helpers.bakayise.com"
                   target="_blank"
                   rel="noreferrer"
                   className="font-bold underline"
                 >
-                  bakayise-uncedo-latest-helpers.web.app
+                  helpers.bakayise.com
                 </a>{' '}
                 directly in Chrome or Safari so the home screen app opens outside the preview frame.
               </p>
@@ -118,12 +118,12 @@ export function PWAInstallPrompt({
               <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-2 leading-relaxed">
                 For permanent home-screen installation, open{' '}
                 <a
-                  href="https://bakayise-uncedo-latest-helpers.web.app"
+                  href="https://helpers.bakayise.com"
                   target="_blank"
                   rel="noreferrer"
                   className="font-bold underline"
                 >
-                  bakayise-uncedo-latest-helpers.web.app
+                  helpers.bakayise.com
                 </a>{' '}
                 directly in Chrome or Safari.
               </p>

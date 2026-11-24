@@ -97,7 +97,21 @@ function formatWhatsAppServiceOptionPrompt({ service = {}, options = [] } = {}) 
   };
 }
 
-function formatWhatsAppBookingConfirmation({ service = {}, selectedOption = null, questions = [], answers = {}, quote = {} } = {}) {
+function formatPaymentSelectionLabel(paymentSelection = null) {
+  if (!paymentSelection || typeof paymentSelection !== 'object') return '';
+  const type = String(paymentSelection.type || '').trim().toLowerCase();
+  if (type === 'cash') return 'Cash (pay helper on completion)';
+  if (type === 'card') {
+    const summary = paymentSelection.cardSummary || {};
+    const brand = safeLabel(summary.brand || 'Card', 30) || 'Card';
+    const last4 = safeLabel(summary.last4 || '', 4);
+    const label = last4 ? `${brand} •••• ${last4}` : brand;
+    return summary.temporary ? `${label} (this booking only)` : label;
+  }
+  return '';
+}
+
+function formatWhatsAppBookingConfirmation({ service = {}, selectedOption = null, questions = [], answers = {}, quote = {}, paymentSelection = null } = {}) {
   const serviceLabel = safeLabel(service.label || 'Selected service', 180);
   const optionTitle = safeLabel(selectedOption?.title || quote?.selectedOptionTitle || '', 140);
   const displayService = optionTitle && !serviceLabel.includes(optionTitle)
@@ -127,18 +141,20 @@ function formatWhatsAppBookingConfirmation({ service = {}, selectedOption = null
   const currency = /^[A-Z]{3}$/.test(normalizedCurrency) ? normalizedCurrency : 'ZAR';
   const amount = Number.isFinite(total) ? total.toFixed(2) : '0.00';
   const formattedAmount = currency === 'ZAR' ? `R${amount}` : `${currency} ${amount}`;
+  const paymentLabel = formatPaymentSelectionLabel(paymentSelection);
   const sections = [
     '*Please review your service request*',
     `*Service:* ${serviceLabel}${optionTitle ? `\n*Option:* ${optionTitle}` : ''}`,
     detailLines.length ? `*Details:*\n${detailLines.join('\n')}` : '',
     `*Final quote: ${formattedAmount}*`,
+    paymentLabel ? `*Payment method:* ${paymentLabel}` : '',
     'This amount comes from the current Uncedo pricing calculation.',
     'Choose *Confirm* to submit this request or *Edit details* to make a change.',
   ].filter(Boolean);
 
   return {
     text: formatWhatsAppText(sections.join('\n\n')),
-    buttonBody: formatWhatsAppText(`*${displayService}*\n*Final quote: ${formattedAmount}*\nConfirm to submit or edit the details.`),
+    buttonBody: formatWhatsAppText(`*${displayService}*\n*Final quote: ${formattedAmount}*${paymentLabel ? `\n*Payment:* ${paymentLabel}` : ''}\nConfirm to submit or edit the details.`).slice(0, 1024),
   };
 }
 
@@ -467,12 +483,171 @@ async function formatVerifiedWhatsAppNextQuestion(params = {}) {
   });
 }
 
+function formatQuoteMoney(quote = {}) {
+  const total = Number(quote.total);
+  const normalizedCurrency = String(quote.currency || 'ZAR').trim().toUpperCase();
+  const currency = /^[A-Z]{3}$/.test(normalizedCurrency) ? normalizedCurrency : 'ZAR';
+  const amount = Number.isFinite(total) ? total.toFixed(2) : '0.00';
+  return currency === 'ZAR' ? `R${amount}` : `${currency} ${amount}`;
+}
+
+function formatWhatsAppPreBookingPaymentPrompt({ service = {}, selectedOption = null, quote = {}, cards = [] } = {}) {
+  const serviceLabel = safeLabel(service.label || 'Selected service', 120);
+  const optionTitle = safeLabel(selectedOption?.title || quote?.selectedOptionTitle || '', 80);
+  const displayService = optionTitle && !serviceLabel.includes(optionTitle)
+    ? `${serviceLabel} — ${optionTitle}`
+    : serviceLabel;
+  const formattedAmount = formatQuoteMoney(quote);
+  const savedCards = Array.isArray(cards) ? cards.filter((card) => card && card.id) : [];
+  const hasSavedCards = savedCards.length > 0;
+  const body = formatWhatsAppText(
+    `*${displayService}*\n*Quote: ${formattedAmount}*\n\nHow would you like to pay for this service?\n\n${hasSavedCards ? 'Choose *Saved card*, *New card*, or *Pay cash* below before confirming.' : 'Choose *Add new card* or *Pay cash* below before confirming.'}`,
+  ).slice(0, 1024);
+
+  const buttons = hasSavedCards
+    ? [
+        { type: 'reply', reply: { id: 'wa_book_pay_saved', title: 'Saved card' } },
+        { type: 'reply', reply: { id: 'wa_book_pay_card', title: 'New card' } },
+        { type: 'reply', reply: { id: 'wa_book_pay_cash', title: 'Pay cash' } },
+      ]
+    : [
+        { type: 'reply', reply: { id: 'wa_book_pay_card', title: 'Add new card' } },
+        { type: 'reply', reply: { id: 'wa_book_pay_cash', title: 'Pay cash' } },
+      ];
+
+  return {
+    text: body,
+    interactive: {
+      type: 'button',
+      body: { text: body },
+      action: { buttons },
+    },
+  };
+}
+
+function formatWhatsAppPreBookingSavedCardMenu({ service = {}, quote = {}, cards = [] } = {}) {
+  const serviceLabel = safeLabel(service.label || 'Uncedo service', 100);
+  const formattedAmount = formatQuoteMoney(quote);
+  const eligible = (Array.isArray(cards) ? cards : []).filter((card) => card && card.id).slice(0, 9);
+  const rows = [
+    ...eligible.map((card) => ({
+      id: `wa_book_saved_card_${String(card.id).trim()}`.slice(0, 200),
+      title: safeLabel(`${card.brand || 'Card'} •••• ${card.last4 || '----'}`, 24) || 'Saved card',
+      description: card.isDefault ? 'Default payment card' : 'Saved payment card',
+    })),
+    {
+      id: 'wa_book_add_new_card',
+      title: 'Add new card',
+      description: 'Verify a new card (R1 check, refunded immediately)',
+    },
+  ];
+  const body = formatWhatsAppText(
+    `*${serviceLabel}* · *${formattedAmount}*\n\nChoose which card you would like to pay with after your job is completed, or tap *Add new card*.`,
+  ).slice(0, 1024);
+
+  return {
+    text: body,
+    interactive: {
+      type: 'list',
+      body: { text: body },
+      action: {
+        button: 'Choose card',
+        sections: [
+          {
+            title: 'Your cards',
+            rows,
+          },
+        ],
+      },
+    },
+  };
+}
+
+function formatWhatsAppCompletionCardFailureRecovery({
+  refPrefix = '',
+  serviceName = 'your Uncedo service',
+  wholeTotalDisplay = '0',
+  failedCardSummary = null,
+  untriedCards = [],
+} = {}) {
+  const safeService = safeLabel(serviceName || 'your Uncedo service', 100);
+  const last4 = safeLabel(failedCardSummary?.last4 || '', 4);
+  const brand = safeLabel(failedCardSummary?.brand || 'Card', 30) || 'Card';
+  const cardDesc = last4 ? ` (${brand} •••• ${last4})` : '';
+  const remaining = Array.isArray(untriedCards) ? untriedCards.filter((card) => card && card.id) : [];
+  const hasOtherCards = remaining.length > 0;
+  const text = formatWhatsAppText(
+    hasOtherCards
+      ? `${refPrefix}🎉 Your *${safeService}* service is complete!\n\n⚠️ Your chosen card${cardDesc} failed, so *R${wholeTotalDisplay} ZAR* was recorded to your wallet. Would you like to use another saved card, add a new card, or pay cash?`
+      : `${refPrefix}🎉 Your *${safeService}* service is complete!\n\n⚠️ Your chosen card${cardDesc} failed and no other saved cards are available, so *R${wholeTotalDisplay} ZAR* was recorded to your wallet. Please add a new card or pay cash below.`,
+  ).slice(0, 1024);
+
+  const buttons = hasOtherCards
+    ? [
+        { type: 'reply', reply: { id: 'wa_recover_saved', title: 'Use another card' } },
+        { type: 'reply', reply: { id: 'wa_payment_card', title: 'Add new card' } },
+        { type: 'reply', reply: { id: 'wa_payment_cash', title: 'Pay cash' } },
+      ]
+    : [
+        { type: 'reply', reply: { id: 'wa_payment_card', title: 'Add new card' } },
+        { type: 'reply', reply: { id: 'wa_payment_cash', title: 'Pay cash' } },
+      ];
+
+  return {
+    text,
+    interactive: {
+      type: 'button',
+      body: { text },
+      action: { buttons },
+    },
+  };
+}
+
+function formatWhatsAppRecoverySavedCardMenu({
+  serviceName = 'Uncedo service',
+  wholeTotalDisplay = '0',
+  untriedCards = [],
+} = {}) {
+  const remaining = (Array.isArray(untriedCards) ? untriedCards : []).filter((card) => card && card.id).slice(0, 9);
+  const rows = [
+    ...remaining.map((card) => ({
+      id: `wa_saved_card_${String(card.id).trim()}`.slice(0, 200),
+      title: safeLabel(`${card.brand || 'Card'} •••• ${card.last4 || '----'}`, 24) || 'Saved card',
+      description: card.isDefault ? 'Default payment card' : 'Saved payment card',
+    })),
+    {
+      id: 'wa_recover_add_card',
+      title: 'Add new card',
+      description: 'Open secure Paystack checkout with a new card',
+    },
+  ];
+  const body = formatWhatsAppText(
+    `Choose another card for *${safeLabel(serviceName, 80)}* (*R${wholeTotalDisplay} ZAR*). Failed cards have been removed from this list.`,
+  ).slice(0, 1024);
+  return {
+    text: body,
+    interactive: {
+      type: 'list',
+      body: { text: body },
+      action: {
+        button: 'Choose card',
+        sections: [{ title: 'Remaining cards', rows }],
+      },
+    },
+  };
+}
+
 module.exports = {
   formatVerifiedWhatsAppNextQuestion,
   formatWhatsAppBookingConfirmation,
+  formatWhatsAppCompletionCardFailureRecovery,
   formatWhatsAppNextQuestion,
+  formatWhatsAppPreBookingPaymentPrompt,
+  formatWhatsAppPreBookingSavedCardMenu,
+  formatWhatsAppRecoverySavedCardMenu,
   formatWhatsAppRequestExpiredMessage,
   formatWhatsAppServiceOptionPrompt,
   formatWhatsAppSubmittedRequestConfirmation,
   renderMissingWhatsAppQuestions,
 };
+

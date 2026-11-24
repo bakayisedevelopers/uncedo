@@ -273,3 +273,77 @@ test('optioned service draft persists selectedOptionId and enforces valid option
   assert.equal(submittedDoc.selectedOptionTitle, 'Knotless Braids');
 });
 
+test('confirmDraft preserves pre-selected payment fields onto confirmed request without promoting temporary card ID to selectedCardId', async () => {
+  const operationsDb = createFirestoreMock({
+    ...catalog,
+    'users/customer-pay-1': { uid: 'customer-pay-1', role: 'customer', whatsappGuestPrincipalIds: [] },
+  });
+  const operations = createMarketplaceRequestOperations({
+    db: operationsDb,
+    admin: { firestore: { FieldValue: { serverTimestamp: () => 'server-time' } } },
+  });
+
+  const selection = { categoryId: 'car_wash', serviceIds: ['full_body_wash'], selectedPackageId: '', structuredAnswers: answers };
+  await operations.createDraft({
+    requestId: 'req-preselect-saved', principalId: 'customer-pay-1', ...selection, channel: 'whatsapp', identityId: 'id-pay-1', now: 1000,
+  });
+  const quotedSaved = await operations.quoteDraft({ requestId: 'req-preselect-saved', principalId: 'customer-pay-1', now: 2000 });
+  // Simulate pre-booking saved card selection persisted onto the draft
+  const draftSaved = operationsDb.documents.get('serviceRequests/req-preselect-saved');
+  operationsDb.documents.set('serviceRequests/req-preselect-saved', {
+    ...draftSaved,
+    preSelectedPaymentType: 'card',
+    preSelectedCardMode: 'saved',
+    preSelectedCardId: 'card_saved_1',
+    preSelectedCardSummary: { brand: 'visa', last4: '4242', temporary: false },
+  });
+  await operations.confirmDraft({
+    requestId: 'req-preselect-saved',
+    principalId: 'customer-pay-1',
+    approvedQuote: quotedSaved.quote,
+    quoteExpiresAtMs: quotedSaved.quoteExpiresAtMs,
+    source: 'whatsapp',
+    paymentFlowVersion: 'explicit_v1',
+    walletAccountingVersion: 1,
+    now: 3000,
+  });
+  const submittedSaved = operationsDb.documents.get('serviceRequests/req-preselect-saved');
+  assert.equal(submittedSaved.preSelectedPaymentType, 'card');
+  assert.equal(submittedSaved.preSelectedCardMode, 'saved');
+  assert.equal(submittedSaved.preSelectedCardId, 'card_saved_1');
+  assert.equal(submittedSaved.selectedCardId, 'card_saved_1');
+  assert.deepEqual(submittedSaved.preSelectedCardSummary, { brand: 'visa', last4: '4242', temporary: false });
+  assert.equal(submittedSaved.requestPayload.selectedCardId, 'card_saved_1');
+
+  // Temporary card authorization should keep preSelectedCardId='request_temp' and leave selectedCardId null/omitted
+  await operations.createDraft({
+    requestId: 'req-preselect-temp', principalId: 'customer-pay-1', ...selection, channel: 'whatsapp', identityId: 'id-pay-1', now: 4000,
+  });
+  const quotedTemp = await operations.quoteDraft({ requestId: 'req-preselect-temp', principalId: 'customer-pay-1', now: 5000 });
+  const draftTemp = operationsDb.documents.get('serviceRequests/req-preselect-temp');
+  operationsDb.documents.set('serviceRequests/req-preselect-temp', {
+    ...draftTemp,
+    preSelectedPaymentType: 'card',
+    preSelectedCardMode: 'new_temp',
+    preSelectedCardId: 'request_temp',
+    preSelectedCardSummary: { brand: 'mastercard', last4: '5555', temporary: true },
+  });
+  await operations.confirmDraft({
+    requestId: 'req-preselect-temp',
+    principalId: 'customer-pay-1',
+    approvedQuote: quotedTemp.quote,
+    quoteExpiresAtMs: quotedTemp.quoteExpiresAtMs,
+    source: 'whatsapp',
+    paymentFlowVersion: 'explicit_v1',
+    walletAccountingVersion: 1,
+    now: 6000,
+  });
+  const submittedTemp = operationsDb.documents.get('serviceRequests/req-preselect-temp');
+  assert.equal(submittedTemp.preSelectedPaymentType, 'card');
+  assert.equal(submittedTemp.preSelectedCardMode, 'new_temp');
+  assert.equal(submittedTemp.preSelectedCardId, 'request_temp');
+  assert.equal(submittedTemp.selectedCardId, undefined);
+  assert.deepEqual(submittedTemp.preSelectedCardSummary, { brand: 'mastercard', last4: '5555', temporary: true });
+});
+
+

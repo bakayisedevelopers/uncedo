@@ -321,4 +321,107 @@ test('formatVerifiedWhatsAppNextQuestion replaces broken 404 option images and f
   assert.equal(allBrokenResult.interactive.type, 'button');
 });
 
+test('formatWhatsAppPreBookingPaymentPrompt adapts buttons based on whether saved cards exist', () => {
+  const { formatWhatsAppPreBookingPaymentPrompt } = require('./serviceBookingPresentation');
+  const noCards = formatWhatsAppPreBookingPaymentPrompt({
+    service: { label: 'Car Wash' },
+    quote: { total: 190, currency: 'ZAR' },
+    cards: [],
+  });
+  assert.equal(noCards.interactive.type, 'button');
+  assert.deepEqual(
+    noCards.interactive.action.buttons.map((b) => [b.reply.id, b.reply.title]),
+    [['wa_book_pay_card', 'Add new card'], ['wa_book_pay_cash', 'Pay cash']],
+  );
+
+  const withCards = formatWhatsAppPreBookingPaymentPrompt({
+    service: { label: 'Car Wash' },
+    quote: { total: 190, currency: 'ZAR' },
+    cards: [{ id: 'card-1', brand: 'visa', last4: '4242', isDefault: true }],
+  });
+  assert.deepEqual(
+    withCards.interactive.action.buttons.map((b) => [b.reply.id, b.reply.title]),
+    [['wa_book_pay_saved', 'Saved card'], ['wa_book_pay_card', 'New card'], ['wa_book_pay_cash', 'Pay cash']],
+  );
+});
+
+test('formatWhatsAppPreBookingSavedCardMenu lists saved cards plus an Add new card row', () => {
+  const { formatWhatsAppPreBookingSavedCardMenu } = require('./serviceBookingPresentation');
+  const menu = formatWhatsAppPreBookingSavedCardMenu({
+    service: { label: 'Cleaning' },
+    quote: { total: 240, currency: 'ZAR' },
+    cards: [
+      { id: 'c1', brand: 'Visa', last4: '1111', isDefault: true },
+      { id: 'c2', brand: 'Mastercard', last4: '2222', isDefault: false },
+    ],
+  });
+  assert.equal(menu.interactive.type, 'list');
+  const rows = menu.interactive.action.sections[0].rows;
+  assert.equal(rows.length, 3);
+  assert.equal(rows[0].id, 'wa_book_saved_card_c1');
+  assert.equal(rows[1].id, 'wa_book_saved_card_c2');
+  assert.equal(rows[2].id, 'wa_book_add_new_card');
+  assert.equal(rows[2].title, 'Add new card');
+});
+
+test('formatWhatsAppBookingConfirmation displays selected payment summary for cash and temporary card', () => {
+  const cashConfirm = formatWhatsAppBookingConfirmation({
+    service: { label: 'Car wash' },
+    quote: { total: 200, currency: 'ZAR' },
+    paymentSelection: { type: 'cash' },
+  });
+  assert.match(cashConfirm.text, /\*Payment method:\* Cash \(pay helper on completion\)/);
+  assert.match(cashConfirm.buttonBody, /\*Payment:\* Cash/);
+
+  const tempCardConfirm = formatWhatsAppBookingConfirmation({
+    service: { label: 'Car wash' },
+    quote: { total: 200, currency: 'ZAR' },
+    paymentSelection: { type: 'card', cardSummary: { brand: 'Visa', last4: '4242', temporary: true } },
+  });
+  assert.match(tempCardConfirm.text, /\*Payment method:\* Visa •••• 4242 \(this booking only\)/);
+  assert.match(tempCardConfirm.buttonBody, /Visa •••• 4242 \(this booking only\)/);
+});
+
+test('formatWhatsAppCompletionCardFailureRecovery offers Use another card only when untried saved cards remain', () => {
+  const {
+    formatWhatsAppCompletionCardFailureRecovery,
+    formatWhatsAppRecoverySavedCardMenu,
+  } = require('./serviceBookingPresentation');
+
+  const withOtherCards = formatWhatsAppCompletionCardFailureRecovery({
+    serviceName: 'Car Wash',
+    wholeTotalDisplay: '190',
+    failedCardSummary: { brand: 'Visa', last4: '1111' },
+    untriedCards: [{ id: 'c2', brand: 'Mastercard', last4: '2222' }],
+  });
+  assert.deepEqual(
+    withOtherCards.interactive.action.buttons.map((b) => b.reply.id),
+    ['wa_recover_saved', 'wa_payment_card', 'wa_payment_cash'],
+  );
+  assert.match(withOtherCards.text, /Visa •••• 1111/);
+
+  const exhausted = formatWhatsAppCompletionCardFailureRecovery({
+    serviceName: 'Car Wash',
+    wholeTotalDisplay: '190',
+    failedCardSummary: { brand: 'Visa', last4: '1111' },
+    untriedCards: [],
+  });
+  assert.deepEqual(
+    exhausted.interactive.action.buttons.map((b) => b.reply.id),
+    ['wa_payment_card', 'wa_payment_cash'],
+  );
+  assert.match(exhausted.text, /no other saved cards are available/i);
+
+  const recoveryMenu = formatWhatsAppRecoverySavedCardMenu({
+    serviceName: 'Car Wash',
+    wholeTotalDisplay: '190',
+    untriedCards: [{ id: 'c2', brand: 'Mastercard', last4: '2222', isDefault: true }],
+  });
+  const rows = recoveryMenu.interactive.action.sections[0].rows;
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].id, 'wa_saved_card_c2');
+  assert.equal(rows[1].id, 'wa_recover_add_card');
+});
+
+
 

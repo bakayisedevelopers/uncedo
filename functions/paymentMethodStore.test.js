@@ -3,9 +3,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  deleteTemporaryRequestPaymentAuthorization,
   getServerPaymentMethods,
+  getTemporaryRequestPaymentAuthorization,
   migrateLegacyPaymentMethods,
   storeReusablePaymentMethod,
+  storeTemporaryRequestPaymentAuthorization,
   updateSavedPaymentMethod,
 } = require('./paymentMethodStore');
 
@@ -17,6 +20,12 @@ class DocRef {
   constructor(db, path) { this.db = db; this.path = path; this.id = path.split('/').at(-1); }
   collection(name) { return new Collection(this.db, `${this.path}/${name}`); }
   async get() { return new Snap(this, this.db.data.get(this.path)); }
+  async set(value, options = {}) {
+    const old = this.db.data.get(this.path);
+    const cloned = structuredClone(value);
+    this.db.data.set(this.path, options.merge && old ? { ...old, ...cloned } : cloned);
+  }
+  async delete() { this.db.data.delete(this.path); }
 }
 class Query {
   constructor(collection, filters = [], max = 100) { this.collection = collection; this.filters = filters; this.max = max; }
@@ -144,3 +153,49 @@ test('guest customers can save reusable cards even before a guest user document 
   assert.equal(serverMethods[0].paystackAuthorizationCode, 'AUTH_GUEST_1');
   assert.equal(serverMethods[0].payerEmail, 'guest.one@example.com');
 });
+
+test('temporary request authorization is isolated per request and never added to customer saved paymentMethods', async () => {
+  const db = new Db({
+    'users/customer-temp': { uid: 'customer-temp', paymentMethods: [] },
+  });
+  const stored = await storeTemporaryRequestPaymentAuthorization({
+    db,
+    admin,
+    requestId: 'req-temp-1',
+    customerId: 'customer-temp',
+    authorization: {
+      authorization_code: 'AUTH_TEMP_ONLY',
+      reusable: true,
+      brand: 'visa',
+      last4: '8888',
+      signature: 'SIG_TEMP',
+    },
+    payerEmail: 'Temp.Payer@example.com',
+    consentAtMs: 1234,
+    now: 1234,
+  });
+
+  assert.equal(stored.saved, true);
+  assert.equal(stored.card.id, 'request_temp');
+  assert.equal(stored.card.temporary, true);
+  assert.equal(stored.card.last4, '8888');
+
+  // Saved profile methods and reusable collection remain untouched
+  const userProfile = (await db.collection('users').doc('customer-temp').get()).data();
+  assert.deepEqual(userProfile.paymentMethods, []);
+  const savedMethods = await getServerPaymentMethods({ db, admin, uid: 'customer-temp' });
+  assert.deepEqual(savedMethods, []);
+
+  // Temporary authorization is readable and deletable by requestId
+  const tempAuth = await getTemporaryRequestPaymentAuthorization({ db, requestId: 'req-temp-1' });
+  assert.equal(tempAuth.id, 'request_temp');
+  assert.equal(tempAuth.temporary, true);
+  assert.equal(tempAuth.paystackAuthorizationCode, 'AUTH_TEMP_ONLY');
+  assert.equal(tempAuth.payerEmail, 'temp.payer@example.com');
+
+  const deleted = await deleteTemporaryRequestPaymentAuthorization({ db, requestId: 'req-temp-1' });
+  assert.equal(deleted, true);
+  const afterDelete = await getTemporaryRequestPaymentAuthorization({ db, requestId: 'req-temp-1' });
+  assert.equal(afterDelete, null);
+});
+

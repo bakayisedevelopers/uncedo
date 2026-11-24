@@ -201,12 +201,99 @@ async function updateSavedPaymentMethod({ db, admin, uid, methodId, action }) {
   });
 }
 
+const REQUEST_TEMP_AUTH_COLLECTION = 'requestPaymentAuthorizations';
+
+async function storeTemporaryRequestPaymentAuthorization({
+  db,
+  admin,
+  requestId,
+  customerId = '',
+  authorization = {},
+  payerEmail = '',
+  consentAtMs = Date.now(),
+  now = Date.now(),
+} = {}) {
+  const safeRequestId = String(requestId || '').trim();
+  const safeCustomerId = String(customerId || '').trim();
+  const authorizationCode = String(authorization.authorization_code || authorization.authorizationCode || '').trim();
+  const normalizedEmail = String(payerEmail || '').trim().toLowerCase();
+  if (!safeRequestId || !authorizationCode || authorization.reusable !== true) {
+    return { saved: false, reason: 'not-reusable' };
+  }
+  const brand = String(authorization.brand || 'Card').slice(0, 40);
+  const last4 = String(authorization.last4 || '').slice(-4);
+  const ref = db.collection(REQUEST_TEMP_AUTH_COLLECTION).doc(safeRequestId);
+  await ref.set({
+    requestId: safeRequestId,
+    customerId: safeCustomerId,
+    authorizationCode,
+    authorizationSignature: String(authorization.signature || '').slice(0, 120) || null,
+    brand,
+    last4,
+    reusable: true,
+    temporary: true,
+    ...(normalizedEmail ? { payerEmail: normalizedEmail } : {}),
+    consentedAtMs: Number(consentAtMs || now),
+    createdAtMs: now,
+    updatedAtMs: now,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+  return {
+    saved: true,
+    card: {
+      id: 'request_temp',
+      brand,
+      last4,
+      reusable: true,
+      temporary: true,
+      payerEmail: normalizedEmail || null,
+    },
+  };
+}
+
+async function getTemporaryRequestPaymentAuthorization({ db, requestId } = {}) {
+  const safeRequestId = String(requestId || '').trim();
+  if (!safeRequestId) return null;
+  const snap = await db.collection(REQUEST_TEMP_AUTH_COLLECTION).doc(safeRequestId).get().catch(() => null);
+  if (!snap?.exists) return null;
+  const data = snap.data() || {};
+  const authorizationCode = String(data.authorizationCode || '').trim();
+  if (!authorizationCode || data.reusable !== true) return null;
+  return {
+    id: 'request_temp',
+    temporary: true,
+    brand: String(data.brand || 'Card').slice(0, 40),
+    last4: String(data.last4 || '').slice(-4),
+    reusable: true,
+    customerId: String(data.customerId || '').trim(),
+    paystackAuthorizationCode: authorizationCode,
+    signature: String(data.authorizationSignature || '') || null,
+    payerEmail: String(data.payerEmail || '').trim().toLowerCase() || null,
+  };
+}
+
+async function deleteTemporaryRequestPaymentAuthorization({ db, requestId } = {}) {
+  const safeRequestId = String(requestId || '').trim();
+  if (!safeRequestId) return false;
+  try {
+    await db.collection(REQUEST_TEMP_AUTH_COLLECTION).doc(safeRequestId).delete();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 module.exports = {
   PRIVATE_COLLECTION,
+  REQUEST_TEMP_AUTH_COLLECTION,
+  deleteTemporaryRequestPaymentAuthorization,
   getServerPaymentMethod,
   getServerPaymentMethods,
+  getTemporaryRequestPaymentAuthorization,
   migrateLegacyPaymentMethods,
   publicPaymentMethod,
   storeReusablePaymentMethod,
+  storeTemporaryRequestPaymentAuthorization,
   updateSavedPaymentMethod,
 };
+

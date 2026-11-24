@@ -102,9 +102,22 @@ function isTerminalServiceOperation(status) {
 }
 
 function shouldDeferCompletionPayment(request = {}, existingOperation = null) {
-  return String(request.paymentFlowVersion || '') === 'explicit_v1'
-    && (!existingOperation || existingOperation.deferredPaymentSelection === true
-      || existingOperation.settlementData?.deferredPaymentSelection === true);
+  if (existingOperation) {
+    return existingOperation.deferredPaymentSelection === true
+      || existingOperation.settlementData?.deferredPaymentSelection === true;
+  }
+  if (String(request.paymentFlowVersion || '') !== 'explicit_v1') {
+    return false;
+  }
+  const preSelectedType = String(
+    request.preSelectedPaymentType
+    || request.requestPayload?.preSelectedPaymentType
+    || '',
+  ).trim().toLowerCase();
+  if (preSelectedType === 'card') {
+    return false;
+  }
+  return true;
 }
 
 function normalizeMinorAmount(value) {
@@ -532,6 +545,17 @@ async function settleServiceFinancialOperation({
         requestPatch.statusDetail = `Customer canceled the service. No saved card was charged; ${formattedAmount} cancellation fee recorded to wallet balance.`;
       } else if (paymentStatus === 'payment_reconciliation_required') {
         requestPatch.statusDetail = `Customer canceled the service. Cancellation fee payment (${formattedAmount}) is being verified.`;
+      }
+    }
+    const failedCardIdForPatch = paymentStatus === 'wallet_debt_recorded'
+      ? String(settlementData.attemptedCardId || settlementData.selectedCardId || request.preSelectedCardId || '').trim()
+      : '';
+    if (failedCardIdForPatch) {
+      const existingFailedCardIds = Array.isArray(request.failedCardIds)
+        ? request.failedCardIds.map((id) => String(id || '').trim()).filter(Boolean)
+        : [];
+      if (!existingFailedCardIds.includes(failedCardIdForPatch)) {
+        requestPatch.failedCardIds = [...existingFailedCardIds, failedCardIdForPatch];
       }
     }
     transaction.set(requestRef, {

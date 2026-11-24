@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertCircle, Clock, X } from 'lucide-react';
+import { AlertCircle, Banknote, Clock, CreditCard, X } from 'lucide-react';
 import { useHelperSession } from '../context/HelperSessionContext';
 import { resolveHelperPayoutAmount } from '../services/helperDataService';
 
@@ -11,6 +11,126 @@ function getCountdownColor(secondsLeft) {
 
 function formatRand(amount) {
   return `R${(Number(amount || 0) || 0).toFixed(2)}`;
+}
+
+const IGNORED_ANSWER_KEYS = new Set([
+  'travel_distance_km',
+  'service_address_target',
+  'service_address',
+  'timing_preference',
+  'scheduled_for_text',
+  'selectedoptionid',
+  'selected_option_id',
+  'preselectedpaymenttype',
+  'pre_selected_payment_type',
+  'paymentmethod',
+  'payment_method',
+]);
+
+function formatDetailLabel(rawKey = '') {
+  const spaced = String(rawKey || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!spaced) return '';
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase();
+}
+
+function formatDetailValue(rawValue) {
+  if (rawValue === null || rawValue === undefined) return '';
+  if (typeof rawValue === 'boolean') return rawValue ? 'Yes' : 'No';
+  if (Array.isArray(rawValue)) {
+    return rawValue.map(formatDetailValue).filter(Boolean).join(', ');
+  }
+  const text = String(rawValue).replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  if (/^[a-z0-9_]+$/.test(text) && text.includes('_')) {
+    const cleaned = text.replace(/_+/g, ' ').trim();
+    return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+  }
+  return text;
+}
+
+function resolveOfferPaymentType(offer) {
+  const rawType = String(
+    offer?.preSelectedPaymentType
+    || offer?.requestPayload?.preSelectedPaymentType
+    || offer?.paymentMethod
+    || offer?.paymentOperation?.method
+    || offer?.settlementData?.method
+    || '',
+  )
+    .trim()
+    .toLowerCase();
+
+  if (rawType === 'cash') return 'cash';
+  if (
+    rawType === 'card'
+    || rawType === 'saved_card'
+    || rawType === 'paystack_checkout'
+    || rawType === 'paystack'
+    || Boolean(
+      offer?.preSelectedCardId
+      || offer?.requestPayload?.preSelectedCardId
+      || offer?.selectedCardId
+      || offer?.requestPayload?.selectedCardId
+      || offer?.preSelectedCardMode
+      || offer?.requestPayload?.preSelectedCardMode,
+    )
+  ) {
+    return 'card';
+  }
+  return '';
+}
+
+function extractOfferDetails(offer, offerTitle = '') {
+  const normalizedTitle = String(offerTitle || '').trim().toLowerCase();
+  const candidates = [
+    offer?.description,
+    offer?.requestPayload?.summary,
+    offer?.serviceSummary,
+    offer?.selectedOptionTitle,
+    offer?.requestPayload?.selectedOptionTitle,
+  ];
+  const summaryText =
+    candidates
+      .map((item) => String(item || '').replace(/\s+/g, ' ').trim())
+      .find(
+        (item) =>
+          Boolean(item)
+          && item.toLowerCase() !== 'a customer is requesting help.'
+          && item.toLowerCase() !== normalizedTitle,
+      ) || '';
+
+  const rawAnswers = offer?.structuredAnswers || offer?.requestPayload?.structuredAnswers || {};
+  const answerRows = [];
+  if (rawAnswers && typeof rawAnswers === 'object' && !Array.isArray(rawAnswers)) {
+    for (const [key, rawValue] of Object.entries(rawAnswers)) {
+      const normalizedKey = String(key || '').trim().toLowerCase();
+      if (!normalizedKey || IGNORED_ANSWER_KEYS.has(normalizedKey)) continue;
+      const value = formatDetailValue(rawValue);
+      const label = formatDetailLabel(key);
+      if (!label || !value) continue;
+      answerRows.push({ key, label, value });
+      if (answerRows.length >= 8) break;
+    }
+  }
+
+  const rawNote = String(
+    offer?.notes
+    || offer?.requestPayload?.notes
+    || offer?.additionalDetails
+    || offer?.requestPayload?.additionalDetails
+    || '',
+  )
+    .replace(/\s+/g, ' ')
+    .trim();
+  const noteText = rawNote && !answerRows.some((item) => item.value.toLowerCase() === rawNote.toLowerCase())
+    ? rawNote
+    : '';
+
+  return { summaryText, answerRows, noteText };
 }
 
 export function HelperOfferOverlay({ onNavigate }) {
@@ -86,15 +206,6 @@ export function HelperOfferOverlay({ onNavigate }) {
   const serverVerifiedHelper = String(profile?.verificationStatus || '').trim().toLowerCase() === 'verified';
   const isBusyFallback = String(activeOffer.offerType || '').trim().toLowerCase() === 'busy_helper_fallback';
   const canRespond = Boolean(user?.uid && (evaluation?.fullyVerified || serverVerifiedHelper) && (!activeRequest || isBusyFallback));
-  const timingPreference = String(
-    activeOffer.timingPreference || activeOffer.requestPayload?.timingPreference || 'now',
-  )
-    .trim()
-    .toLowerCase();
-  const offerTimingLabel = timingPreference === 'later' ? 'Later' : 'Now';
-  const scheduledForText = String(
-    activeOffer.scheduledForText || activeOffer.requestPayload?.scheduledForText || '',
-  ).trim();
 
   const offerTitle =
     activeOffer.title || activeOffer.subject || activeOffer.serviceSummary || 'Service request';
@@ -108,6 +219,12 @@ export function HelperOfferOverlay({ onNavigate }) {
   const payoutAmount =
     activeOffer.payoutEstimate
     ?? resolveHelperPayoutAmount(activeOffer);
+
+  const paymentType = resolveOfferPaymentType(activeOffer);
+  const offerDetails = extractOfferDetails(activeOffer, offerTitle);
+  const hasOfferDetails = Boolean(
+    offerDetails.summaryText || offerDetails.answerRows.length > 0 || offerDetails.noteText,
+  );
 
   const handleAction = async (action) => {
     setPendingAction({ offerId: activeOffer.id, action });
@@ -184,23 +301,46 @@ export function HelperOfferOverlay({ onNavigate }) {
             </div>
           </div>
 
-          {/* Timing Status Card */}
-          <div className="rounded-[14px] border border-emerald-300 px-3 py-2 flex items-center justify-between gap-2">
-            <span className="text-[11px] font-black uppercase tracking-wider text-tealbrand-800 px-1">
-              {isBusyFallback ? 'Queued next' : offerTimingLabel}
-            </span>
-            {isBusyFallback ? (
-              <span className="text-xs font-semibold text-ink-700 truncate">
-                Starts after your current job
+          {/* Request Details Under Price */}
+          {hasOfferDetails && (
+            <div className="rounded-[14px] bg-well/75 px-3.5 py-2.5 space-y-1.5 max-h-36 overflow-y-auto">
+              {offerDetails.summaryText && (
+                <p className="text-xs font-medium text-ink-700 leading-relaxed break-words">
+                  {offerDetails.summaryText}
+                </p>
+              )}
+              {offerDetails.answerRows.length > 0 && (
+                <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                  {offerDetails.answerRows.map((item) => (
+                    <div key={item.key} className="flex items-baseline justify-between sm:justify-start gap-1.5 min-w-0">
+                      <dt className="font-semibold text-ink-500 shrink-0">{item.label}:</dt>
+                      <dd className="font-bold text-ink-900 break-words min-w-0">{item.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+              {offerDetails.noteText && (
+                <p className="text-xs text-ink-600 leading-relaxed break-words">
+                  <span className="font-semibold text-ink-500">Notes: </span>
+                  {offerDetails.noteText}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Customer Payment Type (Borderless, Centered Row) */}
+          {paymentType && (
+            <div className="px-3 py-1 flex items-center justify-center gap-2">
+              {paymentType === 'card' ? (
+                <CreditCard className="h-4 w-4 text-tealbrand-700 shrink-0" aria-hidden="true" />
+              ) : (
+                <Banknote className="h-4 w-4 text-emerald-700 shrink-0" aria-hidden="true" />
+              )}
+              <span className="text-sm font-extrabold text-ink-900">
+                {paymentType === 'card' ? 'Card' : 'Cash'}
               </span>
-            ) : (
-              timingPreference === 'later' && scheduledForText && (
-                <span className="text-xs font-semibold text-ink-700 truncate">
-                  {scheduledForText}
-                </span>
-              )
-            )}
-          </div>
+            </div>
+          )}
 
           {isBusyFallback && activeRequest && (
             <div className="rounded-[14px] border border-tealbrand-200 bg-tealbrand-50 px-3.5 py-2.5 text-xs font-semibold text-tealbrand-900 leading-relaxed">
