@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Navigate, useLocation, useNavigate } from 'react-router-dom';
-import { ArrowRight, Building2, Lock, Mail } from 'lucide-react';
+import { ArrowRight, Lock, Mail } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
 import { hasFirebaseEnv, missingFirebaseEnvKeys } from '../firebase/config';
 
@@ -43,9 +43,13 @@ export default function LoginPage() {
 
       <div className="relative grid w-full max-w-6xl gap-6 lg:grid-cols-[1.1fr_0.9fr]">
         <div className="rounded-[32px] border border-white/10 bg-ink-900/80 p-8 shadow-glow backdrop-blur sm:p-10">
-          <div className="inline-flex items-center gap-2 rounded-full border border-brand/20 bg-brand/15 px-3 py-1 text-xs font-bold uppercase tracking-[0.22em] text-brand-soft">
-            <Building2 className="h-3.5 w-3.5" />
-            Uncedo Admin
+          <div className="inline-flex items-center">
+            <img
+              src="/admin-wordmark-light.png"
+              alt="Uncedo Admin"
+              referrerPolicy="no-referrer"
+              className="h-11 w-auto shrink-0 object-contain"
+            />
           </div>
           <h1 className="mt-5 max-w-xl text-4xl font-bold tracking-tight text-white sm:text-5xl">
             Review helpers, customers, and service photos from one console.

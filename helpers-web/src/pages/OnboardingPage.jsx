@@ -168,19 +168,19 @@ export function OnboardingPage({
         <div className="max-w-7xl mx-auto px-4 sm:px-8 h-14 md:h-16 flex items-center justify-between gap-4">
           <a
             href="/home"
+            aria-label="Uncedo Helpers home"
             onClick={(e) => {
               e.preventDefault();
               onNavigate('/home');
             }}
-            className="flex items-center gap-2.5 font-display font-bold text-base sm:text-lg tracking-tight text-ink-900 whitespace-nowrap shrink-0"
+            className="flex items-center whitespace-nowrap shrink-0"
           >
             <img
-              src="/helpers-logo-192.png"
+              src="/helpers-wordmark.png"
               alt="Uncedo Helpers"
               referrerPolicy="no-referrer"
-              className="h-8 w-8 rounded-lg border border-border object-cover bg-white shrink-0"
+              className="h-8 sm:h-9 w-auto object-contain shrink-0"
             />
-            <span>Uncedo Helpers</span>
           </a>
 
           <div className="hidden md:flex items-center gap-2 text-xs text-ink-500 whitespace-nowrap truncate">

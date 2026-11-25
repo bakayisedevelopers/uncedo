@@ -66,15 +66,14 @@ export default function MainLayout({ children }) {
           </div>
           <div className="flex flex-wrap items-center justify-between gap-4 border-t border-zinc-200 pt-8">
             <p className="text-sm text-zinc-600">&copy; 2026 Uncedo. All rights reserved.</p>
-            <div className="flex items-center gap-2">
+            <Link to="/" aria-label="Uncedo home" className="inline-flex items-center rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600">
               <img
-                src="/logo.png"
+                src="/assets/aistudio/IMG_0926_8f427254.jpeg"
                 alt="Uncedo"
                 referrerPolicy="no-referrer"
-                className="h-7 w-7 object-contain"
+                className="h-9 w-auto shrink-0 object-contain mix-blend-multiply"
               />
-              <span className="font-display font-bold text-zinc-900">Uncedo</span>
-            </div>
+            </Link>
           </div>
         </div>
       </footer>

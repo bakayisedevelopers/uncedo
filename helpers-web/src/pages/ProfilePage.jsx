@@ -440,14 +440,14 @@ export function ProfilePage({ onNavigate, pwa }) {
           <LogOut className="h-[18px] w-[18px]" />
           <span>Log out</span>
         </button>
-        <div className="flex items-center justify-center gap-2 pt-1">
+        <div className="flex items-center justify-center gap-2.5 pt-1">
           <img
-            src="/helpers-logo-192.png"
+            src="/helpers-wordmark.png"
             alt="Uncedo Helpers"
             referrerPolicy="no-referrer"
-            className="h-6 w-6 rounded-md border border-border object-cover bg-white"
+            className="h-7 w-auto object-contain shrink-0"
           />
-          <p className="text-xs font-medium text-ink-400">Uncedo Helpers · App version 1.0.0</p>
+          <p className="text-xs font-medium text-ink-400">· App version 1.0.0</p>
         </div>
       </section>
     </div>

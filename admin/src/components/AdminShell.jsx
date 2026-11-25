@@ -7,7 +7,6 @@ import {
   Menu,
   LogOut,
   Shield,
-  Sparkles,
   Gift,
   Users,
   FileImage,
@@ -77,14 +76,13 @@ export default function AdminShell() {
         <aside className={`fixed inset-y-0 left-0 z-40 w-80 border-r border-white/10 bg-ink-900/96 px-5 py-6 shadow-2xl shadow-black/30 backdrop-blur transition-transform duration-200 lg:sticky lg:top-0 lg:flex lg:h-screen lg:translate-x-0 ${menuOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}`}>
           <div className="flex h-full flex-col gap-6">
             <div className="flex items-start justify-between">
-              <Link to="/dashboard" className="flex items-center gap-3">
-                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-brand/20 text-brand-soft">
-                  <Sparkles className="h-6 w-6" />
-                </div>
-                <div>
-                  <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-ink-300">Uncedo</p>
-                  <h1 className="text-2xl font-bold tracking-tight">Admin</h1>
-                </div>
+              <Link to="/dashboard" aria-label="Uncedo Admin dashboard" className="inline-flex items-center rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
+                <img
+                  src="/admin-wordmark-light.png"
+                  alt="Uncedo Admin"
+                  referrerPolicy="no-referrer"
+                  className="h-10 w-auto shrink-0 object-contain"
+                />
               </Link>
 
               <button

@@ -59,14 +59,13 @@ export function WhatsAppLinkPage({ user, onNavigate, onWhatsAppLinked }) {
         />
         <div className="absolute inset-0 bg-gradient-to-t from-forest-950 via-forest-900/80 to-forest-900/60" />
 
-        <div className="relative z-10 inline-flex items-center gap-2.5 font-display font-bold text-lg tracking-tight text-white">
+        <div className="relative z-10 inline-flex items-center">
           <img
-            src="/helpers-logo-192.png"
+            src="/helpers-wordmark-white.png"
             alt="Uncedo Helpers"
             referrerPolicy="no-referrer"
-            className="h-8 w-8 rounded-lg border border-white/20 object-cover bg-white shrink-0"
+            className="h-9 w-auto object-contain shrink-0"
           />
-          <span>Uncedo Helpers</span>
         </div>
 
         <div className="relative z-10 space-y-3 max-w-md">
@@ -92,14 +91,13 @@ export function WhatsAppLinkPage({ user, onNavigate, onWhatsAppLinked }) {
             <ArrowLeft className="h-4 w-4" />
             Home
           </button>
-          <span className="lg:hidden inline-flex items-center gap-2 font-display font-bold text-sm text-ink-900">
+          <span className="lg:hidden inline-flex items-center">
             <img
-              src="/helpers-logo-192.png"
+              src="/helpers-wordmark.png"
               alt="Uncedo Helpers"
               referrerPolicy="no-referrer"
-              className="h-6 w-6 rounded-md border border-border object-cover bg-white shrink-0"
+              className="h-8 w-auto object-contain shrink-0"
             />
-            <span>Uncedo Helpers</span>
           </span>
           <div className="w-12 hidden lg:block" />
         </header>

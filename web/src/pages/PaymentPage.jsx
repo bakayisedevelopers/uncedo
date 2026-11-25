@@ -383,7 +383,14 @@ export default function PaymentPage() {
     return (
       <PaymentShell>
         <header className="mb-8 flex items-center justify-between gap-4">
-          <Link to="/" className="text-xl font-black tracking-tight text-zinc-950">Uncedo<span className="text-emerald-600">.</span></Link>
+          <Link to="/" aria-label="Uncedo home" className="inline-flex items-center rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600">
+          <img
+            src="/assets/aistudio/IMG_0926_8f427254.jpeg"
+            alt="Uncedo"
+            referrerPolicy="no-referrer"
+            className="h-10 w-auto shrink-0 object-contain mix-blend-multiply"
+          />
+        </Link>
           <div className="flex items-center gap-2 text-xs font-bold text-zinc-500"><LockKeyhole size={15} className="text-emerald-700" /> Card verification</div>
         </header>
         <main className="mx-auto max-w-2xl">
@@ -534,7 +541,14 @@ export default function PaymentPage() {
   return (
     <PaymentShell>
       <header className="mb-8 flex items-center justify-between gap-4">
-        <Link to="/" className="text-xl font-black tracking-tight text-zinc-950">Uncedo<span className="text-emerald-600">.</span></Link>
+        <Link to="/" aria-label="Uncedo home" className="inline-flex items-center rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600">
+          <img
+            src="/assets/aistudio/IMG_0926_8f427254.jpeg"
+            alt="Uncedo"
+            referrerPolicy="no-referrer"
+            className="h-10 w-auto shrink-0 object-contain mix-blend-multiply"
+          />
+        </Link>
         <div className="flex items-center gap-2 text-xs font-bold text-zinc-500"><LockKeyhole size={15} className="text-emerald-700" /> Secure payment</div>
       </header>
       <main className="mx-auto max-w-2xl">

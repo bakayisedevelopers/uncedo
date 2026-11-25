@@ -39,19 +39,19 @@ export function LandingPage({ user, onNavigate, pwa }) {
         <div className="max-w-7xl mx-auto px-4 sm:px-8 h-16 flex items-center justify-between gap-4 sm:gap-8">
           <a
             href="/"
+            aria-label="Uncedo Helpers home"
             onClick={(e) => {
               e.preventDefault();
               onNavigate('/');
             }}
-            className="flex items-center gap-2.5 font-display font-bold text-lg tracking-tight text-ink-900 whitespace-nowrap shrink-0"
+            className="flex items-center whitespace-nowrap shrink-0 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tealbrand-600"
           >
             <img
-              src="/helpers-logo-192.png"
+              src="/helpers-wordmark.png"
               alt="Uncedo Helpers"
               referrerPolicy="no-referrer"
-              className="h-9 w-9 rounded-xl border border-border object-cover bg-white shrink-0"
+              className="h-9 sm:h-10 w-auto object-contain shrink-0"
             />
-            <span>Uncedo Helpers</span>
           </a>
 
           <nav className="hidden md:flex items-center gap-7 text-sm font-medium text-ink-500">

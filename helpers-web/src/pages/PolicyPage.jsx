@@ -91,19 +91,19 @@ export function PolicyPage({ policyKey = 'privacy', user = null, onNavigate }) {
 
           <a
             href="/"
+            aria-label="Uncedo Helpers home"
             onClick={(e) => {
               e.preventDefault();
               onNavigate(user ? '/home' : '/');
             }}
-            className="inline-flex items-center gap-2 font-display font-bold text-sm text-ink-900"
+            className="inline-flex items-center"
           >
             <img
-              src="/helpers-logo-192.png"
+              src="/helpers-wordmark.png"
               alt="Uncedo Helpers"
               referrerPolicy="no-referrer"
-              className="h-7 w-7 rounded-lg border border-border object-cover bg-white shrink-0"
+              className="h-8 w-auto object-contain shrink-0"
             />
-            <span>Uncedo Helpers</span>
           </a>
         </div>
       </header>

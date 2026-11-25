@@ -10,17 +10,15 @@ export default function Navbar() {
       <div className="mx-auto flex h-20 max-w-7xl items-center justify-between gap-8 px-4 sm:px-6 lg:px-8">
         <Link
           to="/"
-          className="flex shrink-0 items-center gap-2.5 whitespace-nowrap rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
+          aria-label="Uncedo home"
+          className="flex shrink-0 items-center whitespace-nowrap rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
         >
           <img
-            src="/logo.png"
+            src="/assets/aistudio/IMG_0926_8f427254.jpeg"
             alt="Uncedo"
             referrerPolicy="no-referrer"
-            className="h-9 w-9 shrink-0 object-contain"
+            className="h-12 w-auto shrink-0 object-contain mix-blend-multiply sm:h-14"
           />
-          <span className="font-display text-xl font-extrabold tracking-tight text-zinc-900">
-            Uncedo
-          </span>
         </Link>
 
         <nav
