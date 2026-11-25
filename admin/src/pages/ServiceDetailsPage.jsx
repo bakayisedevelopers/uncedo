@@ -15,7 +15,12 @@ import {
   subscribeToServiceCatalog,
   uploadServiceCatalogImages,
 } from '../services/serviceCatalogService';
-import { finalizeAiGeneratedImage, isDataUrlImage } from '../utils/aiImageBranding';
+import {
+  aliasCleanReferenceImage,
+  finalizeAiGeneratedImage,
+  isDataUrlImage,
+  resolveCleanReferenceImageUrl,
+} from '../utils/aiImageBranding';
 import { groupRowsByHelper, isPendingServiceOfferingStatus, matchesCatalogItem } from '../utils/moderationView';
 
 function slugify(value = '') {
@@ -462,7 +467,8 @@ function ServiceOptionEditor({
     setIsGeneratingAi(true);
     setImageError('');
     try {
-      const refUrl = matchSiblingStyle && referenceSibling ? String(referenceSibling.imageUrl || '').trim() : '';
+      const rawRefUrl = matchSiblingStyle && referenceSibling ? String(referenceSibling.imageUrl || '').trim() : '';
+      const refUrl = resolveCleanReferenceImageUrl(rawRefUrl);
       const result = await generateAdminOptionImage({
         targetType: 'service_option',
         consistencyMode: refUrl ? 'consistent' : 'unique',
@@ -884,6 +890,7 @@ function QuestionOptionEditor({
       const siblingLabels = (Array.isArray(siblingOptions) ? siblingOptions : [])
         .map((item) => String(item?.label || '').trim())
         .filter(Boolean);
+      const cleanRefUrl = resolveCleanReferenceImageUrl(referenceSiblingUrl);
       const result = await generateAdminOptionImage({
         targetType: 'question_option',
         consistencyMode: consistencyMode === 'unique' ? 'unique' : 'consistent',
@@ -894,8 +901,8 @@ function QuestionOptionEditor({
           optionLabel: option.label,
           siblingOptionLabels: siblingLabels,
         },
-        referenceImageDataUrl: isDataUrlImage(referenceSiblingUrl) ? referenceSiblingUrl : '',
-        referenceImageUrl: !isDataUrlImage(referenceSiblingUrl) && /^https:\/\//i.test(referenceSiblingUrl) ? referenceSiblingUrl : '',
+        referenceImageDataUrl: isDataUrlImage(cleanRefUrl) ? cleanRefUrl : '',
+        referenceImageUrl: !isDataUrlImage(cleanRefUrl) && /^https:\/\//i.test(cleanRefUrl) ? cleanRefUrl : '',
       });
       const stampedUrl = await finalizeAiGeneratedImage(result.imageDataUrl);
       onChange({ ...option, imageUrl: stampedUrl });
@@ -1250,7 +1257,7 @@ function QuestionEditor({
 
     setProgress(`Generating 1 of ${totalCount}...`);
     try {
-      const requestForEntry = async (entry, refDataUrl = '') => {
+      const generateRawForEntry = async (entry, refDataUrl = '') => {
         const result = await generateAdminOptionImage({
           targetType: 'question_option',
           consistencyMode: mode,
@@ -1263,13 +1270,14 @@ function QuestionEditor({
           },
           referenceImageDataUrl: refDataUrl,
         });
-        return finalizeAiGeneratedImage(result.imageDataUrl);
+        return result.imageDataUrl;
       };
 
       if (mode === 'consistent') {
         const firstEntry = labeledEntries[0];
-        const anchorUrl = await requestForEntry(firstEntry, '');
-        assignOptionImage(firstEntry.opt.draftKey, firstEntry.idx, anchorUrl);
+        const rawAnchorUrl = await generateRawForEntry(firstEntry, '');
+        const stampedAnchorUrl = await finalizeAiGeneratedImage(rawAnchorUrl);
+        assignOptionImage(firstEntry.opt.draftKey, firstEntry.idx, stampedAnchorUrl);
         completedCount += 1;
 
         const remaining = labeledEntries.slice(1);
@@ -1278,7 +1286,8 @@ function QuestionEditor({
           setProgress(`Generating ${Math.min(totalCount, completedCount + 1)}–${Math.min(totalCount, completedCount + chunk.length)} of ${totalCount} (matching first picture)...`);
           await Promise.all(
             chunk.map(async (entry) => {
-              const compactUrl = await requestForEntry(entry, anchorUrl);
+              const rawOptionUrl = await generateRawForEntry(entry, rawAnchorUrl);
+              const compactUrl = await finalizeAiGeneratedImage(rawOptionUrl);
               assignOptionImage(entry.opt.draftKey, entry.idx, compactUrl);
               completedCount += 1;
             }),
@@ -1290,7 +1299,8 @@ function QuestionEditor({
           setProgress(`Generating ${Math.min(totalCount, completedCount + 1)}–${Math.min(totalCount, completedCount + chunk.length)} of ${totalCount}...`);
           await Promise.all(
             chunk.map(async (entry) => {
-              const compactUrl = await requestForEntry(entry, '');
+              const rawOptionUrl = await generateRawForEntry(entry, '');
+              const compactUrl = await finalizeAiGeneratedImage(rawOptionUrl);
               assignOptionImage(entry.opt.draftKey, entry.idx, compactUrl);
               completedCount += 1;
             }),
@@ -2423,6 +2433,7 @@ export default function ServiceDetailsPage() {
         if (!file) return opt;
         const uploads = await uploadServiceCatalogImages({ serviceId: opt.draftKey || scope, files: [file] });
         if (uploads?.[0]?.uri) {
+          aliasCleanReferenceImage(uri, uploads[0].uri);
           didUpload = true;
           return { ...opt, imageUrl: uploads[0].uri };
         }
@@ -2441,6 +2452,7 @@ export default function ServiceDetailsPage() {
             if (!file) return subOpt;
             const uploads = await uploadServiceCatalogImages({ serviceId: scope, files: [file] });
             if (uploads?.[0]?.uri) {
+              aliasCleanReferenceImage(uri, uploads[0].uri);
               didUpload = true;
               return { ...subOpt, imageUrl: uploads[0].uri };
             }

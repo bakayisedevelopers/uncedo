@@ -42,9 +42,11 @@ test('buildOptionImagePrompt builds strict consistency edit prompts vs unique sc
   });
 
   assert.match(editPrompt, /STRICT CONSISTENCY IMAGE EDIT/i);
+  assert.match(editPrompt, /REMOVE ANY EXISTING LOGO\/WATERMARK FROM THE REFERENCE IMAGE/i);
   assert.match(editPrompt, /EXACT SAME person/i);
   assert.match(editPrompt, /Ruby Red/);
   assert.match(editPrompt, /What color of manicure do you want\?/);
+  assert.match(editPrompt, /pure white logo/i);
 
   const uniquePrompt = buildOptionImagePrompt({
     targetType: 'question_option',
@@ -59,6 +61,7 @@ test('buildOptionImagePrompt builds strict consistency edit prompts vs unique sc
   });
 
   assert.match(uniquePrompt, /Event & Function/);
+  assert.match(uniquePrompt, /BOTTOM-RIGHT WHITE LOGO VISIBILITY/i);
   assert.doesNotMatch(uniquePrompt, /STRICT CONSISTENCY IMAGE EDIT/i);
 });
 
@@ -190,6 +193,9 @@ test('generateAdminOptionImage supports single service_image gallery generation 
   assert.equal(capturedRequests[0].contents[0].parts.length, 1);
   assert.match(capturedRequests[0].contents[0].parts[0].text, /gallery photograph \(#1\)/i);
   assert.match(capturedRequests[1].contents[0].parts[0].text, /gallery photograph \(#2\)/i);
+  assert.match(capturedRequests[0].contents[0].parts[0].text, /FULL-BLEED EDGE-TO-EDGE PHOTOGRAPH/i);
+  assert.match(capturedRequests[0].contents[0].parts[0].text, /NO blank margin or footer strips/i);
+  assert.doesNotMatch(capturedRequests[0].contents[0].parts[0].text, /booking gallery card/i);
   assert.notEqual(capturedRequests[0].contents[0].parts[0].text, capturedRequests[1].contents[0].parts[0].text);
 
   await assert.rejects(

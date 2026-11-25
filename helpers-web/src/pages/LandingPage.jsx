@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { ArrowRight, ArrowUpRight, Check, Download } from 'lucide-react';
-import heroCraftImg from '../assets/images/hero_helper_craft_1794749285703.jpg';
+import heroCraftImg from '../assets/images/hero_helper_cleaning_1795647320702.jpg';
 import showcaseImg from '../assets/images/partner_work_showcase_1794749286598.jpg';
 import { ONBOARDING_STEPS } from '../utils/onboardingSteps';
 import { WHATSAPP_CHAT_URL } from '../services/helperDataService';
@@ -148,7 +148,7 @@ export function LandingPage({ user, onNavigate, pwa }) {
                 {heroLoaded ? (
                   <img
                     src={heroCraftImg}
-                    alt="Skilled South African service provider organizing tools on a sunlit workbench"
+                    alt="Uncedo Helpers cleaning specialist washing dishes in a sunlit kitchen"
                     referrerPolicy="no-referrer"
                     onError={() => setHeroLoaded(false)}
                     className="h-full w-full object-cover"

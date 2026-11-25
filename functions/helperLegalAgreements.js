@@ -223,26 +223,20 @@ function buildAgreementPdfBuffer({
 
     const logoPath = path.resolve(__dirname, 'assets/logo.png');
     if (fs.existsSync(logoPath)) {
-      doc.image(logoPath, doc.page.margins.left, 42, { fit: [48, 48] });
+      doc.image(logoPath, doc.page.margins.left, 44, { height: 22 });
     }
-
-    doc
-      .fillColor('#059669')
-      .fontSize(22)
-      .font('Helvetica-Bold')
-      .text('Uncedo', doc.page.margins.left + 56, 46, { width: safeContentWidth - 56 });
 
     doc
       .fillColor('#059669')
       .fontSize(18)
       .font('Helvetica-Bold')
-      .text(title, doc.page.margins.left + 56, 72, { width: safeContentWidth - 56, align: 'left' });
+      .text(title, doc.page.margins.left, 72, { width: safeContentWidth, align: 'left' });
 
     doc
       .fontSize(10)
       .font('Helvetica')
       .fillColor('#52525B')
-      .text(legalEntityName, doc.page.margins.left + 56, 92, { width: safeContentWidth - 56, align: 'left' });
+      .text(legalEntityName, doc.page.margins.left, 92, { width: safeContentWidth, align: 'left' });
 
     doc.x = safeContentX;
     doc.y = doc.page.margins.top;

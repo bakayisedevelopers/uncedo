@@ -1,6 +1,8 @@
 'use strict';
 
 const { createHash, randomUUID } = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 const PDFDocument = require('pdfkit');
 
 const SERVICE_INVOICES_COLLECTION = 'serviceInvoices';
@@ -572,21 +574,16 @@ function buildServiceRequestInvoicePdfBuffer(invoice) {
       }
     };
 
-    // Header brand block (crisp vector emblem badge + wordmark)
-    doc.save();
-    doc.roundedRect(left, 26, 40, 40, 9).fill(palette.emerald);
-    doc.path(`M ${left + 12} 37 L ${left + 12} 49 C ${left + 12} 55.5 ${left + 28} 55.5 ${left + 28} 49 L ${left + 28} 37`)
-      .lineWidth(3.4)
-      .lineCap('round')
-      .strokeColor(palette.white)
-      .stroke();
-    doc.restore();
-
-    const titleX = left + 52;
-    doc.font('Helvetica-Bold').fontSize(20).fillColor(palette.emerald)
-      .text('UNCEDO', titleX, 27, { width: 240, lineBreak: false });
+    // Header brand block (transparent Uncedo customer wordmark)
+    const logoPath = path.resolve(__dirname, 'assets/logo.png');
+    if (fs.existsSync(logoPath)) {
+      doc.image(logoPath, left, 27, { height: 22 });
+    } else {
+      doc.font('Helvetica-Bold').fontSize(20).fillColor(palette.emerald)
+        .text('UNCEDO', left, 27, { width: 240, lineBreak: false });
+    }
     doc.font('Helvetica').fontSize(9.5).fillColor(palette.muted)
-      .text('Official Service Invoice & Payment Receipt', titleX, 51, { width: 260, lineBreak: false });
+      .text('UNCEDO · Official Service Invoice & Payment Receipt', left, 54, { width: 280, lineBreak: false });
 
     // Right status + invoice badge
     const badgeWidth = 188;

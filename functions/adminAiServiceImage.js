@@ -88,6 +88,14 @@ const SERVICE_IMAGE_DIRECTIONS = [
   'Balanced wide lifestyle composition illustrating the service fitting naturally into an everyday home, vehicle, or personal care routine.',
 ];
 
+const FULL_BLEED_IMAGE_RULES = [
+  'FULL-BLEED EDGE-TO-EDGE PHOTOGRAPH: The photo scene MUST fill 100% of the entire 1:1 canvas from edge to edge and corner to corner. Strictly NO white, cream, or colored borders, NO Polaroid or picture frames, NO UI card layouts, NO blank margin or footer strips at the bottom, NO text overlays, NO price tags, NO corner logos or watermarks, and NO split-screen collages.',
+  'BOTTOM-RIGHT WHITE LOGO VISIBILITY & CONTRAST RULE: Because a pure white brand logo will be stamped onto the bottom-right corner afterward, compose the scene with rich, medium-to-dark, or deep contrasting colors, natural shadows, dark wood, dark stone, deep foliage, or shaded surfaces in the bottom-right corner. Strictly AVOID white, off-white, bright cream, bright beige, pale yellow, pale gray, or bright blown-out highlights in the bottom-right corner so the white logo never becomes invisible or suffers contrast issues.',
+].join('\n');
+
+const REMOVE_REFERENCE_LOGO_RULE =
+  'REMOVE ANY EXISTING LOGO/WATERMARK FROM THE REFERENCE IMAGE: If the reference photograph contains any corner logo, badge, watermark, or "uncedo" text (especially in the bottom-right corner), completely erase and replace that corner cleanly with natural surrounding scene texture and rich/darker shaded tones so the white logo applied afterward stays clearly visible. NEVER copy, keep, trace, or duplicate any logo or watermark from the reference image.';
+
 function buildOptionImagePrompt({
   targetType = 'question_option',
   consistencyMode = 'consistent',
@@ -110,11 +118,12 @@ function buildOptionImagePrompt({
     const imageNumber = Number.isFinite(rawNumber) && rawNumber >= 1 ? Math.round(rawNumber) : 1;
     const direction = SERVICE_IMAGE_DIRECTIONS[(imageNumber - 1) % SERVICE_IMAGE_DIRECTIONS.length];
     return [
-      `Generate a crisp, realistic commercial 1:1 gallery photograph (#${imageNumber}) for the service "${serviceLabel}"${categoryName ? ` (Category: ${categoryName})` : ''}.`,
+      `Generate a crisp, realistic, full-bleed commercial 1:1 gallery photograph (#${imageNumber}) for the service "${serviceLabel}"${categoryName ? ` (Category: ${categoryName})` : ''}.`,
       `Creative direction for image #${imageNumber}: ${direction}`,
       serviceDescription ? `Service overview: ${serviceDescription}.` : '',
       siblingServiceOptions.length ? `Available service options for realistic visual context: ${siblingServiceOptions.join(', ')}.` : '',
-      'Deliver a clean, authentic, well-lit photograph suitable for a customer booking gallery card. No text overlays, no price tags, no corner logos or watermarks, and no split-screen collages.',
+      'Deliver an authentic, well-lit, edge-to-edge photograph suitable for full-bleed gallery display.',
+      FULL_BLEED_IMAGE_RULES,
     ].filter(Boolean).join('\n');
   }
 
@@ -125,21 +134,23 @@ function buildOptionImagePrompt({
     if (hasReferenceImage && consistencyMode === 'consistent') {
       return [
         'Use the attached reference photograph as the visual and stylistic anchor.',
+        REMOVE_REFERENCE_LOGO_RULE,
         'Preserve the same photographic aesthetic, natural lighting, framing, color grading, and surface/setting mood as the reference image.',
         `Now depict the specific service package/option: "${optionTitle}" for the "${serviceLabel}" service${categoryName ? ` (${categoryName})` : ''}.`,
         optionDescription ? `Option details: ${optionDescription}.` : '',
         serviceDescription ? `Service context: ${serviceDescription}.` : '',
         siblingServiceOptions.length ? `Other packages in this service for context (keep visually distinct yet cohesive): ${siblingServiceOptions.join(', ')}.` : '',
-        'Deliver a single clean, high-clarity 1:1 commercial service photograph. No text, no price tags, no extra corner logos or watermarks, no collages or split screens.',
+        FULL_BLEED_IMAGE_RULES,
       ].filter(Boolean).join('\n');
     }
 
     return [
-      `Generate a crisp, realistic commercial 1:1 photograph representing the specific service option "${optionTitle}" under the "${serviceLabel}" service${categoryName ? ` (Category: ${categoryName})` : ''}.`,
+      `Generate a crisp, realistic, full-bleed commercial 1:1 photograph representing the specific service option "${optionTitle}" under the "${serviceLabel}" service${categoryName ? ` (Category: ${categoryName})` : ''}.`,
       optionDescription ? `What this option covers: ${optionDescription}.` : '',
       serviceDescription ? `Overall service context: ${serviceDescription}.` : '',
       siblingServiceOptions.length ? `Keep this visually focused specifically on "${optionTitle}" (distinct from sibling options: ${siblingServiceOptions.join(', ')}).` : '',
-      'Use clean natural lighting, balanced framing centered on the key visual subject so it looks great in a mobile booking card, and zero text, badges, logos, watermarks, or split-screen collages.',
+      'Use clean natural lighting and balanced framing centered on the key visual subject.',
+      FULL_BLEED_IMAGE_RULES,
     ].filter(Boolean).join('\n');
   }
 
@@ -155,31 +166,33 @@ function buildOptionImagePrompt({
       return [
         'STRICT CONSISTENCY IMAGE EDIT:',
         'Use the attached reference photograph as the exact visual baseline.',
-        'You MUST keep the EXACT SAME person, exact same hands/feet/body/subject, skin tone, finger/toe position, camera angle, lens distance, lighting, and background environment identical to the reference image.',
+        REMOVE_REFERENCE_LOGO_RULE,
+        'You MUST keep the EXACT SAME person, exact same hands/feet/body/subject, skin tone, finger/toe position, camera angle, lens distance, lighting, and overall background environment identical to the reference image (except erasing any corner logo/watermark as instructed above).',
         `Modify ONLY the specific detail representing the answer choice "${optionLabel}" for the question "${questionPrompt || 'Service preference'}" in the "${serviceLabel}" service${categoryName ? ` (${categoryName})` : ''}.`,
         'For example: if this is about nail color, length, or finish, keep the exact same hand/feet, pose, skin, and backdrop and ONLY change the nails to show "' + optionLabel + '". If about room/load/scale/equipment, keep the exact same camera framing and room/setting and adjust only the attribute for "' + optionLabel + '".',
         siblingLabels.length ? `Sibling choices in this exact series: ${siblingLabels.join(', ')}.` : '',
-        'CRITICAL: Do NOT swap to a different person/model, do NOT change camera angle or background, and do NOT draw or duplicate any text, labels, logos, corner watermarks, or multi-panel collages.',
+        'CRITICAL: Do NOT swap to a different person/model, do NOT change camera angle or background, and do NOT draw, keep, or duplicate any text, labels, logos, corner watermarks, borders, frames, bottom strips, or multi-panel collages. Keep the photograph full-bleed edge-to-edge with a darker/contrasting bottom-right corner so a pure white logo stamped afterward remains clearly visible.',
       ].filter(Boolean).join('\n');
     }
 
     return [
       'ANCHOR IMAGE FOR A CONSISTENT OPTION SERIES:',
-      `Generate a crisp, realistic 1:1 studio-quality photograph illustrating the answer choice "${optionLabel}" for the question "${questionPrompt || 'Service preference'}".`,
+      `Generate a crisp, realistic, full-bleed 1:1 studio-quality photograph illustrating the answer choice "${optionLabel}" for the question "${questionPrompt || 'Service preference'}".`,
       `Service: "${serviceLabel}"${categoryName ? ` (${categoryName})` : ''}.`,
       serviceDescription ? `Service context: ${serviceDescription}.` : '',
       siblingLabels.length ? `All choices in this same question: ${siblingLabels.join(', ')}.` : '',
-      'IMPORTANT: Compose a clean, unmistakable, repeatable visual scene (for example: for manicure/nails show a close-up of manicured hands in a graceful neutral pose; for pedicure show neatly posed feet; for home/car/yard services show a clear medium close-up of the exact area/task). Keep framing, lighting, and neutral background clean so subsequent options in this series can edit this exact same subject for complete visual consistency.',
-      'No text overlays, no labels, no logos, no watermarks, and no split-screen collages.',
+      'IMPORTANT: Compose a clean, unmistakable, repeatable visual scene (for example: for manicure/nails show a close-up of manicured hands over a rich/darker contrasting surface or deep neutral drape; for pedicure show neatly posed feet on a rich/darker surface; for home/car/yard services show a clear medium close-up of the exact area/task). Keep framing, lighting, and background clean and dark/rich enough in the bottom-right corner so a pure white logo stays clearly visible across every option in this series.',
+      FULL_BLEED_IMAGE_RULES,
     ].filter(Boolean).join('\n');
   }
 
   return [
-    `Generate a realistic, distinct, high-clarity 1:1 photograph specifically depicting the choice "${optionLabel}" in response to the question "${questionPrompt || 'Service option'}".`,
+    `Generate a realistic, distinct, high-clarity, full-bleed 1:1 photograph specifically depicting the choice "${optionLabel}" in response to the question "${questionPrompt || 'Service option'}".`,
     `Service: "${serviceLabel}"${categoryName ? ` (${categoryName})` : ''}.`,
     serviceDescription ? `Service context: ${serviceDescription}.` : '',
     siblingLabels.length ? `Sibling choices in this question: ${siblingLabels.join(', ')}. Make sure this image clearly illustrates "${optionLabel}" specifically.` : '',
-    'Clean natural composition centered on the subject, suitable for a booking card carousel. No text overlays, no labels, no logos, no watermarks, and no split-panel collages.',
+    'Clean natural composition centered on the subject.',
+    FULL_BLEED_IMAGE_RULES,
   ].filter(Boolean).join('\n');
 }
 

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, CheckCircle2, MessageSquare } from 'lucide-react';
-import portraitImg from '../assets/images/auth_partner_portrait_1794749286443.jpg';
+import portraitImg from '../assets/images/auth_helper_barber_1795647320964.jpg';
 import {
   WHATSAPP_CHAT_URL,
   completeWhatsAppAccountLink,
@@ -53,7 +53,7 @@ export function WhatsAppLinkPage({ user, onNavigate, onWhatsAppLinked }) {
       <aside className="hidden lg:flex lg:col-span-5 relative bg-forest-900 text-white flex-col justify-between p-10 overflow-hidden">
         <img
           src={portraitImg}
-          alt="Uncedo helper specialist"
+          alt="Uncedo Helpers barber specialist"
           referrerPolicy="no-referrer"
           className="absolute inset-0 h-full w-full object-cover opacity-30"
         />

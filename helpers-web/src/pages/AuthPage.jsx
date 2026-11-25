@@ -13,7 +13,7 @@ import {
   ShieldCheck,
   User,
 } from 'lucide-react';
-import portraitImg from '../assets/images/auth_partner_portrait_1794749286443.jpg';
+import portraitImg from '../assets/images/auth_helper_barber_1795647320964.jpg';
 import {
   WHATSAPP_CHAT_URL,
   completeWhatsAppSignupLink,
@@ -354,7 +354,7 @@ export function AuthPage({
         {portraitLoaded && (
           <img
             src={portraitImg}
-            alt="Uncedo helper partner holding smartphone"
+            alt="Uncedo Helpers barber wearing an Uncedo Helpers apron"
             referrerPolicy="no-referrer"
             onError={() => setPortraitLoaded(false)}
             className="absolute inset-0 h-full w-full object-cover opacity-35"
