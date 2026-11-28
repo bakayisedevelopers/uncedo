@@ -3,10 +3,12 @@
 const { createHash, randomUUID } = require('node:crypto');
 const {
   applyHelperPayoutInTransaction,
+  applySplitSettlementInTransaction,
   helperProfileReference,
   helperWalletReference,
   profileWalletPayload,
   resolveSignedBalanceMinor,
+  reverseSplitSettlementInTransaction,
   syncHelperWalletDocumentsInTransaction,
   walletBalanceIsValid,
   walletFromSnapshot,
@@ -140,6 +142,7 @@ async function claimServiceFinancialOperation({
   amount,
   currency = 'ZAR',
   settlementData,
+  splitAllocation = null,
   allowRetry = false,
   expectedRequestStatus = null,
   expectedHelperId = null,
@@ -202,6 +205,10 @@ async function claimServiceFinancialOperation({
     const attemptId = String(attemptNo).padStart(4, '0');
     const attemptRef = operationRef.collection('attempts').doc(attemptId);
     const claimToken = randomUUID();
+    const resolvedSplitAllocation = splitAllocation
+      || settlementData?.splitAllocation
+      || (!allowRetry ? existing?.splitAllocation : null)
+      || null;
     const nextOperation = {
       ...(existing || {}),
       operationId,
@@ -219,6 +226,7 @@ async function claimServiceFinancialOperation({
       claimStartedAtMs: now,
       leaseExpiresAtMs: now + 60_000,
       settlementData: existing?.settlementData || settlementData || {},
+      ...(resolvedSplitAllocation ? { splitAllocation: resolvedSplitAllocation } : {}),
       debtApplied: Boolean(existing?.debtApplied),
       debtReversed: Boolean(existing?.debtReversed),
       createdAtMs: Number(existing?.createdAtMs || now),
@@ -232,6 +240,7 @@ async function claimServiceFinancialOperation({
       amount: Number(amount),
       amountMinor,
       currency: nextOperation.currency,
+      ...(resolvedSplitAllocation ? { splitAllocation: resolvedSplitAllocation } : {}),
       status: 'claimed',
       createdAtMs: now,
       updatedAtMs: now,
@@ -300,6 +309,7 @@ async function executeServiceChargeAttempt({ operation, action, email, authoriza
         reference: String(operation.gatewayReference || ''),
         requestId: String(operation.requestId || ''),
         operationId: String(operation.operationId || ''),
+        splitAllocation: operation?.splitAllocation || null,
       });
     } catch (error) {
       // The request may have reached Paystack even if the caller timed out.
@@ -471,21 +481,72 @@ async function settleServiceFinancialOperation({
     const helperAmountMinor = Math.round(Number(breakdown?.helperAmount || 0) * 100);
     const platformAmountMinor = Math.round(Number(breakdown?.platformAmount || 0) * 100);
     const customerChargeAmountMinor = Math.round(Number(breakdown?.customerChargeAmount ?? operationAmount ?? 0) * 100);
+    const splitAllocation = operation.splitAllocation || settlementData.splitAllocation || null;
     let helperWalletCredited = false;
-    if (['paid', 'wallet_debt_recorded'].includes(paymentStatus) && resolvedHelperId && helperAmountMinor > 0) {
-      const walletCredit = await applyHelperPayoutInTransaction({
-        transaction,
-        db,
-        helperId: resolvedHelperId,
-        requestId: operation.requestId,
-        helperAmountMinor,
-        platformAmountMinor,
-        customerChargeAmountMinor,
-        isCash: false,
-        closureType: operationType === 'completion' ? 'completed' : 'canceled',
-        now,
-      });
-      helperWalletCredited = Boolean(walletCredit.applied || walletCredit.duplicate);
+    let splitSettlementResult = null;
+    if (paymentStatus === 'paid' && resolvedHelperId && helperAmountMinor > 0) {
+      if (splitAllocation) {
+        splitSettlementResult = await applySplitSettlementInTransaction({
+          transaction,
+          db,
+          helperId: resolvedHelperId,
+          requestId: operation.requestId,
+          splitAllocation,
+          helperAmountMinor,
+          platformAmountMinor,
+          customerChargeAmountMinor,
+          closureType: operationType === 'completion' ? 'completed' : 'canceled',
+          gatewayReference: operation.gatewayReference || '',
+          now,
+        });
+        helperWalletCredited = Boolean(splitSettlementResult.applied || splitSettlementResult.duplicate);
+      } else {
+        const walletCredit = await applyHelperPayoutInTransaction({
+          transaction,
+          db,
+          helperId: resolvedHelperId,
+          requestId: operation.requestId,
+          helperAmountMinor,
+          platformAmountMinor,
+          customerChargeAmountMinor,
+          isCash: false,
+          closureType: operationType === 'completion' ? 'completed' : 'canceled',
+          now,
+        });
+        helperWalletCredited = Boolean(walletCredit.applied || walletCredit.duplicate);
+      }
+    } else if (paymentStatus === 'wallet_debt_recorded' && resolvedHelperId && helperAmountMinor > 0) {
+      if (
+        outcome === 'reversed'
+        && operation.finalOutcome === 'success'
+        && splitAllocation
+        && ['paystack_split_with_debt_recovery', 'debt_recovery_platform_only'].includes(String(splitAllocation.mode || '').toLowerCase())
+      ) {
+        await reverseSplitSettlementInTransaction({
+          transaction,
+          db,
+          helperId: resolvedHelperId,
+          requestId: operation.requestId,
+          splitAllocation,
+          gatewayReference: operation.gatewayReference || '',
+          now,
+        });
+        helperWalletCredited = true;
+      } else {
+        const walletCredit = await applyHelperPayoutInTransaction({
+          transaction,
+          db,
+          helperId: resolvedHelperId,
+          requestId: operation.requestId,
+          helperAmountMinor,
+          platformAmountMinor,
+          customerChargeAmountMinor,
+          isCash: false,
+          closureType: operationType === 'completion' ? 'completed' : 'canceled',
+          now,
+        });
+        helperWalletCredited = Boolean(walletCredit.applied || walletCredit.duplicate);
+      }
     }
 
     if (customerRef && operationAmount > 0 && (shouldApplyWalletDebt || shouldReverseWalletDebt)) {
@@ -558,9 +619,22 @@ async function settleServiceFinancialOperation({
         requestPatch.failedCardIds = [...existingFailedCardIds, failedCardIdForPatch];
       }
     }
+    const resolvedSettlementMode = paymentStatus === 'paid' && splitAllocation
+      ? String(splitSettlementResult?.mode || splitAllocation.mode || 'platform_hold_fallback')
+      : null;
     transaction.set(requestRef, {
       ...requestPatch,
       paymentStatus,
+      ...(resolvedSettlementMode ? {
+        paymentSettlementMode: resolvedSettlementMode,
+        splitBreakdown: {
+          mode: resolvedSettlementMode,
+          subaccountCode: splitAllocation.subaccountCode || null,
+          helperSplitAmount: Number(((splitAllocation.helperSplitMinor || 0) / 100).toFixed(2)),
+          platformChargeAmount: Number(((splitAllocation.transactionChargeMinor || 0) / 100).toFixed(2)),
+          debtRecoveredAmount: Number(((splitAllocation.debtRecoveredMinor || 0) / 100).toFixed(2)),
+        },
+      } : {}),
       paymentTransactionId: transactionId || operation.gatewayTransactionId || request.paymentTransactionId || null,
       financialOperationId: operation.operationId,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -830,7 +904,7 @@ async function recordPayoutObservation({
               nextBalanceMinor = balanceBeforeMinor - amountMinor;
               deltaMinor = -amountMinor;
               entryType = 'payout_debit';
-              description = 'Weekly Paystack payout succeeded; wallet balance settled.';
+              description = 'Monthly Paystack wallet payout succeeded; wallet balance settled.';
               didDebitNow = true;
             } else if (action === 'reversal_credit') {
               nextBalanceMinor = balanceBeforeMinor + amountMinor;

@@ -39,18 +39,24 @@ test('backend quote uses the same shared category pricing source and Firestore q
     service_address_target: 'saved_home_address',
     full_body_wash_detailing_addons: 'yes',
   };
+  const flatBaselineSignals = { now: new Date('2026-04-14T08:00:00Z') };
   const backendQuote = quoteFromCatalogEntries({
     entries: carWashCatalog(),
     categoryId: 'car_wash',
     serviceIds: ['full_body_wash'],
     structuredAnswers: answers,
+    signalContext: flatBaselineSignals,
   });
   const entry = carWashCatalog()[0];
   const appEquivalentEngine = createCategoryPricingEngine('car_wash', {
     getCategoryById: () => ({ label: 'Car Wash' }),
     getServiceById: (serviceId) => serviceId === entry.id ? entry : null,
   });
-  const appEquivalentQuote = appEquivalentEngine({ serviceIds: ['full_body_wash'], structuredAnswers: answers });
+  const appEquivalentQuote = appEquivalentEngine({
+    serviceIds: ['full_body_wash'],
+    structuredAnswers: answers,
+    signalContext: flatBaselineSignals,
+  });
 
   assert.equal(backendQuote.total, appEquivalentQuote.total);
   assert.deepEqual(backendQuote.serviceBreakdown, appEquivalentQuote.serviceBreakdown);
@@ -124,6 +130,7 @@ test('Firestore package lookup keeps selected package metadata out of the priced
     serviceIds: ['full_body_wash'],
     selectedPackageId: 'wash_bundle',
     structuredAnswers: answers,
+    signalContext: { now: new Date('2026-04-14T08:00:00Z') },
   });
   assert.equal(quote.travelFee, 35);
   assert.equal(quote.total, 320);
@@ -195,12 +202,14 @@ test('optioned service derives base price from selected option and scopes standa
   });
   assert.deepEqual(buzzQuestions.map((q) => q.id), ['service_address_target']);
 
+  const flatSignals = { now: new Date('2026-04-14T08:00:00Z') };
   const braidQuote = quoteFromCatalogEntries({
     entries: hairstylesCatalog,
     categoryId: 'grooming',
     serviceIds: ['hairstyles'],
     selectedOptionId: 'knotless_braids',
     structuredAnswers: { service_address_target: 'saved_home_address', braid_length: 'waist' },
+    signalContext: flatSignals,
   });
   assert.equal(braidQuote.selectedOptionId, 'knotless_braids');
   assert.equal(braidQuote.selectedOptionTitle, 'Knotless Braids');
@@ -213,6 +222,7 @@ test('optioned service derives base price from selected option and scopes standa
     serviceIds: ['hairstyles'],
     selectedOptionId: 'buzz_cut',
     structuredAnswers: { service_address_target: 'saved_home_address' },
+    signalContext: flatSignals,
   });
   assert.equal(buzzQuote.selectedOptionId, 'buzz_cut');
   assert.equal(buzzQuote.serviceBreakdown[0].subtotal, 100);
@@ -344,6 +354,7 @@ test('question dependencies support chaining, prune stale child answers, and app
       people_count: '14',
       travel_distance_km: 10,
     },
+    signalContext: { now: new Date('2026-04-14T08:00:00Z') },
   });
   // Service subtotal: (200 base + 50 + 30 + 20) * 14 = 300 * 14 = 4200 (service saved travelFee 35 is used and NOT multiplied by 14 or distance)
   assert.equal(fullQuote.serviceBreakdown[0].subtotal, 4200);
@@ -370,6 +381,7 @@ test('service saved pricing.travelFee is used directly (falling back to 35 only 
     categoryId: 'cleaning',
     serviceIds: ['deep_oven_clean'],
     structuredAnswers: { travel_distance_km: 25 },
+    signalContext: { now: new Date('2026-04-14T08:00:00Z') },
   });
   assert.equal(quote.subtotal, 200);
   assert.equal(quote.travelFee, 50);
@@ -461,6 +473,7 @@ test('question dependency triggers when any selected dependsOnOptionValues match
     serviceIds: ['manicure_service'],
     selectedOptionId: 'standard_manicure',
     structuredAnswers: { nail_type: 'press_ons', nail_length: 'long', travel_distance_km: 5 },
+    signalContext: { now: new Date('2026-04-14T08:00:00Z') },
   });
   // Base 150 + Press-ons 40 + Long 50 = 240
   assert.equal(pressOnQuote.serviceBreakdown[0].subtotal, 240);
@@ -531,8 +544,222 @@ test('dependent questions automatically follow parent question option scope even
     serviceIds: ['dishwashing_service'],
     selectedOptionId: 'event_wash',
     structuredAnswers: { is_event: 'yes', event_people_count: '20' },
+    signalContext: { now: new Date('2026-04-14T08:00:00Z') },
   });
   assert.equal(quote.serviceBreakdown[0].subtotal, 300);
+});
+
+test('quoteFromCatalogEntries populates immutable questionAnswers snapshot with resolved option labels and pricing effects', () => {
+  const catalogEntries = [{
+    id: 'window_cleaning',
+    categoryId: 'cleaning',
+    categoryName: 'Cleaning',
+    label: 'Window Cleaning',
+    active: true,
+    approved: true,
+    pricing: { basePrice: 180, travelFee: 35, bookingFee: 0 },
+    questionnaire: {
+      required: [
+        {
+          id: 'property_type',
+          prompt: 'Property type',
+          answerType: 'enum',
+          required: true,
+          options: [
+            { value: 'house', label: 'Standalone House', priceAdder: 0 },
+            { value: 'apartment', label: 'Apartment', priceAdder: 0 },
+          ],
+        },
+        {
+          id: 'window_tier',
+          prompt: 'How many stories?',
+          answerType: 'enum',
+          required: true,
+          options: [
+            { value: 'single', label: 'Single story', priceAdder: 0 },
+            { value: 'double', label: 'Double story', priceAdder: 90 },
+          ],
+        },
+        {
+          id: 'visit_count',
+          prompt: 'How many visits?',
+          answerType: 'enum',
+          required: true,
+          options: [
+            { value: '1', label: '1 visit', pricingType: 'multiplier', factor: 1 },
+            { value: '2', label: '2 visits', pricingType: 'multiplier', factor: 2 },
+          ],
+        },
+      ],
+      optional: [
+        { id: 'notes', prompt: 'Extra instructions', answerType: 'text', required: false },
+      ],
+    },
+  }];
+
+  const quote = quoteFromCatalogEntries({
+    entries: catalogEntries,
+    categoryId: 'cleaning',
+    serviceIds: ['window_cleaning'],
+    structuredAnswers: {
+      property_type: 'house',
+      window_tier: 'double',
+      visit_count: '2',
+      notes: 'Use side gate',
+    },
+    signalContext: { now: new Date('2026-04-14T08:00:00Z') },
+  });
+
+  assert.equal(Array.isArray(quote.questionAnswers), true);
+  assert.equal(quote.questionAnswers.length, 4);
+  const byId = Object.fromEntries(quote.questionAnswers.map((qa) => [qa.questionId, qa]));
+  assert.equal(byId.property_type.prompt, 'Property type');
+  assert.equal(byId.property_type.answerLabel, 'Standalone House');
+  assert.equal(byId.property_type.pricingEffect, 'included');
+  assert.equal(byId.window_tier.answerLabel, 'Double story');
+  assert.equal(byId.window_tier.pricingEffect, 'adder');
+  assert.equal(byId.window_tier.amount, 90);
+  assert.equal(byId.visit_count.answerLabel, '2 visits');
+  assert.equal(byId.visit_count.pricingEffect, 'multiplier');
+  assert.equal(byId.visit_count.multiplier, 2);
+  assert.equal(byId.notes.answerLabel, 'Use side gate');
+});
+
+test('applies SAST day-of-week, time-of-day, and season price multipliers to service subtotals without scaling travelFee and reconciles quote lines', () => {
+  const catalog = [{
+    id: 'deep_sofa_clean',
+    categoryId: 'cleaning',
+    categoryName: 'Cleaning',
+    label: 'Sofa Clean',
+    active: true,
+    approved: true,
+    pricing: { basePrice: 200, travelFee: 35, bookingFee: 0 },
+    questionnaire: { required: [], optional: [] },
+  }];
+
+  // Baseline: Tue 2026-04-14 10:00 SAST (weekday=1, morning=1, autumn=1 => 1.0)
+  const baseline = quoteFromCatalogEntries({
+    entries: catalog,
+    categoryId: 'cleaning',
+    serviceIds: ['deep_sofa_clean'],
+    structuredAnswers: {},
+    signalContext: { now: new Date('2026-04-14T08:00:00Z') },
+  });
+  assert.equal(baseline.subtotal, 200);
+  assert.equal(baseline.travelFee, 35);
+  assert.equal(baseline.schedulePricing.dayBucket, 'weekday');
+  assert.equal(baseline.schedulePricing.timeBucket, 'morning');
+  assert.equal(baseline.schedulePricing.seasonBucket, 'autumn');
+  assert.equal(baseline.schedulePricing.combinedMultiplier, 1);
+
+  // Festive Weekend Overnight: Sat 2026-12-19 23:00 SAST (weekend=1.08 * overnight=1.12 * festive=1.10)
+  const peak = quoteFromCatalogEntries({
+    entries: catalog,
+    categoryId: 'cleaning',
+    serviceIds: ['deep_sofa_clean'],
+    structuredAnswers: {},
+    signalContext: { now: new Date('2026-12-19T21:00:00Z') },
+  });
+  assert.equal(peak.schedulePricing.dayBucket, 'weekend');
+  assert.equal(peak.schedulePricing.timeBucket, 'overnight');
+  assert.equal(peak.schedulePricing.seasonBucket, 'festive');
+  assert.equal(peak.subtotal, Math.round(200 * (1.08 * 1.12 * 1.1)));
+  assert.equal(peak.travelFee, 35);
+  const peakLineSum = peak.lines.reduce((sum, line) => sum + Number(line.amount || 0), 0);
+  assert.equal(peakLineSum, peak.total);
+
+  // Winter Friday Evening: Fri 2026-07-17 19:00 SAST (friday=1.04 * evening=1.08 * winter=0.96)
+  const winterFriEve = quoteFromCatalogEntries({
+    entries: catalog,
+    categoryId: 'cleaning',
+    serviceIds: ['deep_sofa_clean'],
+    structuredAnswers: {},
+    signalContext: { now: new Date('2026-07-17T17:00:00Z') },
+  });
+  assert.equal(winterFriEve.schedulePricing.dayBucket, 'friday');
+  assert.equal(winterFriEve.schedulePricing.timeBucket, 'evening');
+  assert.equal(winterFriEve.schedulePricing.seasonBucket, 'winter');
+  assert.equal(winterFriEve.subtotal, Math.round(200 * (1.04 * 1.08 * 0.96)));
+  assert.equal(winterFriEve.travelFee, 35);
+  assert.equal(winterFriEve.lines.reduce((sum, line) => sum + Number(line.amount || 0), 0), winterFriEve.total);
+
+  // Custom catalog multipliers (plus 'later' scheduled_for_text honored without explicit signalContext)
+  const customCatalog = [{
+    ...catalog[0],
+    pricing: {
+      basePrice: 200,
+      travelFee: 40,
+      dayMultipliers: { friday: 1.15 },
+      timeMultipliers: { afternoon: 1.1 },
+      seasonMultipliers: { summer: 1.05 },
+    },
+  }];
+  const scheduledSummerFriAfternoon = quoteFromCatalogEntries({
+    entries: customCatalog,
+    categoryId: 'cleaning',
+    serviceIds: ['deep_sofa_clean'],
+    structuredAnswers: {
+      timing_preference: 'later',
+      scheduled_for_text: '2026-02-06T14:00:00+02:00',
+    },
+  });
+  assert.equal(scheduledSummerFriAfternoon.schedulePricing.dayBucket, 'friday');
+  assert.equal(scheduledSummerFriAfternoon.schedulePricing.timeBucket, 'afternoon');
+  assert.equal(scheduledSummerFriAfternoon.schedulePricing.seasonBucket, 'summer');
+  assert.equal(scheduledSummerFriAfternoon.subtotal, Math.round(200 * (1.15 * 1.1 * 1.05)));
+  assert.equal(scheduledSummerFriAfternoon.travelFee, 40);
+  assert.equal(
+    scheduledSummerFriAfternoon.lines.reduce((sum, line) => sum + Number(line.amount || 0), 0),
+    scheduledSummerFriAfternoon.total,
+  );
+});
+
+test('parseScheduledSastDate parses natural-language and timezone-less SAST strings deterministically and quotes propagate questionId on lines', () => {
+  const { parseScheduledSastDate } = require('./shared/categoryPricingEngineFactory.cjs');
+  // Reference: Tue 2026-04-14 10:00 SAST
+  const refMs = Date.parse('2026-04-14T08:00:00Z');
+
+  assert.equal(parseScheduledSastDate('tomorrow evening', refMs).toISOString(), new Date('2026-04-15T19:00:00+02:00').toISOString());
+  assert.equal(parseScheduledSastDate('Saturday 2:30 pm', refMs).toISOString(), new Date('2026-04-18T14:30:00+02:00').toISOString());
+  assert.equal(parseScheduledSastDate('2026-12-25 18:00', refMs).toISOString(), new Date('2026-12-25T18:00:00+02:00').toISOString());
+
+  const quote = quoteFromCatalogEntries({
+    entries: [{
+      id: 'window_cleaning',
+      categoryId: 'cleaning',
+      categoryName: 'Cleaning',
+      label: 'Window Cleaning',
+      active: true,
+      approved: true,
+      pricing: { basePrice: 200, travelFee: 35, bookingFee: 0 },
+      questionnaire: {
+        required: [{
+          id: 'storey_tier',
+          prompt: 'How many stories?',
+          answerType: 'enum',
+          required: true,
+          options: [
+            { value: 'single', label: 'Single story', priceAdder: 0 },
+            { value: 'double', label: 'Double story', priceAdder: 90 },
+          ],
+        }],
+        optional: [],
+      },
+    }],
+    categoryId: 'cleaning',
+    serviceIds: ['window_cleaning'],
+    structuredAnswers: {
+      storey_tier: 'double',
+      timing_preference: 'later',
+      scheduled_for_text: 'tomorrow evening',
+    },
+    signalContext: { now: new Date(refMs) },
+  });
+
+  const taggedLine = quote.lines.find((l) => l.amount === 90);
+  assert.equal(taggedLine.questionId, 'storey_tier');
+  assert.equal(quote.schedulePricing.timeBucket, 'evening');
+  assert.equal(quote.schedulePricing.dayBucket, 'weekday');
 });
 
 

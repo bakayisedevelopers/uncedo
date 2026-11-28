@@ -8,7 +8,11 @@ const {
   resolveSelectedServiceOption,
 } = require('./serviceMarketplacePricing');
 
-const PRICING_CONTROL_ANSWER_IDS = new Set(['travel_distance_km']);
+const PRICING_CONTROL_ANSWER_IDS = new Set([
+  'travel_distance_km',
+  'timing_preference',
+  'scheduled_for_text',
+]);
 
 function normalizeAnswer(value) {
   if (typeof value === 'string') return value.trim();
@@ -119,6 +123,10 @@ function normalizeAndValidateAnswers({ answers = {}, questions = [], strictUnkno
     }
     const question = questionMap.get(questionId);
     if (!question) {
+      if (PRICING_CONTROL_ANSWER_IDS.has(questionId)) {
+        normalized[questionId] = normalizeAnswer(rawValue);
+        return;
+      }
       if (strictUnknown) throw new Error(`Unknown service answer field: ${questionId}.`);
       return;
     }
@@ -207,6 +215,155 @@ function validateAndResolveOptionSelection(services = [], selectedOptionId = '')
   throw error;
 }
 
+function resolveOptionDisplayLabels(question, rawAnswer, normalizedAnswers = {}) {
+  const options = Array.isArray(question?.options) ? question.options : [];
+  const values = Array.isArray(rawAnswer) ? rawAnswer : [rawAnswer];
+  if (!options.length) {
+    return values.map((val) => String(val ?? '').trim()).filter(Boolean);
+  }
+  const labels = [];
+  for (const val of values) {
+    const valLower = String(val ?? '').trim().toLowerCase();
+    if (!valLower) continue;
+    const match = options.find((opt) => String(opt?.value || opt?.id || '').trim().toLowerCase() === valLower);
+    if (match) {
+      if (match.dependsOn && match.dependsOn.questionId) {
+        const parentVal = normalizedAnswers?.[match.dependsOn.questionId];
+        const parentVals = Array.isArray(parentVal)
+          ? parentVal.map((item) => String(item || '').trim().toLowerCase())
+          : [String(parentVal || '').trim().toLowerCase()];
+        const expectedVals = [
+          ...(Array.isArray(match.dependsOn.optionValues) ? match.dependsOn.optionValues : []),
+          match.dependsOn.optionValue ?? '',
+        ].map((item) => String(item || '').trim().toLowerCase()).filter(Boolean);
+        if (expectedVals.length && !parentVals.some((item) => expectedVals.includes(item))) {
+          continue;
+        }
+      }
+      labels.push(String(match.label || match.value || val).trim());
+    } else {
+      labels.push(String(val).trim());
+    }
+  }
+  return labels;
+}
+
+function findOwningServiceForQuestion(services = [], questionId = '', selectedPackageId = '') {
+  const normalizedQid = String(questionId || '').trim();
+  if (!normalizedQid) return null;
+  const ordered = [
+    ...services.filter((s) => s?.id === selectedPackageId),
+    ...services.filter((s) => s?.id !== selectedPackageId),
+  ];
+  for (const service of ordered) {
+    const reqList = Array.isArray(service?.questionnaire?.required) ? service.questionnaire.required : [];
+    const optList = Array.isArray(service?.questionnaire?.optional) ? service.questionnaire.optional : [];
+    if (reqList.some((q) => String(q?.id || '').trim() === normalizedQid)
+      || optList.some((q) => String(q?.id || '').trim() === normalizedQid)) {
+      return service;
+    }
+  }
+  return services[0] || null;
+}
+
+function buildSavedQuestionAnswersSnapshot({
+  services = [],
+  selectedPackageId = '',
+  selectedOptionId = '',
+  structuredAnswers = {},
+} = {}) {
+  const normalizedServices = (Array.isArray(services) ? services : [])
+    .map((entry) => normalizeServiceCatalogEntry(entry))
+    .filter(Boolean);
+  const resolvedOptionSelection = normalizedServices.length
+    ? (() => {
+      try {
+        return validateAndResolveOptionSelection(normalizedServices, selectedOptionId);
+      } catch {
+        return { selectedOption: null, selectedOptionId: String(selectedOptionId || '').trim().toLowerCase() };
+      }
+    })()
+    : { selectedOption: null, selectedOptionId: String(selectedOptionId || '').trim().toLowerCase() };
+
+  const questions = getQuestionnaireForSelection({
+    services: normalizedServices,
+    selectedPackageId: String(selectedPackageId || '').trim().toLowerCase(),
+    selectedOptionId: resolvedOptionSelection.selectedOptionId,
+  });
+  const questionMap = new Map(questions.map((question) => [question.id, question]));
+  const applicableQuestions = questions.filter((question) => isQuestionApplicable(question, structuredAnswers, questionMap));
+
+  const saved = [];
+  for (const question of applicableQuestions) {
+    const rawAnswer = structuredAnswers?.[question.id];
+    if (!hasAnswer(rawAnswer)) continue;
+
+    const ownerService = findOwningServiceForQuestion(normalizedServices, question.id, selectedPackageId);
+    const options = Array.isArray(question.options) ? question.options : [];
+    const values = Array.isArray(rawAnswer) ? rawAnswer : [rawAnswer];
+
+    let adderAmount = 0;
+    let materialAmount = 0;
+    let combinedMultiplier = 1;
+
+    for (const val of values) {
+      const valLower = String(val ?? '').trim().toLowerCase();
+      if (!valLower) continue;
+      const choice = options.find((opt) => String(opt?.value || opt?.id || '').trim().toLowerCase() === valLower);
+      if (!choice) continue;
+      if (choice.dependsOn && choice.dependsOn.questionId) {
+        const parentVal = structuredAnswers?.[choice.dependsOn.questionId];
+        const parentVals = Array.isArray(parentVal)
+          ? parentVal.map((item) => String(item || '').trim().toLowerCase())
+          : [String(parentVal || '').trim().toLowerCase()];
+        const expectedVals = [
+          ...(Array.isArray(choice.dependsOn.optionValues) ? choice.dependsOn.optionValues : []),
+          choice.dependsOn.optionValue ?? '',
+        ].map((item) => String(item || '').trim().toLowerCase()).filter(Boolean);
+        if (expectedVals.length && !parentVals.some((item) => expectedVals.includes(item))) {
+          continue;
+        }
+      }
+      adderAmount += Number(choice.priceAdder || 0);
+      materialAmount += Number(choice.materialAdder || 0);
+      const factor = Number(choice.factor ?? choice.multiplier ?? 1);
+      if (choice.pricingType === 'multiplier' && Number.isFinite(factor) && factor !== 1) {
+        combinedMultiplier *= factor;
+      }
+    }
+
+    const answerLabels = resolveOptionDisplayLabels(question, rawAnswer, structuredAnswers);
+    const answerLabel = answerLabels.join(', ') || (Array.isArray(rawAnswer) ? rawAnswer.join(', ') : String(rawAnswer));
+    const roundedAdder = Math.round(adderAmount * 100) / 100;
+    const roundedMaterial = Math.round(materialAmount * 100) / 100;
+    const roundedMultiplier = combinedMultiplier !== 1 ? Math.round(combinedMultiplier * 1000) / 1000 : null;
+    const pricingEffect = roundedAdder > 0
+      ? 'adder'
+      : roundedMaterial > 0
+        ? 'materials'
+        : roundedMultiplier
+          ? 'multiplier'
+          : 'included';
+
+    saved.push({
+      questionId: String(question.id),
+      prompt: String(question.prompt || question.label || question.id).trim(),
+      answer: Array.isArray(rawAnswer) ? rawAnswer.map((item) => String(item ?? '').trim()) : String(rawAnswer ?? '').trim(),
+      answerLabel,
+      answerType: String(question.answerType || 'text').trim().toLowerCase(),
+      required: question.required === true,
+      serviceId: ownerService?.id || null,
+      serviceLabel: ownerService?.label || null,
+      pricingEffect,
+      amount: roundedAdder,
+      materialAmount: roundedMaterial,
+      multiplier: roundedMultiplier,
+    });
+  }
+
+  return saved;
+}
+
 function quoteFromCatalogEntries({
   entries = [],
   categoryId = '',
@@ -215,6 +372,7 @@ function quoteFromCatalogEntries({
   selectedOptionId = '',
   structuredAnswers = {},
   strictUnknownAnswers = true,
+  signalContext = {},
   currency = 'ZAR',
 } = {}) {
   const normalizedCategoryId = String(categoryId || '').trim().toLowerCase();
@@ -274,7 +432,14 @@ function quoteFromCatalogEntries({
     serviceIds: normalizedServiceIds,
     selectedOptionId: resolvedOptionSelection.selectedOptionId,
     structuredAnswers: validation.answers,
+    signalContext,
     currency,
+  });
+  const questionAnswers = buildSavedQuestionAnswersSnapshot({
+    services: selectedQuestionnaireServices,
+    selectedPackageId: packageId,
+    selectedOptionId: resolvedOptionSelection.selectedOptionId,
+    structuredAnswers: validation.answers,
   });
   return {
     ...result,
@@ -283,6 +448,7 @@ function quoteFromCatalogEntries({
     selectedOptionId: resolvedOptionSelection.selectedOption?.id || null,
     selectedOptionTitle: resolvedOptionSelection.selectedOption?.title || null,
     structuredAnswers: validation.answers,
+    questionAnswers,
     questionnaireVersion: buildQuestionnaireHash(selectedQuestionnaireServices, resolvedOptionSelection.selectedOptionId),
     serviceCatalogVersion: buildQuestionnaireHash(selectedServices, resolvedOptionSelection.selectedOptionId),
     quotedAt: new Date().toISOString(),
@@ -313,6 +479,7 @@ async function quoteFromFirestore({ db, ...input }) {
 
 module.exports = {
   buildQuestionnaireHash,
+  buildSavedQuestionAnswersSnapshot,
   getQuestionnaireForSelection,
   isQuestionApplicable,
   normalizeAndValidateAnswers,

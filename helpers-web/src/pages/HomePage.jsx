@@ -1,5 +1,6 @@
 import {
   ArrowRight,
+  Bell,
   Briefcase,
   CreditCard,
   Layers,
@@ -19,6 +20,8 @@ export function HomePage({ onNavigate }) {
     queuedRequest,
     offerNotice,
     setOfferNotice,
+    offerError,
+    setOfferError,
     evaluation,
     walletSnapshot,
     cashConfirmations = [],
@@ -28,6 +31,8 @@ export function HomePage({ onNavigate }) {
     liveCity,
     liveAddress,
     locationAccuracyMeters,
+    notificationPermission,
+    requestNotificationPermission,
   } = useHelperSession();
 
   const rawWalletMinor = walletSnapshot?.wallet?.balanceMinor;
@@ -145,6 +150,38 @@ export function HomePage({ onNavigate }) {
         )}
       </section>
 
+      {/* Browser Offer Notification Prompt (hidden once granted or unsupported) */}
+      {(notificationPermission === 'default' || notificationPermission === 'denied') && (
+        <section className="rounded-2xl border border-border bg-surface p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3.5">
+          <div className="flex items-start gap-3 min-w-0">
+            <span className="h-9 w-9 rounded-xl bg-tealbrand-50 text-tealbrand-700 flex items-center justify-center shrink-0">
+              <Bell className="h-4 w-4" aria-hidden="true" />
+            </span>
+            <div className="min-w-0 space-y-0.5">
+              <h2 className="text-sm font-bold text-ink-900">
+                {notificationPermission === 'denied'
+                  ? 'Browser job offer alerts are blocked'
+                  : 'Turn on browser job offer alerts'}
+              </h2>
+              <p className="text-xs text-ink-600 leading-relaxed">
+                {notificationPermission === 'denied'
+                  ? 'Allow notifications for this site in your browser settings so new job offers pop up right away.'
+                  : 'Get instant browser notifications with full job details and quick Accept or Decline actions when you are picked for a request.'}
+              </p>
+            </div>
+          </div>
+          {notificationPermission === 'default' && (
+            <button
+              type="button"
+              onClick={() => requestNotificationPermission()}
+              className="px-4 py-2.5 rounded-xl bg-tealbrand-600 hover:bg-tealbrand-700 text-xs font-bold text-white shrink-0 min-h-[42px]"
+            >
+              Enable Alerts
+            </button>
+          )}
+        </section>
+      )}
+
       {/* Active Assigned Request */}
       {activeRequest && (
         <section className="rounded-2xl border border-tealbrand-600/40 bg-tealbrand-50 p-5 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4 min-w-0 overflow-hidden">
@@ -183,6 +220,15 @@ export function HomePage({ onNavigate }) {
         <div className="rounded-2xl border border-tealbrand-300 bg-tealbrand-50 px-5 py-3.5 flex items-center justify-between gap-3 text-xs sm:text-sm text-tealbrand-900">
           <span>{offerNotice}</span>
           <button type="button" onClick={() => setOfferNotice?.('')} className="text-xs font-semibold underline shrink-0">
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {offerError && (
+        <div className="rounded-2xl border border-red-200 bg-red-50 px-5 py-3.5 flex items-center justify-between gap-3 text-xs sm:text-sm text-red-800">
+          <span>{offerError}</span>
+          <button type="button" onClick={() => setOfferError?.('')} className="text-xs font-semibold underline shrink-0">
             Dismiss
           </button>
         </div>

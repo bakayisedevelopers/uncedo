@@ -5,7 +5,7 @@ export default function DataVoicePolicyPage() {
   return (
     <LegalPageShell
       title="Data, Location & WhatsApp Policy"
-      updatedAt="21 November 2026"
+      updatedAt="27 November 2026"
       intro="This policy supplements Uncedo’s Privacy Policy & POPIA Notice by explaining how location telemetry, WhatsApp messaging, attachments, and automated systems operate across Uncedo."
       contact="Questions or opt-out/deletion enquiries regarding location or WhatsApp data can be sent via Uncedo in-app support or official WhatsApp (wa.me/27605239926)."
     >
@@ -20,9 +20,11 @@ export default function DataVoicePolicyPage() {
 
       <LegalSection title="2. WhatsApp messaging, relay & media">
         <p>
-          Uncedo uses the Meta WhatsApp Cloud API to send one-time account linking messages, quote confirmations, 6-digit
-          arrival PINs, helper-customer relay messages, and payment links. Communication outside Meta’s 24-hour customer
-          service window uses approved WhatsApp templates and depends on Meta platform delivery.
+          Uncedo uses the Meta WhatsApp Cloud API to send one-time account linking and deletion links, quote
+          confirmations, 6-digit arrival PINs, automated notice when your <strong>2-minute free post-arrival waiting
+          window ends and R1/min waiting charges begin</strong>, helper-customer relay messages, overdue payment reminders,
+          and secure payment links. Communication outside Meta’s 24-hour customer service window uses approved WhatsApp
+          templates and depends on Meta platform delivery.
         </p>
         <p>
           Customers and helpers must not use Uncedo’s WhatsApp channel or relay to exchange passwords, one-time codes,

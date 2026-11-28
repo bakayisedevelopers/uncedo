@@ -5,7 +5,7 @@ export default function TermsPage() {
   return (
     <LegalPageShell
       title="Terms and Conditions"
-      updatedAt="21 November 2026"
+      updatedAt="27 November 2026"
       intro="These Terms and Conditions govern your use of Uncedo’s customer website, mobile apps, payment pages, and WhatsApp service channel. By creating an account, confirming a booking, or paying through Uncedo, you agree to these terms together with our Privacy Policy & POPIA Notice, Payment & Pricing Policy, and Refund Policy."
       contact="For help with a booking, cancellation, payment link, or dispute, use the in-app support option or contact Uncedo via our official WhatsApp support channel (wa.me/27605239926). Never share passwords, one-time codes, full card numbers, or CVVs."
     >
@@ -52,13 +52,14 @@ export default function TermsPage() {
         </p>
       </LegalSection>
 
-      <LegalSection title="4. Matching, arrival PIN verification, and service delivery">
+      <LegalSection title="4. Matching, arrival PIN verification, and 2-minute waiting grace period">
         <p>
           Uncedo routes confirmed requests to eligible, verified, online helpers within the applicable dispatch radius,
           but helper availability or acceptance is never guaranteed. When a helper arrives at your service address, Uncedo
-          issues a <strong>6-digit arrival PIN</strong> via WhatsApp/app notification. You must provide that PIN to the
-          assigned helper so they can verify arrival and start work. Helpers may also capture proof-of-completion photos
-          or record post-arrival waiting time where applicable.
+          issues a <strong>6-digit arrival PIN</strong> via WhatsApp/app notification. Your first <strong>2 minutes
+          </strong> after arrival notification are free; if work has not started once those 2 free minutes expire, Uncedo
+          sends you a WhatsApp notification and waiting charges accrue at <strong>R1 per minute</strong> until the helper
+          enters your PIN and starts work. Helpers may also capture proof-of-completion photos.
         </p>
       </LegalSection>
 
@@ -69,9 +70,10 @@ export default function TermsPage() {
         </p>
         <ul className="list-disc space-y-2 pl-5">
           <li>
-            <strong>Pay by Card (Paystack):</strong> Pay via Paystack’s hosted checkout or confirm an explicit one-time
-            payment using a previously saved card. Card payments are considered complete only after Uncedo verifies
-            settlement directly with Paystack.
+            <strong>Pay by Card (Paystack &amp; Automatic Split):</strong> Pay via Paystack’s hosted checkout or confirm
+            an explicit one-time payment using a previously saved card. Card payments are considered complete only after
+            Uncedo verifies settlement directly with Paystack, and eligible helper shares may be routed directly through
+            Paystack Split.
           </li>
           <li>
             <strong>Pay with Cash:</strong> Where enabled for completed service jobs, you may select Cash, pay the
@@ -85,7 +87,7 @@ export default function TermsPage() {
         </p>
       </LegalSection>
 
-      <LegalSection title="6. Cancellations and customer wallet debt">
+      <LegalSection title="6. Cancellations, 23-hour overdue recovery & customer wallet debt">
         <p>
           Cancellation rules depend strictly on the status of your booking when Uncedo processes your cancellation:
         </p>
@@ -98,15 +100,18 @@ export default function TermsPage() {
           <li>
             <strong>Post-driving cancellation fee:</strong> Cancelling once the assigned helper has started driving, is
             en route, or is buying resources (or after arrival / work started) incurs the applicable cancellation charge
-            calculated from distance travelled (or the service travel fee once arrived) plus the integer booking fee, as
-            displayed to you for confirmation before cancelling.
+            calculated from distance travelled (R4/km while driving, or the service travel fee plus any post-arrival
+            waiting fee after the 2-minute free grace window once arrived) plus the integer booking fee, as displayed to
+            you for confirmation before cancelling.
           </li>
           <li>
-            <strong>Card-only settlement &amp; wallet debt:</strong> Cancellation fees are payable by <strong>card
-            only</strong> (cash is not accepted for cancellations). If an automatic completion or cancellation charge
-            fails, or no chargeable saved card is present, the unpaid amount is deducted against your Uncedo{' '}
-            <strong>wallet balance</strong> as an outstanding debt and a secure card payment link is sent to you. Settling
-            that link by card reverses and clears the wallet debt.
+            <strong>Card-only settlement, 23-hour recovery &amp; booking restrictions:</strong> Cancellation fees are
+            payable by <strong>card only</strong> (cash is not accepted for cancellations). If a completed service remains
+            unpaid after <strong>23 hours</strong>, or if an automatic completion or cancellation charge fails (or no
+            chargeable saved card is present), the unpaid amount is deducted against your Uncedo <strong>wallet balance
+            </strong> as an outstanding debt and a secure card link is sent to you. Settling that link by card
+            reverses and clears the wallet debt. While any unpaid completed request, unpaid cancellation fee, or negative
+            wallet debt remains open, Uncedo blocks new bookings across your linked accounts.
           </li>
         </ul>
         <p>
@@ -124,12 +129,19 @@ export default function TermsPage() {
         </p>
       </LegalSection>
 
-      <LegalSection title="8. Acceptable use, safety, and suspension">
+      <LegalSection title="8. Account deletion, 30-day reactivation & acceptable use">
         <p>
-          You must not commit fraud, harass or threaten helpers or staff, manipulate quotes or GPS/PIN verification,
-          attempt to take confirmed bookings off-platform to evade fees, or misuse another user’s personal information.
-          Uncedo may suspend or terminate accounts, cancel active requests, or withhold/offset disputed balances where
-          reasonably necessary for safety, fraud prevention, or legal compliance.
+          You may request self-service deletion of your account at any time from your Account page or via WhatsApp,
+          provided you have no active bookings, no unpaid completed or cancelled requests, and no negative customer wallet
+          debt. Scheduled deletion triggers a <strong>30-day reactivation grace window</strong>; after 30 days, your
+          active account profile and login are permanently deleted while existing transaction, billing, and support
+          records retain an imprinted contact/deletion snapshot as required for financial, dispute, and legal compliance.
+        </p>
+        <p>
+          You must not commit fraud, chargeback abuse, harass or threaten helpers or staff, manipulate quotes or GPS/PIN
+          verification, attempt to take confirmed bookings off-platform to evade fees, or misuse another user’s personal
+          information. Uncedo may suspend or terminate accounts, cancel active requests, or withhold/offset disputed
+          balances where reasonably necessary for safety, fraud prevention, or legal compliance.
         </p>
       </LegalSection>
 

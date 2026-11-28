@@ -31,10 +31,15 @@ test('maps helper membership display metadata', () => {
 });
 
 test('maps mastery display metadata', () => {
+  assert.deepEqual(getMasteryDisplayMeta('verified'), {
+    label: 'Verified',
+    tone: 'sky',
+    rank: 2,
+  });
   assert.deepEqual(getMasteryDisplayMeta('legend'), {
     label: 'Legend',
     tone: 'gold',
-    rank: 4,
+    rank: 5,
   });
 });
 
@@ -74,7 +79,7 @@ test('builds helper membership progress from trusted metrics', () => {
 test('builds mastery progress toward the next service level', () => {
   const progress = buildMasteryProgressModel({
     mastery: {
-      level: 'beginner',
+      level: 'verified',
       eligibleCompletedJobCount: 40,
       averageRating: 4.7,
       ratingCount: 8,
@@ -163,9 +168,9 @@ test('builds active annual recognition state from authoritative account fields o
 
 test('keeps per-service mastery progress independent for multiple services', () => {
   const cleaning = buildMasteryProgressModel({ mastery: { level: 'specialist', eligibleCompletedJobCount: 50 }, masteryConfig: { master: { minCompletedPaidJobs: 200, minAverageRating: 4.8, minRatingCount: 40 } }, ratingSummary: { average: 4.7, count: 20 } });
-  const gardening = buildMasteryProgressModel({ mastery: { level: 'beginner', eligibleCompletedJobCount: 0 }, masteryConfig: { specialist: { minCompletedPaidJobs: 50, minAverageRating: 4.6, minRatingCount: 10 } }, ratingSummary: { average: 0, count: 0 } });
+  const gardening = buildMasteryProgressModel({ mastery: { level: 'beginner', eligibleCompletedJobCount: 0 }, masteryConfig: { verified: { minCompletedPaidJobs: 10, minAverageRating: 4.0, minRatingCount: 3 }, specialist: { minCompletedPaidJobs: 50, minAverageRating: 4.0, minRatingCount: 10 } }, ratingSummary: { average: 0, count: 0 } });
   assert.equal(cleaning.nextLevel, 'master');
-  assert.equal(gardening.nextLevel, 'specialist');
+  assert.equal(gardening.nextLevel, 'verified');
 });
 
 test('resolves option-specific mastery independently of sibling options and falls back only when optionless', () => {

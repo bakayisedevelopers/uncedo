@@ -1,3 +1,5 @@
+const { parseScheduledSastDate } = require('./shared/categoryPricingEngineFactory.cjs');
+
 const DEFAULT_TRAVEL_FEE = 35;
 const DEFAULT_BOOKING_FEE = 0;
 const BOOKING_FEE_RATE = 0.01;
@@ -181,13 +183,18 @@ function normalizePricing(pricing = {}) {
     availabilityMultiplierHigh: Math.max(0, normalizeNumber(pricing.availabilityMultiplierHigh, 0.98)),
     availabilityMultiplierNormal: Math.max(0, normalizeNumber(pricing.availabilityMultiplierNormal, 1)),
     availabilityMultiplierLow: Math.max(0, normalizeNumber(pricing.availabilityMultiplierLow, 1.08)),
-    weekendMultiplier: Math.max(0, normalizeNumber(pricing.weekendMultiplier, 1.08)),
-    fridayMultiplier: Math.max(0, normalizeNumber(pricing.fridayMultiplier, 1.04)),
-    weekdayMultiplier: Math.max(0, normalizeNumber(pricing.weekdayMultiplier, 1)),
-    morningMultiplier: Math.max(0, normalizeNumber(pricing.morningMultiplier, 1)),
-    afternoonMultiplier: Math.max(0, normalizeNumber(pricing.afternoonMultiplier, 1.02)),
-    eveningMultiplier: Math.max(0, normalizeNumber(pricing.eveningMultiplier, 1.08)),
-    overnightMultiplier: Math.max(0, normalizeNumber(pricing.overnightMultiplier, 1.12)),
+    weekendMultiplier: Math.max(0, normalizeNumber(pricing.weekendMultiplier ?? pricing.dayMultipliers?.weekend, 1.08)),
+    fridayMultiplier: Math.max(0, normalizeNumber(pricing.fridayMultiplier ?? pricing.dayMultipliers?.friday, 1.04)),
+    weekdayMultiplier: Math.max(0, normalizeNumber(pricing.weekdayMultiplier ?? pricing.dayMultipliers?.weekday, 1)),
+    morningMultiplier: Math.max(0, normalizeNumber(pricing.morningMultiplier ?? pricing.timeMultipliers?.morning ?? pricing.timeOfDayMultipliers?.morning, 1)),
+    afternoonMultiplier: Math.max(0, normalizeNumber(pricing.afternoonMultiplier ?? pricing.timeMultipliers?.afternoon ?? pricing.timeOfDayMultipliers?.afternoon, 1.02)),
+    eveningMultiplier: Math.max(0, normalizeNumber(pricing.eveningMultiplier ?? pricing.timeMultipliers?.evening ?? pricing.timeOfDayMultipliers?.evening, 1.08)),
+    overnightMultiplier: Math.max(0, normalizeNumber(pricing.overnightMultiplier ?? pricing.timeMultipliers?.overnight ?? pricing.timeOfDayMultipliers?.overnight, 1.12)),
+    summerSeasonMultiplier: Math.max(0, normalizeNumber(pricing.summerSeasonMultiplier ?? pricing.seasonMultipliers?.summer, 1.04)),
+    festiveSeasonMultiplier: Math.max(0, normalizeNumber(pricing.festiveSeasonMultiplier ?? pricing.peakSeasonMultiplier ?? pricing.seasonMultipliers?.festive ?? pricing.seasonMultipliers?.peakSeason, 1.1)),
+    autumnSeasonMultiplier: Math.max(0, normalizeNumber(pricing.autumnSeasonMultiplier ?? pricing.seasonMultipliers?.autumn ?? pricing.seasonMultipliers?.normal, 1)),
+    winterSeasonMultiplier: Math.max(0, normalizeNumber(pricing.winterSeasonMultiplier ?? pricing.offSeasonMultiplier ?? pricing.seasonMultipliers?.winter ?? pricing.seasonMultipliers?.offSeason, 0.96)),
+    springSeasonMultiplier: Math.max(0, normalizeNumber(pricing.springSeasonMultiplier ?? pricing.seasonMultipliers?.spring ?? pricing.seasonMultipliers?.normal, 1)),
     bundleDiscountPercent: clamp(normalizeNumber(pricing.bundleDiscountPercent, 0), 0, 100),
   };
 }
@@ -291,19 +298,43 @@ function isQuestionIncludedForOption(question = {}, service = {}, selectedOption
   return selectedIds.has(questionId);
 }
 
+const SAST_OFFSET_MS = 2 * 60 * 60 * 1000;
+
+function getSastDateParts(date = new Date()) {
+  const validDate = date instanceof Date && !Number.isNaN(date.getTime())
+    ? date
+    : new Date(date || Date.now());
+  const shifted = new Date(validDate.getTime() + SAST_OFFSET_MS);
+  return {
+    dayOfWeek: shifted.getUTCDay(),
+    hour: shifted.getUTCHours(),
+    month: shifted.getUTCMonth() + 1,
+    isoTimestamp: validDate.toISOString(),
+  };
+}
+
 function getTimeBucket(date = new Date()) {
-  const hour = date.getHours();
-  if (hour < 6) return 'overnight';
+  const { hour } = getSastDateParts(date);
+  if (hour < 6 || hour >= 22) return 'overnight';
   if (hour < 12) return 'morning';
   if (hour < 17) return 'afternoon';
   return 'evening';
 }
 
 function getDayBucket(date = new Date()) {
-  const day = date.getDay();
-  if (day === 5) return 'friday';
-  if (day === 6 || day === 0) return 'weekend';
+  const { dayOfWeek } = getSastDateParts(date);
+  if (dayOfWeek === 5) return 'friday';
+  if (dayOfWeek === 6 || dayOfWeek === 0) return 'weekend';
   return 'weekday';
+}
+
+function getSeasonBucket(date = new Date()) {
+  const { month } = getSastDateParts(date);
+  if (month === 12) return 'festive';
+  if (month === 1 || month === 2) return 'summer';
+  if (month >= 3 && month <= 5) return 'autumn';
+  if (month >= 6 && month <= 8) return 'winter';
+  return 'spring';
 }
 
 function getSignalMultiplier(pricing = {}, signalContext = {}) {
@@ -325,29 +356,51 @@ function getSignalMultiplier(pricing = {}, signalContext = {}) {
   return demandMultiplier * availabilityMultiplier;
 }
 
-function getScheduleMultiplier(pricing = {}, signalContext = {}) {
-  const now = signalContext.now instanceof Date ? signalContext.now : new Date();
-  const timeBucket = getTimeBucket(now);
-  const dayBucket = getDayBucket(now);
+function getScheduleMultiplier(pricing = {}, signalContext = {}, structuredAnswers = {}) {
+  const referenceNow = signalContext.now instanceof Date ? signalContext.now : new Date(signalContext.now || Date.now());
+  let effectiveDate = referenceNow;
+  if (String(structuredAnswers?.timing_preference || '').trim().toLowerCase() === 'later') {
+    const parsedScheduled = parseScheduledSastDate(structuredAnswers?.scheduled_for_text, referenceNow.getTime());
+    if (parsedScheduled) effectiveDate = parsedScheduled;
+  }
+  const timeBucket = String(signalContext.timeOfDayBucket || getTimeBucket(effectiveDate)).trim().toLowerCase();
+  const dayBucket = String(signalContext.dayBucket || getDayBucket(effectiveDate)).trim().toLowerCase();
+  const seasonBucket = String(signalContext.seasonBucket || getSeasonBucket(effectiveDate)).trim().toLowerCase();
 
   const timeMultiplier = timeBucket === 'overnight'
-    ? pricing.overnightMultiplier
+    ? Number(pricing.overnightMultiplier ?? 1.12)
     : timeBucket === 'evening'
-      ? pricing.eveningMultiplier
+      ? Number(pricing.eveningMultiplier ?? 1.08)
       : timeBucket === 'afternoon'
-        ? pricing.afternoonMultiplier
-        : pricing.morningMultiplier;
+        ? Number(pricing.afternoonMultiplier ?? 1.02)
+        : Number(pricing.morningMultiplier ?? 1);
 
   const dayMultiplier = dayBucket === 'weekend'
-    ? pricing.weekendMultiplier
+    ? Number(pricing.weekendMultiplier ?? 1.08)
     : dayBucket === 'friday'
-      ? pricing.fridayMultiplier
-      : pricing.weekdayMultiplier;
+      ? Number(pricing.fridayMultiplier ?? 1.04)
+      : Number(pricing.weekdayMultiplier ?? 1);
+
+  const seasonMultiplier = seasonBucket === 'festive'
+    ? Number(pricing.festiveSeasonMultiplier ?? 1.1)
+    : seasonBucket === 'summer'
+      ? Number(pricing.summerSeasonMultiplier ?? 1.04)
+      : seasonBucket === 'winter'
+        ? Number(pricing.winterSeasonMultiplier ?? 0.96)
+        : seasonBucket === 'autumn'
+          ? Number(pricing.autumnSeasonMultiplier ?? 1)
+          : Number(pricing.springSeasonMultiplier ?? 1);
 
   return {
+    timezone: 'Africa/Johannesburg',
+    effectiveAtMs: effectiveDate.getTime(),
     timeBucket,
     dayBucket,
-    multiplier: timeMultiplier * dayMultiplier,
+    seasonBucket,
+    timeMultiplier,
+    dayMultiplier,
+    seasonMultiplier,
+    multiplier: Number((timeMultiplier * dayMultiplier * seasonMultiplier).toFixed(6)),
   };
 }
 
@@ -411,22 +464,26 @@ function getQuestionAdjustments(service, structuredAnswers = {}, selectedOption 
         multiplier *= optionMultiplier;
       }
 
+      const cleanQuestionId = String(question.id || '').trim();
       if (optionPriceAdder) {
         lines.push({
           label: `${service.label}: ${selectedChoice.label}`,
           amount: roundCurrency(optionPriceAdder),
+          ...(cleanQuestionId ? { questionId: cleanQuestionId } : {}),
         });
       }
       if (selectedChoice.materialAdder) {
         lines.push({
           label: `${service.label}: ${selectedChoice.label} materials`,
           amount: roundCurrency(selectedChoice.materialAdder),
+          ...(cleanQuestionId ? { questionId: cleanQuestionId } : {}),
         });
       }
       if (optionMultiplier && optionMultiplier !== 1) {
         lines.push({
           label: `${service.label}: ${selectedChoice.label} multiplier (×${optionMultiplier})`,
           amount: roundCurrency(0),
+          ...(cleanQuestionId ? { questionId: cleanQuestionId } : {}),
         });
       }
     });
@@ -445,12 +502,14 @@ function createLeafQuote(service, structuredAnswers = {}, signalContext = {}, se
   const selectedOption = resolveSelectedServiceOption(service, selectedOptionId || structuredAnswers?.selectedOptionId || '');
   const baseOptionPrice = selectedOption ? Math.max(0, roundCurrency(Number(selectedOption.price || 0))) : pricing.basePrice;
   const questionAdjustments = getQuestionAdjustments(service, structuredAnswers, selectedOption);
-  const schedule = getScheduleMultiplier(pricing, signalContext);
+  const schedule = getScheduleMultiplier(pricing, signalContext, structuredAnswers);
   const signalMultiplier = getSignalMultiplier(pricing, signalContext);
-  const combinedMultiplier = schedule.multiplier * signalMultiplier * questionAdjustments.multiplier;
   const baseLabor = baseOptionPrice + questionAdjustments.subtotalAdder;
+  const questionScaledLabor = roundCurrency(baseLabor * questionAdjustments.multiplier);
+  const combinedMultiplier = schedule.multiplier * signalMultiplier * questionAdjustments.multiplier;
   const materialFee = pricing.materialFee + questionAdjustments.materialAdder;
   const laborTotal = roundCurrency(baseLabor * combinedMultiplier);
+  const scheduleAndSignalDelta = roundCurrency(laborTotal - questionScaledLabor);
   const subtotal = roundCurrency(laborTotal + materialFee);
   const clampedTotal = (!selectedOption && (pricing.maximumTotal > 0 || pricing.minimumTotal > 0))
     ? roundCurrency(clamp(subtotal, pricing.minimumTotal || 0, pricing.maximumTotal || Number.POSITIVE_INFINITY))
@@ -464,10 +523,20 @@ function createLeafQuote(service, structuredAnswers = {}, signalContext = {}, se
     ...questionAdjustments.lines,
   ];
 
-  if (schedule.multiplier !== 1) {
+  if (questionAdjustments.multiplier !== 1) {
+    const multDelta = roundCurrency(questionScaledLabor - baseLabor);
+    if (multDelta !== 0) {
+      lines.push({
+        label: `${service.label}: quantity/multiplier adjustment`,
+        amount: multDelta,
+      });
+    }
+  }
+
+  if (scheduleAndSignalDelta !== 0) {
     lines.push({
-      label: `${service.label}: ${schedule.dayBucket} ${schedule.timeBucket} multiplier`,
-      amount: roundCurrency(laborTotal - baseLabor - questionAdjustments.subtotalAdder),
+      label: `${service.label}: ${schedule.dayBucket}, ${schedule.timeBucket}, ${schedule.seasonBucket} multiplier`,
+      amount: scheduleAndSignalDelta,
     });
   }
 
@@ -493,6 +562,7 @@ function createLeafQuote(service, structuredAnswers = {}, signalContext = {}, se
     subtotal: clampedTotal,
     estimatedDurationMinutes: pricing.durationMinutes || 0,
     lines,
+    schedulePricing: schedule,
     pricingMode: pricing.pricingMode,
   };
 }
@@ -626,6 +696,9 @@ function computeMarketplaceQuote({
   const bookingFee = computeDynamicBookingFee(bookingFeeBase);
   const total = roundCurrency(serviceTotal + travelFee + bookingFee);
 
+  const schedulePricing = serviceBreakdown.find((item) => item.schedulePricing)?.schedulePricing
+    || getScheduleMultiplier({}, normalizedSignals);
+
   return {
     categoryId: String(categoryId || '').trim().toLowerCase(),
     selectedOptionId: String(selectedOptionId || '').trim().toLowerCase() || null,
@@ -645,6 +718,7 @@ function computeMarketplaceQuote({
     estimatedDurationMinutes: serviceBreakdown.reduce((sum, item) => sum + Number(item.estimatedDurationMinutes || 0), 0),
     demandLevel: normalizedSignals.demandLevel,
     availabilityLevel: normalizedSignals.availabilityLevel,
+    schedulePricing,
     quotedAt: new Date().toISOString(),
   };
 }

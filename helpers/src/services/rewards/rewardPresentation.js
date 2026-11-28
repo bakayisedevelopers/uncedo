@@ -56,9 +56,10 @@ const MEMBERSHIP_META = {
 
 const MASTERY_META = {
   beginner: { label: 'Beginner', tone: 'neutral', rank: 1 },
-  specialist: { label: 'Specialist', tone: 'info', rank: 2 },
-  master: { label: 'Master', tone: 'indigo', rank: 3 },
-  legend: { label: 'Legend', tone: 'gold', rank: 4 },
+  verified: { label: 'Verified', tone: 'sky', rank: 2 },
+  specialist: { label: 'Specialist', tone: 'info', rank: 3 },
+  master: { label: 'Master', tone: 'indigo', rank: 4 },
+  legend: { label: 'Legend', tone: 'gold', rank: 5 },
 };
 
 const REASON_META = {

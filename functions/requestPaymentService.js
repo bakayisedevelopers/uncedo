@@ -1,7 +1,10 @@
 'use strict';
 
 const { createHash, randomBytes } = require('node:crypto');
-const { applyHelperPayoutInTransaction } = require('./helperWalletService');
+const {
+  applyHelperPayoutInTransaction,
+  applySplitSettlementInTransaction,
+} = require('./helperWalletService');
 const { getServiceHelperPayoutBreakdown } = require('./serviceRequestBilling');
 
 const PAYMENT_OPERATIONS = 'servicePaymentOperations';
@@ -254,7 +257,7 @@ async function beginServicePaymentAttempt({ db, admin, sessionRef, session, meth
   });
 }
 
-async function claimSavedCardPayment({ db, admin, requestId, attemptId, gatewayReference, now = Date.now() }) {
+async function claimSavedCardPayment({ db, admin, requestId, attemptId, gatewayReference, splitAllocation = null, now = Date.now() }) {
   const requestRef = db.collection('serviceRequests').doc(String(requestId || ''));
   const paymentRef = db.collection(PAYMENT_OPERATIONS).doc(String(requestId || ''));
   const attemptRef = paymentRef.collection('attempts').doc(String(attemptId || ''));
@@ -271,15 +274,33 @@ async function claimSavedCardPayment({ db, admin, requestId, attemptId, gatewayR
     if (referenceSnap.exists && String(referenceSnap.data()?.attemptId || '') !== attemptId) return { action: 'reference-conflict' };
     if (attempt.status === 'processing' || attempt.status === 'payment_reconciliation_required') return { action: 'reconcile', attempt, request, attemptRef };
     if (attempt.status !== 'awaiting_customer_confirmation' || Number(attempt.expiresAtMs || 0) <= now) return { action: 'confirmation-expired' };
-    transaction.set(attemptRef, { status: 'processing', confirmedAtMs: now, gatewayReference: String(gatewayReference || ''), updatedAtMs: now }, { merge: true });
+    const effectiveSplitAllocation = attempt.splitAllocation || splitAllocation || null;
+    transaction.set(attemptRef, {
+      status: 'processing',
+      confirmedAtMs: now,
+      gatewayReference: String(gatewayReference || ''),
+      ...(effectiveSplitAllocation ? { splitAllocation: effectiveSplitAllocation } : {}),
+      updatedAtMs: now,
+    }, { merge: true });
     transaction.set(paymentRef, { status: 'payment_processing', updatedAtMs: now }, { merge: true });
     transaction.set(referenceRef, { requestId, attemptId, gatewayReference: String(gatewayReference || ''), createdAtMs: now }, { merge: true });
     transaction.update(requestRef, { paymentStatus: 'payment_processing', paymentMethod: 'saved_card', updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-    return { action: 'charge', attempt: { ...attempt, status: 'processing', confirmedAtMs: now, gatewayReference: String(gatewayReference || '') }, request, attemptRef };
+    return {
+      action: 'charge',
+      attempt: {
+        ...attempt,
+        status: 'processing',
+        confirmedAtMs: now,
+        gatewayReference: String(gatewayReference || ''),
+        ...(effectiveSplitAllocation ? { splitAllocation: effectiveSplitAllocation } : {}),
+      },
+      request,
+      attemptRef,
+    };
   });
 }
 
-async function recordCheckoutInitialization({ db, admin, requestId, attemptId, gatewayReference, authorizationUrl, now = Date.now() }) {
+async function recordCheckoutInitialization({ db, admin, requestId, attemptId, gatewayReference, authorizationUrl, splitAllocation = null, now = Date.now() }) {
   const requestRef = db.collection('serviceRequests').doc(String(requestId || ''));
   const paymentRef = db.collection(PAYMENT_OPERATIONS).doc(String(requestId || ''));
   const attemptRef = paymentRef.collection('attempts').doc(String(attemptId || ''));
@@ -294,11 +315,18 @@ async function recordCheckoutInitialization({ db, admin, requestId, attemptId, g
     if (request.paymentStatus === 'paid' || payment.status === 'paid') return { action: 'already-paid' };
     if (attempt.gatewayReference && attempt.gatewayReference !== gatewayReference) return { action: 'reference-conflict' };
     if (referenceSnap.exists && String(referenceSnap.data()?.attemptId || '') !== attemptId) return { action: 'reference-conflict' };
-    transaction.set(attemptRef, { status: 'processing', gatewayReference: String(gatewayReference || ''), authorizationUrl: String(authorizationUrl || ''), updatedAtMs: now }, { merge: true });
+    const effectiveSplitAllocation = attempt.splitAllocation || splitAllocation || null;
+    transaction.set(attemptRef, {
+      status: 'processing',
+      gatewayReference: String(gatewayReference || ''),
+      authorizationUrl: String(authorizationUrl || ''),
+      ...(effectiveSplitAllocation ? { splitAllocation: effectiveSplitAllocation } : {}),
+      updatedAtMs: now,
+    }, { merge: true });
     transaction.set(paymentRef, { status: 'payment_processing', gatewayReference: String(gatewayReference || ''), updatedAtMs: now }, { merge: true });
     transaction.set(referenceRef, { requestId, attemptId, gatewayReference: String(gatewayReference || ''), createdAtMs: now }, { merge: true });
     transaction.update(requestRef, { paymentStatus: 'payment_processing', paymentMethod: 'paystack_checkout', paymentReference: String(gatewayReference || ''), updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-    return { action: 'updated' };
+    return { action: 'updated', splitAllocation: effectiveSplitAllocation };
   });
 }
 
@@ -452,6 +480,12 @@ function computeRequestPayoutBreakdown({ request = {}, legacy = null, amount = 0
                 closureType: 'canceled',
                 billingRule: cancellationRuleFallback,
                 travelledKm: cancellationKmFallback,
+                waitingCost: Number(
+                  request.waitingCost
+                  ?? request.pricingSnapshot?.waitingCost
+                  ?? legacy?.settlementData?.cancellation?.waitingCost
+                  ?? 0,
+                ),
                 ...(request.pricingSnapshot?.cancellationTravelCharge !== undefined
                   ? { travelFeeAmount: Number(request.pricingSnapshot.cancellationTravelCharge) }
                   : {}),
@@ -625,15 +659,35 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
     let reversalTargetRef = customerRef;
     let reversalTargetUid = customerId;
     if (debtOutstanding && customerRef) {
-      customerSnap = await transaction.get(customerRef);
-      const guestTransferredToUid = String(customerSnap.data()?.debtTransferredToUid || '').trim();
-      if (guestTransferredToUid && guestTransferredToUid !== customerId) {
-        const linkedOwnerRef = db.collection('users').doc(guestTransferredToUid);
-        const linkedOwnerSnap = await transaction.get(linkedOwnerRef);
-        if (linkedOwnerSnap.exists) {
-          customerSnap = linkedOwnerSnap;
-          reversalTargetRef = linkedOwnerRef;
-          reversalTargetUid = guestTransferredToUid;
+      const recordedDebtOwnerUid = String(payment?.debtOwnerUid || legacy?.debtOwnerUid || '').trim();
+      if (recordedDebtOwnerUid && recordedDebtOwnerUid !== customerId) {
+        const recordedOwnerRef = db.collection('users').doc(recordedDebtOwnerUid);
+        const recordedOwnerSnap = await transaction.get(recordedOwnerRef);
+        if (recordedOwnerSnap.exists) {
+          customerSnap = recordedOwnerSnap;
+          reversalTargetRef = recordedOwnerRef;
+          reversalTargetUid = recordedDebtOwnerUid;
+        }
+      }
+      if (!customerSnap || !customerSnap.exists) {
+        customerSnap = await transaction.get(customerRef);
+        const guestTransferredToUid = String(customerSnap.data()?.debtTransferredToUid || '').trim();
+        let resolvedLinkedUid = guestTransferredToUid && guestTransferredToUid !== customerId ? guestTransferredToUid : '';
+        if (!resolvedLinkedUid && customerId.startsWith('guest_')) {
+          const ownershipSnap = await transaction.get(db.collection('whatsappGuestOwnership').doc(customerId));
+          const linkedUid = ownershipSnap?.exists ? String(ownershipSnap.data()?.uid || '').trim() : '';
+          if (linkedUid && linkedUid !== customerId) {
+            resolvedLinkedUid = linkedUid;
+          }
+        }
+        if (resolvedLinkedUid) {
+          const linkedOwnerRef = db.collection('users').doc(resolvedLinkedUid);
+          const linkedOwnerSnap = await transaction.get(linkedOwnerRef);
+          if (linkedOwnerSnap.exists) {
+            customerSnap = linkedOwnerSnap;
+            reversalTargetRef = linkedOwnerRef;
+            reversalTargetUid = resolvedLinkedUid;
+          }
         }
       }
       wallet = customerSnap.data()?.wallet || { balance: 0, currency: 'ZAR' };
@@ -653,6 +707,7 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
       ? Number(attempt.amountMinor)
       : Math.round(Number(amount || 0) * 100);
 
+    const splitAllocation = !isCash ? (attempt.splitAllocation || null) : null;
     let walletMovement = { applied: false, deltaMinor: 0, balanceAfterMinor: 0 };
     if (resolvedHelperId) {
       if (isCash && !isCanceled) {
@@ -673,19 +728,35 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
           return { action: 'commission-conflict', reason: walletMovement.reason || 'cash-commission-not-applied' };
         }
       } else if (!isCash && helperAmountMinor > 0) {
-        walletMovement = await applyHelperPayoutInTransaction({
-          transaction,
-          db,
-          helperId: resolvedHelperId,
-          requestId,
-          helperAmountMinor,
-          platformAmountMinor,
-          customerChargeAmountMinor,
-          isCash: false,
-          closureType: isCanceled ? 'canceled' : 'completed',
-          now,
-        });
-        if (!walletMovement.applied && !walletMovement.duplicate && walletMovement.reason !== 'zero-delta') {
+        if (splitAllocation) {
+          walletMovement = await applySplitSettlementInTransaction({
+            transaction,
+            db,
+            helperId: resolvedHelperId,
+            requestId,
+            splitAllocation,
+            helperAmountMinor,
+            platformAmountMinor,
+            customerChargeAmountMinor,
+            closureType: isCanceled ? 'canceled' : 'completed',
+            gatewayReference: String(gatewayReference || '') || String(attempt.gatewayReference || ''),
+            now,
+          });
+        } else {
+          walletMovement = await applyHelperPayoutInTransaction({
+            transaction,
+            db,
+            helperId: resolvedHelperId,
+            requestId,
+            helperAmountMinor,
+            platformAmountMinor,
+            customerChargeAmountMinor,
+            isCash: false,
+            closureType: isCanceled ? 'canceled' : 'completed',
+            now,
+          });
+        }
+        if (!walletMovement.applied && !walletMovement.duplicate && !['zero-delta', 'zero-helper-share', 'no-wallet-movement'].includes(String(walletMovement.reason || ''))) {
           return { action: 'wallet-conflict', reason: walletMovement.reason || 'wallet-credit-not-applied' };
         }
       }
@@ -735,6 +806,20 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
     }
+    const resolvedSettlementMode = isCash
+      ? 'direct_cash'
+      : splitAllocation
+        ? String(walletMovement?.mode || splitAllocation.mode || 'platform_hold_fallback')
+        : null;
+    const splitBreakdownPayload = (!isCash && splitAllocation)
+      ? {
+          mode: resolvedSettlementMode,
+          subaccountCode: splitAllocation.subaccountCode || null,
+          helperSplitAmount: Number(((splitAllocation.helperSplitMinor || 0) / 100).toFixed(2)),
+          platformChargeAmount: Number(((splitAllocation.transactionChargeMinor || 0) / 100).toFixed(2)),
+          debtRecoveredAmount: Number(((splitAllocation.debtRecoveredMinor || 0) / 100).toFixed(2)),
+        }
+      : null;
     const canonicalOperationPatch = {
       operationId: canonicalOperationId,
       requestId,
@@ -750,6 +835,8 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
       debtApplied: Boolean(legacy?.debtApplied || payment?.debtApplied),
       debtReversed: Boolean(legacy?.debtReversed || payment?.debtReversed || (debtOutstanding && customerSnap?.exists)),
       ...(Number.isFinite(Number(legacy?.amountMinor)) ? {} : { amount, amountMinor: Math.round(amount * 100), currency: 'ZAR' }),
+      ...(resolvedSettlementMode ? { paymentSettlementMode: resolvedSettlementMode } : {}),
+      ...(splitBreakdownPayload ? { splitBreakdown: splitBreakdownPayload } : {}),
       alternatePaymentMethod: paymentMethod,
       alternatePaymentReference: String(gatewayReference || '') || null,
       alternatePaymentTransactionId: String(gatewayTransactionId || '') || null,
@@ -765,6 +852,8 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
     transaction.set(requestRef, {
       paymentStatus: 'paid',
       paymentMethod,
+      ...(resolvedSettlementMode ? { paymentSettlementMode: resolvedSettlementMode } : {}),
+      ...(splitBreakdownPayload ? { splitBreakdown: splitBreakdownPayload } : {}),
       paymentTransactionId: String(gatewayTransactionId || '') || null,
       paymentReference: String(gatewayReference || '') || null,
       paymentReceiptId: receiptId,
@@ -795,6 +884,8 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
     transaction.set(paymentRef, {
       status: 'paid',
       method: paymentMethod,
+      ...(resolvedSettlementMode ? { paymentSettlementMode: resolvedSettlementMode } : {}),
+      ...(splitBreakdownPayload ? { splitBreakdown: splitBreakdownPayload } : {}),
       activeAttemptId: attemptId,
       receiptId,
       walletDebtOutstanding: false,
@@ -805,7 +896,18 @@ async function settleRequestPayment({ db, admin, requestId, attemptId, outcome, 
       settledAtMs: now, updatedAtMs: now,
       ...(isCash ? { platformCommissionReviewRequired: false } : {}),
     }, { merge: true });
-    return { action: 'settled', receiptId, amount, method: paymentMethod, customerId, helperId: resolvedHelperId, requestStatus, debtReversed: Boolean(reversedDebtNow) };
+    return {
+      action: 'settled',
+      receiptId,
+      amount,
+      method: paymentMethod,
+      customerId,
+      helperId: resolvedHelperId,
+      requestStatus,
+      debtReversed: Boolean(reversedDebtNow),
+      paymentSettlementMode: resolvedSettlementMode,
+      splitBreakdown: splitBreakdownPayload,
+    };
   });
 }
 
@@ -816,6 +918,7 @@ module.exports = {
   cancelCashPaymentSelection,
   cancelSavedCardPaymentConfirmation,
   claimSavedCardPayment,
+  computeRequestPayoutBreakdown,
   createPaymentToken,
   createServicePaymentSession,
   getFinalPayableAmount,

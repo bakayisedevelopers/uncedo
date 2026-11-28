@@ -248,4 +248,144 @@ test('handles cancellation fee breakdown and waiting/credit adjustments cleanly'
   assert.equal(cancelBreakdown.lines.length, 2);
   assert.equal(cancelBreakdown.lines[0].amount, 24);
   assert.equal(cancelBreakdown.lines[1].amount, 5);
+
+  const arrivedCancelWithWait = buildPriceBreakdownLines({
+    isCanceled: true,
+    settledAmount: 45,
+    request: {
+      cancellationFeeAmount: 45,
+      waitingMinutes: 8,
+      waitingCost: 6,
+      helperPayoutBreakdown: {
+        travelAmount: 35,
+        helperTravelAmount: 35,
+        helperWaitingAmount: 6,
+        waitingCost: 6,
+        bookingFeeAmount: 4,
+      },
+    },
+  });
+  assert.equal(arrivedCancelWithWait.totalAmount, 45);
+  assert.equal(arrivedCancelWithWait.lines.length, 3);
+  assert.deepEqual(arrivedCancelWithWait.lines.map((l) => [l.component, l.amount]), [
+    ['Travel', 35],
+    ['Waiting Time', 6],
+    ['Platform Fee', 4],
+  ]);
 });
+
+test('includes saved questionAnswers in invoice specifications, itemised priceBreakdown, and PDF without needing catalogEntries', async () => {
+  const savedQuestions = [
+    {
+      questionId: 'urgency',
+      prompt: 'How urgent is this request?',
+      answerLabel: 'Urgent',
+      pricingEffect: 'adder',
+      amount: 50,
+    },
+    {
+      questionId: 'property_type',
+      prompt: 'Property type',
+      answerLabel: 'Standalone House',
+      pricingEffect: 'included',
+      amount: 0,
+    },
+    {
+      questionId: 'visits',
+      prompt: 'Visits',
+      answerLabel: '2 visits',
+      pricingEffect: 'multiplier',
+      multiplier: 2,
+      amount: 0,
+    },
+  ];
+  const invoice = buildServiceInvoiceData({
+    requestId: 'req_qa_invoice',
+    request: {
+      status: 'completed',
+      paymentStatus: 'paid',
+      publicRequestReference: 'UNC-5511',
+      subject: 'Plumbing',
+      serviceSummary: 'Tap Repair',
+      customerName: 'Zanele Mthembu',
+      serviceAddress: '5 Oak Ave, Sandton',
+      totalAmount: 439,
+      helperAssignment: { helperId: 'helper_5511', helperName: 'Musa Zulu' },
+      questionAnswers: savedQuestions,
+      pricingSnapshot: {
+        currency: 'ZAR',
+        questionAnswers: savedQuestions,
+        lines: [
+          { label: 'Tap Repair: Standard Visit', amount: 350 },
+          { label: 'Tap Repair: Urgent', amount: 50 },
+          { label: 'Travel fee', amount: 35 },
+          { label: 'Booking fee', amount: 4 },
+        ],
+        total: 439,
+      },
+    },
+  });
+
+  assert.equal(invoice.questionAnswers.length, 3);
+  assert.equal(invoice.questionAnswers[0].label, 'How urgent is this request?');
+  assert.equal(invoice.questionAnswers[0].value, 'Urgent');
+  assert.equal(invoice.priceBreakdown.some((line) => line.label.includes('How urgent is this request?: Urgent') && line.amount === 50), true);
+  assert.equal(invoice.priceBreakdown.some((line) => line.label === 'Property type: Standalone House' && line.amount === 0 && line.displayAmount === 'Included'), true);
+  assert.equal(invoice.priceBreakdown.some((line) => line.label === 'Visits: 2 visits' && line.amount === 0 && line.displayAmount === '×2 multiplier'), true);
+  assert.equal(invoice.priceBreakdown.reduce((sum, line) => sum + line.amount, 0), 439);
+
+  const buffer = await buildServiceRequestInvoicePdfBuffer(invoice);
+  const { pageTexts } = extractPdfPageTexts(buffer);
+  const joined = pageTexts.join('\n');
+  assert.ok(joined.includes('Standalone House'));
+  assert.ok(joined.includes('Included'));
+  assert.ok(joined.includes('×2 multiplier'));
+});
+
+test('matches multiple pricing lines sharing the same questionId and includes questionAnswers on canceled fee invoices', () => {
+  const qaList = [
+    {
+      questionId: 'pool_treatment',
+      prompt: 'Pool chemical pack',
+      answerLabel: 'Full Kit',
+      pricingEffect: 'adder',
+      amount: 100,
+      materialAmount: 60,
+    },
+  ];
+  const multiLineBreakdown = buildPriceBreakdownLines({
+    isCanceled: false,
+    settledAmount: 360,
+    request: {
+      status: 'completed',
+      totalAmount: 360,
+      questionAnswers: qaList,
+      pricingSnapshot: {
+        lines: [
+          { label: 'Pool Clean: Standard', amount: 200 },
+          { label: 'Pool Clean: Full Kit', amount: 100, questionId: 'pool_treatment' },
+          { label: 'Pool Clean: Full Kit materials', amount: 60, questionId: 'pool_treatment' },
+        ],
+        total: 360,
+      },
+    },
+  });
+  const kitLines = multiLineBreakdown.lines.filter((line) => line.questionId === 'pool_treatment');
+  assert.equal(kitLines.length, 2);
+  assert.equal(kitLines.every((line) => line.questionPrompt === 'Pool chemical pack'), true);
+
+  const canceledWithQa = buildPriceBreakdownLines({
+    isCanceled: true,
+    settledAmount: 35,
+    request: {
+      cancellationFeeAmount: 35,
+      helperPayoutBreakdown: { travelAmount: 35 },
+      questionAnswers: [
+        { questionId: 'vehicle_type', prompt: 'Vehicle type', answerLabel: 'SUV', amount: 0 },
+      ],
+    },
+  });
+  assert.equal(canceledWithQa.lines.some((line) => line.label === 'Vehicle type: SUV' && line.component === 'Question & Answer'), true);
+});
+
+

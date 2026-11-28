@@ -14,12 +14,14 @@ import { mapPathnameToStepId } from './utils/onboardingSteps';
 import { LandingPage } from './pages/LandingPage';
 import { AuthPage } from './pages/AuthPage';
 import { WhatsAppLinkPage } from './pages/WhatsAppLinkPage';
+import { WhatsAppAccountDeletionPage } from './pages/WhatsAppAccountDeletionPage';
 import { OnboardingPage } from './pages/OnboardingPage';
 import { HomePage } from './pages/HomePage';
 import { ServicesPage } from './pages/ServicesPage';
 import { JobsPage } from './pages/JobsPage';
 import { ProfilePage } from './pages/ProfilePage';
 import { ProfileSectionPage } from './pages/ProfileSectionPage';
+import { BadgesGuidePage } from './pages/BadgesGuidePage';
 import { RequestDetailPage } from './pages/RequestDetailPage';
 import { PolicyPage } from './pages/PolicyPage';
 
@@ -49,6 +51,7 @@ const APP_PAGE_TITLES = {
   '/profile/payouts': 'Payments',
   '/profile/security': 'Security & clearance',
   '/profile/legal': 'Agreement and legal',
+  '/profile/badges': 'Badges & level guide',
 };
 
 function AppContent() {
@@ -111,7 +114,7 @@ function AppContent() {
   const isOnboardingRoute = pathname === '/onboarding' || Boolean(mapPathnameToStepId(pathname));
   const profileSectionMatch = pathname.match(/^\/profile\/(details|payouts|security|legal)$/);
   const isProtectedAppRoute =
-    ['/home', '/workspace', '/services', '/jobs', '/payments', '/profile'].includes(pathname)
+    ['/home', '/workspace', '/services', '/jobs', '/payments', '/profile', '/profile/badges'].includes(pathname)
     || Boolean(profileSectionMatch);
   const requestMatch = pathname.match(/^\/requests\/([A-Za-z0-9_-]+)$/);
 
@@ -131,8 +134,19 @@ function AppContent() {
 
   if (!authReady) {
     content = (
-      <div className="min-h-screen bg-canvas flex items-center justify-center p-6">
-        <div className="text-sm text-ink-500">Loading Uncedo Helpers…</div>
+      <div className="min-h-screen bg-canvas flex items-center justify-center px-4">
+        <div className="w-full max-w-sm rounded-3xl border border-border bg-surface px-6 py-8 text-center shadow-sm">
+          <img
+            src="/helpers-wordmark.png"
+            alt="Uncedo Helpers"
+            referrerPolicy="no-referrer"
+            className="mx-auto mb-5 h-10 w-auto shrink-0 object-contain"
+          />
+          <div className="mx-auto mb-3 h-1 w-16 overflow-hidden rounded-full bg-tealbrand-600/15">
+            <div className="h-full w-full animate-pulse rounded-full bg-tealbrand-600" />
+          </div>
+          <p className="text-sm font-medium tracking-wide text-ink-600">Loading Uncedo Helpers…</p>
+        </div>
       </div>
     );
   } else if (policyKey) {
@@ -143,6 +157,13 @@ function AppContent() {
         user={user}
         onNavigate={navigate}
         onWhatsAppLinked={setBannerNotice}
+      />
+    );
+  } else if (pathname === '/delete-account') {
+    content = (
+      <WhatsAppAccountDeletionPage
+        user={user}
+        onNavigate={navigate}
       />
     );
   } else if (pathname === '/sign-up' || pathname === '/sign-in') {
@@ -211,6 +232,17 @@ function AppContent() {
           <ProfileSectionPage section={section} onNavigate={navigate} />
         </AppShell>
       );
+    } else if (pathname === '/profile/badges') {
+      signedInView = (
+        <AppShell
+          pathname={pathname}
+          onNavigate={navigate}
+          pwa={pwa}
+          title={APP_PAGE_TITLES['/profile/badges']}
+        >
+          <BadgesGuidePage onNavigate={navigate} />
+        </AppShell>
+      );
     } else if (pathname === '/profile') {
       signedInView = (
         <AppShell pathname={pathname} onNavigate={navigate} pwa={pwa} title={APP_PAGE_TITLES['/profile']}>
@@ -226,7 +258,7 @@ function AppContent() {
     }
 
     content = (
-      <HelperSessionProvider user={user}>
+      <HelperSessionProvider user={user} onNavigate={navigate}>
         {signedInView}
         <HelperOfferOverlay onNavigate={navigate} />
       </HelperSessionProvider>

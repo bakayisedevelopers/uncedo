@@ -51,7 +51,7 @@ export function EarningsScreen({ navigate, goBack }) {
       : (wallet?.availableMinor !== undefined || wallet?.outstandingCommissionMinor !== undefined)
         ? (Number(wallet?.availableMinor || 0) - Number(wallet?.outstandingCommissionMinor || 0))
         : Math.round(Number(profile?.wallet?.balance || 0) * 100);
-  const nextMondayPayoutMinor = wallet.reconciliationBlocked ? 0 : Math.max(0, signedBalanceMinor);
+  const nextMonthlyPayoutMinor = wallet.reconciliationBlocked ? 0 : Math.max(0, signedBalanceMinor);
   const moneyMinor = (minor) => {
     const num = Number(minor || 0);
     const absText = `R${(Math.abs(num) / 100).toFixed(2)}`;
@@ -73,13 +73,13 @@ export function EarningsScreen({ navigate, goBack }) {
 
       <View style={styles.header}>
         <Text style={styles.title}>Payment</Text>
-        <Text style={styles.copy}>Track your single wallet balance, weekly Monday Paystack payouts, and completed or cancelled job settlements.</Text>
+        <Text style={styles.copy}>Track your single wallet balance, automatic card splits, monthly 26th Paystack payouts, and job settlements.</Text>
       </View>
 
       <Card style={styles.walletCard}>
         <SectionHeading
           title="Wallet"
-          subtitle="All helper job payouts and cash commission deductions flow into this single wallet balance."
+          subtitle="Card jobs split automatically to your bank; cash commissions and unpaid-customer credits flow through this single wallet."
           action={<ActionButton label={helperWalletLoading ? 'Refreshing…' : 'Refresh'} tone="secondary" disabled={helperWalletLoading} onPress={refreshHelperWallet} />}
         />
         <Text style={styles.walletAmount}>{moneyMinor(signedBalanceMinor)}</Text>
@@ -90,12 +90,12 @@ export function EarningsScreen({ navigate, goBack }) {
         </Text>
         <View style={styles.metricGrid}>
           <MetricCard
-            label="Next Monday payout"
-            value={moneyMinor(nextMondayPayoutMinor)}
-            helper={nextMondayPayoutMinor > 0
-              ? 'Paid out via Paystack on Monday and reset to R0.00 if successful; stays in your wallet if unsuccessful.'
-              : 'Monday payouts only run when your wallet balance is greater than R0.00.'}
-            accent={nextMondayPayoutMinor > 0 ? 'success' : 'muted'}
+            label="Next 26th monthly payout"
+            value={moneyMinor(nextMonthlyPayoutMinor)}
+            helper={nextMonthlyPayoutMinor > 0
+              ? 'Paid out via Paystack on the 26th of each month and reset to R0.00 if successful; stays in your wallet if unsuccessful.'
+              : 'Paid card jobs split directly to your bank; monthly 26th payouts only run when your wallet balance is above R0.00.'}
+            accent={nextMonthlyPayoutMinor > 0 ? 'success' : 'muted'}
           />
         </View>
         {wallet.reconciliationBlocked ? (
@@ -106,6 +106,7 @@ export function EarningsScreen({ navigate, goBack }) {
           <Text style={styles.transactionHeading}>Recent wallet transactions</Text>
           {helperWalletSnapshot?.transactions?.length ? helperWalletSnapshot.transactions.map((entry) => {
             const deltaMinor = signedDeltaMinorFor(entry);
+            const isDirectSplit = entry.entryType === 'split_direct_settlement' && deltaMinor === 0 && Number(entry.splitHelperAmountMinor || 0) > 0;
             return (
               <View key={entry.id} style={styles.transactionRow}>
                 <View style={styles.transactionCopy}>
@@ -114,12 +115,14 @@ export function EarningsScreen({ navigate, goBack }) {
                   {entry.requestId ? <Text style={styles.transactionMeta}>Request {entry.requestId}</Text> : null}
                 </View>
                 <Text style={styles.transactionAmount}>
-                  {deltaMinor < 0 ? `-${moneyMinor(Math.abs(deltaMinor))}` : `+${moneyMinor(deltaMinor)}`}
+                  {isDirectSplit
+                    ? `Split ${moneyMinor(entry.splitHelperAmountMinor)}`
+                    : (deltaMinor < 0 ? `-${moneyMinor(Math.abs(deltaMinor))}` : `+${moneyMinor(deltaMinor)}`)}
                 </Text>
               </View>
             );
           }) : (
-            <Text style={styles.transactionEmpty}>Wallet credits, cash commission deductions, and Monday payouts will appear here.</Text>
+            <Text style={styles.transactionEmpty}>Split settlements, wallet credits, cash commission deductions, and monthly 26th payouts will appear here.</Text>
           )}
         </View>
       </Card>
@@ -127,7 +130,7 @@ export function EarningsScreen({ navigate, goBack }) {
       <Card>
         <SectionHeading
           title="Reward Points"
-          subtitle="Uncedo Points are separate from cash earnings, weekly payouts, and your wallet."
+          subtitle="Uncedo Points are separate from cash earnings, split settlements, and monthly wallet payouts."
           action={<ActionButton label="Open rewards" tone="secondary" onPress={() => navigate({ key: 'HelperRewardsOverview', params: { parentTab: 'Profile' } })} />}
         />
       </Card>

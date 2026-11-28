@@ -16,5 +16,9 @@ test('explicit payment and cancellation confirmation actions remain deterministi
   assert.deepEqual(parseWhatsAppCommand('pay now'), { type: 'payment_initiation' });
   assert.deepEqual(parseWhatsAppCommand('confirm cancellation'), { type: 'cancellation_confirm' });
   assert.deepEqual(parseWhatsAppCommand('keep booking'), { type: 'cancellation_abort' });
+  assert.deepEqual(parseWhatsAppCommand('delete my account'), { type: 'account_deletion' });
+  assert.deepEqual(parseWhatsAppCommand('I want to delete my account'), { type: 'account_deletion' });
+  assert.deepEqual(parseWhatsAppCommand('reactivate account'), { type: 'account_reactivation' });
+  assert.deepEqual(parseWhatsAppCommand('cancel account deletion'), { type: 'account_reactivation' });
   assert.equal(parseWhatsAppCommand('set my price to 1'), null);
 });

@@ -3,7 +3,7 @@ import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { AuthMessage } from '../components/AuthMessage';
 import MainLayout from '../layouts/MainLayout';
 import { useAuth } from '../context/AuthContext';
-import { googleAuthEnabled, whatsappAuthEnabled } from '../firebase/config';
+import { googleAuthEnabled } from '../firebase/config';
 import { completeWhatsAppSignupLink } from '../services/authService';
 
 export default function AuthPage({ mode = 'login' }) {
@@ -17,16 +17,11 @@ export default function AuthPage({ mode = 'login' }) {
     signInWithEmail,
     signInWithGoogle,
     signUpWithEmail,
-    requestWhatsAppAuthCode,
-    verifyWhatsAppAuthCode,
   } = useAuth();
-  const [method, setMethod] = useState('email');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [phoneNumber, setPhoneNumber] = useState('');
-  const [code, setCode] = useState('');
-  const [challengeId, setChallengeId] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -118,32 +113,6 @@ export default function AuthPage({ mode = 'login' }) {
     }
   }
 
-  async function beginWhatsApp(event) {
-    event.preventDefault();
-    setBusy(true);
-    setError('');
-    setMessage('');
-    try {
-      const result = await requestWhatsAppAuthCode({
-        phoneNumber,
-        mode: isSignup ? 'signup' : 'login',
-        name,
-        email,
-      });
-      setChallengeId(String(result?.challengeId || ''));
-      setMessage('If this number can sign in or register, a verification code has been sent on WhatsApp.');
-    } catch (nextError) {
-      setError(nextError?.message || 'Unable to request a WhatsApp code.');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function finishWhatsApp(event) {
-    event.preventDefault();
-    await run(() => verifyWhatsAppAuthCode({ challengeId, code }));
-  }
-
   const title = isSignup ? 'Create your Uncedo account' : 'Welcome back';
 
   return (
@@ -163,11 +132,6 @@ export default function AuthPage({ mode = 'login' }) {
         </section>
 
         <section className="app-surface p-6 sm:p-8">
-          <div className="mb-6 flex gap-2 rounded-2xl bg-zinc-100 p-1">
-            <button type="button" onClick={() => { setMethod('email'); setError(''); setMessage(''); }} className={`flex-1 rounded-xl px-4 py-2.5 text-sm font-bold ${method === 'email' ? 'bg-white text-brand shadow-sm' : 'text-zinc-500'}`}>Email</button>
-            <button type="button" onClick={() => { setMethod('whatsapp'); setError(''); setMessage(''); }} className={`flex-1 rounded-xl px-4 py-2.5 text-sm font-bold ${method === 'whatsapp' ? 'bg-white text-brand shadow-sm' : 'text-zinc-500'}`}>WhatsApp</button>
-          </div>
-
           <AuthMessage text={error || authError} />
           <AuthMessage text={message} tone="info" />
           {signupLink?.token ? (
@@ -185,30 +149,16 @@ export default function AuthPage({ mode = 'login' }) {
             </button>
           ) : null}
 
-          {method === 'email' ? (
-            <form onSubmit={submitEmail} className="space-y-4">
-              {isSignup ? <Field label="Full name" value={name} onChange={setName} autoComplete="name" required /> : null}
-              {isSignup && !signupLink?.phone ? <Field label="WhatsApp number" value={phoneNumber} onChange={setPhoneNumber} type="tel" autoComplete="tel" placeholder="+27 71 234 5678" required /> : null}
-              {signupLink?.phone ? <Field label="WhatsApp number to link" value={signupLink.phone} onChange={() => {}} type="tel" autoComplete="tel" disabled /> : null}
-              <Field label="Email address" value={email} onChange={setEmail} type="email" autoComplete="email" required />
-              <Field label="Password" value={password} onChange={setPassword} type="password" autoComplete={isSignup ? 'new-password' : 'current-password'} required minLength={6} />
-              <button disabled={busy} className="w-full rounded-2xl bg-brand px-5 py-3 font-bold text-white transition hover:bg-brand-dark disabled:opacity-60">
-                {busy ? 'Please wait…' : isSignup ? 'Create account' : 'Sign in'}
-              </button>
-            </form>
-          ) : (
-            <form onSubmit={challengeId ? finishWhatsApp : beginWhatsApp} className="space-y-4">
-              {isSignup ? <Field label="Full name" value={name} onChange={setName} autoComplete="name" required /> : null}
-              {isSignup ? <Field label="Real email address" value={email} onChange={setEmail} type="email" autoComplete="email" required /> : null}
-              <Field label="WhatsApp number" value={phoneNumber} onChange={setPhoneNumber} type="tel" autoComplete="tel" placeholder="+27 71 234 5678" required disabled={Boolean(challengeId)} />
-              {challengeId ? <Field label="Verification code" value={code} onChange={setCode} inputMode="numeric" autoComplete="one-time-code" maxLength={8} required /> : null}
-              {!whatsappAuthEnabled ? <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-900">WhatsApp sign-in is awaiting Meta authentication configuration.</p> : null}
-              <button disabled={busy || !whatsappAuthEnabled} className="w-full rounded-2xl bg-emerald-700 px-5 py-3 font-bold text-white transition hover:bg-emerald-800 disabled:opacity-60">
-                {busy ? 'Please wait…' : challengeId ? 'Verify and continue' : 'Send WhatsApp code'}
-              </button>
-              {challengeId ? <button type="button" onClick={() => { setChallengeId(''); setCode(''); setMessage(''); }} className="w-full text-sm font-semibold text-zinc-500">Use a different number</button> : null}
-            </form>
-          )}
+          <form onSubmit={submitEmail} className="space-y-4">
+            {isSignup ? <Field label="Full name" value={name} onChange={setName} autoComplete="name" required /> : null}
+            {isSignup && !signupLink?.phone ? <Field label="WhatsApp number" value={phoneNumber} onChange={setPhoneNumber} type="tel" autoComplete="tel" placeholder="+27 71 234 5678" required /> : null}
+            {signupLink?.phone ? <Field label="WhatsApp number to link" value={signupLink.phone} onChange={() => {}} type="tel" autoComplete="tel" disabled /> : null}
+            <Field label="Email address" value={email} onChange={setEmail} type="email" autoComplete="email" required />
+            <Field label="Password" value={password} onChange={setPassword} type="password" autoComplete={isSignup ? 'new-password' : 'current-password'} required minLength={6} />
+            <button disabled={busy} className="w-full rounded-2xl bg-brand px-5 py-3 font-bold text-white transition hover:bg-brand-dark disabled:opacity-60">
+              {busy ? 'Please wait…' : isSignup ? 'Create account' : 'Sign in'}
+            </button>
+          </form>
 
           {signupLink?.token && signupLink.mode !== 'signin' ? (
             <p className="mt-4 text-center text-sm text-zinc-600">

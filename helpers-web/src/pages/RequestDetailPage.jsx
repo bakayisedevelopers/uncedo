@@ -314,8 +314,19 @@ export function RequestDetailPage({ requestId, onNavigate }) {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-canvas flex items-center justify-center p-6">
-        <p className="text-sm text-ink-500">Loading service request workspace…</p>
+      <div className="min-h-screen bg-canvas flex items-center justify-center px-4">
+        <div className="w-full max-w-sm rounded-3xl border border-border bg-surface px-6 py-8 text-center shadow-sm">
+          <img
+            src="/helpers-wordmark.png"
+            alt="Uncedo Helpers"
+            referrerPolicy="no-referrer"
+            className="mx-auto mb-5 h-10 w-auto shrink-0 object-contain"
+          />
+          <div className="mx-auto mb-3 h-1 w-16 overflow-hidden rounded-full bg-tealbrand-600/15">
+            <div className="h-full w-full animate-pulse rounded-full bg-tealbrand-600" />
+          </div>
+          <p className="text-sm font-medium tracking-wide text-ink-600">Loading service request workspace…</p>
+        </div>
       </div>
     );
   }

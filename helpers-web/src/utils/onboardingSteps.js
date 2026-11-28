@@ -39,7 +39,7 @@ export const ONBOARDING_STEPS = [
     number: '06',
     title: 'Bank Payouts',
     shortTitle: 'Payouts',
-    summary: 'Verify your South African bank account for weekly helper earnings.',
+    summary: 'Verify your South African bank account for automatic split settlements and monthly wallet payouts.',
   },
   {
     id: 'review',

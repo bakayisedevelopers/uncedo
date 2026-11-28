@@ -21,6 +21,21 @@ export default defineConfig({
         scope: '/',
         display: 'standalone',
         orientation: 'portrait-primary',
+        launch_handler: {
+          client_mode: ['focus-existing', 'auto'],
+        },
+        handle_links: 'preferred',
+        prefer_related_applications: false,
+        related_applications: [
+          {
+            platform: 'webapp',
+            url: 'https://bakayise-uncedo-latest-helpers.web.app/manifest.webmanifest',
+          },
+          {
+            platform: 'webapp',
+            url: 'https://helpers.bakayise.com/manifest.webmanifest',
+          },
+        ],
         theme_color: '#0B5D56',
         background_color: '#F6F7F4',
         categories: ['business', 'productivity', 'utilities'],
@@ -46,13 +61,29 @@ export default defineConfig({
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,jpg,svg,webmanifest}'],
-        navigateFallback: '/index.html',
-        navigateFallbackDenylist: [/^\/api\//, /^\/verify-paystack/, /^\/__/],
+        importScripts: ['/sw-notifications.js'],
+        globPatterns: ['assets/*.{js,css}', 'manifest.webmanifest'],
+        globIgnores: ['**/*.{jpg,jpeg,html}'],
+        navigateFallback: null,
         cleanupOutdatedCaches: true,
         skipWaiting: true,
         clientsClaim: true,
         runtimeCaching: [
+          {
+            urlPattern: ({ request }) => request.mode === 'navigate',
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'uncedo-helpers-pages-v1',
+              networkTimeoutSeconds: 3,
+              expiration: {
+                maxEntries: 24,
+                maxAgeSeconds: 60 * 60 * 24 * 7,
+              },
+              cacheableResponse: {
+                statuses: [0, 200],
+              },
+            },
+          },
           {
             urlPattern: /^https:\/\/fonts\.(?:googleapis|gstatic)\.com\/.*/i,
             handler: 'CacheFirst',
@@ -92,6 +123,22 @@ export default defineConfig({
     outDir: path.resolve(__dirname, '../helpers/dist'),
     emptyOutDir: true,
     sourcemap: false,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-react': ['react', 'react-dom'],
+          'vendor-firebase': [
+            'firebase/app',
+            'firebase/auth',
+            'firebase/firestore',
+            'firebase/functions',
+            'firebase/messaging',
+            'firebase/storage',
+          ],
+          'vendor-icons': ['lucide-react'],
+        },
+      },
+    },
   },
   server: {
     port: 3000,

@@ -32,10 +32,19 @@ import {
   subscribeToHelperServiceOptionMastery,
   subscribeToHelperServiceRatings,
   subscribeToMasteryConfig,
+  subscribeToMembershipConfig,
   subscribeToRewardAccount,
 } from '../services/helperMasteryService';
-import { DEFAULT_MASTERY_CONFIG } from '../utils/masteryModel';
+import { DEFAULT_MASTERY_CONFIG, DEFAULT_MEMBERSHIP_CONFIG } from '../utils/masteryModel';
 import { evaluateHelperOnboarding } from '../utils/onboardingSteps';
+import {
+  closeOfferBrowserNotification,
+  getBrowserNotificationPermission,
+  parseOfferNotificationSearchParams,
+  requestBrowserNotificationPermission,
+  showOfferBrowserNotification,
+} from '../utils/offerNotificationModel';
+import { syncHelperWebPushToken } from '../utils/fcmPush';
 
 const HelperSessionContext = createContext(null);
 
@@ -48,7 +57,7 @@ const ACTIVE_JOB_STATUSES = new Set([
   'work_started',
 ]);
 
-function playOfferAlert(offer) {
+function playOfferSoundAndVibrate() {
   if (typeof window === 'undefined') return;
   try {
     if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
@@ -87,36 +96,6 @@ function playOfferAlert(offer) {
   } catch {
     // AudioContext may require prior user gesture
   }
-
-  try {
-    if ('Notification' in window && Notification.permission === 'granted') {
-      const amount = Number(offer?.payoutEstimate || 0);
-      const priceLabel = amount > 0 ? `R${amount.toFixed(2)}` : 'New job';
-      const areaLabel = String(offer?.area || '').trim();
-      const title = `New Job Offer · ${priceLabel}`;
-      const body = [offer?.title || offer?.serviceSummary || 'Service request', areaLabel]
-        .filter(Boolean)
-        .join(' — ');
-      const notification = new Notification(title, {
-        body,
-        icon: '/helpers-logo-192.png',
-        badge: '/helpers-logo-192.png',
-        tag: `uncedo-offer-${offer?.id || 'live'}`,
-        renotify: true,
-        requireInteraction: true,
-      });
-      notification.onclick = () => {
-        try {
-          window.focus();
-          notification.close();
-        } catch {
-          // Ignore focus errors
-        }
-      };
-    }
-  } catch {
-    // Ignore Notification construction errors on strict browsers
-  }
 }
 
 const EMPTY_LEGACY_SUMMARY = {
@@ -147,6 +126,9 @@ const ACCOUNTED_WALLET_ENTRY_TYPES = new Set([
   'cancellation_earning_credit',
   'cash_commission_assessed',
   'legacy_job_resolved',
+  'split_direct_settlement',
+  'split_debt_recovery',
+  'split_settlement_reversal',
 ]);
 
 const PENDING_EXPLICIT_PAYMENT_STATUSES = new Set([
@@ -249,7 +231,7 @@ async function resolveGeoWithRace(coords, timeoutMs = 2400) {
   }
 }
 
-export function HelperSessionProvider({ user, children }) {
+export function HelperSessionProvider({ user, onNavigate, children }) {
   const [profile, setProfile] = useState(user?.profile || {});
   const [offerings, setOfferings] = useState([]);
   const [catalog, setCatalog] = useState([]);
@@ -274,6 +256,7 @@ export function HelperSessionProvider({ user, children }) {
   const [serviceRatings, setServiceRatings] = useState([]);
   const [rewardAccount, setRewardAccount] = useState(null);
   const [masteryConfig, setMasteryConfig] = useState(DEFAULT_MASTERY_CONFIG);
+  const [membershipConfig, setMembershipConfig] = useState(DEFAULT_MEMBERSHIP_CONFIG);
   const [loadingInitial, setLoadingInitial] = useState(true);
 
   const [gpsStatus, setGpsStatus] = useState('idle');
@@ -287,6 +270,9 @@ export function HelperSessionProvider({ user, children }) {
   const [resolvedGeo, setResolvedGeo] = useState({ address: '', city: '', lat: null, lon: null });
   const [locationLoading, setLocationLoading] = useState(false);
   const [lastLocationSyncMs, setLastLocationSyncMs] = useState(0);
+  const [notificationPermission, setNotificationPermission] = useState(() =>
+    getBrowserNotificationPermission(),
+  );
 
   const watchIdRef = useRef(null);
   const wakeLockRef = useRef(null);
@@ -297,7 +283,13 @@ export function HelperSessionProvider({ user, children }) {
   const shiftEpochRef = useRef(0);
   const isOnlineRef = useRef(false);
   const latestProfileRef = useRef(profile);
+  const latestOffersRef = useRef(offers);
+  const latestActiveRequestRef = useRef(activeRequest);
+  const latestEvaluationRef = useRef(null);
+  const onNavigateRef = useRef(onNavigate);
   const notifiedOfferKeysRef = useRef(new Set());
+  const activeNotifiedOfferIdsRef = useRef(new Set());
+  const processedOfferActionKeysRef = useRef(new Set());
 
   const isOnline = String(profile?.onlineStatus || '').toLowerCase() === 'online';
   const activeRequestId = String(profile?.activeServiceRequestId || '').trim();
@@ -310,6 +302,81 @@ export function HelperSessionProvider({ user, children }) {
   useEffect(() => {
     latestProfileRef.current = profile;
   }, [profile]);
+
+  useEffect(() => {
+    latestOffersRef.current = offers;
+  }, [offers]);
+
+  useEffect(() => {
+    latestActiveRequestRef.current = activeRequest;
+  }, [activeRequest]);
+
+  useEffect(() => {
+    onNavigateRef.current = onNavigate;
+  }, [onNavigate]);
+
+  const requestNotificationPermission = useCallback(async () => {
+    const next = await requestBrowserNotificationPermission();
+    setNotificationPermission(next);
+    if (next === 'granted' && user?.uid) {
+      await syncHelperWebPushToken(user.uid).catch(() => null);
+    }
+    return next;
+  }, [user?.uid]);
+
+  useEffect(() => {
+    if (!user?.uid || notificationPermission !== 'granted') return undefined;
+    let cancelled = false;
+    syncHelperWebPushToken(user.uid).catch(() => null);
+    const onVisibility = () => {
+      if (!cancelled && document.visibilityState === 'visible') {
+        syncHelperWebPushToken(user.uid).catch(() => null);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [notificationPermission, user?.uid]);
+
+  useEffect(() => {
+    setNotificationPermission(getBrowserNotificationPermission());
+    if (typeof navigator === 'undefined' || !navigator.permissions?.query) {
+      return undefined;
+    }
+    let permStatus = null;
+    let active = true;
+    navigator.permissions
+      .query({ name: 'notifications' })
+      .then((status) => {
+        if (!active) return;
+        permStatus = status;
+        setNotificationPermission(status.state === 'prompt' ? 'default' : status.state);
+        status.onchange = () => {
+          setNotificationPermission(getBrowserNotificationPermission());
+        };
+      })
+      .catch(() => null);
+    return () => {
+      active = false;
+      if (permStatus) {
+        permStatus.onchange = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search || '');
+    if (params.get('acceptedQueued') === '1') {
+      setOfferNotice('Queued offer accepted. We sent your estimated finish and arrival times to the customer for confirmation.');
+      params.delete('acceptedQueued');
+      const nextSearch = params.toString();
+      const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash || ''}`;
+      window.history.replaceState(null, '', nextUrl);
+    }
+  }, []);
 
   const activeCoords = useMemo(() => {
     if (
@@ -395,6 +462,7 @@ export function HelperSessionProvider({ user, children }) {
       }
     });
     const unsubMasteryConfig = subscribeToMasteryConfig(setMasteryConfig);
+    const unsubMembershipConfig = subscribeToMembershipConfig(setMembershipConfig);
     const unsubOptionMastery = subscribeToHelperServiceOptionMastery(user.uid, setServiceOptionMastery, () => setServiceOptionMastery([]));
     const unsubServiceMastery = subscribeToHelperServiceMastery(user.uid, setServiceMastery, () => setServiceMastery([]));
     const unsubOptionRatings = subscribeToHelperOptionRatings(user.uid, setServiceOptionRatings, () => setServiceOptionRatings([]));
@@ -425,6 +493,7 @@ export function HelperSessionProvider({ user, children }) {
       unsubClearance?.();
       unsubAgreement?.();
       unsubMasteryConfig?.();
+      unsubMembershipConfig?.();
       unsubOptionMastery?.();
       unsubServiceMastery?.();
       unsubOptionRatings?.();
@@ -643,16 +712,49 @@ export function HelperSessionProvider({ user, children }) {
 
   useEffect(() => {
     const nowMs = Date.now();
-    const list = Array.isArray(offers) ? offers : [];
+    const list = (Array.isArray(offers) ? offers : []).filter(
+      (offer) => offer?.id && (!offer.offerExpiresAt || Number(offer.offerExpiresAt) > nowMs),
+    );
+    const activeIds = new Set(list.map((offer) => String(offer.id).trim()).filter(Boolean));
+
+    for (const prevId of Array.from(activeNotifiedOfferIdsRef.current)) {
+      if (!activeIds.has(prevId)) {
+        activeNotifiedOfferIdsRef.current.delete(prevId);
+        closeOfferBrowserNotification(prevId);
+      }
+    }
+
     list.forEach((offer) => {
-      if (!offer?.id) return;
-      if (offer.offerExpiresAt && Number(offer.offerExpiresAt) <= nowMs) return;
       const offerKey = `${offer.id}:${offer.offerRevision || 0}:${offer.offerToken || ''}`;
       if (notifiedOfferKeysRef.current.has(offerKey)) return;
       notifiedOfferKeysRef.current.add(offerKey);
-      playOfferAlert(offer);
+      activeNotifiedOfferIdsRef.current.add(String(offer.id).trim());
+
+      playOfferSoundAndVibrate();
+
+      const currentProfile = latestProfileRef.current || {};
+      const serverVerified = String(currentProfile?.verificationStatus || '').trim().toLowerCase() === 'verified';
+      const isBusyFallback = String(offer.offerType || '').trim().toLowerCase() === 'busy_helper_fallback';
+      const canRespond = Boolean(
+        user?.uid
+        && (latestEvaluationRef.current?.fullyVerified || serverVerified)
+        && (!latestActiveRequestRef.current || isBusyFallback),
+      );
+
+      (async () => {
+        await showOfferBrowserNotification(offer, {
+          canRespond,
+          payoutAmountOverride: offer?.payoutEstimate ?? resolveHelperPayoutAmount(offer),
+          onFallbackFocus: () => {
+            const path = typeof window !== 'undefined' ? window.location.pathname : '/home';
+            if (!['/home', '/workspace', '/jobs', '/services', '/payments', '/profile'].includes(path)) {
+              onNavigateRef.current?.('/home');
+            }
+          },
+        });
+      })();
     });
-  }, [offers]);
+  }, [offers, user?.uid]);
 
   // Reverse-geocode current live coordinates whenever the helper moves > 35m or address is missing
   useEffect(() => {
@@ -975,8 +1077,12 @@ export function HelperSessionProvider({ user, children }) {
 
     try {
       if (!currentlyOnline) {
-        if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'default') {
-          Notification.requestPermission().catch(() => null);
+        if (String(profile?.accountStatus || '').trim().toLowerCase() === 'pending_deletion') {
+          setGpsError('Your helper account is scheduled for deletion. Reactivate your account before going online.');
+          return;
+        }
+        if (getBrowserNotificationPermission() === 'default') {
+          requestNotificationPermission().catch(() => null);
         }
         const coords = await readCurrentGeoPosition({
           enableHighAccuracy: true,
@@ -1111,6 +1217,7 @@ export function HelperSessionProvider({ user, children }) {
   }, []);
 
   const respondToOffer = useCallback(async (offer, action, onAcceptedNavigate) => {
+    closeOfferBrowserNotification(offer?.id);
     setOfferBusyId(offer.id);
     setOfferError('');
     setOfferNotice('');
@@ -1127,13 +1234,135 @@ export function HelperSessionProvider({ user, children }) {
         } else if (onAcceptedNavigate) {
           onAcceptedNavigate(`/requests/${offer.id}`);
         }
+      } else if (action === 'decline') {
+        setOfferNotice('Job offer declined.');
       }
+      return result;
     } catch (err) {
       setOfferError(err?.message || 'Unable to process offer response. Please try again.');
+      return null;
     } finally {
       setOfferBusyId('');
     }
   }, []);
+
+  const executePendingNotificationAction = useCallback(
+    async ({ requestId, action, offerToken = '', offerRevision = 0 }) => {
+      if (!user?.uid || !requestId) return;
+      const cleanAction = String(action || 'view').trim().toLowerCase();
+      const actionKey = `${requestId}:${cleanAction}:${offerRevision}:${offerToken}`;
+      if (processedOfferActionKeysRef.current.has(actionKey)) return;
+      processedOfferActionKeysRef.current.add(actionKey);
+
+      if (cleanAction === 'accept' || cleanAction === 'decline') {
+        const matched = (latestOffersRef.current || []).find((item) => item.id === requestId) || {
+          id: requestId,
+          offerToken,
+          offerRevision,
+        };
+        const resolvedOffer = {
+          ...matched,
+          id: matched.id || requestId,
+          offerToken: matched.offerToken || offerToken,
+          offerRevision: matched.offerRevision || offerRevision,
+        };
+        if (!resolvedOffer.offerToken || !resolvedOffer.offerRevision) {
+          setOfferError('This helper offer is no longer current.');
+          return;
+        }
+        await respondToOffer(
+          resolvedOffer,
+          cleanAction,
+          cleanAction === 'accept' ? onNavigateRef.current : undefined,
+        );
+        return;
+      }
+
+      const path = typeof window !== 'undefined' ? window.location.pathname : '/home';
+      if (!['/home', '/workspace', '/jobs', '/services', '/payments', '/profile'].includes(path)) {
+        onNavigateRef.current?.('/home');
+      }
+    },
+    [respondToOffer, user?.uid],
+  );
+
+  useEffect(() => {
+    if (!user?.uid || typeof window === 'undefined') return undefined;
+
+    const consumeSearchOfferAction = () => {
+      const parsed = parseOfferNotificationSearchParams(window.location.search || '');
+      if (!parsed?.requestId) return;
+
+      const params = new URLSearchParams(window.location.search || '');
+      params.delete('offerId');
+      params.delete('offerAction');
+      params.delete('offerToken');
+      params.delete('offerRevision');
+      const nextSearch = params.toString();
+      const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash || ''}`;
+      window.history.replaceState(null, '', nextUrl);
+
+      executePendingNotificationAction(parsed);
+    };
+
+    consumeSearchOfferAction();
+    window.addEventListener('popstate', consumeSearchOfferAction);
+    return () => window.removeEventListener('popstate', consumeSearchOfferAction);
+  }, [executePendingNotificationAction, user?.uid]);
+
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
+      return undefined;
+    }
+
+    const handleSwMessage = (event) => {
+      const msg = event?.data || {};
+      if (!msg || typeof msg !== 'object') return;
+
+      if (msg.type === 'OFFER_NOTIFICATION_ACTION' && msg.requestId) {
+        executePendingNotificationAction({
+          requestId: String(msg.requestId || '').trim(),
+          action: String(msg.action || 'view').trim().toLowerCase(),
+          offerToken: String(msg.offerToken || '').trim(),
+          offerRevision: Number(msg.offerRevision || 0),
+        });
+        return;
+      }
+
+      if (msg.type === 'OFFER_NOTIFICATION_ACCEPTED') {
+        closeOfferBrowserNotification(msg.requestId);
+        if (msg.busyFallbackAccepted) {
+          setOfferNotice('Queued offer accepted. We sent your estimated finish and arrival times to the customer for confirmation.');
+        }
+        if (msg.targetPath && onNavigateRef.current) {
+          onNavigateRef.current(msg.targetPath);
+        }
+        return;
+      }
+
+      if (msg.type === 'OFFER_NOTIFICATION_DECLINED') {
+        closeOfferBrowserNotification(msg.requestId);
+        return;
+      }
+
+      if (msg.type === 'OFFER_NOTIFICATION_FOCUS') {
+        const path = typeof window !== 'undefined' ? window.location.pathname : '/home';
+        if (!['/home', '/workspace', '/jobs', '/services', '/payments', '/profile'].includes(path)) {
+          onNavigateRef.current?.('/home');
+        }
+        return;
+      }
+
+      if (msg.type === 'OFFER_NOTIFICATION_ERROR') {
+        if (msg.errorMessage) {
+          setOfferError(msg.errorMessage);
+        }
+      }
+    };
+
+    navigator.serviceWorker.addEventListener('message', handleSwMessage);
+    return () => navigator.serviceWorker.removeEventListener('message', handleSwMessage);
+  }, [executePendingNotificationAction]);
 
   const refreshVerification = useCallback(async () => {
     return syncMyHelperVerificationStatus();
@@ -1150,6 +1379,7 @@ export function HelperSessionProvider({ user, children }) {
       }),
     [activeAgreement, catalog, clearanceReview, offerings, profile],
   );
+  latestEvaluationRef.current = evaluation;
 
   const liveCity = useMemo(() => {
     const resolved = String(resolvedGeo.city || '').trim();
@@ -1250,6 +1480,7 @@ export function HelperSessionProvider({ user, children }) {
       serviceRatingMap,
       rewardAccount,
       masteryConfig,
+      membershipConfig,
       loadingInitial,
       evaluation,
       isOnline,
@@ -1267,6 +1498,8 @@ export function HelperSessionProvider({ user, children }) {
       locationLoading,
       lastLocationSyncMs,
       refreshCurrentLocation,
+      notificationPermission,
+      requestNotificationPermission,
       setGpsError,
       setOfferError,
       setOfferNotice,
@@ -1303,6 +1536,7 @@ export function HelperSessionProvider({ user, children }) {
       serviceRatingMap,
       rewardAccount,
       masteryConfig,
+      membershipConfig,
       loadingInitial,
       evaluation,
       isOnline,
@@ -1320,6 +1554,8 @@ export function HelperSessionProvider({ user, children }) {
       locationLoading,
       lastLocationSyncMs,
       refreshCurrentLocation,
+      notificationPermission,
+      requestNotificationPermission,
       toggleOnline,
       respondToOffer,
       refreshVerification,

@@ -1,5 +1,7 @@
 'use strict';
 
+const { computeWaitingTimeCharge } = require('./serviceRequestBilling');
+
 const PRE_ASSIGNMENT_STATUSES = new Set([
   'collecting_details',
   'scheduled_pending',
@@ -26,6 +28,17 @@ const POST_ASSIGNMENT_STATUSES = new Set([
   'work_started',
 ]);
 
+function normalizeTimestampMs(value) {
+  if (!value) return 0;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value.toMillis === 'function') return Number(value.toMillis()) || 0;
+  if (typeof value === 'object' && Number.isFinite(Number(value._seconds))) {
+    return Number(value._seconds) * 1000 + Math.round(Number(value._nanoseconds || 0) / 1e6);
+  }
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function isCustomerCancellableStatus(status) {
   const normalized = String(status || '').trim().toLowerCase();
   return PRE_ASSIGNMENT_STATUSES.has(normalized) || POST_ASSIGNMENT_STATUSES.has(normalized);
@@ -37,6 +50,9 @@ function calculateCustomerCancellationTerms({
   bookingFee = 0,
   travelFee = 0,
   travelRatePerKm = 4,
+  now = Date.now(),
+  arrivedAtMs = 0,
+  workStartedAtMs = 0,
   toMoney = (value) => Number(Number(value || 0).toFixed(2)),
   payoutBreakdown,
 } = {}) {
@@ -81,12 +97,30 @@ function calculateCustomerCancellationTerms({
   const distanceKm = Math.max(0, Number(distanceTravelledMeters || 0) / 1000);
   let billingRule = 'booking_fee_only';
   let travelCharge = 0;
+  let waitingMinutes = 0;
+  let waitingCost = 0;
+
   if (['driving', 'en_route', 'buying_resources'].includes(status)) {
     billingRule = 'travelled_distance_plus_booking_fee';
     travelCharge = toMoney(distanceKm * Number(travelRatePerKm || 0));
   } else if (['arrived', 'work_started'].includes(status)) {
     billingRule = 'travel_fee_plus_booking_fee';
     travelCharge = toMoney(travelFee);
+    const resolvedArrivedAtMs = normalizeTimestampMs(arrivedAtMs)
+      || normalizeTimestampMs(request.arrivedAt)
+      || normalizeTimestampMs(request.helperAssignment?.arrivedAt);
+    const resolvedWorkStartedAtMs = normalizeTimestampMs(workStartedAtMs)
+      || normalizeTimestampMs(request.workStartedAt)
+      || normalizeTimestampMs(request.helperAssignment?.workStartedAt);
+    const waitEndMs = status === 'work_started'
+      ? (resolvedWorkStartedAtMs || Number(now || Date.now()))
+      : Number(now || Date.now());
+    const waitStats = computeWaitingTimeCharge({
+      arrivedAtMs: resolvedArrivedAtMs,
+      endedAtMs: waitEndMs,
+    });
+    waitingMinutes = waitStats.waitingMinutes;
+    waitingCost = waitStats.waitingCost;
   }
 
   const breakdown = payoutBreakdown({
@@ -94,6 +128,7 @@ function calculateCustomerCancellationTerms({
     travelledKm: distanceKm,
     travelFeeAmount: billingRule === 'travelled_distance_plus_booking_fee' ? travelCharge : travelFee,
     bookingFeeAmount: integerBookingFee,
+    waitingCost,
   });
   const cancellationAmount = Math.max(0, toMoney(breakdown?.customerChargeAmount || 0));
   return {
@@ -103,6 +138,8 @@ function calculateCustomerCancellationTerms({
     cancellationAmount,
     cancellationDistanceKm: Number(distanceKm.toFixed(2)),
     travelCharge,
+    waitingMinutes,
+    waitingCost,
     helperPayoutBreakdown: breakdown,
   };
 }

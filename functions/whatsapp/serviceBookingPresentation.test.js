@@ -423,5 +423,29 @@ test('formatWhatsAppCompletionCardFailureRecovery offers Use another card only w
   assert.equal(rows[1].id, 'wa_recover_add_card');
 });
 
+test('formatWhatsAppSavedAddressConfirmationPrompt and missing prompt show clear actions and address', () => {
+  const {
+    formatWhatsAppMissingHomeAddressPrompt,
+    formatWhatsAppSavedAddressConfirmationPrompt,
+  } = require('./serviceBookingPresentation');
+
+  const confirmPrompt = formatWhatsAppSavedAddressConfirmationPrompt({
+    service: { label: 'Hand washing & Laundry' },
+    savedAddress: '17 Iris Street, Witbank, 1035',
+  });
+  assert.match(confirmPrompt.text, /17 Iris Street, Witbank, 1035/);
+  assert.equal(confirmPrompt.interactive.type, 'button');
+  assert.deepEqual(
+    confirmPrompt.interactive.action.buttons.map((b) => [b.reply.id, b.reply.title]),
+    [['wa_opt_sac_confirm', 'Confirm address'], ['wa_opt_sac_change', 'Provide new address']],
+  );
+
+  const missingPrompt = formatWhatsAppMissingHomeAddressPrompt({
+    service: { label: 'Hand washing & Laundry' },
+  });
+  assert.equal(missingPrompt.interactive, null);
+  assert.match(missingPrompt.text, /provide your home address/i);
+});
+
 
 

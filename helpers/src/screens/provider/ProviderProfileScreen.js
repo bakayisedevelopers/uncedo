@@ -236,7 +236,7 @@ export function ProviderProfileScreen({ navigate }) {
         <ProfileRow
           icon="card-outline"
           title="Payment"
-          description="Review payout setup, weekly earnings, and your verified bank destination."
+          description="Review payout setup, wallet & split earnings, and your verified bank destination."
           onPress={() => navigate({ key: 'Earnings', params: { parentTab: 'Profile' } })}
         />
         <ProfileRow

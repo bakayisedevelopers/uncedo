@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Check, ChevronDown, Image as ImageIcon, Loader2, Pencil, Plus, RotateCcw, Sparkles, Trash2, X, ZoomIn } from 'lucide-react';
+import { ArrowLeft, Check, ChevronDown, ChevronRight, CornerDownRight, GitBranch, Image as ImageIcon, ListPlus, Loader2, Pencil, Plus, RotateCcw, Sparkles, Trash2, X, ZoomIn } from 'lucide-react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Badge, Card, ConfirmDialog, EmptyState, LoadingState, SectionTitle } from '../components/ui';
 import { getAdminCatalogCategories } from '../constants/serviceCatalog';
@@ -18,10 +18,19 @@ import {
 import {
   aliasCleanReferenceImage,
   finalizeAiGeneratedImage,
+  finalizeUploadedImageFile,
   isDataUrlImage,
   resolveCleanReferenceImageUrl,
 } from '../utils/aiImageBranding';
 import { groupRowsByHelper, isPendingServiceOfferingStatus, matchesCatalogItem } from '../utils/moderationView';
+import {
+  buildQuestionImageGenerationContext,
+  buildQuestionTree,
+  enforceExclusiveServiceOptionQuestions,
+  getPreferredDefaultTriggerValues,
+  getQuestionNodeKey,
+  unlinkDirectDependentsOfQuestion,
+} from '../utils/questionTree';
 
 function slugify(value = '') {
   return String(value || '')
@@ -89,7 +98,7 @@ function normalizeServiceOptions(options = [], questions = null) {
     ? new Set(questions.filter(isOptionSpecificQuestion).map((q) => String(q.id || '').trim()).filter(Boolean))
     : null;
 
-  return (Array.isArray(options) ? options : [])
+  const cleaned = (Array.isArray(options) ? options : [])
     .filter((option) => String(option.title || '').trim() || String(option.description || '').trim())
     .map((option, index) => ({
       id: String(option.id || slugify(option.title) || `option_${index + 1}`).trim(),
@@ -102,6 +111,8 @@ function normalizeServiceOptions(options = [], questions = null) {
         .filter((id) => Boolean(id) && (!allowedOptionSpecificIds || allowedOptionSpecificIds.has(id))),
       requiresNoOptionSpecificQuestions: Boolean(option.requiresNoOptionSpecificQuestions),
     }));
+
+  return enforceExclusiveServiceOptionQuestions(cleaned, allowedOptionSpecificIds);
 }
 
 function getQuestionOptionSlug(option = {}, index = 0) {
@@ -428,6 +439,20 @@ function ServiceOptionEditor({
     () => allQuestions.filter((q) => isOptionSpecificQuestion(q)),
     [allQuestions],
   );
+  const questionOwnerMap = useMemo(() => {
+    const owners = new Map();
+    (Array.isArray(siblingOptions) ? siblingOptions : []).forEach((other, idx) => {
+      if (!other || other.draftKey === option.draftKey || other.requiresNoOptionSpecificQuestions) return;
+      const ownerTitle = String(other.title || '').trim() || `Option ${idx + 1}`;
+      (Array.isArray(other.selectedQuestionIds) ? other.selectedQuestionIds : []).forEach((rawId) => {
+        const qid = String(rawId || '').trim();
+        if (qid && !owners.has(qid)) {
+          owners.set(qid, ownerTitle);
+        }
+      });
+    });
+    return owners;
+  }, [option.draftKey, siblingOptions]);
   const hasDependentQuestions = useMemo(
     () => allQuestions.some((q) => hasQuestionDependency(q) || q.type === 'dependent'),
     [allQuestions],
@@ -443,9 +468,10 @@ function ServiceOptionEditor({
     setIsUploading(true);
     setImageError('');
     try {
+      const brandedFile = await finalizeUploadedImageFile(file);
       const uploads = await uploadServiceCatalogImages({
         serviceId: option.draftKey || 'service_option',
-        files: [file],
+        files: [brandedFile],
       });
       if (uploads && uploads[0]?.uri) {
         onChange({ ...option, imageUrl: uploads[0].uri });
@@ -491,9 +517,14 @@ function ServiceOptionEditor({
   };
 
   const toggleQuestionId = (questionId) => {
+    const cleanQid = String(questionId || '').trim();
+    if (!cleanQid) return;
     const currentIds = Array.isArray(option.selectedQuestionIds) ? option.selectedQuestionIds : [];
-    const exists = currentIds.includes(questionId);
-    const nextIds = exists ? currentIds.filter((id) => id !== questionId) : [...currentIds, questionId];
+    const exists = currentIds.includes(cleanQid);
+    if (!exists && questionOwnerMap.has(cleanQid)) {
+      return;
+    }
+    const nextIds = exists ? currentIds.filter((id) => id !== cleanQid) : [...currentIds, cleanQid];
     onChange({ ...option, selectedQuestionIds: nextIds });
   };
 
@@ -652,7 +683,11 @@ function ServiceOptionEditor({
             type="checkbox"
             className="mt-1 shrink-0"
             checked={Boolean(option.requiresNoOptionSpecificQuestions)}
-            onChange={(event) => onChange({ ...option, requiresNoOptionSpecificQuestions: event.target.checked })}
+            onChange={(event) => onChange({
+              ...option,
+              requiresNoOptionSpecificQuestions: event.target.checked,
+              ...(event.target.checked ? { selectedQuestionIds: [] } : {}),
+            })}
           />
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
@@ -671,25 +706,41 @@ function ServiceOptionEditor({
             </div>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               {optionSpecificCandidates.map((q) => {
-                const isSelected = (option.selectedQuestionIds || []).includes(q.id);
+                const qid = String(q.id || '').trim();
+                const isSelected = (option.selectedQuestionIds || []).includes(qid);
+                const claimedByTitle = !isSelected ? questionOwnerMap.get(qid) || '' : '';
+                const isDisabled = Boolean(claimedByTitle);
                 return (
-                  <label key={q.id} className="flex min-w-0 items-center gap-2 rounded-xl border border-white/10 bg-ink-950/30 px-3 py-2 text-xs text-white">
+                  <label
+                    key={qid || q.draftKey}
+                    title={isDisabled ? `Already assigned to "${claimedByTitle}". Each option-specific question can only belong to one option.` : undefined}
+                    className={`flex min-w-0 items-center gap-2 rounded-xl border px-3 py-2 text-xs transition ${
+                      isDisabled
+                        ? 'cursor-not-allowed border-white/5 bg-ink-950/20 text-ink-400 opacity-60'
+                        : 'cursor-pointer border-white/10 bg-ink-950/30 text-white hover:border-white/20'
+                    }`}
+                  >
                     <input
                       type="checkbox"
                       className="shrink-0"
                       checked={isSelected}
-                      onChange={() => toggleQuestionId(q.id)}
+                      disabled={isDisabled}
+                      onChange={() => toggleQuestionId(qid)}
                     />
-                    <span className="min-w-0 flex-1 truncate">{q.prompt || q.id}</span>
+                    <span className="min-w-0 flex-1 truncate">{q.prompt || qid}</span>
+                    {claimedByTitle ? (
+                      <span className="shrink-0 max-w-[120px] truncate rounded-md border border-white/10 bg-white/5 px-1.5 py-0.5 text-[10px] font-semibold text-ink-300">
+                        Used by: {claimedByTitle}
+                      </span>
+                    ) : null}
                   </label>
                 );
               })}
             </div>
-            {hasDependentQuestions ? (
-              <p className="text-[11px] text-ink-300">
-                Dependent questions are excluded here because they follow their parent question automatically once selected.
-              </p>
-            ) : null}
+            <p className="text-[11px] text-ink-300">
+              Each option-specific question can only be assigned to one option (Standard questions are always asked everywhere).
+              {hasDependentQuestions ? ' Dependent follow-up questions follow their parent question automatically once selected.' : ''}
+            </p>
           </div>
         ) : !option.requiresNoOptionSpecificQuestions && hasDependentQuestions ? (
           <p className="text-[11px] text-ink-300 pt-2 border-t border-white/10">
@@ -777,47 +828,14 @@ function SliderField({
 }
 
 async function prepareQuestionOptionImageFile(file) {
-  if (!file || typeof document === 'undefined' || typeof Image === 'undefined') return file;
-  const mime = String(file.type || '').toLowerCase();
-  const name = String(file.name || '').toLowerCase();
-  const needsConversion = mime === 'image/webp'
-    || mime === 'image/avif'
-    || mime === 'image/gif'
-    || mime === 'image/svg+xml'
-    || /\.(?:webp|avif|gif|svg)$/i.test(name);
-  if (!needsConversion) return file;
-
-  let objectUrl = '';
-  try {
-    objectUrl = URL.createObjectURL(file);
-    const img = await new Promise((resolve, reject) => {
-      const element = new Image();
-      element.onload = () => resolve(element);
-      element.onerror = () => reject(new Error('Image decode failed'));
-      element.src = objectUrl;
-    });
-    const width = img.naturalWidth || img.width || 1024;
-    const height = img.naturalHeight || img.height || 1024;
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return file;
-    ctx.drawImage(img, 0, 0, width, height);
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9));
-    if (!blob) return file;
-    const baseName = String(file.name || 'option_picture').replace(/\.[^.]+$/, '') || 'option_picture';
-    return new File([blob], `${baseName}.jpg`, { type: 'image/jpeg' });
-  } catch (_error) {
-    return file;
-  } finally {
-    if (objectUrl) URL.revokeObjectURL(objectUrl);
-  }
+  return finalizeUploadedImageFile(file);
 }
 
 function QuestionOptionEditor({
   option,
   question,
+  allQuestions = [],
+  serviceOptions = [],
   siblingOptions = [],
   serviceContext = {},
   consistencyMode = 'consistent',
@@ -891,6 +909,13 @@ function QuestionOptionEditor({
         .map((item) => String(item?.label || '').trim())
         .filter(Boolean);
       const cleanRefUrl = resolveCleanReferenceImageUrl(referenceSiblingUrl);
+      const flowContext = buildQuestionImageGenerationContext({
+        question,
+        allQuestions: allQuestions.length ? allQuestions : [question],
+        serviceOptions,
+        resolveImageUrl: resolveCleanReferenceImageUrl,
+        excludeImageUrls: cleanRefUrl ? [cleanRefUrl] : [],
+      });
       const result = await generateAdminOptionImage({
         targetType: 'question_option',
         consistencyMode: consistencyMode === 'unique' ? 'unique' : 'consistent',
@@ -900,6 +925,9 @@ function QuestionOptionEditor({
           prompt: question?.prompt || '',
           optionLabel: option.label,
           siblingOptionLabels: siblingLabels,
+          ...(flowContext.serviceOption ? { serviceOption: flowContext.serviceOption } : {}),
+          ...(flowContext.contextChain?.length ? { contextChain: flowContext.contextChain } : {}),
+          ...(flowContext.contextImages?.length ? { contextImages: flowContext.contextImages } : {}),
         },
         referenceImageDataUrl: isDataUrlImage(cleanRefUrl) ? cleanRefUrl : '',
         referenceImageUrl: !isDataUrlImage(cleanRefUrl) && /^https:\/\//i.test(cleanRefUrl) ? cleanRefUrl : '',
@@ -1068,7 +1096,14 @@ function QuestionOptionEditor({
   );
 }
 
-function MultiSelectAnswerDropdown({ options = [], selectedValues = [], onChange }) {
+function MultiSelectAnswerDropdown({
+  options = [],
+  selectedValues = [],
+  onChange,
+  compact = false,
+  alignRight = false,
+  emptyPlaceholder = 'Select triggering answer(s)...',
+}) {
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef(null);
 
@@ -1098,7 +1133,7 @@ function MultiSelectAnswerDropdown({ options = [], selectedValues = [], onChange
     .map((opt) => opt.label);
 
   const summaryText = selectedLabels.length === 0
-    ? 'Select triggering answer(s)...'
+    ? emptyPlaceholder
     : selectedLabels.length <= 2
       ? selectedLabels.join(', ')
       : `${selectedLabels.slice(0, 2).join(', ')} (+${selectedLabels.length - 2} more)`;
@@ -1116,20 +1151,30 @@ function MultiSelectAnswerDropdown({ options = [], selectedValues = [], onChange
   };
 
   return (
-    <div ref={containerRef} className="relative">
+    <div ref={containerRef} className={compact ? 'relative min-w-0 max-w-full flex-1 sm:flex-none' : 'relative'}>
       <button
         type="button"
         onClick={() => setIsOpen((prev) => !prev)}
-        className="flex w-full items-center justify-between gap-2 rounded-2xl border border-white/10 bg-ink-950/50 px-3 py-2.5 text-left text-sm text-white outline-none transition hover:border-white/20"
+        className={compact
+          ? `flex w-full sm:w-auto items-center justify-between gap-2 rounded-xl border px-2.5 py-1.5 text-left text-xs outline-none transition min-w-0 max-w-full sm:max-w-[190px] ${
+            selectedLabels.length === 0
+              ? 'border-amber-400/50 bg-amber-500/10 text-amber-200 hover:border-amber-400/80'
+              : 'border-white/15 bg-ink-950/75 text-white hover:border-white/30'
+          }`
+          : 'flex w-full items-center justify-between gap-2 rounded-2xl border border-white/10 bg-ink-950/50 px-3 py-2.5 text-left text-sm text-white outline-none transition hover:border-white/20'}
       >
-        <span className={`truncate ${selectedLabels.length === 0 ? 'text-ink-300' : 'text-white font-medium'}`}>
+        <span className={`truncate ${selectedLabels.length === 0 ? (compact ? 'text-amber-200 font-medium' : 'text-ink-300') : 'text-white font-medium'}`}>
           {summaryText}
         </span>
-        <ChevronDown className={`h-4 w-4 shrink-0 text-ink-300 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+        <ChevronDown className={`${compact ? 'h-3.5 w-3.5' : 'h-4 w-4'} shrink-0 text-ink-300 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
       </button>
 
       {isOpen ? (
-        <div className="mt-2 rounded-2xl border border-white/15 bg-ink-950/95 p-2.5 shadow-xl space-y-2">
+        <div
+          className={compact
+            ? `absolute left-0 ${alignRight ? 'sm:left-auto sm:right-0' : ''} top-full z-30 mt-1.5 w-60 max-w-[calc(100vw-3rem)] rounded-2xl border border-white/15 bg-ink-950/95 p-2.5 shadow-xl space-y-2`
+            : 'mt-2 rounded-2xl border border-white/15 bg-ink-950/95 p-2.5 shadow-xl space-y-2'}
+        >
           {options.length > 1 ? (
             <div className="flex items-center justify-between gap-2 border-b border-white/10 pb-2 text-xs">
               <button
@@ -1183,6 +1228,7 @@ function QuestionEditor({
   required = true,
   questions,
   allQuestions = [],
+  serviceOptions = [],
   suggestions = [],
   serviceContext = {},
   storageScope = 'question_option',
@@ -1196,25 +1242,35 @@ function QuestionEditor({
   resetKey = '',
   saveVersion = 0,
 }) {
-  const [expandedQuestionIndex, setExpandedQuestionIndex] = useState(-1);
+  const [expandedQuestionKey, setExpandedQuestionKey] = useState('');
+  const [collapsedSubtreeByKey, setCollapsedSubtreeByKey] = useState({});
   const [questionStatusMessage, setQuestionStatusMessage] = useState('');
   const [consistencyModeByQuestion, setConsistencyModeByQuestion] = useState({});
   const [batchImageStateByQuestion, setBatchImageStateByQuestion] = useState({});
   const allSourceQuestions = allQuestions.length ? allQuestions : questions;
+  const questionTree = useMemo(() => buildQuestionTree(questions), [questions]);
 
   useEffect(() => {
-    setExpandedQuestionIndex(-1);
+    setExpandedQuestionKey('');
+    setCollapsedSubtreeByKey({});
     setQuestionStatusMessage('');
   }, [resetKey]);
 
   useEffect(() => {
     if (!saveVersion) return;
-    setExpandedQuestionIndex(-1);
+    setExpandedQuestionKey('');
     setQuestionStatusMessage('');
   }, [saveVersion]);
 
   const updateQuestion = (targetIndex, nextQuestion) => {
     onChange(questions.map((question, index) => (index === targetIndex ? nextQuestion : question)));
+  };
+
+  const toggleSubtreeCollapse = (nodeKey) => {
+    setCollapsedSubtreeByKey((prev) => ({
+      ...prev,
+      [nodeKey]: !prev[nodeKey],
+    }));
   };
 
   const handleGenerateAllPictures = async (question) => {
@@ -1258,6 +1314,13 @@ function QuestionEditor({
     setProgress(`Generating 1 of ${totalCount}...`);
     try {
       const generateRawForEntry = async (entry, refDataUrl = '') => {
+        const flowContext = buildQuestionImageGenerationContext({
+          question,
+          allQuestions: allSourceQuestions,
+          serviceOptions,
+          resolveImageUrl: resolveCleanReferenceImageUrl,
+          excludeImageUrls: refDataUrl ? [refDataUrl] : [],
+        });
         const result = await generateAdminOptionImage({
           targetType: 'question_option',
           consistencyMode: mode,
@@ -1267,6 +1330,9 @@ function QuestionEditor({
             prompt: question.prompt,
             optionLabel: entry.opt.label,
             siblingOptionLabels: siblingLabels,
+            ...(flowContext.serviceOption ? { serviceOption: flowContext.serviceOption } : {}),
+            ...(flowContext.contextChain?.length ? { contextChain: flowContext.contextChain } : {}),
+            ...(flowContext.contextImages?.length ? { contextImages: flowContext.contextImages } : {}),
           },
           referenceImageDataUrl: refDataUrl,
         });
@@ -1315,14 +1381,18 @@ function QuestionEditor({
   };
 
   const removeQuestion = (targetIndex) => {
-    onChange(questions.filter((_, index) => index !== targetIndex));
-    if (expandedQuestionIndex === targetIndex) setExpandedQuestionIndex(-1);
-    else if (expandedQuestionIndex > targetIndex) setExpandedQuestionIndex((prev) => prev - 1);
+    const removed = questions[targetIndex];
+    const removedKey = removed ? getQuestionNodeKey(removed, targetIndex) : '';
+    const nextQuestions = removed?.id
+      ? unlinkDirectDependentsOfQuestion(removed.id, questions)
+      : questions.filter((_, index) => index !== targetIndex);
+    onChange(nextQuestions);
+    if (expandedQuestionKey === removedKey) setExpandedQuestionKey('');
   };
 
-  const autoSavePreviousOpenQuestion = async (nextIndex = -1) => {
-    if (expandedQuestionIndex < 0 || expandedQuestionIndex === nextIndex) return;
-    const openQuestion = questions[expandedQuestionIndex];
+  const autoSavePreviousOpenQuestion = async (nextKey = '') => {
+    if (!expandedQuestionKey || expandedQuestionKey === nextKey) return;
+    const openQuestion = questions.find((q, idx) => getQuestionNodeKey(q, idx) === expandedQuestionKey);
     if (!openQuestion || !isQuestionComplete(openQuestion) || typeof onPersistQuestions !== 'function') return;
     try {
       const persisted = await onPersistQuestions(questions);
@@ -1334,29 +1404,62 @@ function QuestionEditor({
     }
   };
 
-  const addQuestion = async () => {
-    setQuestionStatusMessage('');
-    await autoSavePreviousOpenQuestion(-1);
+  const allocateNextQuestionId = () => {
     const usedIds = new Set(allSourceQuestions.map((q) => String(q.id || '').trim()).filter(Boolean));
     let seq = allSourceQuestions.length + 1;
     while (usedIds.has(`question_${seq}`)) seq += 1;
-    const nextQuestions = [
-      ...questions,
-      createQuestionDraft({
-        id: `question_${seq}`,
-        prompt: '',
-        answerType: 'enum',
-        options: [],
-      }, seq - 1, required),
-    ];
-    onChange(nextQuestions);
-    setExpandedQuestionIndex(nextQuestions.length - 1);
+    return { nextId: `question_${seq}`, seq };
   };
 
-  const handleEditQuestion = async (targetIndex) => {
+  const addQuestion = async () => {
     setQuestionStatusMessage('');
-    await autoSavePreviousOpenQuestion(targetIndex);
-    setExpandedQuestionIndex(targetIndex);
+    await autoSavePreviousOpenQuestion('');
+    const { nextId, seq } = allocateNextQuestionId();
+    const created = createQuestionDraft({
+      id: nextId,
+      prompt: '',
+      answerType: 'enum',
+      options: [],
+    }, seq - 1, required);
+    const nextQuestions = [...questions, created];
+    onChange(nextQuestions);
+    setExpandedQuestionKey(getQuestionNodeKey(created, nextQuestions.length - 1));
+  };
+
+  const addDependentQuestion = async (parentQuestion, parentNodeKey) => {
+    if (!parentQuestion?.id) return;
+    setQuestionStatusMessage('');
+    await autoSavePreviousOpenQuestion('');
+    const { nextId, seq } = allocateNextQuestionId();
+    const defaultTriggers = getPreferredDefaultTriggerValues(parentQuestion);
+    const created = createQuestionDraft({
+      id: nextId,
+      prompt: '',
+      type: 'dependent',
+      answerType: 'enum',
+      dependencyRule: {
+        dependsOnQuestionId: parentQuestion.id,
+        dependsOnOptionValue: defaultTriggers[0] || '',
+        dependsOnOptionValues: defaultTriggers,
+      },
+      options: [],
+    }, seq - 1, required);
+    const nextQuestions = [...questions, created];
+    onChange(nextQuestions);
+    if (typeof onDependencyAssigned === 'function') {
+      onDependencyAssigned(created.id);
+    }
+    setCollapsedSubtreeByKey((prev) => ({
+      ...prev,
+      [parentNodeKey]: false,
+    }));
+    setExpandedQuestionKey(getQuestionNodeKey(created, nextQuestions.length - 1));
+  };
+
+  const handleEditQuestion = async (targetKey) => {
+    setQuestionStatusMessage('');
+    await autoSavePreviousOpenQuestion(targetKey);
+    setExpandedQuestionKey(targetKey);
   };
 
   const handleSaveSingleQuestion = async (targetIndex) => {
@@ -1378,7 +1481,7 @@ function QuestionEditor({
       const persisted = typeof onPersistQuestions === 'function'
         ? await onPersistQuestions(questions)
         : false;
-      setExpandedQuestionIndex(-1);
+      setExpandedQuestionKey('');
       setQuestionStatusMessage(
         persisted
           ? 'Question saved to Firestore.'
@@ -1454,231 +1557,127 @@ function QuestionEditor({
       ) : null}
 
       <div className="mt-4 min-w-0 w-full space-y-3">
-        {questions.length ? questions.map((question, index) => {
-          const isExpanded = expandedQuestionIndex === index;
-          const qHighlight = highlightMap?.get(question.draftKey || question.id || index) || null;
-          const changed = qHighlight?.changedFields || new Set();
-          const answerSummary = question.answerType === 'text'
-            ? 'Text answer'
-            : `Options (${Array.isArray(question.options) ? question.options.length : 0})`;
-          const pictureCount = question.answerType === 'text'
-            ? 0
-            : (Array.isArray(question.options) ? question.options.filter((opt) => String(opt?.imageUrl || '').trim()).length : 0);
-          const pictureSummary = pictureCount > 0
-            ? ` • ${pictureCount} picture${pictureCount === 1 ? '' : 's'}`
-            : '';
-          const isDependent = hasQuestionDependency(question) || question.type === 'dependent';
-          const typeSummary = isDependent
-            ? 'Dependent (follows parent)'
-            : question.type === 'standard'
-              ? 'Standard'
-              : 'Option-specific';
-          const depQuestionId = String(question.dependencyRule?.dependsOnQuestionId || '').trim();
-          const depOptionValues = getDependencyTriggerValues(question.dependencyRule, question.dependsOn);
-          const eligibleParentQuestions = allSourceQuestions.filter((candidate) => (
-            candidate
-            && candidate.id
-            && candidate.id !== question.id
-            && candidate.enabled !== false
-            && !wouldCreateDependencyCycle(question.id, candidate.id, allSourceQuestions)
-          ));
-          const parentQuestion = allSourceQuestions.find((candidate) => candidate.id === depQuestionId && candidate.id !== question.id) || null;
-          const parentOptions = (Array.isArray(parentQuestion?.options) ? parentQuestion.options : [])
-            .map((opt, optIdx) => ({
-              value: getQuestionOptionSlug(opt, optIdx),
-              label: String(opt?.label || opt?.value || '').trim(),
-            }))
-            .filter((opt) => opt.label && opt.value);
-          const matchedParentLabels = depOptionValues.map((val) => {
-            const match = parentOptions.find((opt) => opt.value.toLowerCase() === val.toLowerCase());
-            return match?.label || val;
-          });
-          const dependencySummary = depQuestionId
-            ? ` • Depends on: ${parentQuestion?.prompt || depQuestionId} = ${matchedParentLabels.length ? matchedParentLabels.join(' or ') : 'select answer(s)'}`
-            : '';
+        {questionTree.length ? (() => {
+          const renderQuestionNode = (node) => {
+            const { question, arrayIndex: index, key: nodeKey, hierarchyNumber, children, directChildCount, depth } = node;
+            const isSubtask = depth > 0;
+            const isExpanded = expandedQuestionKey === nodeKey;
+            const hasSubtasks = children.length > 0;
+            const isSubtreeCollapsed = Boolean(collapsedSubtreeByKey[nodeKey]);
+            const qHighlight = highlightMap?.get(question.draftKey || question.id || index) || null;
+            const changed = qHighlight?.changedFields || new Set();
+            const answerSummary = question.answerType === 'text'
+              ? 'Text answer'
+              : `Options (${Array.isArray(question.options) ? question.options.length : 0})`;
+            const pictureCount = question.answerType === 'text'
+              ? 0
+              : (Array.isArray(question.options) ? question.options.filter((opt) => String(opt?.imageUrl || '').trim()).length : 0);
+            const pictureSummary = pictureCount > 0
+              ? ` · ${pictureCount} picture${pictureCount === 1 ? '' : 's'}`
+              : '';
+            const isDependent = hasQuestionDependency(question) || question.type === 'dependent';
+            const typeSummary = isDependent
+              ? 'Sub-question'
+              : question.type === 'standard'
+                ? 'Standard'
+                : 'Option-specific';
+            const depQuestionId = String(question.dependencyRule?.dependsOnQuestionId || '').trim();
+            const depOptionValues = getDependencyTriggerValues(question.dependencyRule, question.dependsOn);
+            const eligibleParentQuestions = allSourceQuestions.filter((candidate) => (
+              candidate
+              && candidate.id
+              && candidate.id !== question.id
+              && candidate.enabled !== false
+              && !wouldCreateDependencyCycle(question.id, candidate.id, allSourceQuestions)
+            ));
+            const parentQuestion = node.parentQuestion
+              || allSourceQuestions.find((candidate) => candidate.id === depQuestionId && candidate.id !== question.id)
+              || null;
+            const parentOptions = (Array.isArray(parentQuestion?.options) ? parentQuestion.options : [])
+              .map((opt, optIdx) => ({
+                value: getQuestionOptionSlug(opt, optIdx),
+                label: String(opt?.label || opt?.value || '').trim(),
+              }))
+              .filter((opt) => opt.label && opt.value);
 
-          const qKey = question.draftKey || question.id;
-          const consistencyMode = consistencyModeByQuestion[qKey] === 'unique' ? 'unique' : 'consistent';
-          const batchState = batchImageStateByQuestion[qKey] || { busy: false, progress: '', error: '' };
+            const qKey = question.draftKey || question.id;
+            const consistencyMode = consistencyModeByQuestion[qKey] === 'unique' ? 'unique' : 'consistent';
+            const batchState = batchImageStateByQuestion[qKey] || { busy: false, progress: '', error: '' };
+            const subtaskCountLabel = `${directChildCount} sub-question${directChildCount === 1 ? '' : 's'}`;
 
-          return (
-            <div
-              key={question.draftKey || `question_${index}`}
-              className={`min-w-0 w-full rounded-[22px] border p-3 sm:p-4 transition ${
-                qHighlight ? AI_CARD_HIGHLIGHT_CLASS : 'border-white/10 bg-ink-950/40'
-              }`}
-            >
-              <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
-                <div className="flex min-w-0 flex-1 items-center gap-3">
-                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand/25 text-brand-soft font-bold text-sm">
-                    #{index + 1}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="truncate font-bold text-white text-sm sm:text-base">{question.prompt || `Question ${index + 1} (Untitled)`}</p>
-                      {qHighlight ? <AiChangeBadge status={qHighlight.status} /> : null}
-                    </div>
-                    <p className="truncate text-xs text-ink-300">
-                      {typeSummary} • {answerSummary}{pictureSummary}{dependencySummary}{question.enabled === false ? ' • Disabled' : ''}
-                    </p>
-                  </div>
-                </div>
+            return (
+              <div key={nodeKey} className="min-w-0 w-full">
+                <div
+                  className={`min-w-0 w-full border transition ${
+                    isSubtask
+                      ? 'rounded-[18px] px-3 py-2.5 sm:px-3.5 sm:py-3'
+                      : 'rounded-[22px] p-3 sm:p-4'
+                  } ${
+                    qHighlight
+                      ? AI_CARD_HIGHLIGHT_CLASS
+                      : isSubtask
+                        ? 'border-white/10 bg-ink-950/35 hover:border-white/15'
+                        : 'border-white/10 bg-ink-950/45'
+                  }`}
+                >
+                  <div className="flex min-w-0 flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+                    <div className="flex w-full min-w-0 items-start gap-2.5 sm:w-auto sm:flex-1 sm:items-center sm:gap-3">
+                      {hasSubtasks ? (
+                        <button
+                          type="button"
+                          onClick={() => toggleSubtreeCollapse(nodeKey)}
+                          title={isSubtreeCollapsed ? 'Expand sub-questions' : 'Collapse sub-questions'}
+                          aria-label={isSubtreeCollapsed ? 'Expand sub-questions' : 'Collapse sub-questions'}
+                          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-ink-200 transition hover:bg-white/10 hover:text-white"
+                        >
+                          {isSubtreeCollapsed ? (
+                            <ChevronRight className="h-4 w-4" />
+                          ) : (
+                            <ChevronDown className="h-4 w-4" />
+                          )}
+                        </button>
+                      ) : isSubtask ? (
+                        <span className="inline-flex h-7 w-5 shrink-0 items-center justify-center text-ink-300" aria-hidden="true">
+                          <CornerDownRight className="h-3.5 w-3.5" />
+                        </span>
+                      ) : null}
 
-                <div className="flex shrink-0 items-center gap-2">
-                  {isExpanded ? (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => handleSaveSingleQuestion(index)}
-                        disabled={isMutating}
-                        title="Save question details"
-                        aria-label="Save question details"
-                        className="inline-flex items-center justify-center rounded-xl bg-emerald-500/20 p-2 text-emerald-300 transition hover:bg-emerald-500/30 disabled:opacity-60"
-                      >
-                        <Check className="h-4 w-4" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setExpandedQuestionIndex(-1);
-                          setQuestionStatusMessage('');
-                        }}
-                        title="Collapse question"
-                        aria-label="Collapse question"
-                        className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 p-2 text-ink-200 transition hover:bg-white/10 hover:text-white"
-                      >
-                        <X className="h-4 w-4" />
-                      </button>
-                    </>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => handleEditQuestion(index)}
-                      title="Edit question details"
-                      aria-label="Edit question details"
-                      className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 p-2 text-brand-soft transition hover:bg-white/10"
-                    >
-                      <Pencil className="h-4 w-4" />
-                    </button>
-                  )}
-
-                  <button
-                    type="button"
-                    onClick={() => removeQuestion(index)}
-                    title="Remove question"
-                    aria-label="Remove question"
-                    className="inline-flex items-center justify-center rounded-xl border border-red-500/20 bg-red-500/10 p-2 text-red-300 transition hover:bg-red-500/20"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
-              </div>
-
-              {isExpanded ? (
-                <div className="mt-4 min-w-0 w-full space-y-4 pt-4 border-t border-white/10">
-                  <label className="flex items-center gap-2 text-sm text-ink-200">
-                    <input
-                      type="checkbox"
-                      checked={question.enabled !== false}
-                      onChange={(event) => updateQuestion(index, { ...question, enabled: event.target.checked })}
-                    />
-                    Enabled
-                  </label>
-
-                  <div className="grid grid-cols-1 gap-4 md:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)_minmax(0,0.8fr)]">
-                    <input
-                      value={question.prompt}
-                      onChange={(event) => updateQuestion(index, {
-                        ...question,
-                        prompt: event.target.value,
-                      })}
-                      placeholder="Question prompt"
-                      className={`w-full rounded-2xl border px-4 py-3 text-sm text-white outline-none ${
-                        changed.has('prompt') ? AI_INPUT_HIGHLIGHT_CLASS : 'border-white/10 bg-ink-950/50'
-                      }`}
-                    />
-                    {depQuestionId ? (
-                      <select
-                        value="dependent"
-                        disabled
-                        title="Dependent questions automatically follow their parent question and cannot be assigned as option-specific"
-                        className="w-full cursor-not-allowed rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-ink-200 outline-none"
-                      >
-                        <option value="dependent">Dependent (Follows parent)</option>
-                      </select>
-                    ) : (
-                      <select
-                        value={question.type === 'standard' ? 'standard' : 'option-specific'}
-                        onChange={(event) => updateQuestion(index, { ...question, type: event.target.value })}
-                        className={`w-full rounded-2xl border px-4 py-3 text-sm text-white outline-none ${
-                          changed.has('type') ? AI_INPUT_HIGHLIGHT_CLASS : 'border-white/10 bg-ink-950/50'
+                      <div
+                        className={`flex shrink-0 items-center justify-center rounded-xl font-bold tabular-nums ${
+                          isSubtask
+                            ? 'h-8 min-w-[2.25rem] px-1.5 bg-white/8 text-ink-200 text-xs'
+                            : 'h-9 min-w-[2.25rem] px-2 bg-brand/25 text-brand-soft text-sm'
                         }`}
                       >
-                        <option value="option-specific">Option-specific</option>
-                        <option value="standard">Standard (Always asked)</option>
-                      </select>
-                    )}
-                    <select
-                      value={question.answerType}
-                      onChange={(event) => updateQuestion(index, { ...question, answerType: event.target.value })}
-                      className={`w-full rounded-2xl border px-4 py-3 text-sm text-white outline-none ${
-                        changed.has('answerType') ? AI_INPUT_HIGHLIGHT_CLASS : 'border-white/10 bg-ink-950/50'
-                      }`}
-                    >
-                      <option value="enum">Options</option>
-                      <option value="text">Text answer</option>
-                    </select>
-                  </div>
+                        #{hierarchyNumber}
+                      </div>
 
-                  <div className={`rounded-2xl border p-3 space-y-3 ${
-                    changed.has('dependencyRule') ? AI_CARD_HIGHLIGHT_CLASS : 'border-white/10 bg-white/5'
-                  }`}>
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <p className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Question dependency (Optional)</p>
-                        <p className="mt-1 text-xs text-ink-300">
-                          Only ask this question when the customer chooses one or more selected answers on an earlier question.
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className={`font-bold text-white line-clamp-2 sm:truncate ${isSubtask ? 'text-sm' : 'text-sm sm:text-base'}`}>
+                            {question.prompt || `Question ${hierarchyNumber} (Untitled)`}
+                          </p>
+                          {qHighlight ? <AiChangeBadge status={qHighlight.status} /> : null}
+                        </div>
+                        <p className="truncate text-xs text-ink-300 tabular-nums">
+                          {typeSummary} · {answerSummary}{pictureSummary}
+                          {hasSubtasks ? ` · ${subtaskCountLabel}` : ''}
+                          {question.enabled === false ? ' · Disabled' : ''}
                         </p>
                       </div>
-                      {changed.has('dependencyRule') ? <AiChangeBadge status={qHighlight?.status || 'updated'} /> : null}
                     </div>
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                      <label className="block space-y-1.5">
-                        <span className="text-xs font-bold text-ink-200">Depends on question</span>
-                        <select
-                          value={depQuestionId}
-                          onChange={(event) => {
-                            const nextParentId = event.target.value;
-                            const nextType = nextParentId ? 'dependent' : 'option-specific';
-                            updateQuestion(index, {
-                              ...question,
-                              type: nextType,
-                              dependencyRule: {
-                                dependsOnQuestionId: nextParentId,
-                                dependsOnOptionValue: '',
-                                dependsOnOptionValues: [],
-                              },
-                            });
-                            if (nextParentId && typeof onDependencyAssigned === 'function') {
-                              onDependencyAssigned(question.id);
-                            }
-                          }}
-                          className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-3 py-2.5 text-sm text-white outline-none"
-                        >
-                          <option value="">None — always ask within option scope</option>
-                          {eligibleParentQuestions.map((candidate) => (
-                            <option key={candidate.id} value={candidate.id}>
-                              {candidate.prompt || candidate.id}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
 
-                      {depQuestionId ? (
-                        <div className="block space-y-1.5">
-                          <span className="text-xs font-bold text-ink-200">Show this question when answer is (any of)</span>
+                    <div className="flex w-full min-w-0 items-center justify-between gap-2 border-t border-white/10 pt-2 sm:w-auto sm:max-w-full sm:shrink-0 sm:justify-end sm:border-t-0 sm:pt-0">
+                      {isSubtask && depQuestionId ? (
+                        <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:flex-initial">
+                          <span className="hidden 2xl:inline text-[11px] font-semibold text-ink-300 whitespace-nowrap">
+                            If answer:
+                          </span>
                           {parentOptions.length > 0 ? (
                             <MultiSelectAnswerDropdown
+                              compact
+                              alignRight
+                              emptyPlaceholder="Choose answer..."
                               options={parentOptions}
                               selectedValues={depOptionValues}
                               onChange={(nextValues) => updateQuestion(index, {
@@ -1709,127 +1708,381 @@ function QuestionEditor({
                                   },
                                 });
                               }}
-                              placeholder="Type exact answer(s), separated by commas..."
-                              className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-3 py-2.5 text-sm text-white outline-none"
+                              aria-label="Trigger answer text"
+                              placeholder="Trigger text..."
+                              className="w-full min-w-0 sm:w-32 rounded-xl border border-white/15 bg-ink-950/75 px-2.5 py-1.5 text-xs text-white outline-none"
                             />
                           )}
                         </div>
                       ) : null}
-                    </div>
-                    {depQuestionId ? (
-                      <p className="text-xs text-ink-200">
-                        {depOptionValues.length === 0 ? (
-                          <span className="font-bold text-amber-300">
-                            Select one or more answers from "{parentQuestion?.prompt || depQuestionId}" that should trigger this question.{' '}
-                          </span>
-                        ) : null}
-                        Dependent questions cannot be manually assigned as option-specific—they automatically become available whenever "{parentQuestion?.prompt || depQuestionId}" is active and triggered.
-                      </p>
-                    ) : null}
-                  </div>
 
-                  {question.answerType === 'text' ? (
-                    <input
-                      value={question.answerHint}
-                      onChange={(event) => updateQuestion(index, { ...question, answerHint: event.target.value })}
-                      placeholder="Answer hint for customers"
-                      className={`w-full rounded-2xl border px-4 py-3 text-sm text-white outline-none ${
-                        changed.has('answerHint') ? AI_INPUT_HIGHLIGHT_CLASS : 'border-white/10 bg-ink-950/50'
-                      }`}
-                    />
-                  ) : (
-                    <div className="space-y-3">
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="text-sm font-bold text-white">Options and added price</p>
-                          {changed.has('options') ? <AiChangeBadge status={qHighlight?.status || 'updated'} /> : null}
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          {question.options.length > 0 ? (
-                            <>
-                              <select
-                                value={consistencyMode}
-                                disabled={batchState.busy}
-                                onChange={(event) => setConsistencyModeByQuestion((prev) => ({
-                                  ...prev,
-                                  [qKey]: event.target.value,
-                                }))}
-                                aria-label="AI image consistency mode"
-                                className="rounded-2xl border border-white/10 bg-ink-950/60 px-3 py-2 text-xs font-bold text-white outline-none disabled:opacity-60"
-                              >
-                                <option value="consistent">Consistent (same subject)</option>
-                                <option value="unique">Unique images</option>
-                              </select>
-                              <button
-                                type="button"
-                                disabled={batchState.busy || isMutating}
-                                onClick={() => handleGenerateAllPictures(question)}
-                                className="inline-flex items-center gap-2 rounded-2xl border border-brand/40 bg-brand/20 px-4 py-2 text-sm font-bold text-white transition hover:bg-brand/30 disabled:opacity-60"
-                              >
-                                {batchState.busy ? (
-                                  <Loader2 className="h-4 w-4 animate-spin" />
-                                ) : (
-                                  <Sparkles className="h-4 w-4 text-brand-soft" />
-                                )}
-                                {batchState.busy ? 'Generating pictures...' : 'Generate pictures for all options'}
-                              </button>
-                            </>
-                          ) : null}
+                      <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:ml-0">
+                        {hasSubtasks ? (
                           <button
                             type="button"
-                            disabled={batchState.busy}
-                            onClick={() => updateQuestion(index, {
-                              ...question,
-                              options: [...question.options, createOptionDraft({}, question.options.length)],
-                            })}
-                            className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-bold text-white disabled:opacity-60"
+                            onClick={() => toggleSubtreeCollapse(nodeKey)}
+                            className="inline-flex h-8 items-center gap-1 rounded-xl border border-white/10 bg-white/5 px-2 text-xs font-semibold text-ink-200 transition hover:bg-white/10 hover:text-white whitespace-nowrap shrink-0 tabular-nums"
+                            title={`${subtaskCountLabel} — click to ${isSubtreeCollapsed ? 'show' : 'hide'}`}
+                            aria-label={`${subtaskCountLabel} — click to ${isSubtreeCollapsed ? 'show' : 'hide'}`}
                           >
-                            <Plus className="h-4 w-4" />
-                            Add option
+                            <GitBranch className="h-3.5 w-3.5 shrink-0 text-brand-soft" />
+                            <span>{directChildCount}</span>
                           </button>
-                        </div>
+                        ) : null}
+
+                        {question.id ? (
+                          <button
+                            type="button"
+                            onClick={() => addDependentQuestion(question, nodeKey)}
+                            disabled={isMutating}
+                            title="Add sub-question"
+                            aria-label="Add sub-question"
+                            className="inline-flex h-8 items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-2 text-xs font-semibold text-brand-soft transition hover:bg-white/10 hover:text-white disabled:opacity-60 whitespace-nowrap shrink-0"
+                          >
+                            <ListPlus className="h-4 w-4 shrink-0" />
+                            <span className="hidden 2xl:inline">Sub-question</span>
+                          </button>
+                        ) : null}
+
+                        {isExpanded ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => handleSaveSingleQuestion(index)}
+                              disabled={isMutating}
+                              title="Save question details"
+                              aria-label="Save question details"
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-500/20 text-emerald-300 transition hover:bg-emerald-500/30 disabled:opacity-60 shrink-0"
+                            >
+                              <Check className="h-4 w-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setExpandedQuestionKey('');
+                                setQuestionStatusMessage('');
+                              }}
+                              title="Collapse question"
+                              aria-label="Collapse question"
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-xl border border-white/10 bg-white/5 text-ink-200 transition hover:bg-white/10 hover:text-white shrink-0"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleEditQuestion(nodeKey)}
+                            title="Edit question details"
+                            aria-label="Edit question details"
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-xl border border-white/10 bg-white/5 text-brand-soft transition hover:bg-white/10 shrink-0"
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => removeQuestion(index)}
+                          title="Remove question"
+                          aria-label="Remove question"
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-xl border border-red-500/20 bg-red-500/10 text-red-300 transition hover:bg-red-500/20 shrink-0"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
                       </div>
-                      {batchState.progress ? (
-                        <p className="text-xs font-bold text-emerald-300">{batchState.progress}</p>
-                      ) : null}
-                      {batchState.error ? (
-                        <p className="text-xs font-bold text-rose-300">{batchState.error}</p>
-                      ) : null}
-                      {question.options.length ? question.options.map((option, optionIndex) => {
-                        const subKey = String(option?.draftKey || getQuestionOptionSlug(option, optionIndex));
-                        const subAiStatus = qHighlight?.subOptionHighlights?.get(subKey) || '';
-                        return (
-                          <QuestionOptionEditor
-                            key={option.draftKey || `option_${optionIndex}`}
-                            option={option}
-                            question={question}
-                            siblingOptions={question.options}
-                            serviceContext={serviceContext}
-                            consistencyMode={consistencyMode}
-                            storageScope={storageScope}
-                            aiStatus={subAiStatus}
-                            isBatchGenerating={batchState.busy}
-                            onPreviewImage={onPreviewImage}
-                            onChange={(nextOption) => updateQuestion(index, {
-                              ...question,
-                              options: question.options.map((currentOption, currentIndex) => (currentIndex === optionIndex ? nextOption : currentOption)),
-                            })}
-                            onRemove={() => updateQuestion(index, {
-                              ...question,
-                              options: question.options.filter((_, currentIndex) => currentIndex !== optionIndex),
-                            })}
-                          />
-                        );
-                      }) : (
-                        <p className="text-sm text-ink-300">Add at least one option so the admin can control the added price for each answer.</p>
+                    </div>
+                  </div>
+
+                  {isExpanded ? (
+                    <div className="mt-4 min-w-0 w-full space-y-4 pt-4 border-t border-white/10">
+                      <label className="flex items-center gap-2 text-sm text-ink-200">
+                        <input
+                          type="checkbox"
+                          checked={question.enabled !== false}
+                          onChange={(event) => updateQuestion(index, { ...question, enabled: event.target.checked })}
+                        />
+                        Enabled
+                      </label>
+
+                      <div className="grid grid-cols-1 gap-4 md:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)_minmax(0,0.8fr)]">
+                        <input
+                          value={question.prompt}
+                          onChange={(event) => updateQuestion(index, {
+                            ...question,
+                            prompt: event.target.value,
+                          })}
+                          placeholder="Question prompt"
+                          className={`w-full rounded-2xl border px-4 py-3 text-sm text-white outline-none ${
+                            changed.has('prompt') ? AI_INPUT_HIGHLIGHT_CLASS : 'border-white/10 bg-ink-950/50'
+                          }`}
+                        />
+                        {depQuestionId ? (
+                          <select
+                            value="dependent"
+                            disabled
+                            title="Dependent questions automatically follow their parent question and cannot be assigned as option-specific"
+                            className="w-full cursor-not-allowed rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-ink-200 outline-none"
+                          >
+                            <option value="dependent">Dependent (Follows parent)</option>
+                          </select>
+                        ) : (
+                          <select
+                            value={question.type === 'standard' ? 'standard' : 'option-specific'}
+                            onChange={(event) => {
+                              const nextType = event.target.value;
+                              updateQuestion(index, { ...question, type: nextType });
+                              if (nextType === 'standard' && question.id && typeof onDependencyAssigned === 'function') {
+                                onDependencyAssigned(question.id);
+                              }
+                            }}
+                            className={`w-full rounded-2xl border px-4 py-3 text-sm text-white outline-none ${
+                              changed.has('type') ? AI_INPUT_HIGHLIGHT_CLASS : 'border-white/10 bg-ink-950/50'
+                            }`}
+                          >
+                            <option value="option-specific">Option-specific</option>
+                            <option value="standard">Standard (Always asked)</option>
+                          </select>
+                        )}
+                        <select
+                          value={question.answerType}
+                          onChange={(event) => updateQuestion(index, { ...question, answerType: event.target.value })}
+                          className={`w-full rounded-2xl border px-4 py-3 text-sm text-white outline-none ${
+                            changed.has('answerType') ? AI_INPUT_HIGHLIGHT_CLASS : 'border-white/10 bg-ink-950/50'
+                          }`}
+                        >
+                          <option value="enum">Options</option>
+                          <option value="text">Text answer</option>
+                        </select>
+                      </div>
+
+                      <div className={`rounded-2xl border p-3 space-y-3 ${
+                        changed.has('dependencyRule') ? AI_CARD_HIGHLIGHT_CLASS : 'border-white/10 bg-white/5'
+                      }`}>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <p className="text-xs font-bold uppercase tracking-[0.18em] text-ink-300">Question dependency (Optional)</p>
+                            <p className="mt-1 text-xs text-ink-300">
+                              Only ask this question when the customer chooses one or more selected answers on an earlier question.
+                            </p>
+                          </div>
+                          {changed.has('dependencyRule') ? <AiChangeBadge status={qHighlight?.status || 'updated'} /> : null}
+                        </div>
+                        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                          <label className="block space-y-1.5">
+                            <span className="text-xs font-bold text-ink-200">Depends on question</span>
+                            <select
+                              value={depQuestionId}
+                              onChange={(event) => {
+                                const nextParentId = event.target.value;
+                                const nextType = nextParentId ? 'dependent' : 'option-specific';
+                                const nextParentObj = eligibleParentQuestions.find((candidate) => candidate.id === nextParentId) || null;
+                                const nextDefaultTriggers = nextParentId
+                                  ? getPreferredDefaultTriggerValues(nextParentObj)
+                                  : [];
+                                updateQuestion(index, {
+                                  ...question,
+                                  type: nextType,
+                                  dependencyRule: {
+                                    dependsOnQuestionId: nextParentId,
+                                    dependsOnOptionValue: nextDefaultTriggers[0] || '',
+                                    dependsOnOptionValues: nextDefaultTriggers,
+                                  },
+                                });
+                                if (nextParentId && typeof onDependencyAssigned === 'function') {
+                                  onDependencyAssigned(question.id);
+                                }
+                              }}
+                              className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-3 py-2.5 text-sm text-white outline-none"
+                            >
+                              <option value="">None — always ask within option scope</option>
+                              {eligibleParentQuestions.map((candidate) => (
+                                <option key={candidate.id} value={candidate.id}>
+                                  {candidate.prompt || candidate.id}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+
+                          {depQuestionId ? (
+                            <div className="block space-y-1.5">
+                              <span className="text-xs font-bold text-ink-200">Show this question when answer is (any of)</span>
+                              {parentOptions.length > 0 ? (
+                                <MultiSelectAnswerDropdown
+                                  options={parentOptions}
+                                  selectedValues={depOptionValues}
+                                  onChange={(nextValues) => updateQuestion(index, {
+                                    ...question,
+                                    type: 'dependent',
+                                    dependencyRule: {
+                                      dependsOnQuestionId: depQuestionId,
+                                      dependsOnOptionValue: nextValues[0] || '',
+                                      dependsOnOptionValues: nextValues,
+                                    },
+                                  })}
+                                />
+                              ) : (
+                                <input
+                                  value={depOptionValues.join(', ')}
+                                  onChange={(event) => {
+                                    const nextValues = event.target.value
+                                      .split(',')
+                                      .map((entry) => entry.trim())
+                                      .filter(Boolean);
+                                    updateQuestion(index, {
+                                      ...question,
+                                      type: 'dependent',
+                                      dependencyRule: {
+                                        dependsOnQuestionId: depQuestionId,
+                                        dependsOnOptionValue: nextValues[0] || '',
+                                        dependsOnOptionValues: nextValues,
+                                      },
+                                    });
+                                  }}
+                                  placeholder="Type exact answer(s), separated by commas..."
+                                  className="w-full rounded-2xl border border-white/10 bg-ink-950/50 px-3 py-2.5 text-sm text-white outline-none"
+                                />
+                              )}
+                            </div>
+                          ) : null}
+                        </div>
+                        {depQuestionId ? (
+                          <p className="text-xs text-ink-200">
+                            {depOptionValues.length === 0 ? (
+                              <span className="font-bold text-amber-300">
+                                Select one or more answers from "{parentQuestion?.prompt || depQuestionId}" that should trigger this question.{' '}
+                              </span>
+                            ) : null}
+                            Dependent questions cannot be manually assigned as option-specific—they automatically become available whenever "{parentQuestion?.prompt || depQuestionId}" is active and triggered.
+                          </p>
+                        ) : null}
+                      </div>
+
+                      {question.answerType === 'text' ? (
+                        <input
+                          value={question.answerHint}
+                          onChange={(event) => updateQuestion(index, { ...question, answerHint: event.target.value })}
+                          placeholder="Answer hint for customers"
+                          className={`w-full rounded-2xl border px-4 py-3 text-sm text-white outline-none ${
+                            changed.has('answerHint') ? AI_INPUT_HIGHLIGHT_CLASS : 'border-white/10 bg-ink-950/50'
+                          }`}
+                        />
+                      ) : (
+                        <div className="space-y-3">
+                          <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="text-sm font-bold text-white">Options and added price</p>
+                              {changed.has('options') ? <AiChangeBadge status={qHighlight?.status || 'updated'} /> : null}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              {question.options.length > 0 ? (
+                                <>
+                                  <select
+                                    value={consistencyMode}
+                                    disabled={batchState.busy}
+                                    onChange={(event) => setConsistencyModeByQuestion((prev) => ({
+                                      ...prev,
+                                      [qKey]: event.target.value,
+                                    }))}
+                                    aria-label="AI image consistency mode"
+                                    className="rounded-2xl border border-white/10 bg-ink-950/60 px-3 py-2 text-xs font-bold text-white outline-none disabled:opacity-60"
+                                  >
+                                    <option value="consistent">Consistent (same subject)</option>
+                                    <option value="unique">Unique images</option>
+                                  </select>
+                                  <button
+                                    type="button"
+                                    disabled={batchState.busy || isMutating}
+                                    onClick={() => handleGenerateAllPictures(question)}
+                                    className="inline-flex items-center gap-2 rounded-2xl border border-brand/40 bg-brand/20 px-4 py-2 text-sm font-bold text-white transition hover:bg-brand/30 disabled:opacity-60"
+                                  >
+                                    {batchState.busy ? (
+                                      <Loader2 className="h-4 w-4 animate-spin" />
+                                    ) : (
+                                      <Sparkles className="h-4 w-4 text-brand-soft" />
+                                    )}
+                                    {batchState.busy ? 'Generating pictures...' : 'Generate pictures for all options'}
+                                  </button>
+                                </>
+                              ) : null}
+                              <button
+                                type="button"
+                                disabled={batchState.busy}
+                                onClick={() => updateQuestion(index, {
+                                  ...question,
+                                  options: [...question.options, createOptionDraft({}, question.options.length)],
+                                })}
+                                className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-bold text-white disabled:opacity-60"
+                              >
+                                <Plus className="h-4 w-4" />
+                                Add option
+                              </button>
+                            </div>
+                          </div>
+                          {batchState.progress ? (
+                            <p className="text-xs font-bold text-emerald-300">{batchState.progress}</p>
+                          ) : null}
+                          {batchState.error ? (
+                            <p className="text-xs font-bold text-rose-300">{batchState.error}</p>
+                          ) : null}
+                          {question.options.length ? question.options.map((option, optionIndex) => {
+                            const subKey = String(option?.draftKey || getQuestionOptionSlug(option, optionIndex));
+                            const subAiStatus = qHighlight?.subOptionHighlights?.get(subKey) || '';
+                            return (
+                              <QuestionOptionEditor
+                                key={option.draftKey || `option_${optionIndex}`}
+                                option={option}
+                                question={question}
+                                allQuestions={allSourceQuestions}
+                                serviceOptions={serviceOptions}
+                                siblingOptions={question.options}
+                                serviceContext={serviceContext}
+                                consistencyMode={consistencyMode}
+                                storageScope={storageScope}
+                                aiStatus={subAiStatus}
+                                isBatchGenerating={batchState.busy}
+                                onPreviewImage={onPreviewImage}
+                                onChange={(nextOption) => updateQuestion(index, {
+                                  ...question,
+                                  options: question.options.map((currentOption, currentIndex) => (currentIndex === optionIndex ? nextOption : currentOption)),
+                                })}
+                                onRemove={() => updateQuestion(index, {
+                                  ...question,
+                                  options: question.options.filter((_, currentIndex) => currentIndex !== optionIndex),
+                                })}
+                              />
+                            );
+                          }) : (
+                            <p className="text-sm text-ink-300">Add at least one option so the admin can control the added price for each answer.</p>
+                          )}
+                        </div>
                       )}
                     </div>
-                  )}
+                  ) : null}
                 </div>
-              ) : null}
-            </div>
-          );
-        }) : (
+
+                {hasSubtasks && !isSubtreeCollapsed ? (
+                  <div className="mt-2 ml-3 sm:ml-6 pl-3 sm:pl-5 border-l border-white/15 space-y-2">
+                    {children.map((childNode) => renderQuestionNode(childNode))}
+                    {question.id ? (
+                      <button
+                        type="button"
+                        onClick={() => addDependentQuestion(question, nodeKey)}
+                        disabled={isMutating}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-dashed border-white/15 bg-white/[0.03] px-3 py-1.5 text-xs font-semibold text-ink-200 transition hover:border-brand/40 hover:bg-brand/10 hover:text-white disabled:opacity-60"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        <span>Add dependent question</span>
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            );
+          };
+
+          return questionTree.map((rootNode) => renderQuestionNode(rootNode));
+        })() : (
           <EmptyState title="No questions yet" description="Add questions here so the customer flow reads them directly from the backend." />
         )}
       </div>
@@ -1864,6 +2117,20 @@ export default function ServiceDetailsPage() {
   const [draftTravelFee, setDraftTravelFee] = useState(35);
   const [draftMinimumTotal, setDraftMinimumTotal] = useState(80);
   const [draftMaximumTotal, setDraftMaximumTotal] = useState(500);
+  const [draftScheduleMultipliers, setDraftScheduleMultipliers] = useState({
+    weekdayMultiplier: 1,
+    fridayMultiplier: 1.04,
+    weekendMultiplier: 1.08,
+    morningMultiplier: 1,
+    afternoonMultiplier: 1.02,
+    eveningMultiplier: 1.08,
+    overnightMultiplier: 1.12,
+    summerSeasonMultiplier: 1.04,
+    autumnSeasonMultiplier: 1,
+    winterSeasonMultiplier: 0.96,
+    springSeasonMultiplier: 1,
+    festiveSeasonMultiplier: 1.1,
+  });
   const [draftRequiresPortfolioSelection, setDraftRequiresPortfolioSelection] = useState(false);
   const [draftOptionApplicationMode, setDraftOptionApplicationMode] = useState('per_option');
   const [draftInheritBundleImages, setDraftInheritBundleImages] = useState(true);
@@ -2033,6 +2300,21 @@ export default function ServiceDetailsPage() {
     setDraftTravelFee(Number(selectedService.pricing?.travelFee ?? 35));
     setDraftMinimumTotal(Number(selectedService.pricing?.minimumTotal ?? 80));
     setDraftMaximumTotal(Number(selectedService.pricing?.maximumTotal ?? 500));
+    const sp = selectedService.pricing || {};
+    setDraftScheduleMultipliers({
+      weekdayMultiplier: Number(sp.weekdayMultiplier ?? sp.dayMultipliers?.weekday ?? 1),
+      fridayMultiplier: Number(sp.fridayMultiplier ?? sp.dayMultipliers?.friday ?? 1.04),
+      weekendMultiplier: Number(sp.weekendMultiplier ?? sp.dayMultipliers?.weekend ?? 1.08),
+      morningMultiplier: Number(sp.morningMultiplier ?? sp.timeMultipliers?.morning ?? 1),
+      afternoonMultiplier: Number(sp.afternoonMultiplier ?? sp.timeMultipliers?.afternoon ?? 1.02),
+      eveningMultiplier: Number(sp.eveningMultiplier ?? sp.timeMultipliers?.evening ?? 1.08),
+      overnightMultiplier: Number(sp.overnightMultiplier ?? sp.timeMultipliers?.overnight ?? 1.12),
+      summerSeasonMultiplier: Number(sp.summerSeasonMultiplier ?? sp.seasonMultipliers?.summer ?? 1.04),
+      autumnSeasonMultiplier: Number(sp.autumnSeasonMultiplier ?? sp.seasonMultipliers?.autumn ?? 1),
+      winterSeasonMultiplier: Number(sp.winterSeasonMultiplier ?? sp.offSeasonMultiplier ?? sp.seasonMultipliers?.winter ?? 0.96),
+      springSeasonMultiplier: Number(sp.springSeasonMultiplier ?? sp.seasonMultipliers?.spring ?? 1),
+      festiveSeasonMultiplier: Number(sp.festiveSeasonMultiplier ?? sp.peakSeasonMultiplier ?? sp.seasonMultipliers?.festive ?? 1.1),
+    });
     setDraftRequiresPortfolioSelection(Boolean(selectedService.requiresPortfolioSelection));
     setDraftOptionApplicationMode(selectedService.optionApplicationMode === 'unified' ? 'unified' : 'per_option');
     setDraftInheritBundleImages(selectedService.inheritBundleImages !== false);
@@ -2056,16 +2338,15 @@ export default function ServiceDetailsPage() {
         : q
     ));
     setDraftQuestions(normalizedLoadedQuestions);
-    const nonOptionSpecificIds = new Set(
-      normalizedLoadedQuestions.filter((q) => !isOptionSpecificQuestion(q)).map((q) => q.id),
+    const allowedOptionSpecificIds = new Set(
+      normalizedLoadedQuestions.filter((q) => isOptionSpecificQuestion(q)).map((q) => q.id).filter(Boolean),
     );
     setDraftOptions(
       Array.isArray(selectedService.options) && selectedService.options.length
-        ? selectedService.options.map((opt, idx) => {
-            const cleanSelected = (Array.isArray(opt.selectedQuestionIds) ? opt.selectedQuestionIds : [])
-              .filter((qid) => !nonOptionSpecificIds.has(qid));
-            return createServiceOptionDraft({ ...opt, selectedQuestionIds: cleanSelected }, idx);
-          })
+        ? enforceExclusiveServiceOptionQuestions(
+            selectedService.options.map((opt, idx) => createServiceOptionDraft(opt, idx)),
+            allowedOptionSpecificIds,
+          )
         : []
     );
     setExpandedOptionIndex(-1);
@@ -2165,6 +2446,7 @@ export default function ServiceDetailsPage() {
     draftTravelFee,
     draftMinimumTotal,
     draftMaximumTotal,
+    draftScheduleMultipliers: { ...draftScheduleMultipliers },
     draftRequiresPortfolioSelection,
     draftOptionApplicationMode,
     draftInheritBundleImages,
@@ -2186,6 +2468,9 @@ export default function ServiceDetailsPage() {
     setDraftTravelFee(Number(snapshot.draftTravelFee ?? 35));
     setDraftMinimumTotal(Number(snapshot.draftMinimumTotal ?? 80));
     setDraftMaximumTotal(Number(snapshot.draftMaximumTotal ?? 500));
+    if (snapshot.draftScheduleMultipliers) {
+      setDraftScheduleMultipliers(snapshot.draftScheduleMultipliers);
+    }
     setDraftRequiresPortfolioSelection(Boolean(snapshot.draftRequiresPortfolioSelection));
     setDraftOptionApplicationMode(snapshot.draftOptionApplicationMode === 'unified' ? 'unified' : 'per_option');
     setDraftInheritBundleImages(snapshot.draftInheritBundleImages !== false);
@@ -2357,18 +2642,26 @@ export default function ServiceDetailsPage() {
       setDraftRequiresPortfolioSelection(Boolean(aiDraft.requiresPortfolioSelection));
       setDraftOptionApplicationMode(aiDraft.optionApplicationMode === 'unified' ? 'unified' : 'per_option');
 
-      setDraftOptions(
-        (Array.isArray(aiDraft.options) ? aiDraft.options : []).map((opt, idx) => {
-          const matchedImage = existingServiceOptImages.get(String(opt.id || '').toLowerCase())
-            || existingServiceOptImages.get(slugify(opt.title || ''))
-            || '';
-          return createServiceOptionDraft({ ...opt, imageUrl: matchedImage }, idx);
-        }),
-      );
       const aiQuestions = Array.isArray(aiDraft.questions)
         ? aiDraft.questions
         : [...(Array.isArray(aiDraft.requiredQuestions) ? aiDraft.requiredQuestions : []), ...(Array.isArray(aiDraft.optionalQuestions) ? aiDraft.optionalQuestions : [])];
-      setDraftQuestions(aiQuestions.map((q, idx) => mergeQuestionWithImages(q, idx)));
+      const mergedAiQuestions = aiQuestions.map((q, idx) => mergeQuestionWithImages(q, idx));
+      const allowedAiOptionSpecificIds = new Set(
+        mergedAiQuestions.filter((q) => isOptionSpecificQuestion(q)).map((q) => q.id).filter(Boolean),
+      );
+
+      setDraftOptions(
+        enforceExclusiveServiceOptionQuestions(
+          (Array.isArray(aiDraft.options) ? aiDraft.options : []).map((opt, idx) => {
+            const matchedImage = existingServiceOptImages.get(String(opt.id || '').toLowerCase())
+              || existingServiceOptImages.get(slugify(opt.title || ''))
+              || '';
+            return createServiceOptionDraft({ ...opt, imageUrl: matchedImage }, idx);
+          }),
+          allowedAiOptionSpecificIds,
+        ),
+      );
+      setDraftQuestions(mergedAiQuestions);
 
       setExpandedOptionIndex(-1);
       setOptionStatusMessage('');
@@ -2486,12 +2779,43 @@ export default function ServiceDetailsPage() {
     optionApplicationMode: draftOptionApplicationMode === 'unified' ? 'unified' : 'per_option',
     inheritBundleImages: draftInheritBundleImages,
     pricing: {
+      ...(selectedService?.pricing || {}),
       basePrice: resolvedOptions.length ? 0 : Number(selectedService?.pricing?.basePrice || 0),
       travelFee: Number(draftTravelFee || 35),
       bookingFee: 0,
       minimumTotal: Number(draftMinimumTotal || 0),
       maximumTotal: Number(draftMaximumTotal || 0),
-      bundleDiscountPercent: 0,
+      bundleDiscountPercent: Number(selectedService?.pricing?.bundleDiscountPercent || 0),
+      weekdayMultiplier: Number(draftScheduleMultipliers.weekdayMultiplier ?? 1),
+      fridayMultiplier: Number(draftScheduleMultipliers.fridayMultiplier ?? 1.04),
+      weekendMultiplier: Number(draftScheduleMultipliers.weekendMultiplier ?? 1.08),
+      morningMultiplier: Number(draftScheduleMultipliers.morningMultiplier ?? 1),
+      afternoonMultiplier: Number(draftScheduleMultipliers.afternoonMultiplier ?? 1.02),
+      eveningMultiplier: Number(draftScheduleMultipliers.eveningMultiplier ?? 1.08),
+      overnightMultiplier: Number(draftScheduleMultipliers.overnightMultiplier ?? 1.12),
+      summerSeasonMultiplier: Number(draftScheduleMultipliers.summerSeasonMultiplier ?? 1.04),
+      autumnSeasonMultiplier: Number(draftScheduleMultipliers.autumnSeasonMultiplier ?? 1),
+      winterSeasonMultiplier: Number(draftScheduleMultipliers.winterSeasonMultiplier ?? 0.96),
+      springSeasonMultiplier: Number(draftScheduleMultipliers.springSeasonMultiplier ?? 1),
+      festiveSeasonMultiplier: Number(draftScheduleMultipliers.festiveSeasonMultiplier ?? 1.1),
+      dayMultipliers: {
+        weekday: Number(draftScheduleMultipliers.weekdayMultiplier ?? 1),
+        friday: Number(draftScheduleMultipliers.fridayMultiplier ?? 1.04),
+        weekend: Number(draftScheduleMultipliers.weekendMultiplier ?? 1.08),
+      },
+      timeMultipliers: {
+        morning: Number(draftScheduleMultipliers.morningMultiplier ?? 1),
+        afternoon: Number(draftScheduleMultipliers.afternoonMultiplier ?? 1.02),
+        evening: Number(draftScheduleMultipliers.eveningMultiplier ?? 1.08),
+        overnight: Number(draftScheduleMultipliers.overnightMultiplier ?? 1.12),
+      },
+      seasonMultipliers: {
+        summer: Number(draftScheduleMultipliers.summerSeasonMultiplier ?? 1.04),
+        autumn: Number(draftScheduleMultipliers.autumnSeasonMultiplier ?? 1),
+        winter: Number(draftScheduleMultipliers.winterSeasonMultiplier ?? 0.96),
+        spring: Number(draftScheduleMultipliers.springSeasonMultiplier ?? 1),
+        festive: Number(draftScheduleMultipliers.festiveSeasonMultiplier ?? 1.1),
+      },
     },
     options: normalizeServiceOptions(resolvedOptions, resolvedQuestions),
     questionnaire: {
@@ -2555,7 +2879,14 @@ export default function ServiceDetailsPage() {
       }
     }
 
-    setDraftOptions((current) => [...current, createServiceOptionDraft({}, current.length)]);
+    setDraftOptions((current) => {
+      const usedNums = current.map((opt) => {
+        const match = String(opt?.id || '').match(/^option_(\d+)$/i);
+        return match ? Number(match[1]) : 0;
+      });
+      const nextIndex = Math.max(current.length, ...usedNums, 0);
+      return [...current, createServiceOptionDraft({}, nextIndex)];
+    });
     setExpandedOptionIndex(-1);
   };
 
@@ -2651,7 +2982,7 @@ export default function ServiceDetailsPage() {
           maxImages: 10,
         },
       });
-      const stampedUrl = await finalizeAiGeneratedImage(result.imageDataUrl);
+      const stampedUrl = await finalizeAiGeneratedImage(result.imageDataUrl, 1024, 0.88, { position: 'bottom-right' });
       setDraftAiServiceImages((current) => {
         const availableSlots = Math.max(0, 10 - effectiveImages.length - draftFiles.length - current.length);
         if (availableSlots <= 0) return current;
@@ -2683,10 +3014,15 @@ export default function ServiceDetailsPage() {
     setMessage('');
     setServiceImageAiError('');
     try {
+      const brandedDraftFiles = draftFiles.length
+        ? await Promise.all(
+            draftFiles.map((file) => finalizeUploadedImageFile(file, 1024, 0.9, { position: 'bottom-right' })),
+          )
+        : [];
       const aiServiceFiles = draftAiServiceImages
         .map((entry, idx) => dataUrlToImageFile(entry.uri, `${targetServiceId}_service_${idx + 1}`))
         .filter(Boolean);
-      const allPendingServiceFiles = [...draftFiles, ...aiServiceFiles];
+      const allPendingServiceFiles = [...brandedDraftFiles, ...aiServiceFiles];
       const uploads = allPendingServiceFiles.length
         ? await uploadServiceCatalogImages({ serviceId: targetServiceId, files: allPendingServiceFiles })
         : [];
@@ -3225,6 +3561,48 @@ export default function ServiceDetailsPage() {
                 />
               </div>
 
+              <div className="mt-4 rounded-[22px] border border-white/10 bg-white/5 p-4">
+                <p className="text-sm font-bold text-white">Day, time & season multipliers (SAST)</p>
+                <p className="mt-1 text-xs text-ink-200">
+                  Applied automatically to the service subtotal based on South Africa time without multiplying travel fees.
+                </p>
+                <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  {[
+                    ['weekdayMultiplier', 'Weekday (Mon–Thu)'],
+                    ['fridayMultiplier', 'Friday'],
+                    ['weekendMultiplier', 'Weekend (Sat–Sun)'],
+                    ['morningMultiplier', 'Morning (06–11)'],
+                    ['afternoonMultiplier', 'Afternoon (12–16)'],
+                    ['eveningMultiplier', 'Evening (17–21)'],
+                    ['overnightMultiplier', 'Overnight (22–05)'],
+                    ['summerSeasonMultiplier', 'Summer (Jan–Feb)'],
+                    ['autumnSeasonMultiplier', 'Autumn (Mar–May)'],
+                    ['winterSeasonMultiplier', 'Winter (Jun–Aug)'],
+                    ['springSeasonMultiplier', 'Spring (Sep–Nov)'],
+                    ['festiveSeasonMultiplier', 'Festive (Dec)'],
+                  ].map(([fieldKey, labelText]) => (
+                    <label key={fieldKey} className="block rounded-xl border border-white/10 bg-black/20 p-2.5 text-xs text-ink-200">
+                      <span className="block font-medium text-white">{labelText}</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0.5"
+                        max="3"
+                        className="mt-1 w-full rounded-lg border border-white/15 bg-ink-900 px-2 py-1 text-sm text-white"
+                        value={draftScheduleMultipliers[fieldKey] ?? 1}
+                        onChange={(event) => {
+                          const numeric = Number(event.target.value);
+                          setDraftScheduleMultipliers((prev) => ({
+                            ...prev,
+                            [fieldKey]: Number.isFinite(numeric) && numeric >= 0 ? numeric : 1,
+                          }));
+                        }}
+                      />
+                    </label>
+                  ))}
+                </div>
+              </div>
+
               <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2">
                 <div className={`rounded-[24px] border p-4 ${
                   aiFieldChanges.has('requiresPortfolioSelection') ? AI_CARD_HIGHLIGHT_CLASS : 'border-white/10 bg-white/5'
@@ -3458,6 +3836,7 @@ export default function ServiceDetailsPage() {
                   required
                   questions={draftQuestions}
                   allQuestions={draftQuestions}
+                  serviceOptions={draftOptions}
                   suggestions={suggestedQuestions}
                   serviceContext={serviceAiContext}
                   storageScope={selectedService?.id && selectedService.id !== 'new' ? selectedService.id : (slugify(draftServiceId || draftLabel) || 'question_option')}

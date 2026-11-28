@@ -50,20 +50,25 @@ function parseScheduledDateTime(value = '') {
 }
 
 function normalizeCoordinate(coordinate = null) {
-  const latitude = Number(coordinate?.latitude);
-  const longitude = Number(coordinate?.longitude);
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+  if (!coordinate || typeof coordinate !== 'object') return null;
+  const rawLat = coordinate.latitude;
+  const rawLng = coordinate.longitude;
+  if (rawLat === null || rawLat === undefined || rawLat === '' || typeof rawLat === 'boolean') return null;
+  if (rawLng === null || rawLng === undefined || rawLng === '' || typeof rawLng === 'boolean') return null;
+  const latitude = Number(rawLat);
+  const longitude = Number(rawLng);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || (latitude === 0 && longitude === 0)) {
     return null;
   }
 
   return {
     latitude,
     longitude,
-    accuracy: Number.isFinite(Number(coordinate?.accuracy)) ? Number(coordinate.accuracy) : null,
-    altitude: Number.isFinite(Number(coordinate?.altitude)) ? Number(coordinate.altitude) : null,
-    altitudeAccuracy: Number.isFinite(Number(coordinate?.altitudeAccuracy)) ? Number(coordinate.altitudeAccuracy) : null,
-    heading: Number.isFinite(Number(coordinate?.heading)) ? Number(coordinate.heading) : null,
-    speed: Number.isFinite(Number(coordinate?.speed)) ? Number(coordinate.speed) : null,
+    accuracy: coordinate.accuracy !== null && coordinate.accuracy !== undefined && coordinate.accuracy !== '' && Number.isFinite(Number(coordinate.accuracy)) ? Number(coordinate.accuracy) : null,
+    altitude: coordinate.altitude !== null && coordinate.altitude !== undefined && coordinate.altitude !== '' && Number.isFinite(Number(coordinate.altitude)) ? Number(coordinate.altitude) : null,
+    altitudeAccuracy: coordinate.altitudeAccuracy !== null && coordinate.altitudeAccuracy !== undefined && coordinate.altitudeAccuracy !== '' && Number.isFinite(Number(coordinate.altitudeAccuracy)) ? Number(coordinate.altitudeAccuracy) : null,
+    heading: coordinate.heading !== null && coordinate.heading !== undefined && coordinate.heading !== '' && Number.isFinite(Number(coordinate.heading)) ? Number(coordinate.heading) : null,
+    speed: coordinate.speed !== null && coordinate.speed !== undefined && coordinate.speed !== '' && Number.isFinite(Number(coordinate.speed)) ? Number(coordinate.speed) : null,
   };
 }
 

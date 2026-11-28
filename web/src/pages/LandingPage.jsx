@@ -170,7 +170,7 @@ export default function LandingPage() {
                   .
                 </p>
 
-                <div className="mt-8 flex flex-wrap items-center gap-5">
+                <div className="mt-8 flex flex-wrap items-center gap-4">
                   <a
                     href={UNCEDO_WHATSAPP_BOOK_URL}
                     target="_blank"
@@ -181,12 +181,12 @@ export default function LandingPage() {
                     <span>Book on WhatsApp</span>
                     <ArrowRight className="h-4 w-4 shrink-0" aria-hidden="true" />
                   </a>
-
                   <Link
-                    to="/sign-in"
-                    className="inline-flex min-h-[44px] items-center whitespace-nowrap text-sm font-semibold text-zinc-700 underline decoration-zinc-300 underline-offset-4 transition-colors hover:text-zinc-950 hover:decoration-zinc-900"
+                    to="/"
+                    className="inline-flex min-h-[48px] items-center justify-center gap-2 whitespace-nowrap rounded-xl border border-zinc-300 bg-white px-5 py-3.5 text-base font-bold text-zinc-900 transition-colors duration-150 hover:border-zinc-400 hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 focus-visible:ring-offset-2"
                   >
-                    Already have an account? Sign in
+                    <span>Browse Services</span>
+                    <ArrowRight className="h-4 w-4 shrink-0 text-zinc-500" aria-hidden="true" />
                   </Link>
                 </div>
               </div>

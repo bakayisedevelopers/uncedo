@@ -1,11 +1,47 @@
-export const MASTERY_LEVELS = Object.freeze(['beginner', 'specialist', 'master', 'legend']);
+export const MASTERY_LEVELS = Object.freeze(['beginner', 'verified', 'specialist', 'master', 'legend']);
 export const MEMBERSHIP_LEVELS = Object.freeze(['neighbour', 'partner', 'friend', 'family']);
 
 export const DEFAULT_MASTERY_CONFIG = Object.freeze({
   beginner: { minCompletedPaidJobs: 0, minAverageRating: 0, minRatingCount: 0 },
-  specialist: { minCompletedPaidJobs: 50, minAverageRating: 4.6, minRatingCount: 10 },
-  master: { minCompletedPaidJobs: 200, minAverageRating: 4.8, minRatingCount: 40 },
-  legend: { minCompletedPaidJobs: 500, minAverageRating: 4.9, minRatingCount: 100 },
+  verified: { minCompletedPaidJobs: 10, minAverageRating: 4.0, minRatingCount: 3 },
+  specialist: { minCompletedPaidJobs: 50, minAverageRating: 4.0, minRatingCount: 10 },
+  master: { minCompletedPaidJobs: 200, minAverageRating: 4.0, minRatingCount: 40 },
+  legend: { minCompletedPaidJobs: 500, minAverageRating: 4.0, minRatingCount: 100 },
+});
+
+export const DEFAULT_MEMBERSHIP_CONFIG = Object.freeze({
+  neighbour: {
+    minCompletedPaidJobs: 0,
+    minAverageRating: 0,
+    minRatingCount: 0,
+    minCompletionRate: 0,
+    maxCancellationRate: null,
+    requireVerified: false,
+  },
+  partner: {
+    minCompletedPaidJobs: 25,
+    minAverageRating: 4.0,
+    minRatingCount: 5,
+    minCompletionRate: 0.8,
+    maxCancellationRate: 0.2,
+    requireVerified: true,
+  },
+  friend: {
+    minCompletedPaidJobs: 100,
+    minAverageRating: 4.0,
+    minRatingCount: 20,
+    minCompletionRate: 0.9,
+    maxCancellationRate: 0.1,
+    requireVerified: true,
+  },
+  family: {
+    minCompletedPaidJobs: 300,
+    minAverageRating: 4.0,
+    minRatingCount: 50,
+    minCompletionRate: 0.95,
+    maxCancellationRate: 0.05,
+    requireVerified: true,
+  },
 });
 
 export const MASTERY_META = Object.freeze({
@@ -16,24 +52,31 @@ export const MASTERY_META = Object.freeze({
     tone: 'neutral',
     description: 'Starting Uncedo experience tier for this service option.',
   },
+  verified: {
+    level: 'verified',
+    label: 'Verified',
+    rank: 2,
+    tone: 'sky',
+    description: 'Proven track record of at least 10 paid jobs with strong early ratings on this option.',
+  },
   specialist: {
     level: 'specialist',
     label: 'Specialist',
-    rank: 2,
+    rank: 3,
     tone: 'teal',
     description: 'Established delivery record and strong customer ratings on this option.',
   },
   master: {
     level: 'master',
     label: 'Master',
-    rank: 3,
+    rank: 4,
     tone: 'indigo',
     description: 'High volume of paid completions with consistently top ratings.',
   },
   legend: {
     level: 'legend',
     label: 'Legend',
-    rank: 4,
+    rank: 5,
     tone: 'amber',
     description: 'Highest platform experience recognition for this service option.',
   },
@@ -122,6 +165,33 @@ export function mergeMasteryConfig(rawConfig = null) {
       minCompletedPaidJobs: toNumber(override.minCompletedPaidJobs, fallbackRule.minCompletedPaidJobs),
       minAverageRating: toNumber(override.minAverageRating, fallbackRule.minAverageRating),
       minRatingCount: toNumber(override.minRatingCount, fallbackRule.minRatingCount),
+    };
+  }
+  return merged;
+}
+
+export function mergeMembershipConfig(rawConfig = null) {
+  const root = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
+  const source = root.helper && typeof root.helper === 'object' ? root.helper : root;
+  const merged = {};
+  for (const level of MEMBERSHIP_LEVELS) {
+    const fallbackRule = DEFAULT_MEMBERSHIP_CONFIG[level];
+    const override = source[level] && typeof source[level] === 'object' ? source[level] : {};
+    merged[level] = {
+      minCompletedPaidJobs: toNumber(override.minCompletedPaidJobs, fallbackRule.minCompletedPaidJobs),
+      minAverageRating: toNumber(override.minAverageRating, fallbackRule.minAverageRating),
+      minRatingCount: toNumber(override.minRatingCount, fallbackRule.minRatingCount),
+      minCompletionRate: toNumber(override.minCompletionRate, fallbackRule.minCompletionRate),
+      maxCancellationRate:
+        override.maxCancellationRate === null
+          ? null
+          : override.maxCancellationRate !== undefined
+            ? toNumber(override.maxCancellationRate, fallbackRule.maxCancellationRate ?? 1)
+            : fallbackRule.maxCancellationRate,
+      requireVerified:
+        override.requireVerified !== undefined
+          ? Boolean(override.requireVerified)
+          : Boolean(fallbackRule.requireVerified),
     };
   }
   return merged;
@@ -274,11 +344,18 @@ export function buildMasteryProgressModel({ mastery = {}, masteryConfig = DEFAUL
 
 export function buildHelperApprovedMasteryList({
   offerings = [],
+  catalog = [],
   serviceOptionMasteryMap = null,
   serviceMasteryMap = null,
   optionRatingMap = null,
   serviceRatingMap = null,
 } = {}) {
+  const catalogById = new Map();
+  for (const entry of Array.isArray(catalog) ? catalog : []) {
+    const key = normalizeStrictToken(entry?.id || entry?.serviceId || '');
+    if (key) catalogById.set(key, entry);
+  }
+
   const items = [];
   for (const offering of Array.isArray(offerings) ? offerings : []) {
     if (!offering) continue;
@@ -293,14 +370,26 @@ export function buildHelperApprovedMasteryList({
       serviceRatingMap,
     });
 
+    const serviceKey = normalizeStrictToken(offering.serviceId || resolved.serviceId || '');
+    const optionKey = normalizeStrictToken(offering.optionId || resolved.optionId || '');
+    const catalogEntry = serviceKey ? catalogById.get(serviceKey) : null;
+    const catalogOption = optionKey && Array.isArray(catalogEntry?.options)
+      ? catalogEntry.options.find((opt) => normalizeStrictToken(opt?.id || '') === optionKey)
+      : null;
+
+    const liveServiceName = String(catalogEntry?.label || catalogEntry?.serviceName || offering.serviceName || offering.serviceId || 'Service').trim();
+    const liveOptionTitle = String(catalogOption?.title || catalogOption?.label || offering.optionTitle || '').trim();
+
     items.push({
       offering,
       offeringId: String(offering.id || offering.offeringId || resolved.masteryKey).trim(),
-      serviceName: String(offering.serviceName || offering.serviceId || 'Service').trim(),
-      optionTitle: String(offering.optionTitle || '').trim(),
-      displayName: offering.optionTitle
-        ? `${String(offering.serviceName || offering.serviceId || '').trim()} — ${String(offering.optionTitle).trim()}`
-        : String(offering.serviceName || offering.serviceId || 'Service').trim(),
+      serviceId: serviceKey || String(offering.serviceId || '').trim(),
+      optionId: optionKey || String(offering.optionId || '').trim(),
+      serviceName: liveServiceName,
+      optionTitle: liveOptionTitle,
+      displayName: liveOptionTitle
+        ? `${liveServiceName} — ${liveOptionTitle}`
+        : liveServiceName,
       mastery: resolved,
     });
   }

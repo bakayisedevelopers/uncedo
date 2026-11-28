@@ -1,5 +1,5 @@
 import { getFirebaseClients } from '../firebase/config';
-import { mergeMasteryConfig } from '../utils/masteryModel';
+import { mergeMasteryConfig, mergeMembershipConfig } from '../utils/masteryModel';
 
 export function subscribeToHelperServiceOptionMastery(helperId, onData, onError) {
   if (!helperId) {
@@ -99,6 +99,20 @@ export function subscribeToMasteryConfig(onData, onError) {
     (error) => {
       onError?.(error);
       onData?.(mergeMasteryConfig(null));
+    },
+  );
+}
+
+export function subscribeToMembershipConfig(onData, onError) {
+  const { db, firestoreModule } = getFirebaseClients();
+  return firestoreModule.onSnapshot(
+    firestoreModule.doc(db, 'rewardConfig', 'membership'),
+    (snap) => {
+      onData?.(mergeMembershipConfig(snap.exists() ? snap.data() : null));
+    },
+    (error) => {
+      onError?.(error);
+      onData?.(mergeMembershipConfig(null));
     },
   );
 }

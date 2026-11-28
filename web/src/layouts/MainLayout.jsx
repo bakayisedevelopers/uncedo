@@ -1,12 +1,12 @@
 import { Link } from 'react-router-dom';
 import Navbar, { UNCEDO_WHATSAPP_BOOK_URL } from '../components/Navbar';
 
-export default function MainLayout({ children }) {
+export default function MainLayout({ children, hideHelpers = false }) {
   const footerLinkClassName = 'transition-colors hover:text-brand-dark';
 
   return (
     <div className="flex min-h-screen flex-col bg-white font-sans text-zinc-900">
-      <Navbar />
+      <Navbar hideHelpers={hideHelpers} />
       <main className="flex-1">
         {children}
       </main>
@@ -26,16 +26,18 @@ export default function MainLayout({ children }) {
                     Book on WhatsApp
                   </a>
                 </li>
-                <li><a href="/#features" className={footerLinkClassName}>Why WhatsApp</a></li>
-                <li><a href="/#how-it-works" className={footerLinkClassName}>How it works</a></li>
+                <li><Link to="/" className={footerLinkClassName}>Discover Reels</Link></li>
+                <li><Link to="/services" className={footerLinkClassName}>Browse Grid</Link></li>
+                <li><a href="/about#features" className={footerLinkClassName}>Why WhatsApp</a></li>
+                <li><a href="/about#how-it-works" className={footerLinkClassName}>How it works</a></li>
               </ul>
             </div>
             <div>
               <h4 className="mb-4 font-display text-sm font-bold text-zinc-900">Platform</h4>
               <ul className="space-y-2.5 text-sm text-zinc-600">
-                <li><Link to="/" className={footerLinkClassName}>Home</Link></li>
+                <li><Link to="/about" className={footerLinkClassName}>About Uncedo</Link></li>
+                <li><Link to="/policies" className={footerLinkClassName}>All Policies</Link></li>
                 <li><a href="https://helpers.bakayise.com" className={footerLinkClassName}>Helpers Portal</a></li>
-                <li><Link to="/sign-in" className={footerLinkClassName}>Customer Sign in</Link></li>
               </ul>
             </div>
             <div>

@@ -578,12 +578,51 @@ export default function PaymentPage() {
             <section className="app-surface overflow-hidden">
               <div className="border-b border-zinc-100 bg-zinc-50/80 p-5 sm:p-6">
                 <div className="flex items-start justify-between gap-4">
-                <div><p className="text-xs font-bold uppercase tracking-wider text-zinc-500">Service</p><h2 className="mt-1 text-lg font-extrabold text-zinc-950">{request.service || 'Uncedo service'}</h2></div>
+                  <div><p className="text-xs font-bold uppercase tracking-wider text-zinc-500">Service</p><h2 className="mt-1 text-lg font-extrabold text-zinc-950">{request.service || 'Uncedo service'}</h2></div>
                   <div className="rounded-xl bg-emerald-100 p-2.5 text-emerald-800"><ShieldCheck size={21} /></div>
                 </div>
                 <p className="mt-4 text-xs font-semibold text-zinc-500">Request reference</p>
                 <p className="mt-0.5 font-mono text-sm font-bold text-zinc-800">{request.requestReference || '—'}</p>
               </div>
+              {Array.isArray(payment.questionAnswers) && payment.questionAnswers.length > 0 ? (
+                <div className="border-b border-zinc-100 px-5 py-4 sm:px-6">
+                  <p className="text-xs font-bold uppercase tracking-wider text-zinc-500">Service details &amp; answers</p>
+                  <dl className="mt-2.5 space-y-2 text-sm">
+                    {payment.questionAnswers.map((qa, index) => (
+                      <div key={`${qa.questionId || qa.label || 'qa'}-${index}`} className="flex flex-wrap items-baseline justify-between gap-2">
+                        <dt className="text-zinc-600">{qa.label || 'Detail'}</dt>
+                        <dd className="font-semibold text-zinc-900">{qa.value || 'Provided'}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
+              ) : null}
+              {Array.isArray(payment.priceBreakdown) && payment.priceBreakdown.length > 0 ? (
+                <div className="border-b border-zinc-100 px-5 py-4 sm:px-6">
+                  <p className="text-xs font-bold uppercase tracking-wider text-zinc-500">Invoice amount breakdown</p>
+                  <div className="mt-2.5 space-y-2 text-sm">
+                    {payment.priceBreakdown.map((item, index) => {
+                      const numericAmount = Number(item.amount || 0);
+                      const amountLabel = item.displayAmount && numericAmount === 0
+                        ? item.displayAmount
+                        : numericAmount === 0
+                          ? 'Included'
+                          : formatMoney(numericAmount, payment.currency);
+                      return (
+                        <div key={`${item.label || 'line'}-${index}`} className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="font-medium text-zinc-800">{item.label || 'Charge'}</p>
+                            {item.component ? <p className="text-xs text-zinc-500">{item.component}</p> : null}
+                          </div>
+                          <span className={`shrink-0 font-bold tabular-nums ${numericAmount < 0 ? 'text-emerald-700' : numericAmount === 0 ? 'text-zinc-500' : 'text-zinc-900'}`}>
+                            {amountLabel}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
               <div className="flex items-center justify-between gap-3 p-5 sm:p-6">
                 <div><p className="text-sm font-semibold text-zinc-500">Final payable amount</p><p className="mt-1 text-3xl font-black text-zinc-950 tabular-nums">{formatMoney(payment.amount, payment.currency)}</p></div>
                 <span className={`rounded-full px-3 py-1.5 text-xs font-extrabold ${paid ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-900'}`}>{paid ? 'Paid' : String(payment.paymentStatus || 'unpaid').replaceAll('_', ' ')}</span>

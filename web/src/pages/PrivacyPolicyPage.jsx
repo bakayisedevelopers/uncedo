@@ -5,7 +5,7 @@ export default function PrivacyPolicyPage() {
   return (
     <LegalPageShell
       title="Privacy Policy & POPIA Notice"
-      updatedAt="21 November 2026"
+      updatedAt="27 November 2026"
       intro="This Privacy Policy and POPIA Notice explains how Uncedo collects, uses, stores, shares, secures, and disposes of personal information across the Uncedo website, customer and helper applications, web payment pages, and WhatsApp service channel in compliance with the Protection of Personal Information Act 4 of 2013 (POPIA) of South Africa."
       contact="To submit a POPIA access, correction, deletion, or objection request, or to reach our Information Officer / privacy team, use the in-app support option or contact Uncedo through our official WhatsApp support channel (wa.me/27605239926) and request routing to the Information Officer. We verify identity before acting on any request. Never send passwords, one-time codes, full card numbers, or CVVs."
     >
@@ -36,9 +36,9 @@ export default function PrivacyPolicyPage() {
           </li>
           <li>
             <strong>Service requests, quotes &amp; verification:</strong> Service categories, intake questionnaire answers,
-            calculated quotes (service subtotal, service travel fee, integer booking fee, and any applicable post-arrival
-            waiting fee), booking status, 6-digit arrival PIN verification events, completion-proof photos uploaded for a
-            job, ratings, and support tickets.
+            calculated quotes (service subtotal, service travel fee, integer booking fee, and post-arrival waiting fees at
+            R1/min after the 2-minute free grace period), booking status, 6-digit arrival PIN verification events,
+            completion-proof photos uploaded for a job, ratings, and support tickets.
           </li>
           <li>
             <strong>Location &amp; live GPS tracking:</strong> Customer service address and coordinates needed to quote,
@@ -46,12 +46,12 @@ export default function PrivacyPolicyPage() {
             locations are processed while the helper is online or on an active trip and stop when the helper goes offline.
           </li>
           <li>
-            <strong>Payment &amp; wallet records:</strong> Payment status, Paystack transaction and receipt references,
-            masked card descriptors (brand and last four digits) with reusable Paystack authorisation tokens where you
-            explicitly consent to save a card, customer wallet ledger entries (including unpaid completion or cancellation
-            fee debt balances and card-settlement reversals), cash payment confirmations, and helper weekly ZAR bank
-            payout records. Uncedo never collects or stores your full card number or CVV and never accepts card details
-            over WhatsApp.
+            <strong>Payment &amp; wallet records:</strong> Payment status, Paystack transaction, split settlement, and
+            receipt references, masked card descriptors (brand and last four digits) with reusable Paystack authorisation
+            tokens where you explicitly consent to save a card, customer wallet ledger entries (including failed-charge or
+            23-hour overdue debt balances and card-settlement reversals), cash payment confirmations, and helper Paystack
+            split or monthly 26th ZAR bank payout records. Uncedo never collects or stores your full card number or CVV and
+            never accepts card details over WhatsApp.
           </li>
           <li>
             <strong>Special personal information &amp; helper vetting (POPIA s26–s33):</strong> For helpers applying to
@@ -171,17 +171,28 @@ export default function PrivacyPolicyPage() {
         </p>
       </LegalSection>
 
-      <LegalSection title="10. Information quality, retention, and honest operational controls (Condition 5)">
+      <LegalSection title="10. Information quality, retention, and 30-day account deletion (Condition 5)">
         <p>
           You can review and update your customer name, service address, account type, and contact details at any time on
           your <Link className="font-bold text-brand underline" to="/account">Account page</Link> or through supported
           WhatsApp/in-app flows.
         </p>
         <p>
-          We retain financial, booking, wallet-debt, payout, and audit records for as long as needed for service delivery,
-          dispute resolution, fraud prevention, and statutory South African tax and accounting periods. Helper Police
-          Clearance Certificates are held in private storage with object-hold safeguards to preserve vetting and audit
-          integrity unless lawful destruction is required and approved.
+          <strong>Self-service account deletion &amp; 30-day reactivation window:</strong> You may request account
+          deletion from your Account page or via a verified one-time 30-minute WhatsApp link. Deletion cannot be scheduled
+          while you have an active service request, an unpaid completed or cancelled job, or a negative wallet debt
+          balance. Once scheduled, your account enters a <strong>30-day pending-deletion grace period</strong> during
+          which you may reactivate it. If you do not reactivate within 30 days, Uncedo permanently deletes your active
+          user profile, authentication login, and WhatsApp account link, while <strong>imprinting</strong> your name,
+          verified contact details, and deletion timestamp solely onto existing historical service requests, financial
+          payment records, and support tickets (creating no new records if none existed) so Uncedo can meet South
+          African tax, accounting, fraud-prevention, and dispute-resolution obligations.
+        </p>
+        <p>
+          We retain those financial, booking, wallet-debt, payout, and audit records for as long as needed for service
+          delivery, dispute resolution, fraud prevention, and statutory South African tax and accounting periods. Helper
+          Police Clearance Certificates are held in private storage with object-hold safeguards to preserve vetting and
+          audit integrity unless lawful destruction is required and approved.
         </p>
         <p>
           Certain temporary WhatsApp operational and media records carry target expiry timestamps; however, scheduled
@@ -224,8 +235,9 @@ export default function PrivacyPolicyPage() {
           </li>
         </ul>
         <p>
-          Some deletion requests may be deferred or limited where retention is legally required (for example, unpaid
-          wallet-debt settlement records, statutory tax records, or active safety investigations).
+          Some deletion requests may be deferred or limited where active jobs remain open or where retention is legally
+          required (for example, unpaid completed/cancelled request balances, unpaid wallet-debt settlement records,
+          statutory tax records, imprinted transaction audit histories, or active safety investigations).
         </p>
       </LegalSection>
 

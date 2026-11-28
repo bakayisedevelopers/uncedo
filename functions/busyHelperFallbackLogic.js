@@ -174,7 +174,10 @@ function resolveHelperSelectionWithBusyFallback({
     };
   }
 
-  const declinedSet = new Set(normalizeIdList(request.declinedHelperIds));
+  const declinedSet = new Set([
+    ...normalizeIdList(request.declinedHelperIds),
+    ...normalizeIdList(request.canceledByHelperIds),
+  ]);
   const excludedSet = new Set(normalizeIdList(request.offerCycleExcludedHelperIds));
   const rejectedBusySet = new Set(normalizeIdList(request.customerRejectedBusyHelperIds));
 

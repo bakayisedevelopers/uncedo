@@ -123,3 +123,84 @@ test('option-level matching isolates per_option approvals while supporting unifi
   assert.equal(helperServiceOfferingMatchesRequest(legacyOffering, 'errands', ['legacy_errand'], catalogIndex, ''), true);
 });
 
+test('dispatch matching relies strictly on serviceId and optionId even when service names or option titles change', () => {
+  const catalogIndex = {
+    activeEntries: [
+      {
+        id: 'hairstyles',
+        categoryId: 'grooming',
+        label: 'Renamed Braiding Studio',
+        optionApplicationMode: 'per_option',
+        options: [
+          { id: 'knotless_braids', title: 'New Boxless Knotless Style' },
+        ],
+      },
+      {
+        id: 'box_braids_special',
+        categoryId: 'grooming',
+        label: 'Braids Special',
+        optionApplicationMode: 'per_option',
+        options: [],
+      },
+    ],
+    activeCatalogIds: new Set(['hairstyles', 'box_braids_special']),
+    byId: new Map([
+      ['hairstyles', {
+        id: 'hairstyles',
+        categoryId: 'grooming',
+        label: 'Renamed Braiding Studio',
+        optionApplicationMode: 'per_option',
+        options: [{ id: 'knotless_braids', title: 'New Boxless Knotless Style' }],
+      }],
+      ['box_braids_special', {
+        id: 'box_braids_special',
+        categoryId: 'grooming',
+        label: 'Braids Special',
+        optionApplicationMode: 'per_option',
+        options: [],
+      }],
+    ]),
+  };
+
+  // Helper offering still carries an old display name, but canonical serviceId & optionId match.
+  const staleNameOffering = {
+    serviceId: 'hairstyles',
+    serviceName: 'Old Hairstyles Name',
+    categoryId: 'grooming',
+    optionId: 'knotless_braids',
+    optionTitle: 'Legacy Knotless Title',
+    applicationMode: 'option',
+    status: 'approved',
+    active: true,
+    approved: true,
+    verified: true,
+  };
+  assert.equal(
+    helperServiceOfferingMatchesRequest(staleNameOffering, 'grooming', ['hairstyles'], catalogIndex, 'knotless_braids'),
+    true,
+  );
+
+  // Even if an offering's mutable serviceName happens to match another serviceId slug, it must NOT match by name.
+  const misleadingNameOffering = {
+    serviceId: 'hairstyles',
+    serviceName: 'box_braids_special',
+    categoryId: 'grooming',
+    optionId: 'knotless_braids',
+    optionTitle: 'Knotless Braids',
+    applicationMode: 'option',
+    status: 'approved',
+    active: true,
+    approved: true,
+    verified: true,
+  };
+  assert.equal(
+    helperServiceOfferingMatchesRequest(misleadingNameOffering, 'grooming', ['box_braids_special'], catalogIndex, ''),
+    false,
+  );
+
+  const dispatch = buildHelperDispatchServiceIds([staleNameOffering], catalogIndex);
+  assert.deepEqual(dispatch.serviceIds, ['hairstyles']);
+  assert.deepEqual(dispatch.expandedServiceIds, ['hairstyles']);
+  assert.deepEqual(dispatch.approvedOptionKeys, ['hairstyles::knotless_braids']);
+});
+

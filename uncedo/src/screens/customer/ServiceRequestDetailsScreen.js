@@ -240,12 +240,20 @@ function DetailGrid({ rows }) {
 function PricingBreakdown({ lines, total }) {
   return (
     <View style={styles.pricingWrap}>
-      {lines.map((line, index) => (
-        <View key={`${line.label}-${index}`} style={styles.pricingRow}>
-          <Text style={styles.pricingLabel}>{line.label || 'Charge'}</Text>
-          <Text style={styles.pricingValue}>{formatCurrency(line.amount)}</Text>
-        </View>
-      ))}
+      {lines.map((line, index) => {
+        const numericAmount = Number(line?.amount || 0);
+        const displayValue = line?.displayAmount && numericAmount === 0
+          ? String(line.displayAmount)
+          : numericAmount === 0
+            ? 'Included'
+            : formatCurrency(numericAmount);
+        return (
+          <View key={`${line.label}-${index}`} style={styles.pricingRow}>
+            <Text style={styles.pricingLabel}>{line.label || 'Charge'}</Text>
+            <Text style={styles.pricingValue}>{displayValue}</Text>
+          </View>
+        );
+      })}
       <View style={styles.pricingDivider} />
       <View style={styles.pricingRow}>
         <Text style={styles.pricingTotalLabel}>Total</Text>
@@ -291,6 +299,19 @@ export function ServiceRequestDetailsScreen({ route, goBack }) {
   const toneStyle = useMemo(() => getServiceRequestToneStyle(request?.status), [request?.status]);
   const progressSteps = useMemo(() => getServiceRequestProgress(request?.status), [request?.status]);
   const pricingLines = Array.isArray(request?.pricingSnapshot?.lines) ? request.pricingSnapshot.lines : [];
+  const questionAnswers = useMemo(() => {
+    const candidates = [
+      request?.questionAnswers,
+      request?.pricingSnapshot?.questionAnswers,
+      request?.requestPayload?.questionAnswers,
+    ];
+    for (const list of candidates) {
+      if (Array.isArray(list) && list.length > 0) {
+        return list.filter((item) => item && (item.prompt || item.label));
+      }
+    }
+    return [];
+  }, [request]);
 
   const detailRows = useMemo(() => {
     if (!request) return [];
@@ -431,6 +452,26 @@ export function ServiceRequestDetailsScreen({ route, goBack }) {
           </View>
           <DetailGrid rows={detailRows} />
         </View>
+
+        {/* ── Saved question answers ── */}
+        {questionAnswers.length ? (
+          <View style={styles.sectionCard}>
+            <View style={styles.sectionHeader}>
+              <View style={styles.sectionIconWrap}>
+                <Ionicons color={colors.brandDark} name="help-circle-outline" size={18} />
+              </View>
+              <Text style={styles.sectionTitle}>Service questions &amp; answers</Text>
+            </View>
+            <View style={styles.pricingWrap}>
+              {questionAnswers.map((qa, index) => (
+                <View key={`${qa.questionId || qa.prompt || index}`} style={styles.pricingRow}>
+                  <Text style={styles.pricingLabel}>{qa.prompt || qa.label}</Text>
+                  <Text style={styles.pricingValue}>{qa.answerLabel || qa.value || 'Provided'}</Text>
+                </View>
+              ))}
+            </View>
+          </View>
+        ) : null}
 
         {/* ── Pricing breakdown ── */}
         {pricingLines.length ? (

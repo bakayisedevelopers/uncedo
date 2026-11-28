@@ -88,7 +88,6 @@ function buildHelperDispatchServiceIds(helperOfferings = [], catalogIndex = null
   getApprovedActiveHelperServiceOfferings(helperOfferings).forEach((offering) => {
     const serviceToken = normalizeDispatchToken(offering.serviceId);
     const categoryToken = normalizeDispatchToken(offering.categoryId);
-    const nameToken = normalizeDispatchToken(offering.serviceName || offering.name || '');
     const optionToken = normalizeDispatchToken(offering.optionId || '');
     const catalogEntry = catalogIndex?.byId?.get(serviceToken) || null;
     const catalogCategoryToken = normalizeDispatchToken(catalogEntry?.categoryId || categoryToken);
@@ -97,12 +96,9 @@ function buildHelperDispatchServiceIds(helperOfferings = [], catalogIndex = null
     const isUnifiedService = catalogEntry?.optionApplicationMode === 'unified';
 
     if (catalogCategoryToken) categoryIds.add(catalogCategoryToken);
-    if (serviceToken) serviceIds.add(serviceToken);
-    if (nameToken) serviceIds.add(nameToken);
-    [serviceToken, nameToken].filter(Boolean).forEach((token) => expandedServiceIds.add(token));
-    if (catalogEntry?.label) {
-      const labelToken = normalizeDispatchToken(catalogEntry.label);
-      if (labelToken) expandedServiceIds.add(labelToken);
+    if (serviceToken) {
+      serviceIds.add(serviceToken);
+      expandedServiceIds.add(serviceToken);
     }
     (Array.isArray(catalogEntry?.includedServiceIds) ? catalogEntry.includedServiceIds : []).forEach((includedId) => {
       const includedToken = normalizeDispatchToken(includedId);
@@ -115,7 +111,7 @@ function buildHelperDispatchServiceIds(helperOfferings = [], catalogIndex = null
       } else if (hasConfiguredOptions && isUnifiedService) {
         approvedOptionKeys.add(`${serviceToken}::__unified__`);
         catalogOptions.forEach((opt) => {
-          const optToken = normalizeDispatchToken(opt?.id || opt?.title || '');
+          const optToken = normalizeDispatchToken(opt?.id || '');
           if (optToken) approvedOptionKeys.add(`${serviceToken}::${optToken}`);
         });
       } else if (!hasConfiguredOptions) {
@@ -176,9 +172,13 @@ function helperServiceOfferingMatchesRequest(
   expandRequestedServiceTokensFn = null,
 ) {
   const categoryToken = normalizeDispatchToken(categoryId);
-  if (!categoryToken || normalizeDispatchToken(offering.categoryId) !== categoryToken) return false;
+  if (!categoryToken) return false;
 
   const serviceToken = normalizeDispatchToken(offering.serviceId);
+  const catalogEntry = catalogIndex?.byId?.get(serviceToken) || null;
+  const effectiveCategoryToken = normalizeDispatchToken(catalogEntry?.categoryId || offering.categoryId);
+  if (effectiveCategoryToken !== categoryToken) return false;
+
   const offeringOptionToken = normalizeDispatchToken(offering.optionId || '');
   const requestOptionToken = normalizeDispatchToken(requestOptionId);
 
@@ -192,9 +192,7 @@ function helperServiceOfferingMatchesRequest(
 
   if (!requestedTokens.length && !requiresOptionMatch) return true;
 
-  const offeringTokens = new Set([serviceToken, normalizeDispatchToken(offering.serviceName)]);
-  const catalogEntry = catalogIndex?.byId?.get(serviceToken) || null;
-  if (catalogEntry?.label) offeringTokens.add(normalizeDispatchToken(catalogEntry.label));
+  const offeringTokens = new Set([serviceToken].filter(Boolean));
   (Array.isArray(catalogEntry?.includedServiceIds) ? catalogEntry.includedServiceIds : []).forEach((includedId) => {
     const token = normalizeDispatchToken(includedId);
     if (token) offeringTokens.add(token);

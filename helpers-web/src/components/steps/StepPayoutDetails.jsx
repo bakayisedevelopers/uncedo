@@ -114,7 +114,7 @@ export function StepPayoutDetails({ profile, onCompleteNext, showContinueButton 
       });
       setDocumentNumber('');
       setEditing(false);
-      setNotice('Bank account verified and linked for weekly payouts.');
+      setNotice('Bank account verified and linked for automatic split settlements and monthly 26th payouts.');
     } catch (err) {
       setError(err?.message || 'Bank account verification failed. Confirm your details match your bank records.');
     } finally {
@@ -134,7 +134,7 @@ export function StepPayoutDetails({ profile, onCompleteNext, showContinueButton 
                   Bank account verified with Paystack
                 </div>
                 <p className="text-xs text-ink-600 mt-0.5">
-                  Weekly helper payouts will settle automatically into this account.
+                  Card payments split automatically to this account, and remaining wallet balances pay out on the 26th of each month.
                 </p>
               </div>
             </div>

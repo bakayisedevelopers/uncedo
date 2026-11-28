@@ -400,5 +400,98 @@ test('completion card failure records attemptedCardId into failedCardIds without
   assert.deepEqual(updatedReq.failedCardIds, ['card_0', 'card_1']);
 });
 
+test('completion card charge forwards splitAllocation to Paystack and reverses recovered debt if transaction is reversed', async () => {
+  const { resolvePaystackSplitAllocation } = require('./splitPaymentService');
+  const { claimServiceFinancialOperation } = require('./financialOperationService');
+  const reqId = 'rq-split-op-1';
+  const opId = serviceFinancialOperationId(reqId);
+  const splitAllocation = resolvePaystackSplitAllocation({
+    helperId: 'helper-op-1',
+    payoutProfile: { verificationStatus: 'verified', subaccountCode: 'ACCT_op1' },
+    helperWalletBalanceMinor: -2500,
+    helperAmountMinor: 7500,
+    platformAmountMinor: 2500,
+    customerChargeAmountMinor: 10000,
+  });
+
+  const db = new MemoryDb({
+    [`serviceRequests/${reqId}`]: {
+      customerId: 'customer-op-1',
+      status: 'work_completed',
+      helperAssignment: { helperId: 'helper-op-1' },
+    },
+    'users/customer-op-1': { uid: 'customer-op-1', wallet: { balance: 0, currency: 'ZAR' } },
+    'users/helper-op-1': { uid: 'helper-op-1', wallet: { balance: -25, balanceMinor: -2500, currency: 'ZAR' } },
+    'helperWallets/helper-op-1': { helperId: 'helper-op-1', balance: -25, balanceMinor: -2500, schemaVersion: 2, currency: 'ZAR' },
+  });
+
+  const claim = await claimServiceFinancialOperation({
+    db,
+    requestRef: db.collection('serviceRequests').doc(reqId),
+    requestId: reqId,
+    operationType: 'completion',
+    amount: 100,
+    splitAllocation,
+    settlementData: {
+      customerId: 'customer-op-1',
+      helperId: 'helper-op-1',
+      helperPayoutBreakdown: { customerChargeAmount: 100, helperAmount: 75, platformAmount: 25 },
+      requestPatch: { status: 'completed' },
+    },
+    now: 5_000,
+  });
+
+  assert.equal(claim.action, 'charge');
+  assert.equal(claim.operation.splitAllocation.mode, 'paystack_split_with_debt_recovery');
+
+  let receivedSplitAllocation = null;
+  const chargeOutcome = await executeServiceChargeAttempt({
+    operation: claim.operation,
+    action: 'charge',
+    email: 'customer@uncedo.test',
+    authorizationCode: 'AUTH_test',
+    paystack: {
+      async chargeAuthorization(input) {
+        receivedSplitAllocation = input.splitAllocation;
+        return { attempted: true, ok: true, transactionId: 'tx-split-op', reference: input.reference, gatewayStatus: 'success' };
+      },
+      async verifyTransaction() {
+        return { outcome: 'success', transaction: { id: 'tx-split-op', status: 'success' } };
+      },
+    },
+  });
+  assert.equal(chargeOutcome.outcome, 'success');
+  assert.equal(receivedSplitAllocation.subaccountCode, 'ACCT_op1');
+  assert.equal(receivedSplitAllocation.transactionChargeMinor, 5000); // R25 platform + R25 debt
+
+  const settled = await settleServiceFinancialOperation({
+    db,
+    admin,
+    operationRef: claim.operationRef,
+    requestRef: db.collection('serviceRequests').doc(reqId),
+    outcome: 'success',
+    transactionId: 'tx-split-op',
+    now: 6_000,
+  });
+  assert.equal(settled.applied, true);
+  assert.equal((await db.collection('helperWallets').doc('helper-op-1').get()).data().balanceMinor, 0);
+  assert.equal((await db.collection('serviceRequests').doc(reqId).get()).data().paymentSettlementMode, 'paystack_split_with_debt_recovery');
+
+  // Reversal restores the -R25 debt on helper wallet and moves customer to wallet_debt_recorded
+  const reversed = await settleServiceFinancialOperation({
+    db,
+    admin,
+    operationRef: claim.operationRef,
+    requestRef: db.collection('serviceRequests').doc(reqId),
+    outcome: 'reversed',
+    transactionId: 'tx-split-op',
+    now: 7_000,
+  });
+  assert.equal(reversed.applied, true);
+  assert.equal((await db.collection('helperWallets').doc('helper-op-1').get()).data().balanceMinor, -2500);
+  assert.equal((await db.collection('users').doc('customer-op-1').get()).data().wallet.balance, -100);
+});
+
+
 
 

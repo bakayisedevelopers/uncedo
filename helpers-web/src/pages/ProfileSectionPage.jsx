@@ -7,6 +7,8 @@ import { StepPoliceClearance } from '../components/steps/StepPoliceClearance';
 import { StepProfilePhoto } from '../components/steps/StepProfilePhoto';
 import { useHelperSession } from '../context/HelperSessionContext';
 import {
+  reactivateHelperAccount,
+  requestHelperAccountDeletion,
   resolveHelperPayoutAmount,
   resolveLegacyCompletedJobsWalletApi,
   respondToCashServicePaymentApi,
@@ -94,6 +96,48 @@ export function ProfileSectionPage({ section = 'details', isTopLevel = false, on
   const [resolvingLegacy, setResolvingLegacy] = useState(false);
   const [legacyFeedback, setLegacyFeedback] = useState('');
   const [legacyError, setLegacyError] = useState('');
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deleteReason, setDeleteReason] = useState('');
+  const [deletionBusy, setDeletionBusy] = useState(false);
+  const [deletionError, setDeletionError] = useState('');
+  const [deletionFeedback, setDeletionFeedback] = useState('');
+  const isPendingDeletion = String(profile?.accountStatus || '').trim().toLowerCase() === 'pending_deletion';
+  const deletionDateLabel = profile?.deletionScheduledAtMs
+    ? new Intl.DateTimeFormat('en-ZA', { day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(profile.deletionScheduledAtMs))
+    : 'in 30 days';
+
+  const handleScheduleAccountDeletion = async () => {
+    setDeletionError('');
+    setDeletionFeedback('');
+    if (deleteConfirmText.trim() !== 'DELETE') {
+      setDeletionError('Type DELETE in uppercase to schedule account deletion.');
+      return;
+    }
+    setDeletionBusy(true);
+    try {
+      await requestHelperAccountDeletion({ reason: deleteReason.trim() });
+      await signOutHelperAccount().catch(() => null);
+      onNavigate('/sign-in');
+    } catch (err) {
+      setDeletionError(err?.message || 'Unable to schedule account deletion right now.');
+    } finally {
+      setDeletionBusy(false);
+    }
+  };
+
+  const handleReactivateAccount = async () => {
+    setDeletionError('');
+    setDeletionFeedback('');
+    setDeletionBusy(true);
+    try {
+      await reactivateHelperAccount();
+      setDeletionFeedback('Your helper account has been reactivated and the 30-day scheduled deletion was canceled.');
+    } catch (err) {
+      setDeletionError(err?.message || 'Unable to reactivate your account right now.');
+    } finally {
+      setDeletionBusy(false);
+    }
+  };
 
   const handleResolveLegacyJobs = async () => {
     setResolvingLegacy(true);
@@ -251,7 +295,7 @@ export function ProfileSectionPage({ section = 'details', isTopLevel = false, on
                   : (wallet?.availableMinor !== undefined || wallet?.outstandingCommissionMinor !== undefined)
                     ? (Number(wallet?.availableMinor || 0) - Number(wallet?.outstandingCommissionMinor || 0))
                     : Math.round(Number(profile?.wallet?.balance || 0) * 100);
-              const nextMondayMinor = wallet?.reconciliationBlocked ? 0 : Math.max(0, signedBalanceMinor);
+              const nextMonthlyPayoutMinor = wallet?.reconciliationBlocked ? 0 : Math.max(0, signedBalanceMinor);
               const formattedBalance = signedBalanceMinor < 0
                 ? `-R${(Math.abs(signedBalanceMinor) / 100).toFixed(2)}`
                 : moneyMinor(signedBalanceMinor);
@@ -270,14 +314,14 @@ export function ProfileSectionPage({ section = 'details', isTopLevel = false, on
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div className="rounded-2xl border border-border bg-surface p-3.5">
-                      <div className="text-[11px] font-bold uppercase text-ink-400">Next Monday payout</div>
+                      <div className="text-[11px] font-bold uppercase text-ink-400">Next 26th monthly payout</div>
                       <div className="tabular-nums-mono text-lg font-extrabold text-tealbrand-700 mt-1">
-                        {moneyMinor(nextMondayMinor)}
+                        {moneyMinor(nextMonthlyPayoutMinor)}
                       </div>
                       <div className="text-[11px] text-ink-500 mt-0.5">
-                        {nextMondayMinor > 0
-                          ? 'Paid out via Paystack on Monday and reset to R0.00 once confirmed.'
-                          : 'Payouts only run when your wallet balance is above R0.00.'}
+                        {nextMonthlyPayoutMinor > 0
+                          ? 'Paid out via Paystack on the 26th of the month and reset to R0.00 once confirmed.'
+                          : 'Paid card jobs split directly to your bank; monthly 26th payouts run for remaining wallet balances above R0.00.'}
                       </div>
                     </div>
                     <div className="rounded-2xl border border-border bg-surface p-3.5 space-y-2">
@@ -468,6 +512,7 @@ export function ProfileSectionPage({ section = 'details', isTopLevel = false, on
                     ? Number(tx.deltaMinor)
                     : Number(tx.availableDeltaMinor ?? tx.amountMinor ?? tx.amount ?? 0);
                   const txType = String(tx.entryType || tx.type || tx.category || 'Income').replace(/_/g, ' ');
+                  const isDirectSplit = tx.entryType === 'split_direct_settlement' && deltaMinor === 0 && Number(tx.splitHelperAmountMinor || 0) > 0;
                   return (
                     <div key={tx.id || idx} className="p-3.5 sm:px-4 flex items-center justify-between gap-3 bg-surface">
                       <div className="min-w-0 space-y-0.5">
@@ -485,7 +530,9 @@ export function ProfileSectionPage({ section = 'details', isTopLevel = false, on
                         </div>
                       </div>
                       <span className={`tabular-nums-mono text-sm font-extrabold shrink-0 ${deltaMinor < 0 ? 'text-red-700' : 'text-tealbrand-700'}`}>
-                        {deltaMinor < 0 ? '-' : '+'}{moneyMinor(Math.abs(deltaMinor))}
+                        {isDirectSplit
+                          ? `Split ${moneyMinor(tx.splitHelperAmountMinor)}`
+                          : `${deltaMinor < 0 ? '-' : '+'}${moneyMinor(Math.abs(deltaMinor))}`}
                       </span>
                     </div>
                   );
@@ -598,6 +645,59 @@ export function ProfileSectionPage({ section = 'details', isTopLevel = false, on
             >
               Log out
             </button>
+          </section>
+
+          <section className="rounded-[24px] border border-red-200 bg-surface p-5 sm:p-6 space-y-3">
+            <h2 className="font-display text-lg font-extrabold text-ink-900">
+              {isPendingDeletion ? 'Account scheduled for deletion' : 'Delete helper account'}
+            </h2>
+            {isPendingDeletion ? (
+              <>
+                <p className="text-sm text-red-900 leading-relaxed">
+                  Your helper account is scheduled for permanent deletion on <strong>{deletionDateLabel}</strong>. You are offline and removed from dispatch. Cancel deletion now to restore your account immediately.
+                </p>
+                {deletionError && <p className="text-xs font-semibold text-red-700">{deletionError}</p>}
+                {deletionFeedback && <p className="text-xs font-semibold text-tealbrand-700">{deletionFeedback}</p>}
+                <button
+                  type="button"
+                  disabled={deletionBusy}
+                  onClick={handleReactivateAccount}
+                  className="px-5 py-2.5 rounded-xl bg-tealbrand-700 hover:bg-tealbrand-800 text-xs font-bold text-white disabled:opacity-50"
+                >
+                  {deletionBusy ? 'Reactivating…' : 'Cancel deletion & reactivate'}
+                </button>
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-ink-600 leading-relaxed">
+                  Scheduling deletion immediately takes you offline and places your account in a 30-day reactivation window before permanent removal. Past job and payout records retain your details for record-keeping.
+                </p>
+                {deletionError && <p className="text-xs font-semibold text-red-700">{deletionError}</p>}
+                {deletionFeedback && <p className="text-xs font-semibold text-tealbrand-700">{deletionFeedback}</p>}
+                <input
+                  type="text"
+                  value={deleteReason}
+                  onChange={(e) => setDeleteReason(e.target.value)}
+                  placeholder="Optional reason"
+                  className="w-full rounded-xl border border-border bg-white px-4 py-2.5 text-sm text-ink-900"
+                />
+                <input
+                  type="text"
+                  value={deleteConfirmText}
+                  onChange={(e) => setDeleteConfirmText(e.target.value)}
+                  placeholder="Type DELETE to confirm"
+                  className="w-full rounded-xl border border-border bg-white px-4 py-2.5 text-sm text-ink-900"
+                />
+                <button
+                  type="button"
+                  disabled={deletionBusy || deleteConfirmText.trim() !== 'DELETE'}
+                  onClick={handleScheduleAccountDeletion}
+                  className="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-xs font-bold text-white disabled:opacity-50"
+                >
+                  {deletionBusy ? 'Scheduling deletion…' : 'Schedule 30-day account deletion'}
+                </button>
+              </>
+            )}
           </section>
         </div>
       )}

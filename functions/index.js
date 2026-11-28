@@ -14,6 +14,7 @@ const {
 } = require('./serviceMarketplacePricing');
 const { generateAdminServiceDraft: runAdminAiServiceDraft } = require('./adminAiServiceAssistant');
 const { generateAdminOptionImage: runAdminAiOptionImage } = require('./adminAiServiceImage');
+const { runServiceCatalogAskAi } = require('./serviceCatalogAskAi');
 const {
   LEGAL_ENTITY_NAME,
 } = require('./legalAgreements');
@@ -41,8 +42,10 @@ const {
 } = require('./rewards/ratingService');
 const { incrementCompletedPaid, recalculateMastery, recalculateServiceOptionMastery, recalculateMembership } = require('./rewards/progressionService');
 const { getFunctions } = require('firebase-admin/functions');
+const { getMessaging } = require('firebase-admin/messaging');
 const { applyTrustedAdminRole, isTrustedAdminToken } = require('./security/adminAuthorization');
 const { ensureCustomerProfileRecord } = require('./account/customerProfileBootstrap');
+const { sendHelperOfferWebPush } = require('./helperOfferPushService');
 // A single-concurrency fractional-CPU profile for Functions that previously
 // failed deployment under the project's regional CPU quota.
 const HALF_CPU_OPTIONS = Object.freeze({ cpu: 0.5, concurrency: 1 });
@@ -74,6 +77,7 @@ const {
   cancelCashPaymentSelection,
   cancelSavedCardPaymentConfirmation,
   claimSavedCardPayment,
+  computeRequestPayoutBreakdown,
   createPaymentToken,
   createServicePaymentSession,
   getFinalPayableAmount,
@@ -87,7 +91,16 @@ const {
   safePaymentReceipt,
   settleRequestPayment,
 } = require('./requestPaymentService');
-const { ensureAndSendServiceRequestInvoice } = require('./serviceRequestInvoice');
+const {
+  buildPaystackSplitParams,
+  createPaystackSubaccount,
+  resolveAttemptSplitAllocation,
+} = require('./splitPaymentService');
+const {
+  buildPriceBreakdownLines,
+  ensureAndSendServiceRequestInvoice,
+  extractRequestSpecifications,
+} = require('./serviceRequestInvoice');
 const {
   HELPER_WALLETS,
   computeLegacyCompletedJobResolution,
@@ -99,6 +112,7 @@ const {
   minorAmount: normalizeWalletMinor,
   normalizeWalletForClient,
   resolveSignedBalanceMinor,
+  reverseSplitSettlementInTransaction,
   syncHelperWalletDocumentsInTransaction,
   toRandFromMinor,
   walletBalanceIsValid,
@@ -115,7 +129,10 @@ const {
   quoteFromCatalogEntries,
   quoteFromFirestore,
 } = require('./serviceRequestPricing');
-const { createMarketplaceRequestOperations } = require('./marketplaceRequestOperations');
+const {
+  createMarketplaceRequestOperations,
+  findUnpaidCompletedRequest,
+} = require('./marketplaceRequestOperations');
 const { createServiceRequestOfferOperations } = require('./serviceRequestOfferOperations');
 const {
   getHelperPayoutVerificationStatus,
@@ -157,11 +174,13 @@ const {
   formatVerifiedWhatsAppNextQuestion,
   formatWhatsAppBookingConfirmation,
   formatWhatsAppCompletionCardFailureRecovery,
+  formatWhatsAppMissingHomeAddressPrompt,
   formatWhatsAppNextQuestion,
   formatWhatsAppPreBookingPaymentPrompt,
   formatWhatsAppPreBookingSavedCardMenu,
   formatWhatsAppRecoverySavedCardMenu,
   formatWhatsAppRequestExpiredMessage,
+  formatWhatsAppSavedAddressConfirmationPrompt,
   formatWhatsAppServiceOptionPrompt,
   formatWhatsAppSubmittedRequestConfirmation,
   renderMissingWhatsAppQuestions,
@@ -190,6 +209,18 @@ const { createWhatsAppIntentRouter } = require('./whatsapp/aiIntentRouter');
 const { assertNoUnsupportedMoney, parseResponse } = require('./whatsapp/aiResponseGenerator');
 const { runWhatsAppAgentLoop } = require('./whatsapp/agentLoop');
 const { isManuallyRetryableAssistantJob, sanitizeAssistantFailure } = require('./whatsapp/assistantJobRecovery');
+const {
+  geocodeServiceAddressWithFallback,
+  normalizeGeoCoordinates,
+} = require('./serviceAddressGeocoding');
+const {
+  evaluateSavedAddressWorkflow,
+  extractSavedAddressFromRecords,
+  extractSavedHomeLocationFromRecords,
+  getValidDraftServiceLocation,
+  resolveExplicitServiceAddressTargetReply,
+  resolveSavedAddressConfirmationReply,
+} = require('./whatsapp/serviceAddressHelpers');
 const { buildNearbyHelperMapResults, validOrigin: validMapOrigin } = require('./nearbyHelperMapService');
 const { buildPublicTutorSummary } = require('./publicProfileSummary');
 const { createWhatsAppToolRegistry } = require('./whatsapp/toolRegistry');
@@ -216,9 +247,27 @@ const {
   getWhatsAppHelperBaseUrl,
   getWhatsAppSignupUrl,
   getWhatsAppAccountLinkUrl,
+  getWhatsAppAccountDeletionUrl,
   getWhatsAppHelperAgreementUrl,
   getWhatsAppHelperOnboardingUrl,
 } = require('./whatsapp/signupLinks');
+const {
+  ACCOUNT_DELETION_GRACE_DAYS,
+  buildWhatsAppAccountDeletionUrl,
+  createWhatsAppAccountDeletionChallenge,
+  executePermanentAccountDeletion,
+  formatDeletionDateLabel,
+  isAccountPendingDeletion,
+  isWhatsAppAccountDeletionChallengeLive,
+  maskEmailAddress,
+  reactivateAccount,
+  resolveAccountRole,
+  scheduleAccountDeletion,
+  validateAccountDeletionEligibility,
+} = require('./accountDeletionService');
+const {
+  executeWaitingGraceNotice,
+} = require('./waitingGraceNotificationService');
 const {
   resolveUniqueWhatsAppCustomerAccount,
   selectUniqueVerifiedWhatsAppAccount,
@@ -314,10 +363,15 @@ const {
   normalizeWhatsAppIdentityPhone,
 } = require('./whatsapp/identityLink');
 const {
+  buildExpiredOfferLists,
+  buildHelperCancelRematchTransition,
   evaluateOfferExpiry,
   evaluateHelperRequestTransition,
+  mergePreservedHelperQueue,
+  normalizeExpiredPendingOffer,
   normalizeRevision,
   normalizeTimestamp,
+  resolveNextServiceHelperSelection: resolveNextServiceHelperSelectionFromLogic,
 } = require('./serviceRequestOfferLogic');
 const {
   HELPER_LABOR_PAYOUT_RATE,
@@ -326,7 +380,10 @@ const {
   SERVICE_BOOKING_FEE_RATE,
   SERVICE_DEFAULT_TRAVEL_FEE,
   SERVICE_TRAVEL_RATE_PER_KM,
+  WAITING_FREE_GRACE_MINUTES,
+  WAITING_RATE_PER_MINUTE,
   computeServiceBookingFee,
+  computeWaitingTimeCharge,
   formatWholeRandDisplay,
   getServiceBookingFee,
   getServiceHelperPayoutBreakdown,
@@ -337,6 +394,15 @@ const {
   toRand,
   toWholeRand,
 } = require('./serviceRequestBilling');
+const {
+  applyUnpaidRecoveryWalletDeduction,
+  buildRecoveryMessageText,
+  getLatestDueUnpaidRecoveryStage,
+  getNextUnpaidRecoveryStage,
+  getRecoveryStageByIndex,
+  getRecoveryTaskId,
+  isRequestEligibleForUnpaidRecovery,
+} = require('./paymentRecoveryService');
 
 admin.initializeApp();
 
@@ -482,6 +548,32 @@ function getWeekKey(dateInput = new Date()) {
   return `${year}-W${String(Math.max(weekNumber, 1)).padStart(2, '0')}`;
 }
 
+function getJohannesburgDateParts(dateInput = new Date()) {
+  const date = toDateFromMillis(dateInput) || new Date();
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Johannesburg',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const year = Number(parts.find((p) => p.type === 'year')?.value || date.getUTCFullYear());
+  const month = Number(parts.find((p) => p.type === 'month')?.value || (date.getUTCMonth() + 1));
+  const day = Number(parts.find((p) => p.type === 'day')?.value || date.getUTCDate());
+  return { year, month, day };
+}
+
+function getMonthRange(dateInput = new Date()) {
+  const { year, month } = getJohannesburgDateParts(dateInput);
+  const monthStart = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
+  const monthEnd = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+  return { monthStart, monthEnd, weekStart: monthStart, weekEnd: monthEnd };
+}
+
+function getMonthKey(dateInput = new Date()) {
+  const { year, month } = getJohannesburgDateParts(dateInput);
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
 function buildHelperPayoutDocId(weekKey, helperId) {
   return `${weekKey}_${helperId}`;
 }
@@ -506,6 +598,7 @@ function computeStoredHelperPayoutBreakdown(request = {}) {
       closureType: 'canceled',
       billingRule: request?.pricingSnapshot?.cancellationBillingRule || 'booking_fee_only',
       travelledKm: Number(request?.pricingSnapshot?.cancellationDistanceKm || 0),
+      waitingCost: Number(request?.waitingCost || request?.pricingSnapshot?.waitingCost || 0),
       travelFeeAmount: Number(
         request?.pricingSnapshot?.cancellationTravelCharge
         || request?.pricingSnapshot?.travelFee
@@ -725,10 +818,11 @@ async function computeHelperDerivedStats(uid) {
   if (!uid) return null;
 
   const { userRef, offerEventsRef } = getHelperStatsCollections(uid);
-  const [userSnap, offerSnap, requestsSnap] = await Promise.all([
+  const [userSnap, offerSnap, requestsSnap, canceledByHelperSnap] = await Promise.all([
     userRef.get(),
     offerEventsRef.orderBy('occurredAtMs', 'desc').limit(HELPER_STATS_MAX_EVENTS).get(),
     db.collection('serviceRequests').where('helperAssignment.helperId', '==', uid).get(),
+    db.collection('serviceRequests').where('canceledByHelperIds', 'array-contains', uid).get(),
   ]);
 
   const helperData = userSnap.exists ? (userSnap.data() || {}) : {};
@@ -769,18 +863,34 @@ async function computeHelperDerivedStats(uid) {
     });
 
   const completedRequests = helperRequests.filter((request) => String(request.status || '').toLowerCase() === SERVICE_REQUEST_STATUS.COMPLETED);
-  const helperCanceledRequests = helperRequests.filter((request) => {
+  const historyCanceledCountByRequest = new Set();
+  let rematchCanceledCount = 0;
+  for (const snap of canceledByHelperSnap.docs) {
+    const reqData = snap.data() || {};
+    const history = Array.isArray(reqData.helperCancellationHistory) ? reqData.helperCancellationHistory : [];
+    const recentForHelper = history.filter((entry) => (
+      String(entry?.helperId || '') === uid
+      && normalizeStatsEventTimestamp(entry?.canceledAtMs) >= thirtyDaysAgo
+    ));
+    if (recentForHelper.length > 0) {
+      historyCanceledCountByRequest.add(snap.id);
+      rematchCanceledCount += recentForHelper.length;
+    }
+  }
+  const legacyHelperCanceledRequests = helperRequests.filter((request) => {
+    if (historyCanceledCountByRequest.has(request.id)) return false;
     const status = String(request.status || '').toLowerCase();
     const canceledBy = String(request.canceledBy || '').toLowerCase();
     return status === SERVICE_REQUEST_STATUS.CANCELED && (canceledBy === 'helper' || canceledBy === 'helper_user' || canceledBy === 'helper_account');
   });
 
-  const requestDenominator = completedRequests.length + helperCanceledRequests.length;
+  const helperCanceledCount = rematchCanceledCount + legacyHelperCanceledRequests.length;
+  const requestDenominator = completedRequests.length + helperCanceledCount;
   const completionRate = requestDenominator > 0
     ? Number((completedRequests.length / requestDenominator).toFixed(4))
     : null;
   const cancellationRate = requestDenominator > 0
-    ? Number((helperCanceledRequests.length / requestDenominator).toFixed(4))
+    ? Number((helperCanceledCount / requestDenominator).toFixed(4))
     : null;
 
   const rollups = {
@@ -939,7 +1049,7 @@ function buildActiveServiceCatalogIndex(entries = []) {
     if (entryIdToken) {
       byId.set(entryIdToken, entry);
     }
-    [entry.id, entry.label, entry.categoryId, entry.categoryName].forEach((value) => {
+    [entry.id, entry.categoryId].forEach((value) => {
       const token = normalizeServiceToken(value);
       if (token) activeTokens.add(token);
     });
@@ -970,7 +1080,6 @@ function expandRequestedServiceTokens(requestServiceIds = [], serviceCatalogInde
     tokens.add(normalized);
     const catalogEntry = serviceCatalogIndex.byId?.get(normalized) || null;
     if (catalogEntry) {
-      tokens.add(normalizeServiceToken(catalogEntry.label));
       (Array.isArray(catalogEntry.includedServiceIds) ? catalogEntry.includedServiceIds : []).forEach((includedId) => {
         const includedToken = normalizeServiceToken(includedId);
         if (includedToken) {
@@ -1222,13 +1331,12 @@ function encodeGeohash(latitude, longitude, precision = 7) {
 }
 
 function getH3CellForLocation(location = null, resolution = HELPER_DISPATCH_H3_RESOLUTION) {
-  const latitude = normalizeCoordinate(location?.latitude);
-  const longitude = normalizeCoordinate(location?.longitude);
-  if (latitude === null || longitude === null) {
+  const coords = normalizeGeoCoordinates(location);
+  if (!coords) {
     return null;
   }
 
-  return h3.latLngToCell(latitude, longitude, resolution);
+  return h3.latLngToCell(coords.latitude, coords.longitude, resolution);
 }
 
 function getH3QueryCellsForLocation(location = null, resolution = HELPER_DISPATCH_H3_RESOLUTION) {
@@ -1261,15 +1369,17 @@ function buildHelperDispatchIndexDocument(helperId = '', helper = {}, catalogInd
   const dispatchPaused = isTruthyFlag(helper.dispatchPaused ?? helper.isDispatchPaused);
   const suspended = isTruthyFlag(helper.suspended ?? helper.isSuspended);
   const blocked = isTruthyFlag(helper.blocked ?? helper.isBlocked);
+  const pendingDeletion = isAccountPendingDeletion(helper);
   const verificationStatus = String(helper.verificationStatus || '').trim().toLowerCase();
   const policeClearanceStatus = normalizePoliceClearanceStatus(helper.policeClearanceStatus);
   const policeClearanceRequired = helperPoliceClearanceRequired();
   const payoutVerificationStatus = getHelperPayoutVerificationStatus(helper);
   const agreementCurrent = isHelperAgreementCurrent(helper);
-  const online = activeRole === 'helper' && onlineStatus === 'online';
+  const online = activeRole === 'helper' && onlineStatus === 'online' && !pendingDeletion;
   const activeServiceRequestId = String(helper.activeServiceRequestId || '').trim() || null;
   const hasApprovedServices = (dispatchServices.approvedOptionKeys?.length || 0) > 0;
   const available = online
+    && !pendingDeletion
     && !activeServiceRequestId
     && !dispatchPaused
     && !suspended
@@ -1311,6 +1421,7 @@ function buildHelperDispatchIndexDocument(helperId = '', helper = {}, catalogInd
     dispatchPaused,
     suspended,
     blocked,
+    accountStatus: pendingDeletion ? 'pending_deletion' : 'active',
     activeServiceRequestId,
     rating: normalizePositiveNumber(metrics.overallRating ?? helper.rating, 0),
     acceptanceRate: normalizePositiveNumber(metrics.acceptanceRate, 0),
@@ -1450,20 +1561,25 @@ function isHelperDispatchEligible(helper = {}, categoryId = '', requestServiceId
 }
 
 function normalizeCoordinate(value) {
+  if (value === null || value === undefined || typeof value === 'boolean' || typeof value === 'object') {
+    return null;
+  }
+  if (typeof value === 'string' && !value.trim()) {
+    return null;
+  }
   const next = Number(value);
   return Number.isFinite(next) ? next : null;
 }
 
 function buildLiveLocationPayload(payload = {}) {
-  const latitude = normalizeCoordinate(payload.latitude);
-  const longitude = normalizeCoordinate(payload.longitude);
-  if (latitude === null || longitude === null) {
+  const coords = normalizeGeoCoordinates(payload);
+  if (!coords) {
     return null;
   }
 
   return {
-    latitude,
-    longitude,
+    latitude: coords.latitude,
+    longitude: coords.longitude,
     accuracy: normalizeCoordinate(payload.accuracy),
     altitude: normalizeCoordinate(payload.altitude),
     altitudeAccuracy: normalizeCoordinate(payload.altitudeAccuracy),
@@ -1477,11 +1593,11 @@ function buildLiveLocationPayload(payload = {}) {
 
 function getLiveLocationSnapshot(user = {}) {
   const location = user?.liveLocation || {};
-  const latitude = normalizeCoordinate(location.latitude);
-  const longitude = normalizeCoordinate(location.longitude);
-  if (latitude === null || longitude === null) {
+  const coords = normalizeGeoCoordinates(location);
+  if (!coords) {
     return null;
   }
+  const { latitude, longitude } = coords;
 
   return {
     latitude,
@@ -1554,15 +1670,14 @@ function isHelperMapVisible(helper = {}) {
 
 function getLastKnownLocationSnapshot(user = {}) {
   const location = user?.lastKnownLocation || {};
-  const latitude = normalizeCoordinate(location.latitude);
-  const longitude = normalizeCoordinate(location.longitude);
-  if (latitude === null || longitude === null) {
+  const coords = normalizeGeoCoordinates(location);
+  if (!coords) {
     return null;
   }
 
   return {
-    latitude,
-    longitude,
+    latitude: coords.latitude,
+    longitude: coords.longitude,
     updatedAtMs: normalizeMillis(location.updatedAtMs ?? location.updatedAt),
   };
 }
@@ -1606,14 +1721,50 @@ function getHelperRecentAssignmentsCount(helper = {}) {
 function getServiceRequestLocationSnapshot(request = {}) {
   const directLocation = request?.location || {};
   const payloadLocation = request?.requestPayload?.location || {};
-  const latitude = normalizeCoordinate(directLocation.latitude ?? payloadLocation.latitude);
-  const longitude = normalizeCoordinate(directLocation.longitude ?? payloadLocation.longitude);
+  return normalizeGeoCoordinates(directLocation) || normalizeGeoCoordinates(payloadLocation);
+}
 
-  if (latitude === null || longitude === null) {
-    return null;
+async function resolveRequestLocationWithGeocoding({
+  location = null,
+  serviceAddress = '',
+  structuredAnswers = {},
+  savedHomeLocation = null,
+} = {}) {
+  const rawLocation = location && typeof location === 'object' && !Array.isArray(location) ? location : null;
+  const resolvedAddress = String(
+    serviceAddress
+      || rawLocation?.address
+      || structuredAnswers?.service_address
+      || '',
+  ).trim().slice(0, 500);
+  const existingCoords = normalizeGeoCoordinates(rawLocation) || normalizeGeoCoordinates(savedHomeLocation);
+  if (existingCoords) {
+    return {
+      ...(rawLocation || {}),
+      latitude: existingCoords.latitude,
+      longitude: existingCoords.longitude,
+      ...(resolvedAddress ? { address: resolvedAddress } : {}),
+    };
   }
-
-  return { latitude, longitude };
+  if (resolvedAddress) {
+    const geocoded = await geocodeServiceAddressWithFallback(resolvedAddress, { logger }).catch(() => null);
+    if (geocoded) {
+      return {
+        ...(rawLocation || {}),
+        latitude: geocoded.latitude,
+        longitude: geocoded.longitude,
+        address: resolvedAddress,
+        source: rawLocation?.source || geocoded.provider || 'server_geocoded',
+      };
+    }
+    return {
+      ...(rawLocation || {}),
+      latitude: null,
+      longitude: null,
+      address: resolvedAddress,
+    };
+  }
+  return rawLocation;
 }
 
 function getDispatchDistanceBand(distanceKm) {
@@ -1731,7 +1882,22 @@ async function getHelperDispatchPlanForServiceRequest(request = {}, { includeBus
     return { freeQueue: [], busyQueue: [], busyActiveRequestIdsByHelper: {} };
   }
 
-  const requestLocation = getServiceRequestLocationSnapshot(request);
+  let requestLocation = getServiceRequestLocationSnapshot(request);
+  if (!requestLocation) {
+    const fallbackAddress = String(
+      request?.location?.address
+        || request?.serviceAddress
+        || request?.requestPayload?.serviceAddress
+        || request?.requestPayload?.location?.address
+        || '',
+    ).trim();
+    if (fallbackAddress) {
+      const geocoded = await geocodeServiceAddressWithFallback(fallbackAddress, { logger }).catch(() => null);
+      if (geocoded) {
+        requestLocation = { latitude: geocoded.latitude, longitude: geocoded.longitude };
+      }
+    }
+  }
   const dispatchCandidates = await queryHelperDispatchCandidates(categoryId, requestServiceIds, catalogIndex, requestLocation, requestOptionId);
 
   const busyActiveRequestIdsByHelper = {};
@@ -1799,80 +1965,10 @@ async function getHelperQueueForServiceRequest(request = {}) {
   return plan.freeQueue;
 }
 
-function mergePreservedHelperQueue({
-  preservedQueue = [],
-  rebuiltQueue = [],
-}) {
-  const rebuiltIdSet = new Set(
-    (Array.isArray(rebuiltQueue) ? rebuiltQueue : [])
-      .map((value) => String(value || '').trim())
-      .filter(Boolean),
-  );
-  const merged = [];
-  const seen = new Set();
-
-  const pushId = (value) => {
-    const normalized = String(value || '').trim();
-    if (!normalized || seen.has(normalized)) {
-      return;
-    }
-    seen.add(normalized);
-    merged.push(normalized);
-  };
-
-  (Array.isArray(preservedQueue) ? preservedQueue : [])
-    .filter((value) => rebuiltIdSet.has(String(value || '').trim()))
-    .forEach(pushId);
-
-  (Array.isArray(rebuiltQueue) ? rebuiltQueue : []).forEach(pushId);
-
-  return merged;
-}
-
 function resolveNextServiceHelperSelection(request = {}, candidateQueue = [], now = Date.now()) {
-  const excludedHelperIds = getServiceRequestExcludedHelperIds(request);
-  const declinedHelperIdSet = new Set(getServiceRequestDeclinedHelperIds(request));
-  const queue = mergePreservedHelperQueue({
-    preservedQueue: request.helperQueue,
-    rebuiltQueue: candidateQueue,
+  return resolveNextServiceHelperSelectionFromLogic(request, candidateQueue, now, {
+    reofferCooldownMs: HELPER_REOFFER_COOLDOWN_MS,
   });
-  const excludedHelperIdSet = new Set(excludedHelperIds);
-  const eligibleQueue = queue.filter((helperId) => !declinedHelperIdSet.has(helperId));
-  const availableQueue = eligibleQueue.filter((helperId) => !excludedHelperIdSet.has(helperId));
-  const deferredQueue = eligibleQueue.filter((helperId) => excludedHelperIdSet.has(helperId));
-
-  if (availableQueue.length) {
-    return {
-      queue: [...availableQueue, ...deferredQueue],
-      selectedHelperId: availableQueue[0],
-      excludedHelperIds,
-      resetExcludedHelperIds: false,
-      reofferAfterCooldown: false,
-    };
-  }
-
-  const lastOfferAtMs = normalizeMillis(request.lastOfferAt);
-  const cooldownElapsed = deferredQueue.length > 0
-    && lastOfferAtMs > 0
-    && (now - lastOfferAtMs) >= HELPER_REOFFER_COOLDOWN_MS;
-
-  if (cooldownElapsed) {
-    return {
-      queue: [...deferredQueue],
-      selectedHelperId: deferredQueue[0] || '',
-      excludedHelperIds,
-      resetExcludedHelperIds: true,
-      reofferAfterCooldown: true,
-    };
-  }
-
-  return {
-    queue: [...deferredQueue],
-    selectedHelperId: '',
-    excludedHelperIds,
-    resetExcludedHelperIds: false,
-    reofferAfterCooldown: false,
-  };
 }
 
 exports.getCustomerServicePricingQuote = onRequest({ cors: true, maxInstances: 5, concurrency: 20, timeoutSeconds: 30 }, async (req, res) => {
@@ -1922,6 +2018,13 @@ exports.quoteCustomerServiceRequest = onRequest({ cors: true, maxInstances: 5, .
   const requestId = String(req.body?.requestId || '').trim();
   if (!requestId) return res.status(400).json({ success: false, message: 'A request ID is required.' });
   try {
+    const resolvedLocation = req.body?.location === undefined && req.body?.serviceAddress === undefined
+      ? undefined
+      : await resolveRequestLocationWithGeocoding({
+        location: req.body?.location,
+        serviceAddress: req.body?.serviceAddress,
+        structuredAnswers: req.body?.structuredAnswers || {},
+      });
     const update = await marketplaceRequestOperations.updateDraft({
       requestId,
       principalId: decoded.uid,
@@ -1930,7 +2033,7 @@ exports.quoteCustomerServiceRequest = onRequest({ cors: true, maxInstances: 5, .
       selectedPackageId: req.body?.selectedPackageId,
       selectedOptionId: req.body?.selectedOptionId,
       structuredAnswers: req.body?.structuredAnswers || {},
-      location: req.body?.location,
+      location: resolvedLocation,
       serviceAddress: req.body?.serviceAddress,
       timingPreference: req.body?.timingPreference,
       scheduledForText: req.body?.scheduledForText,
@@ -1954,6 +2057,13 @@ exports.updateCustomerServiceRequestDraft = onRequest({ cors: true, maxInstances
   const requestId = String(req.body?.requestId || '').trim();
   if (!requestId) return res.status(400).json({ success: false, message: 'A request ID is required.' });
   try {
+    const resolvedLocation = req.body?.location === undefined && req.body?.serviceAddress === undefined
+      ? undefined
+      : await resolveRequestLocationWithGeocoding({
+        location: req.body?.location,
+        serviceAddress: req.body?.serviceAddress,
+        structuredAnswers: req.body?.structuredAnswers || {},
+      });
     const result = await marketplaceRequestOperations.updateDraft({
       requestId,
       principalId: decoded.uid,
@@ -1962,7 +2072,7 @@ exports.updateCustomerServiceRequestDraft = onRequest({ cors: true, maxInstances
       selectedPackageId: req.body?.selectedPackageId,
       selectedOptionId: req.body?.selectedOptionId,
       structuredAnswers: req.body?.structuredAnswers,
-      location: req.body?.location,
+      location: resolvedLocation,
       serviceAddress: req.body?.serviceAddress,
       timingPreference: req.body?.timingPreference,
       scheduledForText: req.body?.scheduledForText,
@@ -2006,6 +2116,11 @@ exports.createCustomerServiceRequest = onRequest({ cors: true, maxInstances: 5, 
   }
 
   try {
+    const resolvedLocation = await resolveRequestLocationWithGeocoding({
+      location: req.body?.location || null,
+      serviceAddress: String(req.body?.serviceAddress || '').trim(),
+      structuredAnswers,
+    });
     const result = await marketplaceRequestOperations.createDraft({
       requestId,
       principalId: decoded.uid,
@@ -2015,7 +2130,7 @@ exports.createCustomerServiceRequest = onRequest({ cors: true, maxInstances: 5, 
       selectedPackageId,
       selectedOptionId,
       structuredAnswers,
-      location: req.body?.location || null,
+      location: resolvedLocation,
       serviceAddress: String(req.body?.serviceAddress || '').trim(),
       timingPreference: String(req.body?.timingPreference || '').trim(),
       scheduledForText: String(req.body?.scheduledForText || '').trim(),
@@ -2025,6 +2140,27 @@ exports.createCustomerServiceRequest = onRequest({ cors: true, maxInstances: 5, 
 
     if (result.code === 'active-request') {
       res.status(409).json({ success: false, code: result.code, activeRequestId: result.activeRequestId, message: 'You already have an active service request.' });
+      return;
+    }
+    if (result.code === 'unpaid-completed-request') {
+      const refLabel = result.requestReference || result.unpaidRequestId;
+      const amountSuffix = Number(result.unpaidAmount || 0) > 0 ? ` (R${Number(result.unpaidAmount).toFixed(2)} ZAR)` : '';
+      res.status(409).json({
+        success: false,
+        code: result.code,
+        unpaidRequestId: result.unpaidRequestId,
+        requestReference: refLabel,
+        unpaidAmount: Number(result.unpaidAmount || 0),
+        message: `You have an unpaid completed service request (${refLabel}${amountSuffix}). Please pay your outstanding request before booking again.`,
+      });
+      return;
+    }
+    if (result.code === 'account-pending-deletion') {
+      res.status(403).json({
+        success: false,
+        code: result.code,
+        message: result.message || 'Your account is scheduled for deletion. Reactivate your account before booking again.',
+      });
       return;
     }
     if (result.code === 'request-id-conflict') {
@@ -2100,6 +2236,27 @@ exports.confirmCustomerServiceRequest = onRequest({ cors: true, maxInstances: 5,
     }
     if (outcome.code === 'active-request') {
       res.status(409).json({ success: false, code: outcome.code, message: 'You already have another active service request.', activeRequestId: outcome.activeRequestId });
+      return;
+    }
+    if (outcome.code === 'unpaid-completed-request') {
+      const refLabel = outcome.requestReference || outcome.unpaidRequestId;
+      const amountSuffix = Number(outcome.unpaidAmount || 0) > 0 ? ` (R${Number(outcome.unpaidAmount).toFixed(2)} ZAR)` : '';
+      res.status(409).json({
+        success: false,
+        code: outcome.code,
+        unpaidRequestId: outcome.unpaidRequestId,
+        requestReference: refLabel,
+        unpaidAmount: Number(outcome.unpaidAmount || 0),
+        message: `You have an unpaid completed service request (${refLabel}${amountSuffix}). Please pay your outstanding request before booking again.`,
+      });
+      return;
+    }
+    if (outcome.code === 'account-pending-deletion') {
+      res.status(403).json({
+        success: false,
+        code: outcome.code,
+        message: outcome.message || 'Your account is scheduled for deletion. Reactivate your account before confirming a booking.',
+      });
       return;
     }
     if (outcome.code !== 'submitted') {
@@ -2347,6 +2504,60 @@ function getWhatsAppAccountLinkBaseUrl(role) {
   } catch (_) {
     throw new HttpsError('failed-precondition', 'The WhatsApp account-link page is not configured with a valid HTTPS URL.');
   }
+}
+
+function getWhatsAppAccountDeletionBaseUrl(role) {
+  try {
+    return getWhatsAppAccountDeletionUrl({ role, env: process.env }).toString();
+  } catch (_) {
+    throw new HttpsError('failed-precondition', 'The WhatsApp account deletion page is not configured with a valid HTTPS URL.');
+  }
+}
+
+async function issueWhatsAppAccountDeletionLink({ uid, role, identityId, phoneNumber, mode = 'manage', sourceEventId = '' }) {
+  const challenge = createWhatsAppAccountDeletionChallenge({
+    uid,
+    role,
+    identityId,
+    phoneNumber,
+    mode,
+    sourceEventId,
+  });
+  await db.collection('whatsappAccountDeletionChallenges').doc(challenge.tokenHash).set({
+    ...challenge.challenge,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+  return {
+    token: challenge.token,
+    tokenHash: challenge.tokenHash,
+    url: buildWhatsAppAccountDeletionUrl(getWhatsAppAccountDeletionBaseUrl(role), challenge.token),
+    expiresAtMs: challenge.challenge.expiresAtMs,
+  };
+}
+
+async function sendWhatsAppAccountLifecycleNotice({ uid, text, purpose = 'account_lifecycle' }) {
+  if (!whatsappMessagingEnabled()) return false;
+  const linkSnap = await db.collection('whatsappUserLinks').doc(String(uid || '').trim()).get().catch(() => null);
+  const identityId = linkSnap?.exists ? String(linkSnap.data()?.identityId || '').trim() : '';
+  if (!identityId) return false;
+  const [identitySnap, conversationSnap] = await Promise.all([
+    db.collection('whatsappIdentities').doc(identityId).get().catch(() => null),
+    db.collection('whatsappConversations').doc(identityId).get().catch(() => null),
+  ]);
+  if (!identitySnap?.exists) return false;
+  const identity = identitySnap.data() || {};
+  if (String(identity.linkedFirebaseUid || '').trim() !== String(uid || '').trim()) return false;
+  const sendResult = await persistWhatsAppAssistantReply({
+    sourceEventId: `${purpose}:${uid}:${Date.now()}`,
+    identityId,
+    identity,
+    conversationRef: conversationSnap?.ref || db.collection('whatsappConversations').doc(identityId),
+    text,
+    purpose,
+    requireCurrentInbound: false,
+  }).catch(() => null);
+  return sendResult?.sent === true;
 }
 
 async function createWhatsAppExistingAccountLink({ identityId, sourceEventId, candidate, forceResend = false }) {
@@ -4102,7 +4313,24 @@ async function confirmWhatsAppServiceDraft({ identityId, identity, conversationR
     return { code: outcome.code === 'submitted' ? 'confirmed' : 'already-confirmed', requestId };
   }
   if (outcome.code === 'active-request') return { code: 'active-request', requestId: outcome.activeRequestId };
+  if (outcome.code === 'unpaid-completed-request') return outcome;
   return outcome;
+}
+
+async function buildWhatsAppUnpaidCompletedRequestReply({ unpaid = {} } = {}) {
+  const requestId = String(unpaid.unpaidRequestId || '').trim();
+  const refLabel = String(unpaid.requestReference || requestId || 'your completed request').trim();
+  const amount = Number(unpaid.unpaidAmount || 0);
+  const amountSuffix = amount > 0 ? ` (*R${amount.toFixed(2)} ZAR*)` : '';
+  const paymentUrl = requestId
+    ? await buildRequestPaymentLink({
+      requestId,
+      request: unpaid.request || { id: requestId, customerId: unpaid.request?.customerId || '' },
+    }).catch(() => '')
+    : '';
+  return paymentUrl
+    ? `You have an unpaid completed Uncedo request (*${refLabel}*${amountSuffix}). Please pay your outstanding balance before booking again.\n\nPay here: ${paymentUrl}`
+    : `You have an unpaid completed Uncedo request (*${refLabel}*${amountSuffix}). Please pay your outstanding balance (or reply *pay*) before booking again.`;
 }
 
 function whatsappDiagnosticHash(value) {
@@ -4514,7 +4742,12 @@ async function persistWhatsAppOnboardingDetails({ identityId, eventId, identity,
     if (uid && profileSnapshot?.exists) {
       const profileUpdates = { updatedAt: now };
       if (safePreferredName) profileUpdates.whatsappPreferredName = safePreferredName;
-      if (safeHomeAddress) profileUpdates.homeAddress = safeHomeAddress;
+      if (safeHomeAddress) {
+        profileUpdates.homeAddress = safeHomeAddress;
+        if (state.role === 'customer' || profileSnapshot.data()?.customerProfile) {
+          profileUpdates.customerProfile = { serviceAddress: safeHomeAddress };
+        }
+      }
       if (safeProviderType) profileUpdates.providerType = safeProviderType;
       if (safeBusinessName) profileUpdates.businessName = safeBusinessName;
       if (safeFullName) {
@@ -5662,11 +5895,15 @@ async function resolveWhatsAppToolAuthorization(identityId, eventIdentity) {
   if (!linked) return { identity, authorization: { role: 'guest', verified: false, linked: false } };
 
   const linkedRole = String(identity.role || link.role || '').trim().toLowerCase();
+  const resolvedSavedAddress = extractSavedAddressFromRecords(identity, profile);
+  const resolvedHomeLocation = extractSavedHomeLocationFromRecords(identity, profile);
   if (linkedRole === 'customer' && profileAllowsRole(profile, 'customer')) {
     return {
       identity: {
         ...identity,
         preferredName: identity.preferredName || profile.whatsappPreferredName || profile.firstName || profile.fullName || profile.displayName || '',
+        ...(resolvedSavedAddress ? { homeAddress: resolvedSavedAddress } : {}),
+        ...(resolvedHomeLocation ? { homeLocation: resolvedHomeLocation } : {}),
       },
       authorization: { uid, role: 'customer', verified: true, linked: true },
     };
@@ -5677,6 +5914,8 @@ async function resolveWhatsAppToolAuthorization(identityId, eventIdentity) {
       identity: {
         ...identity,
         preferredName: identity.preferredName || profile.whatsappPreferredName || profile.firstName || profile.fullName || profile.displayName || '',
+        ...(resolvedSavedAddress ? { homeAddress: resolvedSavedAddress } : {}),
+        ...(resolvedHomeLocation ? { homeLocation: resolvedHomeLocation } : {}),
       },
       authorization: { uid, role: 'helper', verified: true, linked: true, helperVerified },
     };
@@ -5720,7 +5959,7 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
           whatsappPhoneNumber: String(profile.whatsappPhoneNumber || identity.whatsappPhoneNumber || '').slice(0, 40),
           role: context.authorization.role,
           accountType: 'linked',
-          homeAddress: String(profile.homeAddress || identity.homeAddress || '').trim().slice(0, 500),
+          homeAddress: extractSavedAddressFromRecords(profile, identity),
           verificationStatus: context.authorization.role === 'helper' ? String(profile.verificationStatus || 'pending') : '',
         };
       },
@@ -5917,6 +6156,33 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
         };
       },
       async initiateServiceBooking(args, context) {
+        const principalUid = String(
+          context.authorization?.uid
+            || context.identity?.linkedFirebaseUid
+            || context.identity?.guestPrincipalId
+            || '',
+        ).trim();
+        const extraIds = context.identity?.guestPrincipalId
+          ? [String(context.identity.guestPrincipalId).trim()]
+          : [];
+        const unpaidCompleted = await findUnpaidCompletedRequest({
+          db,
+          principalId: principalUid,
+          extraCustomerIds: extraIds,
+        }).catch(() => null);
+        if (unpaidCompleted) {
+          const paymentUrl = await buildRequestPaymentLink({
+            requestId: unpaidCompleted.unpaidRequestId,
+            request: unpaidCompleted.request,
+          }).catch(() => '');
+          return {
+            code: 'unpaid-completed-request',
+            unpaidRequestId: unpaidCompleted.unpaidRequestId,
+            requestReference: unpaidCompleted.requestReference,
+            unpaidAmount: unpaidCompleted.unpaidAmount,
+            paymentUrl,
+          };
+        }
         let serviceId = String(args?.serviceId || '').trim().toLowerCase();
         const query = String(args?.query || '').trim().toLowerCase();
         const serviceOptionQuery = String(args?.serviceOption || '').trim();
@@ -7147,8 +7413,11 @@ function buildWhatsAppAssistantToolRegistry({ identityId, conversationRef, event
             : Number(data.availableDeltaMinor || 0);
           return {
             entryType: String(data.entryType || 'entry'),
+            settlementMode: String(data.settlementMode || ''),
             amount: minorToMajor(amtMinor),
             delta: minorToMajor(deltaMinor),
+            splitHelperAmount: Number(data.splitHelperAmountMinor || 0) > 0 ? minorToMajor(data.splitHelperAmountMinor) : 0,
+            debtRecovered: Number(data.debtRecoveredMinor || 0) > 0 ? minorToMajor(data.debtRecoveredMinor) : 0,
             description: String(data.description || '').slice(0, 160),
             date: Number(data.createdAtMs || 0) > 0 ? new Date(Number(data.createdAtMs)).toISOString().slice(0, 10) : '',
           };
@@ -7883,6 +8152,13 @@ function formatWhatsAppToolResult(toolName, result = {}) {
     return 'I could not process that helper service application right now.';
   }
   if (toolName === 'initiateServiceBooking') {
+    if (result.code === 'unpaid-completed-request') {
+      const refLabel = result.requestReference || result.unpaidRequestId || 'your completed request';
+      const amountSuffix = Number(result.unpaidAmount || 0) > 0 ? ` (*R${Number(result.unpaidAmount).toFixed(2)} ZAR*)` : '';
+      return result.paymentUrl
+        ? `You have an unpaid completed Uncedo request (*${refLabel}*${amountSuffix}). Please pay your outstanding balance before booking again.\n\nPay here: ${result.paymentUrl}`
+        : `You have an unpaid completed Uncedo request (*${refLabel}*${amountSuffix}). Please pay your outstanding balance before booking again.`;
+    }
     if (result.code === 'not-found') {
       return `🔍 I couldn't find the service you requested to book. Please check the service name or select from our available services.`;
     }
@@ -8500,7 +8776,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
             }
           } else {
             const preferredName = String(identity.preferredName || profile.whatsappPreferredName || '').trim();
-            const hasHomeAddress = Boolean(String(identity.homeAddress || profile.homeAddress || '').trim());
+            const hasHomeAddress = Boolean(extractSavedAddressFromRecords(identity, profile));
             const state = {
               role,
               accountMode: 'account',
@@ -10196,6 +10472,79 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       }
     }
     const command = parseWhatsAppCommand(commandText);
+    if (command?.type === 'account_deletion' || command?.type === 'account_reactivation') {
+      const linkedUid = String(identity.linkedFirebaseUid || '').trim();
+      const verifiedLink = Boolean(linkedUid && normalizeTimestamp(identity.verifiedAt));
+      if (!verifiedLink) {
+        await reply(
+          'To manage or delete an Uncedo account from WhatsApp, your WhatsApp chat must be linked to an Uncedo account. Please link your account first or manage it inside the Uncedo app.',
+        );
+        await jobRef.set({
+          status: 'completed',
+          intent: command.type,
+          reason: 'linked_account_required',
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        return;
+      }
+      const userSnap = await db.collection('users').doc(linkedUid).get();
+      if (!userSnap.exists) {
+        await reply('We could not find an active Uncedo account connected to this WhatsApp chat.');
+        await jobRef.set({ status: 'completed', intent: command.type, reason: 'profile_missing', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+      const userProfile = userSnap.data() || {};
+      const effectiveRole = resolveAccountRole(userProfile, identity.role || '');
+      if (command.type === 'account_reactivation') {
+        if (!isAccountPendingDeletion(userProfile)) {
+          await reply('Your Uncedo account is already active and not scheduled for deletion.');
+          await jobRef.set({ status: 'completed', intent: 'account_reactivation', reason: 'already_active', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          return;
+        }
+        const reactivated = await reactivateAccount({
+          db,
+          admin,
+          uid: linkedUid,
+          channel: 'whatsapp',
+        });
+        if (reactivated.code === 'reactivated') {
+          if (effectiveRole === 'helper') {
+            await syncHelperDispatchIndexById(linkedUid).catch(() => null);
+          }
+          await reply(
+            effectiveRole === 'helper'
+              ? 'Your Uncedo helper account has been reactivated and its 30-day scheduled deletion was canceled. You can open the Helpers app or send "online" when you are ready for jobs.'
+              : 'Your Uncedo customer account has been reactivated and its 30-day scheduled deletion was canceled. You can book services again right away.',
+          );
+        } else {
+          await reply(reactivated.message || 'The reactivation window for this account has ended.');
+        }
+        await jobRef.set({ status: 'completed', intent: 'account_reactivation', reason: reactivated.code, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        return;
+      }
+
+      const phoneNumber = normalizeWhatsAppIdentityPhone(identity.whatsappPhoneNumber || `+${String(identity.waId || '')}`).phoneNumber;
+      const deletionLink = await issueWhatsAppAccountDeletionLink({
+        uid: linkedUid,
+        role: effectiveRole,
+        identityId,
+        phoneNumber,
+        mode: isAccountPendingDeletion(userProfile) ? 'reactivate' : 'manage',
+        sourceEventId: eventId,
+      });
+      if (isAccountPendingDeletion(userProfile)) {
+        const dateLabel = formatDeletionDateLabel(userProfile.deletionScheduledAtMs);
+        await reply(
+          `Your Uncedo ${effectiveRole} account is currently scheduled for permanent deletion on *${dateLabel}*.\n\nIf you changed your mind, reply *reactivate account* here or open this secure link to cancel deletion and restore your account (valid for 30 minutes):\n${deletionLink.url}`,
+        );
+      } else {
+        await reply(
+          `You can request 30-day scheduled deletion for your Uncedo ${effectiveRole} account using this secure link (valid for 30 minutes):\n${deletionLink.url}\n\nYour account will stay in a 30-day reactivation window before permanent removal, and completed service history remains preserved for record-keeping.`,
+        );
+      }
+      await jobRef.set({ status: 'completed', intent: 'account_deletion_link', role: effectiveRole, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return;
+    }
     if (command?.type === 'cancellation_abort' && conversation.pendingCancellation) {
       await conversationRef.set({ pendingCancellation: admin.firestore.FieldValue.delete(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       await reply('The request has not been canceled.');
@@ -10776,6 +11125,8 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           });
         } else if (confirmation.code === 'active-request') {
           await reply(`You already have an active Uncedo request (${confirmation.requestId}). I have not created another request.`);
+        } else if (confirmation.code === 'unpaid-completed-request') {
+          await reply(await buildWhatsAppUnpaidCompletedRequestReply({ unpaid: confirmation }));
         } else {
           await reply('I could not confirm this quotation. It may have expired or the service details changed. Please send the service details again.');
         }
@@ -11288,6 +11639,20 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           text: satVal.replace(/_/g, ' '),
           actionChoice: { type: 'service_address_target', value: satVal },
         };
+      } else if (interactiveBtnId === 'wa_opt_sac_confirm') {
+        inbound = {
+          ...inbound,
+          type: 'text',
+          text: interactiveTitle || 'Confirm address',
+          actionChoice: { type: 'saved_address_confirmation', action: 'confirm' },
+        };
+      } else if (interactiveBtnId === 'wa_opt_sac_change') {
+        inbound = {
+          ...inbound,
+          type: 'text',
+          text: interactiveTitle || 'Provide new address',
+          actionChoice: { type: 'saved_address_confirmation', action: 'change' },
+        };
       } else if (interactiveBtnId.startsWith('wa_ans_')) {
         inbound = {
           ...inbound,
@@ -11409,9 +11774,7 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         })
       : null;
     const locationNowMs = Date.now();
-    const activeDraftLocation = activeDraft?.location && isHelperLocationFresh(activeDraft.location, locationNowMs)
-      ? activeDraft.location
-      : null;
+    const activeDraftLocation = getValidDraftServiceLocation(activeDraft?.location || null, locationNowMs, isHelperLocationFresh);
     const pendingServiceLocation = conversation.pendingServiceLocation || {};
     const pendingLocation = Number(pendingServiceLocation.expiresAtMs || 0) > locationNowMs
       && pendingServiceLocation.location && isHelperLocationFresh(pendingServiceLocation.location, locationNowMs)
@@ -11596,7 +11959,21 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       intentResult.serviceId = inbound.actionChoice.serviceId;
       intentResult.confidence = 1.0;
     } else if (activeDraft && activeDraft.status === 'collecting' && conversation.currentMode === 'booking_intake' && !activeRelayRequestContext?.isOpen) {
-      if (![
+      const pendingSavedAddressReply = activeDraft.awaitingSavedAddressConfirmation === true
+        && inbound.type === 'text'
+        && !inbound.actionChoice
+        ? resolveSavedAddressConfirmationReply(originalUserText)
+        : '';
+      const isPendingHomeAddressEntry = activeDraft.awaitingSavedAddressInput === true
+        && inbound.type === 'text'
+        && !inbound.actionChoice
+        && originalUserText.trim().length >= 5
+        && !/^(?:cancel|stop|cancel booking|cancel request)$/i.test(originalUserText.trim());
+      if (inbound.actionChoice?.type === 'saved_address_confirmation' || pendingSavedAddressReply || isPendingHomeAddressEntry) {
+        intentResult.intent = 'service_booking';
+        intentResult.serviceId = activeDraft.serviceId;
+        intentResult.confidence = 1.0;
+      } else if (![
         'human_escalation',
         'cancellation',
         'service_discovery',
@@ -12132,6 +12509,50 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       return;
     }
 
+    if (intentResult.intent === 'service_booking') {
+      const linkedUidForDeletionCheck = String(identity.linkedFirebaseUid || '').trim();
+      if (linkedUidForDeletionCheck) {
+        const linkedUserSnap = await db.collection('users').doc(linkedUidForDeletionCheck).get().catch(() => null);
+        const linkedUserData = linkedUserSnap?.exists ? linkedUserSnap.data() || {} : {};
+        if (isAccountPendingDeletion(linkedUserData)) {
+          const dateLabel = formatDeletionDateLabel(linkedUserData.deletionScheduledAtMs);
+          await reply(`Your Uncedo account is currently scheduled for permanent deletion on *${dateLabel}*. Reply *reactivate account* to restore your account before booking a service.`);
+          await jobRef.set({
+            status: 'completed',
+            intent: intentResult.intent,
+            errorCode: 'account-pending-deletion',
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+          return;
+        }
+      }
+      const bookingPrincipalId = String(
+        activeDraft?.principalId
+          || identity.linkedFirebaseUid
+          || identity.guestPrincipalId
+          || '',
+      ).trim();
+      const extraBookingIds = [
+        identity.guestPrincipalId,
+        identity.linkedFirebaseUid,
+      ].map((value) => String(value || '').trim()).filter(Boolean);
+      const unpaidCompleted = await findUnpaidCompletedRequest({
+        db,
+        principalId: bookingPrincipalId,
+        extraCustomerIds: extraBookingIds,
+      }).catch(() => null);
+      if (unpaidCompleted) {
+        await reply(await buildWhatsAppUnpaidCompletedRequestReply({ unpaid: unpaidCompleted }));
+        await jobRef.set({
+          status: 'completed',
+          intent: intentResult.intent,
+          errorCode: 'unpaid-completed-request',
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        return;
+      }
+    }
+
     const serviceHasOptions = Array.isArray(service.options) && service.options.length > 0;
     const priorOptionId = activeDraft?.serviceId === service.id ? String(activeDraft?.selectedOptionId || '').trim() : '';
     const resolvedOptionFromTurn = resolveWhatsAppServiceOption(service, {
@@ -12269,6 +12690,22 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       }
     } else if (inbound.actionChoice?.type === 'service_address_target') {
       answerExtraction.answers = { ...(answerExtraction.answers || {}), service_address_target: inbound.actionChoice.value };
+    } else if (inbound.actionChoice?.type === 'saved_address_confirmation') {
+      answerExtraction.answers = {
+        service_address_target: inbound.actionChoice.action === 'change' ? 'another_address' : 'saved_home_address',
+      };
+    } else if (
+      activeDraft?.serviceId === service.id
+      && activeDraft?.awaitingSavedAddressConfirmation === true
+      && inbound.type === 'text'
+      && !inbound.actionChoice
+    ) {
+      const confirmationReply = resolveSavedAddressConfirmationReply(originalUserText);
+      if (confirmationReply === 'confirm' || confirmationReply === 'change') {
+        answerExtraction.answers = {
+          service_address_target: confirmationReply === 'change' ? 'another_address' : 'saved_home_address',
+        };
+      }
     }
     const baseAnswers = activeDraft?.serviceId === service.id && activeDraft?.structuredAnswers
       ? Object.fromEntries(Object.entries(activeDraft.structuredAnswers).filter(([key]) => allowedQuestionIds.has(key)))
@@ -12307,6 +12744,20 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         }
       }
     }
+    const addressTargetQuestion = serviceQuestions.find((q) => q.id === 'service_address_target');
+    const explicitAddressTargetReply = (inbound.type === 'text' && inbound.actionChoice?.type !== 'service_address_target')
+      ? resolveExplicitServiceAddressTargetReply(originalUserText, {
+        allowedQuestionIds: [...allowedQuestionIds],
+        missingQuestionIds: Array.isArray(activeDraft?.missingQuestionIds) ? activeDraft.missingQuestionIds : [],
+        questionOptions: Array.isArray(addressTargetQuestion?.options) ? addressTargetQuestion.options : [],
+      })
+      : '';
+    if (explicitAddressTargetReply && (!answerExtraction.answers?.service_address_target || inbound.actionChoice?.type !== 'service_address_target')) {
+      answerExtraction.answers = {
+        ...(answerExtraction.answers || {}),
+        service_address_target: explicitAddressTargetReply,
+      };
+    }
     const incomingAnswers = Object.fromEntries(Object.entries(answerExtraction.answers || {}).filter(([key]) => allowedQuestionIds.has(key)));
     let validation;
     try {
@@ -12336,24 +12787,109 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
     const targetRequiresSavedAddress = String(validation.answers?.service_address_target || '').toLowerCase() === 'saved_home_address';
     const targetIsCurrentLocation = String(validation.answers?.service_address_target || '').toLowerCase() === 'current_location';
     const targetIsAnotherAddress = String(validation.answers?.service_address_target || '').toLowerCase() === 'another_address';
-    const hasSavedHomeAddress = Boolean(identity?.homeAddress || identity?.savedAddress || toolIdentity?.homeAddress);
+    const savedHomeAddress = extractSavedAddressFromRecords(identity, toolIdentity);
+    const savedHomeCoordinates = extractSavedHomeLocationFromRecords(identity, toolIdentity);
+    const hasSavedHomeAddress = Boolean(savedHomeAddress);
 
     let effectiveLocation = serviceLocation;
-    if (targetRequiresSavedAddress && hasSavedHomeAddress && (!effectiveLocation || !effectiveLocation.address)) {
-      const saved = String(identity?.homeAddress || identity?.savedAddress || toolIdentity?.homeAddress).trim();
-      if (saved) {
-        effectiveLocation = { address: saved };
+    const savedAddressWorkflow = evaluateSavedAddressWorkflow({
+      serviceId: service.id,
+      targetRequiresSavedAddress,
+      savedHomeAddress,
+      savedHomeCoordinates,
+      activeDraft,
+      effectiveLocation,
+      inbound,
+      originalUserText,
+      explicitAddressTargetReply,
+    });
+
+    if (savedAddressWorkflow.handled) {
+      effectiveLocation = savedAddressWorkflow.effectiveLocation;
+      if (savedAddressWorkflow.switchTargetTo) {
+        validation.answers.service_address_target = savedAddressWorkflow.switchTargetTo;
+        structuredAnswersUpdate.service_address_target = savedAddressWorkflow.switchTargetTo;
       }
-    } else if (targetIsAnotherAddress && (activeDraft?.awaitingAnotherAddress || !activeDraftLocation) && originalUserText && !inbound.actionChoice && inbound.type === 'text') {
-      effectiveLocation = { address: originalUserText.trim() };
+    } else if (targetIsAnotherAddress && (activeDraft?.awaitingAnotherAddress || !activeDraftLocation)
+      && originalUserText && !inbound.actionChoice && inbound.type === 'text' && !explicitAddressTargetReply) {
+      effectiveLocation = { address: originalUserText.trim(), source: 'whatsapp_typed_address' };
     }
 
-    const needsAddressInput = (targetIsAnotherAddress && (!effectiveLocation || !effectiveLocation.address))
-      || (targetRequiresSavedAddress && !hasSavedHomeAddress && (!effectiveLocation || !effectiveLocation.address));
+    if (effectiveLocation?.address && !normalizeGeoCoordinates(effectiveLocation)) {
+      const geocoded = await geocodeServiceAddressWithFallback(effectiveLocation.address, { logger }).catch(() => null);
+      if (geocoded) {
+        effectiveLocation = {
+          ...effectiveLocation,
+          latitude: geocoded.latitude,
+          longitude: geocoded.longitude,
+          geocodeProvider: geocoded.provider,
+        };
+      }
+    }
+
+    if (savedAddressWorkflow.shouldPersistHomeAddress) {
+      const providedHomeAddress = savedAddressWorkflow.shouldPersistHomeAddress;
+      const providedHomeCoords = normalizeGeoCoordinates(effectiveLocation);
+      try {
+        await db.runTransaction(async (transaction) => {
+          const identityRef = db.collection('whatsappIdentities').doc(identityId);
+          const identitySnap = await transaction.get(identityRef);
+          if (!identitySnap.exists) return;
+          const currentIdData = identitySnap.data() || {};
+          const uid = String(currentIdData.linkedFirebaseUid || '').trim();
+          const idUpdate = {
+            homeAddress: providedHomeAddress,
+            ...(providedHomeCoords ? { homeLocation: providedHomeCoords } : {}),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          };
+          let userRef = null;
+          let userSnap = null;
+          let linkSnap = null;
+          if (uid) {
+            userRef = db.collection('users').doc(uid);
+            const linkRef = db.collection('whatsappUserLinks').doc(uid);
+            [userSnap, linkSnap] = await Promise.all([transaction.get(userRef), transaction.get(linkRef)]);
+          }
+          transaction.set(identityRef, idUpdate, { merge: true });
+          const linkData = linkSnap?.data() || {};
+          if (
+            uid
+            && userSnap?.exists
+            && String(linkData.uid || '') === uid
+            && String(linkData.identityId || '') === identityId
+            && normalizeTimestamp(currentIdData.verifiedAt)
+          ) {
+            const existingUserData = userSnap.data() || {};
+            transaction.set(userRef, {
+              homeAddress: providedHomeAddress,
+              ...(providedHomeCoords ? { homeLocation: providedHomeCoords } : {}),
+              customerProfile: {
+                ...(existingUserData.customerProfile || {}),
+                serviceAddress: providedHomeAddress,
+                ...(providedHomeCoords ? { homeLocation: providedHomeCoords } : {}),
+              },
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            }, { merge: true });
+          }
+        });
+      } catch (persistHomeErr) {
+        logger.warn('whatsapp_save_home_address_failed', {
+          identityId,
+          errorCode: String(persistHomeErr?.code || 'save_home_address_failed').slice(0, 80),
+        });
+      }
+    }
+
+    const effectiveTarget = String(validation.answers?.service_address_target || '').toLowerCase();
+    const targetIsNowAnotherAddress = effectiveTarget === 'another_address';
+    const needsAddressInput = (targetIsNowAnotherAddress && (!effectiveLocation || !effectiveLocation.address))
+      || (effectiveTarget === 'saved_home_address' && savedAddressWorkflow.awaitingSavedAddressInput === true);
+    const needsSavedAddressConfirmation = effectiveTarget === 'saved_home_address'
+      && savedAddressWorkflow.awaitingSavedAddressConfirmation === true;
     const locationPinRequired = intentResult.intent === 'service_booking'
       && (targetIsCurrentLocation || activeDraft?.locationPinRequired === true || explicitlyRequestsCurrentLocation)
-      && (!effectiveLocation || !effectiveLocation.latitude);
-    const awaitingAddressOrPin = needsAddressInput || locationPinRequired;
+      && !normalizeGeoCoordinates(effectiveLocation);
+    const awaitingAddressOrPin = needsAddressInput || needsSavedAddressConfirmation || locationPinRequired;
 
     if (validation.missingRequired.length || awaitingAddressOrPin) {
       const canonicalRequestId = activeDraft?.serviceId === service.id
@@ -12377,7 +12913,12 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           ...(currentMediaAssetId ? { mediaAssetIds: admin.firestore.FieldValue.arrayUnion(currentMediaAssetId) } : {}),
           missingQuestionIds: validation.missingRequired,
           locationPinRequired,
-          awaitingAnotherAddress: targetIsAnotherAddress && (!effectiveLocation || !effectiveLocation.address),
+          awaitingAnotherAddress: (targetIsNowAnotherAddress && (!effectiveLocation || !effectiveLocation.address)) || savedAddressWorkflow.awaitingAnotherAddress === true,
+          awaitingSavedAddressInput: savedAddressWorkflow.awaitingSavedAddressInput === true,
+          awaitingSavedAddressConfirmation: savedAddressWorkflow.awaitingSavedAddressConfirmation === true,
+          savedAddressConfirmed: savedAddressWorkflow.savedAddressConfirmed === true,
+          confirmedSavedAddress: savedAddressWorkflow.confirmedSavedAddress || '',
+          pendingSavedAddress: savedAddressWorkflow.awaitingSavedAddressConfirmation ? savedHomeAddress : '',
           questionnaireVersion: stableEventId(JSON.stringify(serviceQuestions)),
           location: effectiveLocation || null,
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -12398,7 +12939,22 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
       });
       const missingQuestions = getMissingRequiredQuestions(applicableQuestions, validation.missingRequired);
       let questionResult;
-      if (missingQuestions.length > 0) {
+      if (savedAddressWorkflow.promptKind === 'missing_home_address') {
+        questionResult = formatWhatsAppMissingHomeAddressPrompt({ service });
+      } else if (savedAddressWorkflow.promptKind === 'confirm_saved_address') {
+        questionResult = formatWhatsAppSavedAddressConfirmationPrompt({
+          service,
+          savedAddress: savedHomeAddress,
+        });
+      } else if (
+        savedAddressWorkflow.promptKind === 'provide_new_address'
+        || (targetIsNowAnotherAddress && (!effectiveLocation || !effectiveLocation.address))
+      ) {
+        questionResult = {
+          text: formatWhatsAppText(`📍 *${service.label}*\n\nPlease provide the street address where you would like the helper to come.`),
+          interactive: null,
+        };
+      } else if (missingQuestions.length > 0) {
         const nextQ = missingQuestions[0];
         const nextQIndex = applicableRequiredOrMissing.findIndex((q) => q.id === nextQ.id);
         const totalRequired = applicableRequiredOrMissing.length;
@@ -12412,16 +12968,6 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
           hasSavedHomeAddress,
           logger,
         });
-      } else if (targetIsAnotherAddress && (!effectiveLocation || !effectiveLocation.address)) {
-        questionResult = {
-          text: formatWhatsAppText(`📍 *${service.label}*\n\nPlease type the street address where you would like the helper to come.`),
-          interactive: null,
-        };
-      } else if (targetRequiresSavedAddress && !hasSavedHomeAddress && (!effectiveLocation || !effectiveLocation.address)) {
-        questionResult = {
-          text: formatWhatsAppText(`🏠 *${service.label}*\n\nI do not have a saved address on file for you. Please type your street address below, or share your WhatsApp location pin.`),
-          interactive: null,
-        };
       } else if (locationPinRequired) {
         questionResult = {
           text: formatWhatsAppText(`📍 *${service.label}*\n\nPlease share your current WhatsApp location pin (📎 > Location) to continue.`),
@@ -12481,6 +13027,8 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         let failureReply = 'I could not start this request yet. Please check your active requests or contact Uncedo support.';
         if (requestDraft.code === 'active-request') {
           failureReply = `You already have an active Uncedo request (${requestDraft.activeRequestId}). Please complete or cancel it before starting another one.`;
+        } else if (requestDraft.code === 'unpaid-completed-request') {
+          failureReply = await buildWhatsAppUnpaidCompletedRequestReply({ unpaid: requestDraft });
         } else if (requestDraft.code === 'invalid-service-answers') {
           failureReply = 'I need a bit more information to set up this request. Please review your answers or let me know the service details.';
         } else if (requestDraft.code === 'service-unavailable') {
@@ -12548,11 +13096,17 @@ exports.processWhatsAppAssistantJobOnCreate = onDocumentCreated({
         ...(currentMediaAssetId ? { mediaAssetIds: admin.firestore.FieldValue.arrayUnion(currentMediaAssetId) } : {}),
         missingQuestionIds: [],
         locationPinRequired: false,
+        awaitingAnotherAddress: false,
+        awaitingSavedAddressInput: false,
+        awaitingSavedAddressConfirmation: false,
+        savedAddressConfirmed: savedAddressWorkflow.savedAddressConfirmed === true,
+        confirmedSavedAddress: savedAddressWorkflow.confirmedSavedAddress || '',
+        pendingSavedAddress: '',
         questionnaireVersion: quote.questionnaireVersion,
         serviceCatalogVersion: quote.serviceCatalogVersion,
         quoteSnapshot: quote,
         quoteExpiresAtMs,
-        location: serviceLocation || null,
+        location: effectiveLocation || serviceLocation || null,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         createdAt: activeDraft?.createdAt || admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
@@ -12690,10 +13244,12 @@ exports.syncServiceRequestLifecycle = onDocumentWritten({
 
   const requestId = event.params.requestId;
   const requestRef = db.collection('serviceRequests').doc(requestId);
-  const dispatchPlan = await getHelperDispatchPlanForServiceRequest(afterData, { includeBusyFallback: true });
+  const preNormalized = normalizeExpiredPendingOffer(afterData, Date.now());
+  const dispatchPlan = await getHelperDispatchPlanForServiceRequest(preNormalized.request, { includeBusyFallback: true });
   const candidateQueue = dispatchPlan.freeQueue;
 
   let expiredDuringSyncData = null;
+  let expiredOfferStatToRecord = null;
 
   await db.runTransaction(async (transaction) => {
     const snap = await transaction.get(requestRef);
@@ -12726,7 +13282,7 @@ exports.syncServiceRequestLifecycle = onDocumentWritten({
     if (
       request.status === SERVICE_REQUEST_STATUS.HELPER_FOUND
       && request.currentOfferHelperId
-      && normalizeMillis(request.offerExpiresAt) > Date.now()
+      && normalizeMillis(request.offerExpiresAt) > now
     ) {
       logger.info('service_request_lifecycle_offer_preserved', {
         requestId,
@@ -12738,17 +13294,31 @@ exports.syncServiceRequestLifecycle = onDocumentWritten({
       return;
     }
 
-    const freeSelection = resolveNextServiceHelperSelection(request, candidateQueue, now);
+    const expiredOfferCleanup = normalizeExpiredPendingOffer(request, now);
+    const effectiveRequest = expiredOfferCleanup.request;
+    const freeSelection = resolveNextServiceHelperSelection(effectiveRequest, candidateQueue, now);
     const selection = resolveHelperSelectionWithBusyFallback({
-      request,
+      request: effectiveRequest,
       freeSelection,
       busyCandidateQueue: dispatchPlan.busyQueue,
     });
     const { queue, selectedHelperId } = selection;
 
+    if (expiredOfferCleanup.expired && !expiredOfferCleanup.alreadyRecorded) {
+      expiredOfferStatToRecord = {
+        helperId: expiredOfferCleanup.helperId,
+        offerRevision: expiredOfferCleanup.offerRevision,
+        categoryId: effectiveRequest.categoryId || '',
+        serviceIds: Array.isArray(effectiveRequest.serviceIds) ? effectiveRequest.serviceIds : [],
+        offeredAtMs: expiredOfferCleanup.offeredAtMs || now,
+        closedAtMs: now,
+      };
+    }
+
     logger.info('service_request_lifecycle_selection', {
       requestId,
       requestStatus: String(request.status || '').toLowerCase(),
+      expiredOfferNormalizedHelperId: expiredOfferCleanup.expired ? expiredOfferCleanup.helperId : null,
       candidateQueueSize: Array.isArray(candidateQueue) ? candidateQueue.length : 0,
       busyQueueSize: Array.isArray(dispatchPlan.busyQueue) ? dispatchPlan.busyQueue.length : 0,
       selectedHelperId: selectedHelperId || null,
@@ -12761,7 +13331,7 @@ exports.syncServiceRequestLifecycle = onDocumentWritten({
     });
 
     if (!selectedHelperId) {
-      if (hasNoHelperWindowExpired(request, now)) {
+      if (hasNoHelperWindowExpired(effectiveRequest, now)) {
         transaction.update(requestRef, {
           status: SERVICE_REQUEST_STATUS.EXPIRED,
           statusDetail: 'Service request expired. No helpers were available within 5 minutes.',
@@ -12769,18 +13339,20 @@ exports.syncServiceRequestLifecycle = onDocumentWritten({
           expiredAtMs: now,
           expiredReason: 'no_helper_available_5min_timeout',
           helperQueue: queue,
+          busyHelperQueue: [],
           currentOfferHelperId: null,
           offerExpiresAt: null,
           offerToken: null,
           offerType: null,
           offerBusyActiveRequestId: null,
+          ...(expiredOfferCleanup.expired ? { lastOfferResponse: expiredOfferCleanup.lastOfferResponse } : {}),
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
-        expiredDuringSyncData = { ...request, status: SERVICE_REQUEST_STATUS.EXPIRED, expiredAtMs: now };
+        expiredDuringSyncData = { ...effectiveRequest, status: SERVICE_REQUEST_STATUS.EXPIRED, expiredAtMs: now };
         return;
       }
-      if (request.status !== SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE) {
-        const noHelperWindowExpiresAtMs = Number(request.noHelperWindowExpiresAtMs || 0) || (now + NO_HELPER_WINDOW_MS);
+      if (request.status !== SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE || expiredOfferCleanup.expired) {
+        const noHelperWindowExpiresAtMs = Number(effectiveRequest.noHelperWindowExpiresAtMs || 0) || (now + NO_HELPER_WINDOW_MS);
         logger.info('service_request_lifecycle_no_helper_available', {
           requestId,
           helperQueueSize: Array.isArray(queue) ? queue.length : 0,
@@ -12799,9 +13371,10 @@ exports.syncServiceRequestLifecycle = onDocumentWritten({
           offerType: null,
           offerBusyActiveRequestId: null,
           offerCycleExcludedHelperIds: selection.excludedHelperIds,
-          declinedHelperIds: getServiceRequestDeclinedHelperIds(request),
-          matchingStartedAtMs: getRequestMatchingStartedAtMs(request) || now,
+          declinedHelperIds: getServiceRequestDeclinedHelperIds(effectiveRequest),
+          matchingStartedAtMs: getRequestMatchingStartedAtMs(effectiveRequest) || now,
           noHelperWindowExpiresAtMs,
+          ...(expiredOfferCleanup.expired ? { lastOfferResponse: expiredOfferCleanup.lastOfferResponse } : {}),
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
       }
@@ -12809,7 +13382,7 @@ exports.syncServiceRequestLifecycle = onDocumentWritten({
     }
 
     const selectedHelperRef = db.collection('users').doc(selectedHelperId);
-    const offerRevision = nextOfferRevision(request);
+    const offerRevision = nextOfferRevision(effectiveRequest);
     const offerToken = randomUUID();
     const isBusyFallback = selection.isBusyFallback === true;
     const offerBusyActiveRequestId = isBusyFallback
@@ -12849,7 +13422,8 @@ exports.syncServiceRequestLifecycle = onDocumentWritten({
       offerType: isBusyFallback ? 'busy_helper_fallback' : 'standard',
       offerBusyActiveRequestId,
       offerCycleExcludedHelperIds: selection.resetExcludedHelperIds ? [] : selection.excludedHelperIds,
-      declinedHelperIds: getServiceRequestDeclinedHelperIds(request),
+      declinedHelperIds: getServiceRequestDeclinedHelperIds(effectiveRequest),
+      ...(expiredOfferCleanup.expired ? { lastOfferResponse: expiredOfferCleanup.lastOfferResponse } : {}),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
     transaction.set(selectedHelperRef, {
@@ -12861,6 +13435,25 @@ exports.syncServiceRequestLifecycle = onDocumentWritten({
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     }, { merge: true });
   });
+
+  if (expiredOfferStatToRecord) {
+    await recordHelperOfferLifecycleEvent({
+      helperId: expiredOfferStatToRecord.helperId,
+      requestId,
+      offerRevision: expiredOfferStatToRecord.offerRevision,
+      categoryId: expiredOfferStatToRecord.categoryId,
+      serviceIds: expiredOfferStatToRecord.serviceIds,
+      outcome: 'expired',
+      offeredAtMs: expiredOfferStatToRecord.offeredAtMs,
+      closedAtMs: expiredOfferStatToRecord.closedAtMs,
+      responseMinutes: null,
+      sourceStatus: 'matching',
+    }).catch((error) => logger.warn('helper_offer_expiry_stats_failed', {
+      requestId,
+      helperId: expiredOfferStatToRecord.helperId,
+      error: error?.message,
+    }));
+  }
 
   if (expiredDuringSyncData) {
     await sendWhatsAppCustomerRequestExpiredNotification({ requestId, request: expiredDuringSyncData })
@@ -12950,24 +13543,19 @@ exports.expireServiceRequestOffer = onTaskDispatched({
     const decision = evaluateOfferExpiry(request, { helperId, offerToken, offerRevision }, Date.now());
     if (!decision.shouldExpire) return { expired: false, reason: decision.code };
 
-    const helperQueue = (Array.isArray(request.helperQueue) ? request.helperQueue : [])
-      .map((value) => String(value || '').trim())
-      .filter((value) => value && value !== helperId);
-    const offerCycleExcludedHelperIds = [...new Set([
-      ...(Array.isArray(request.offerCycleExcludedHelperIds) ? request.offerCycleExcludedHelperIds : []),
-      helperId,
-    ].map((value) => String(value || '').trim()).filter(Boolean))];
+    const lists = buildExpiredOfferLists(request, helperId);
 
     transaction.update(requestRef, {
       status: SERVICE_REQUEST_STATUS.MATCHING,
       statusDetail: 'Helper offer expired. Matching the next helper.',
-      helperQueue,
+      helperQueue: lists.helperQueue,
+      busyHelperQueue: lists.busyHelperQueue,
       currentOfferHelperId: null,
       offerExpiresAt: null,
       offerToken: null,
       offerType: null,
       offerBusyActiveRequestId: null,
-      offerCycleExcludedHelperIds,
+      offerCycleExcludedHelperIds: lists.offerCycleExcludedHelperIds,
       lastOfferResponse: {
         helperId,
         offerToken,
@@ -13590,12 +14178,50 @@ exports.scheduleServiceRequestExpiryOnNoHelperWrite = onDocumentWritten({
   } catch (error) {
     if (String(error?.code || '').includes('task-already-exists')) {
       logger.info('service_request_no_helper_expiry_task_already_scheduled', { requestId });
-      return;
+    } else {
+      logger.error('service_request_no_helper_expiry_task_schedule_failed', {
+        requestId,
+        error: error?.message || 'unknown_error',
+      });
     }
-    logger.error('service_request_no_helper_expiry_task_schedule_failed', {
-      requestId,
-      error: error?.message || 'unknown_error',
-    });
+  }
+
+  const queuedDeferredHelpers = Array.isArray(after.helperQueue) ? after.helperQueue.filter(Boolean) : [];
+  if (queuedDeferredHelpers.length > 0) {
+    const lastOfferAtMs = normalizeMillis(after.lastOfferAt);
+    const cooldownAtMs = lastOfferAtMs > 0
+      ? lastOfferAtMs + HELPER_REOFFER_COOLDOWN_MS
+      : (now + HELPER_REOFFER_COOLDOWN_MS);
+    if (cooldownAtMs + 5000 < expiresAtMs) {
+      const reofferDelaySeconds = Math.max(1, Math.ceil((cooldownAtMs - now) / 1000) + 1);
+      const reofferTaskId = `no-helper-reoffer_${createHash('sha256').update(`${requestId}:${lastOfferAtMs || expiresAtMs}`).digest('hex').slice(0, 32)}`;
+      try {
+        await getFunctions().taskQueue('expireServiceRequestOnNoHelperAvailable').enqueue({
+          requestId,
+          mode: 'reoffer_cooldown',
+          scheduledAtMs: now,
+          lastOfferAtMs,
+          expiresAtMs: cooldownAtMs,
+        }, {
+          id: reofferTaskId,
+          scheduleDelaySeconds: reofferDelaySeconds,
+          dispatchDeadlineSeconds: 60,
+        });
+        logger.info('service_request_no_helper_reoffer_task_scheduled', {
+          requestId,
+          delaySeconds: reofferDelaySeconds,
+          cooldownAtMs,
+          taskId: reofferTaskId,
+        });
+      } catch (reofferError) {
+        if (!String(reofferError?.code || '').includes('task-already-exists')) {
+          logger.warn('service_request_no_helper_reoffer_task_schedule_failed', {
+            requestId,
+            error: reofferError?.message || 'unknown_error',
+          });
+        }
+      }
+    }
   }
 });
 
@@ -13613,6 +14239,42 @@ exports.expireServiceRequestOnNoHelperAvailable = onTaskDispatched({
   }
 
   const requestRef = db.collection('serviceRequests').doc(requestId);
+  if (input.mode === 'reoffer_cooldown') {
+    const reofferOutcome = await db.runTransaction(async (transaction) => {
+      const requestSnap = await transaction.get(requestRef);
+      if (!requestSnap.exists) return { retried: false, reason: 'not-found' };
+      const request = requestSnap.data() || {};
+      const currentStatus = String(request.status || '').trim().toLowerCase();
+      if (currentStatus !== SERVICE_REQUEST_STATUS.NO_HELPER_AVAILABLE || request?.helperAssignment?.helperId) {
+        return { retried: false, reason: 'status-changed' };
+      }
+      const now = Date.now();
+      if (hasNoHelperWindowExpired(request, now)) {
+        return { retried: false, reason: 'window-expired' };
+      }
+      const deferred = Array.isArray(request.helperQueue) ? request.helperQueue.filter(Boolean) : [];
+      if (!deferred.length) {
+        return { retried: false, reason: 'no-deferred-helpers' };
+      }
+      const lastOfferAtMs = normalizeMillis(request.lastOfferAt);
+      if (lastOfferAtMs > 0 && (now - lastOfferAtMs) < (HELPER_REOFFER_COOLDOWN_MS - 1000)) {
+        return { retried: false, reason: 'cooldown-not-elapsed' };
+      }
+      transaction.update(requestRef, {
+        status: SERVICE_REQUEST_STATUS.MATCHING,
+        statusDetail: 'Retrying available helpers after cooldown.',
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      return { retried: true };
+    });
+    logger.info('service_request_no_helper_reoffer_task_finished', {
+      requestId,
+      retried: reofferOutcome.retried,
+      reason: reofferOutcome.reason || null,
+    });
+    return;
+  }
+
   let expiredRequestData = null;
 
   await db.runTransaction(async (transaction) => {
@@ -13841,6 +14503,73 @@ exports.notifyWhatsAppHelperOfferOnServiceRequestWrite = onDocumentWritten({
   }
 });
 
+exports.notifyWebPushHelperOfferOnServiceRequestWrite = onDocumentWritten({
+  document: 'serviceRequests/{requestId}',
+  maxInstances: 2,
+  ...QUARTER_CPU_OPTIONS,
+}, async (event) => {
+  const before = event.data.before.exists ? event.data.before.data() || {} : null;
+  const after = event.data.after.exists ? event.data.after.data() || {} : null;
+  if (!after || String(after.status || '').toLowerCase() !== SERVICE_REQUEST_STATUS.HELPER_FOUND) return;
+
+  const requestId = String(event.params.requestId || '').trim();
+  const helperId = String(after.currentOfferHelperId || '').trim();
+  const offerToken = String(after.offerToken || '').trim();
+  const offerRevision = normalizeRevision(after.offerRevision);
+  if (!requestId || !helperId || !offerToken || !offerRevision) return;
+
+  if (
+    before
+    && String(before.status || '').toLowerCase() === SERVICE_REQUEST_STATUS.HELPER_FOUND
+    && String(before.currentOfferHelperId || '') === helperId
+    && String(before.offerToken || '') === offerToken
+    && normalizeRevision(before.offerRevision) === offerRevision
+  ) {
+    return;
+  }
+
+  const offerPayoutBreakdown = after.helperPayoutBreakdown && typeof after.helperPayoutBreakdown === 'object'
+    ? after.helperPayoutBreakdown
+    : getServiceHelperPayoutBreakdown(after, { closureType: 'completed', waitingCost: 0 });
+  const payoutAmount = toRand(
+    offerPayoutBreakdown?.helperAmount
+      ?? after.pricingSnapshot?.total
+      ?? after.pricingSnapshot?.finalAmount
+      ?? 0,
+  );
+
+  try {
+    const result = await sendHelperOfferWebPush({
+      db,
+      messaging: getMessaging(),
+      serverTimestamp: admin.firestore.FieldValue.serverTimestamp(),
+      requestId,
+      after,
+      helperId,
+      payoutAmount,
+      nowMs: Date.now(),
+      logger,
+    });
+    if (!result.skipped) {
+      logger.info('helper_web_push_offer_dispatched', {
+        requestId,
+        helperId,
+        offerRevision,
+        sent: result.sent,
+        pruned: result.pruned,
+        totalTokens: result.totalTokens,
+      });
+    }
+  } catch (error) {
+    logger.warn('helper_web_push_offer_failed', {
+      requestId,
+      helperId,
+      offerRevision,
+      error: String(error?.message || 'unknown').slice(0, 160),
+    });
+  }
+});
+
 exports.respondToServiceRequestOffer = onRequest({ cors: true, invoker: 'public', maxInstances: 2, ...QUARTER_CPU_OPTIONS, memory: '512MiB', timeoutSeconds: 60 }, async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, message: 'Method not allowed.' });
@@ -13987,11 +14716,42 @@ exports.updateHelperServiceRequest = onRequest({ cors: true, invoker: 'public', 
         return { error: 'helper-account-required', status: 403 };
       }
       const request = requestSnap.data() || {};
-      if (String(request?.helperAssignment?.helperId || '') !== helperId) {
-        return { error: 'not-assigned-helper', status: 403 };
-      }
       const financialOperation = financialOperationSnap.exists ? financialOperationSnap.data() || {} : null;
       const currentStatusLower = String(request.status || '').toLowerCase();
+      const helperData = helperSnap.data() || {};
+      const assignedHelperId = String(request?.helperAssignment?.helperId || '');
+
+      if (action === 'cancel'
+        && !assignedHelperId
+        && String(request.lastCanceledHelperId || '') === helperId) {
+        const helperUpdates = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+        if (String(helperData.activeServiceRequestId || '') === requestId) {
+          helperUpdates.activeServiceRequestId = null;
+        }
+        if (String(helperData.queuedServiceRequestId || '') === requestId) {
+          helperUpdates.queuedServiceRequestId = admin.firestore.FieldValue.delete();
+        }
+        transaction.set(helperRef, helperUpdates, { merge: true });
+        transaction.set(db.collection('helperDispatchIndex').doc(helperId), {
+          activeServiceRequestId: null,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        return {
+          changed: false,
+          alreadyCanceled: true,
+          rematched: true,
+          canceledFromStatus: String(request.lastCanceledFromStatus || currentStatusLower),
+          customerId: String(request.customerId || ''),
+          subject: String(request.serviceSummary || request.subject || 'Service request'),
+          helperName: String(request.lastCanceledHelperName || helperData.fullName || 'Your helper'),
+          canceledNowMs: Number(request.lastHelperCanceledAtMs || Date.now()),
+        };
+      }
+
+      if (assignedHelperId !== helperId) {
+        return { error: 'not-assigned-helper', status: 403 };
+      }
+
       if (action === 'cancel'
         && currentStatusLower === SERVICE_REQUEST_STATUS.CANCELED
         && financialOperation?.operationType === 'helper_cancellation') {
@@ -14006,10 +14766,11 @@ exports.updateHelperServiceRequest = onRequest({ cors: true, invoker: 'public', 
         return {
           changed: false,
           alreadyCanceled: true,
+          rematched: false,
           canceledFromStatus: currentStatusLower,
           customerId: String(request.customerId || ''),
           subject: String(request.serviceSummary || request.subject || 'Service request'),
-          helperName: String(request.helperAssignment?.helperName || helperSnap.data()?.fullName || 'Your helper'),
+          helperName: String(request.helperAssignment?.helperName || helperData.fullName || 'Your helper'),
           canceledNowMs: Number(request.canceledAtMs || Date.now()),
         };
       }
@@ -14018,66 +14779,71 @@ exports.updateHelperServiceRequest = onRequest({ cors: true, invoker: 'public', 
       }
 
       if (action === 'cancel') {
-        const cancelableStatuses = new Set(['accepted', 'driving', 'en_route', 'buying_resources', 'arrived', 'work_started']);
-        if (!cancelableStatuses.has(currentStatusLower)) {
-          return { error: 'request-not-cancelable', status: 409 };
-        }
         const cancelNowMs = Date.now();
-        transaction.update(requestRef, {
-          status: SERVICE_REQUEST_STATUS.CANCELED,
-          canceledFromStatus: currentStatusLower,
-          statusDetail: 'Helper canceled the session.',
-          canceledBy: 'helper',
-          canceledReason: reason,
-          canceledAt: admin.firestore.FieldValue.serverTimestamp(),
-          canceledAtMs: cancelNowMs,
-          endedAt: cancelNowMs,
-          helperPayoutBreakdown: {
-            helperAmount: 0,
-            platformAmount: 0,
-            customerChargeAmount: 0,
-            closureType: 'canceled',
-            payoutRule: 'helper_canceled',
-          },
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          financialOperationId: serviceFinancialOperationId(requestId),
+        const helperName = String(request.helperAssignment?.helperName || helperData.fullName || 'Your helper');
+        const nextPayoutBreakdown = request.pricingSnapshot
+          ? getServiceHelperPayoutBreakdown(request, { closureType: 'completed', waitingCost: 0 })
+          : undefined;
+        const rematch = buildHelperCancelRematchTransition(request, {
+          helperId,
+          helperName,
+          reason,
+          nextPayoutBreakdown,
+          now: cancelNowMs,
+          noHelperWindowMs: NO_HELPER_WINDOW_MS,
         });
-        if (['arrived', 'work_started'].includes(currentStatusLower)) {
+        if (!rematch.ok) {
+          return {
+            error: rematch.code || 'request-not-cancelable',
+            status: rematch.code === 'not-assigned-helper' ? 403 : 409,
+          };
+        }
+
+        transaction.update(requestRef, {
+          ...rematch.updates,
+          lastCanceledFromStatus: rematch.canceledFromStatus,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        if (['arrived', 'work_started'].includes(rematch.canceledFromStatus) || request.arrivalVerification?.required === true) {
           transaction.set(requestRef.collection('private').doc('arrivalPin'), {
             pin: admin.firestore.FieldValue.delete(),
             invalidatedAtMs: cancelNowMs,
-            invalidatedReason: 'helper_canceled',
+            invalidatedReason: 'helper_canceled_rematch',
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           }, { merge: true });
         }
-        transaction.create(financialOperationRef, {
-          operationId: serviceFinancialOperationId(requestId),
-          requestId,
-          operationType: 'helper_cancellation',
-          status: 'settled_no_charge',
-          finalOutcome: 'no_charge',
-          paymentStatus: 'not_applicable',
-          paymentSettled: true,
-          settlementApplied: true,
-          canceledFromStatus: currentStatusLower,
-          createdAtMs: cancelNowMs,
-          updatedAtMs: cancelNowMs,
-        });
-        transaction.set(helperRef, {
-          activeServiceRequestId: null,
+
+        const helperUpdates = {
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        }, { merge: true });
-        transaction.set(db.collection('helperDispatchIndex').doc(helperId), {
-          activeServiceRequestId: null,
+        };
+        if (String(helperData.activeServiceRequestId || '') === requestId) {
+          helperUpdates.activeServiceRequestId = null;
+        }
+        if (String(helperData.queuedServiceRequestId || '') === requestId) {
+          helperUpdates.queuedServiceRequestId = admin.firestore.FieldValue.delete();
+        }
+        transaction.set(helperRef, helperUpdates, { merge: true });
+
+        const dispatchIndexUpdates = {
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        }, { merge: true });
+        };
+        if (String(helperData.activeServiceRequestId || '') === requestId || rematch.canceledFromStatus !== 'helper_queued') {
+          dispatchIndexUpdates.activeServiceRequestId = null;
+        }
+        transaction.set(db.collection('helperDispatchIndex').doc(helperId), dispatchIndexUpdates, { merge: true });
+
         return {
           changed: true,
           didCancel: true,
-          canceledFromStatus: currentStatusLower,
+          rematched: true,
+          canceledFromStatus: rematch.canceledFromStatus,
+          offerRevision: rematch.updates.offerRevision,
+          categoryId: String(request.categoryId || ''),
+          serviceIds: Array.isArray(request.serviceIds) ? request.serviceIds : [],
           customerId: String(request.customerId || ''),
           subject: String(request.serviceSummary || request.subject || 'Service request'),
-          helperName: String(request.helperAssignment?.helperName || helperSnap.data()?.fullName || 'Your helper'),
+          helperName: rematch.helperName,
           canceledNowMs: cancelNowMs,
         };
       }
@@ -14192,28 +14958,81 @@ exports.updateHelperServiceRequest = onRequest({ cors: true, invoker: 'public', 
     }
     if (result.didCancel || result.alreadyCanceled) {
       const closedAtMs = Number(result.canceledNowMs || Date.now());
-      await Promise.all([
-        admin.database().ref(`liveTracking/serviceRequests/${requestId}`).update({
-          status: SERVICE_REQUEST_STATUS.CANCELED,
-          closedReason: 'helper_canceled',
-          closedAtMs,
-          updatedAtMs: closedAtMs,
-        }).catch(() => null),
-        result.customerId
-          ? createUserNotificationOnce({
-            notificationId: `helper_cancel_${requestId}_${helperId}`,
-            userId: result.customerId,
-            title: 'Service canceled by helper',
-            message: `${result.helperName || 'Your helper'} canceled the ${result.subject || 'service'} session.${reason ? ` Reason: ${reason}` : ''}`,
-            type: 'service_canceled',
-            requestId,
-            targetPath: `/customer/requests/${requestId}`,
-            metadata: { canceledBy: 'helper', canceledFromStatus: result.canceledFromStatus || '' },
-          }).catch(() => null)
-          : Promise.resolve(),
-        syncHelperDispatchIndexById(helperId).catch(() => null),
-        computeHelperDerivedStats(helperId).catch(() => null),
-      ]);
+      if (result.rematched) {
+        const { offerEventsRef } = getHelperStatsCollections(helperId);
+        await Promise.all([
+          admin.database().ref(`liveTracking/serviceRequests/${requestId}`).update({
+            status: SERVICE_REQUEST_STATUS.MATCHING,
+            helperId: '',
+            helperLocation: null,
+            routePolylineEncoded: '',
+            routePolylineOverviewEncoded: '',
+            routeSnapshot: null,
+            distanceMeters: null,
+            durationSeconds: null,
+            distanceTravelledMeters: 0,
+            closedReason: null,
+            closedAtMs: null,
+            updatedAtMs: closedAtMs,
+          }).catch(() => null),
+          result.didCancel
+            ? storeHelperStatsEvent({
+              uid: helperId,
+              collectionRef: offerEventsRef,
+              eventId: `${requestId}_cancel_${closedAtMs}`,
+              payload: {
+                helperId,
+                requestId,
+                offerRevision: Number(result.offerRevision || 0),
+                categoryId: String(result.categoryId || ''),
+                serviceIds: Array.isArray(result.serviceIds) ? result.serviceIds : [],
+                outcome: 'helper_canceled',
+                canceledFromStatus: result.canceledFromStatus || '',
+                reason,
+                occurredAtMs: closedAtMs,
+                closedAtMs,
+              },
+            }).catch(() => null)
+            : Promise.resolve(),
+          result.customerId
+            ? createUserNotificationOnce({
+              notificationId: `helper_cancel_rematch_${requestId}_${helperId}_${closedAtMs}`,
+              userId: result.customerId,
+              title: 'Finding you a new helper',
+              message: `${result.helperName || 'Your helper'} canceled the ${result.subject || 'service'} session.${reason ? ` Reason: ${reason}` : ''} We are finding another nearby helper for you now.`,
+              type: 'matching_update',
+              requestId,
+              targetPath: `/customer/requests/${requestId}`,
+              metadata: { canceledBy: 'helper', rematched: true, canceledFromStatus: result.canceledFromStatus || '' },
+            }).catch(() => null)
+            : Promise.resolve(),
+          syncHelperDispatchIndexById(helperId).catch(() => null),
+          computeHelperDerivedStats(helperId).catch(() => null),
+        ]);
+      } else {
+        await Promise.all([
+          admin.database().ref(`liveTracking/serviceRequests/${requestId}`).update({
+            status: SERVICE_REQUEST_STATUS.CANCELED,
+            closedReason: 'helper_canceled',
+            closedAtMs,
+            updatedAtMs: closedAtMs,
+          }).catch(() => null),
+          result.customerId
+            ? createUserNotificationOnce({
+              notificationId: `helper_cancel_${requestId}_${helperId}`,
+              userId: result.customerId,
+              title: 'Service canceled by helper',
+              message: `${result.helperName || 'Your helper'} canceled the ${result.subject || 'service'} session.${reason ? ` Reason: ${reason}` : ''}`,
+              type: 'service_canceled',
+              requestId,
+              targetPath: `/customer/requests/${requestId}`,
+              metadata: { canceledBy: 'helper', canceledFromStatus: result.canceledFromStatus || '' },
+            }).catch(() => null)
+            : Promise.resolve(),
+          syncHelperDispatchIndexById(helperId).catch(() => null),
+          computeHelperDerivedStats(helperId).catch(() => null),
+        ]);
+      }
       await promoteNextQueuedServiceRequestForHelper({ helperId, closedRequestId: requestId })
         .catch((err) => logger.warn('promote_queued_after_helper_cancel_failed', { helperId, requestId, error: err?.message }));
     }
@@ -14375,7 +15194,7 @@ exports.syncServiceRequestAssignmentState = onDocumentWritten({
     const customerId = after.customerId || before?.customerId || null;
     const helperName = after?.helperAssignment?.helperName || 'A helper';
     const acceptedAtMs = normalizeTimestamp(after?.helperAssignment?.acceptedAt) || Date.now();
-    const customerLocation = normalizeCoordinate(after.location || after.requestPayload?.location || null);
+    const customerLocation = getServiceRequestLocationSnapshot(after);
     const helperSnapshot = await db.collection('users').doc(helperId).get();
     const helperLocation = getLiveLocationSnapshot(helperSnapshot.data() || {});
     const initialTracking = {
@@ -14671,6 +15490,112 @@ exports.syncHelperDispatchIndexOnServiceOfferingWrite = onDocumentWritten({
     source: newlyApproved ? 'helper_service_moderation' : 'offering_sync',
   }).catch(() => null);
   await syncHelperDispatchIndexById(helperId);
+});
+
+exports.syncHelperOfferingsOnServiceCatalogWrite = onDocumentWritten({
+  document: 'serviceCatalog/{serviceId}',
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
+}, async (event) => {
+  serviceCatalogCache = { loadedAtMs: 0, entries: [] };
+
+  const rawServiceId = String(event.params?.serviceId || '').trim();
+  const canonicalServiceId = normalizeServiceToken(rawServiceId);
+  if (!canonicalServiceId) return;
+
+  const afterEntry = event.data.after.exists
+    ? normalizeServiceCatalogEntry({ id: rawServiceId, ...(event.data.after.data() || {}) })
+    : null;
+
+  const serviceIdCandidates = [...new Set([
+    rawServiceId,
+    canonicalServiceId,
+    String(afterEntry?.id || '').trim(),
+    normalizeServiceToken(afterEntry?.id || ''),
+  ].filter(Boolean))].slice(0, 10);
+
+  const offeringsQuery = serviceIdCandidates.length
+    ? await db.collection('helperServices')
+      .where('serviceId', serviceIdCandidates.length === 1 ? '==' : 'in', serviceIdCandidates.length === 1 ? serviceIdCandidates[0] : serviceIdCandidates)
+      .get()
+      .catch(() => null)
+    : null;
+  if (!offeringsQuery || offeringsQuery.empty) return;
+
+  const optionTitleById = new Map(
+    (Array.isArray(afterEntry?.options) ? afterEntry.options : [])
+      .map((opt) => [normalizeServiceToken(opt.id), String(opt.title || '').trim()])
+      .filter(([optId]) => Boolean(optId)),
+  );
+
+  const affectedHelperIds = new Set();
+  const pendingUpdates = [];
+
+  offeringsQuery.docs.forEach((docSnap) => {
+    const offering = docSnap.data() || {};
+    const helperId = String(offering.helperId || '').trim();
+    if (helperId) affectedHelperIds.add(helperId);
+    if (!afterEntry) return;
+
+    const nextPatch = {};
+    const nextServiceName = String(afterEntry.label || offering.serviceName || canonicalServiceId).trim();
+    const nextCategoryId = normalizeServiceToken(afterEntry.categoryId || offering.categoryId);
+    const nextCategoryName = String(afterEntry.categoryName || offering.categoryName || '').trim();
+    if (nextServiceName && String(offering.serviceName || '').trim() !== nextServiceName) {
+      nextPatch.serviceName = nextServiceName;
+    }
+    if (nextCategoryId && normalizeServiceToken(offering.categoryId) !== nextCategoryId) {
+      nextPatch.categoryId = nextCategoryId;
+    }
+    if (nextCategoryName && String(offering.categoryName || '').trim() !== nextCategoryName) {
+      nextPatch.categoryName = nextCategoryName;
+    }
+
+    const optId = normalizeServiceToken(offering.optionId || '');
+    const catalogHasOptions = optionTitleById.size > 0;
+    if (optId && optionTitleById.has(optId)) {
+      const liveOptionTitle = optionTitleById.get(optId);
+      if (liveOptionTitle && String(offering.optionTitle || '').trim() !== liveOptionTitle) {
+        nextPatch.optionTitle = liveOptionTitle;
+      }
+      if (offering.catalogOptionRemoved === true) {
+        nextPatch.catalogOptionRemoved = admin.firestore.FieldValue.delete();
+      }
+    } else if (optId && catalogHasOptions && !optionTitleById.has(optId)) {
+      const alreadyDisabled = offering.active === false
+        && String(offering.status || '').trim().toLowerCase() === 'paused'
+        && offering.approved === false
+        && offering.catalogOptionRemoved === true;
+      if (!alreadyDisabled) {
+        nextPatch.active = false;
+        nextPatch.status = 'paused';
+        nextPatch.approved = false;
+        nextPatch.catalogOptionRemoved = true;
+      }
+    }
+
+    if (Object.keys(nextPatch).length > 0) {
+      nextPatch.updatedAt = admin.firestore.FieldValue.serverTimestamp();
+      pendingUpdates.push({ ref: docSnap.ref, patch: nextPatch });
+    }
+  });
+
+  for (let i = 0; i < pendingUpdates.length; i += 400) {
+    const chunk = pendingUpdates.slice(i, i + 400);
+    const batch = db.batch();
+    chunk.forEach(({ ref, patch }) => batch.update(ref, patch));
+    await batch.commit();
+  }
+
+  for (const helperId of affectedHelperIds) {
+    await syncHelperDispatchIndexById(helperId).catch((error) => {
+      logger.warn('catalog_write_helper_dispatch_sync_failed', {
+        serviceId: canonicalServiceId,
+        helperId,
+        error: error?.message || 'unknown_error',
+      });
+    });
+  }
 });
 
 exports.notifyWhatsAppHelperServiceModeration = onDocumentCreated({
@@ -17700,17 +18625,21 @@ async function buildRequestPaymentLink({ requestId, request = {}, expiresInMs = 
   return `${baseUrl}?token=${encodeURIComponent(session.token)}`;
 }
 
-async function syncWhatsAppRelayModeForRequestTransition({ after, status, beforeStatus, requestId }) {
-  if (!['accepted', 'completed', 'canceled', 'expired', 'no_helper_available'].includes(status) || status === beforeStatus) return;
+async function syncWhatsAppRelayModeForRequestTransition({ before = null, after, status, beforeStatus, requestId }) {
+  if (!['matching', 'accepted', 'completed', 'canceled', 'expired', 'no_helper_available'].includes(status) || status === beforeStatus) return;
   const identities = [];
   const customerIdentityId = await resolveCustomerWhatsAppIdentityId({
     customerId: String(after.customerId || '').trim(),
     request: after,
   });
   if (customerIdentityId) identities.push(customerIdentityId);
-  const helperId = String(after.helperAssignment?.helperId || '').trim();
-  if (helperId) {
-    const link = await db.collection('whatsappUserLinks').doc(helperId).get();
+  const candidateHelperIds = [...new Set([
+    String(after.helperAssignment?.helperId || '').trim(),
+    String(before?.helperAssignment?.helperId || '').trim(),
+    String(after.lastCanceledHelperId || '').trim(),
+  ].filter(Boolean))];
+  for (const candidateHelperId of candidateHelperIds) {
+    const link = await db.collection('whatsappUserLinks').doc(candidateHelperId).get();
     if (link.exists) identities.push(String(link.data()?.identityId || '').trim());
   }
   const activeIdentities = [...new Set(identities.filter(Boolean))];
@@ -17769,6 +18698,22 @@ function buildWhatsAppLifecycleText({
 
   if (beforeStatus !== status) {
     if (status === 'matching') {
+      const isHelperCancelRematch = [
+        'accepted',
+        'driving',
+        'en_route',
+        'buying_resources',
+        'arrived',
+        'work_started',
+        'helper_queued',
+      ].includes(beforeStatus) || Boolean(after.lastCanceledHelperId && after.lastHelperCanceledAtMs);
+      if (isHelperCancelRematch) {
+        const prevHelperName = String(after.lastCanceledHelperName || 'Your helper').trim() || 'Your helper';
+        const reasonNote = after.lastCanceledHelperReason
+          ? `\nReason: ${String(after.lastCanceledHelperReason).slice(0, 140)}`
+          : '';
+        return `${refPrefix}⚠️ *${prevHelperName}* canceled your *${serviceName}* request.${reasonNote}\n\n🔍 We're finding another nearby helper for you now.`;
+      }
       return `${refPrefix}🔍 We received your *${serviceName}* request and are finding a nearby helper.`;
     }
     if (status === 'accepted') {
@@ -17841,7 +18786,7 @@ exports.notifyWhatsAppServiceRequestLifecycle = onDocumentWritten({
   const beforeStatus = String(before?.status || '').toLowerCase();
   const status = String(after.status || '').toLowerCase();
   const requestId = String(event.params.requestId || '').trim();
-  await syncWhatsAppRelayModeForRequestTransition({ after, status, beforeStatus, requestId }).catch((error) => {
+  await syncWhatsAppRelayModeForRequestTransition({ before, after, status, beforeStatus, requestId }).catch((error) => {
     logger.warn('whatsapp_relay_mode_sync_failed', { requestId, status, errorCode: String(error?.code || 'conversation_sync_failed').slice(0, 80) });
   });
   if (!whatsappNotificationsEnabled() || !whatsappMessagingEnabled()) return;
@@ -19100,6 +20045,13 @@ function paymentSessionPublicPayload(resolved) {
       || (paymentState === 'not_applicable' && Number(resolved.amount || 0) <= 0)
     ),
   );
+  const questionAnswers = extractRequestSpecifications({ request });
+  const breakdown = buildPriceBreakdownLines({
+    request,
+    settledAmount: Number(resolved.amount || 0),
+    legacyOperation: resolved.legacyOperation || null,
+    isCanceled,
+  });
   return {
     success: true,
     requestReference: String(request.publicRequestReference || request.requestReference || request.id || ''),
@@ -19115,6 +20067,8 @@ function paymentSessionPublicPayload(resolved) {
     activeAttemptId: String(operation.activeAttemptId || ''),
     paymentMethod: String(operation.method || ''),
     receiptId: String(operation.receiptId || request.paymentReceiptId || ''),
+    questionAnswers,
+    priceBreakdown: breakdown.lines,
     canRateHelper,
     hasCustomerRating: Boolean(customerRating || request.customerRatedHelper),
     customerRating: customerRating ? {
@@ -19919,13 +20873,18 @@ exports.getServicePaymentSession = onRequest({ cors: true, invoker: 'public', ma
   }
   if (payload.paymentStatus === 'paid') {
     payload.receipt = safePaymentReceipt({ requestId: result.request.id, operation: result.paymentOperation, request: result.request });
-    if (!payload.receipt && result.legacyOperation?.status === 'settled_success') {
+    if (payload.receipt) {
+      payload.receipt.questionAnswers = payload.questionAnswers;
+      payload.receipt.priceBreakdown = payload.priceBreakdown;
+    } else if (result.legacyOperation?.status === 'settled_success') {
       payload.receipt = {
         receiptId: String(result.legacyOperation.gatewayTransactionId || result.legacyOperation.operationId || ''),
         requestReference: String(result.request.publicRequestReference || result.request.requestReference || result.request.id || ''),
         service: String(result.request.subject || result.request.serviceName || 'Uncedo service'),
         amount: Number(result.legacyOperation.amount || result.request.totalAmount || 0), currency: 'ZAR', method: 'paystack',
         paidAtMs: Number(result.legacyOperation.settledAtMs || 0), status: 'paid',
+        questionAnswers: payload.questionAnswers,
+        priceBreakdown: payload.priceBreakdown,
       };
     }
   }
@@ -19988,6 +20947,28 @@ exports.startServicePaystackCheckout = onRequest({ cors: true, invoker: 'public'
   }
   const reference = getRequestPaymentReference(resolved.session.requestId, attempt.attemptId);
   const now = Date.now();
+  let effectiveSplitAllocation = attempt.splitAllocation || null;
+  if (!effectiveSplitAllocation) {
+    const breakdown = computeRequestPayoutBreakdown({
+      request: resolved.request,
+      legacy: resolved.legacyOperation,
+      amount: Number(attempt.amount || 0),
+      isCanceled: ['canceled', 'cancelled'].includes(String(resolved.request.status || '').trim().toLowerCase()),
+    });
+    effectiveSplitAllocation = await resolveAttemptSplitAllocation({
+      db,
+      admin,
+      callPaystackApi,
+      paystackSecretKey,
+      requestId: resolved.session.requestId,
+      helperId: breakdown.resolvedHelperId,
+      helperAmountMinor: breakdown.helperAmountMinor,
+      platformAmountMinor: breakdown.platformAmountMinor,
+      customerChargeAmountMinor: Number(attempt.amountMinor || breakdown.customerChargeAmountMinor || 0),
+      logger,
+    });
+  }
+  const splitParams = buildPaystackSplitParams(effectiveSplitAllocation);
   await attemptRef.set({
     gatewayReference: reference,
     email,
@@ -19995,9 +20976,18 @@ exports.startServicePaystackCheckout = onRequest({ cors: true, invoker: 'public'
     saveCardConsentAtMs: saveCardConsent ? now : null,
     saveCardOwnerUid,
     saveCardPrincipalType: saveCardOwnerUid ? (String(saveCardOwnerUid).startsWith('guest_') ? 'whatsapp_guest' : 'firebase_uid') : null,
+    ...(effectiveSplitAllocation ? { splitAllocation: effectiveSplitAllocation } : {}),
     updatedAtMs: now,
   }, { merge: true });
-  await recordCheckoutInitialization({ db, admin, requestId: resolved.session.requestId, attemptId: attempt.attemptId, gatewayReference: reference, authorizationUrl: '' });
+  await recordCheckoutInitialization({
+    db,
+    admin,
+    requestId: resolved.session.requestId,
+    attemptId: attempt.attemptId,
+    gatewayReference: reference,
+    authorizationUrl: '',
+    splitAllocation: effectiveSplitAllocation,
+  });
   try {
     const baseUrl = String(process.env.CUSTOMER_PAYMENT_URL || 'https://uncedo.bakayise.com/payment').trim().replace(/\/$/, '');
     // Keep the bearer payment token in same-origin sessionStorage; only the
@@ -20014,7 +21004,13 @@ exports.startServicePaystackCheckout = onRequest({ cors: true, invoker: 'public'
         reference,
         callback_url: callbackUrl,
         channels: ['card'],
-        metadata: { uncedo_request_id: resolved.session.requestId, uncedo_payment_attempt_id: attempt.attemptId, save_card_consent: saveCardConsent },
+        ...splitParams,
+        metadata: {
+          uncedo_request_id: resolved.session.requestId,
+          uncedo_payment_attempt_id: attempt.attemptId,
+          save_card_consent: saveCardConsent,
+          ...(effectiveSplitAllocation?.mode ? { split_mode: effectiveSplitAllocation.mode } : {}),
+        },
       },
     });
     const authorizationUrl = String(payload.data?.authorization_url || '');
@@ -20022,7 +21018,15 @@ exports.startServicePaystackCheckout = onRequest({ cors: true, invoker: 'public'
     if (!authorizationUrl.startsWith('https://') || !['checkout.paystack.com', 'checkout.paystack.co'].includes(checkoutHost) || String(payload.data?.reference || '') !== reference) {
       return res.status(502).json({ success: false, code: 'checkout-response-invalid', message: 'Paystack did not return a valid secure checkout link.' });
     }
-    const saved = await recordCheckoutInitialization({ db, admin, requestId: resolved.session.requestId, attemptId: attempt.attemptId, gatewayReference: reference, authorizationUrl });
+    const saved = await recordCheckoutInitialization({
+      db,
+      admin,
+      requestId: resolved.session.requestId,
+      attemptId: attempt.attemptId,
+      gatewayReference: reference,
+      authorizationUrl,
+      splitAllocation: effectiveSplitAllocation,
+    });
     if (saved.action !== 'updated') return res.status(409).json({ success: false, code: saved.action });
     return res.status(200).json({ success: true, authorizationUrl, status: 'payment_processing' });
   } catch (error) {
@@ -20620,8 +21624,11 @@ exports.getHelperWalletTransactions = onRequest({ cors: true, invoker: 'public',
     return {
       id: document.id,
       entryType: String(entry.entryType || 'wallet_entry'),
+      settlementMode: String(entry.settlementMode || ''),
       amountMinor: Math.max(0, Number(entry.amountMinor || 0)),
       deltaMinor: signedDeltaMinor,
+      splitHelperAmountMinor: Math.max(0, Number(entry.splitHelperAmountMinor || 0)),
+      debtRecoveredMinor: Math.max(0, Number(entry.debtRecoveredMinor || 0)),
       balanceBeforeMinor: Number.isSafeInteger(Number(entry.balanceBeforeMinor)) ? Number(entry.balanceBeforeMinor) : null,
       balanceAfterMinor: Number.isSafeInteger(Number(entry.balanceAfterMinor)) ? Number(entry.balanceAfterMinor) : null,
       availableDeltaMinor: Number(entry.availableDeltaMinor || 0),
@@ -20745,7 +21752,38 @@ exports.confirmSavedCardServicePayment = onRequest({ cors: true, invoker: 'publi
   let paystackSecretKey = '';
   try { paystackSecretKey = getPaymentsSecrets().PAYSTACK_SECRET_KEY; } catch { return res.status(503).json({ success: false, code: 'payments-unavailable' }); }
   const reference = String(attempt.gatewayReference || getRequestPaymentReference(requestId, attemptId));
-  const claim = await claimSavedCardPayment({ db, admin, requestId, attemptId, gatewayReference: reference });
+  let savedCardSplitAllocation = attempt.splitAllocation || null;
+  if (!savedCardSplitAllocation) {
+    const savedCardRequestData = requestSnap?.exists ? (requestSnap.data() || {}) : {};
+    const legacySnap = await db.collection(FINANCIAL_OPERATIONS_COLLECTION).doc(serviceFinancialOperationId(requestId)).get().catch(() => null);
+    const legacyData = legacySnap?.exists ? (legacySnap.data() || {}) : null;
+    const breakdown = computeRequestPayoutBreakdown({
+      request: savedCardRequestData,
+      legacy: legacyData,
+      amount: Number(attempt.amount || 0),
+      isCanceled: ['canceled', 'cancelled'].includes(String(savedCardRequestData.status || '').trim().toLowerCase()),
+    });
+    savedCardSplitAllocation = await resolveAttemptSplitAllocation({
+      db,
+      admin,
+      callPaystackApi,
+      paystackSecretKey,
+      requestId,
+      helperId: breakdown.resolvedHelperId,
+      helperAmountMinor: breakdown.helperAmountMinor,
+      platformAmountMinor: breakdown.platformAmountMinor,
+      customerChargeAmountMinor: Number(attempt.amountMinor || breakdown.customerChargeAmountMinor || 0),
+      logger,
+    });
+  }
+  const claim = await claimSavedCardPayment({
+    db,
+    admin,
+    requestId,
+    attemptId,
+    gatewayReference: reference,
+    splitAllocation: savedCardSplitAllocation,
+  });
   if (!['charge', 'reconcile'].includes(claim.action)) return res.status(claim.action === 'already-paid' ? 200 : 409).json({ success: claim.action === 'already-paid', status: claim.action });
   const outcome = await executeServiceChargeAttempt({
     operation: { ...claim.attempt, requestId, operationId: `payment_${requestId}`, gatewayReference: reference },
@@ -20807,12 +21845,23 @@ exports.getServicePaymentReceipt = onRequest({ cors: true, invoker: 'public', ma
   }
   if (!resolved || resolved.code !== 'available') return res.status(404).json({ success: false, message: 'Payment receipt not found.' });
   const requestIdResolved = String(resolved.request.id || resolved.session?.requestId || requestId);
+  const requestStatus = String(resolved.request.status || '').trim().toLowerCase();
+  const isCanceled = requestStatus === 'canceled' || requestStatus === 'cancelled';
+  const questionAnswers = extractRequestSpecifications({ request: resolved.request });
+  const breakdown = buildPriceBreakdownLines({
+    request: resolved.request,
+    settledAmount: Number(resolved.paymentOperation?.settlement?.amount ?? resolved.paymentOperation?.amount ?? resolved.legacyOperation?.amount ?? resolved.request?.totalAmount ?? resolved.request?.cancellationFeeAmount ?? 0),
+    legacyOperation: resolved.legacyOperation || null,
+    isCanceled,
+  });
   const receipt = safePaymentReceipt({ requestId: requestIdResolved, operation: resolved.paymentOperation, request: resolved.request });
   if (!receipt && resolved.legacyOperation?.paymentStatus === 'paid') {
     const legacy = resolved.legacyOperation;
-    return res.status(200).json({ success: true, receipt: { receiptId: String(legacy.gatewayTransactionId || legacy.operationId || ''), requestReference: String(resolved.request.publicRequestReference || requestIdResolved), requestId: requestIdResolved, service: String(resolved.request.subject || 'Uncedo service'), amount: Number(legacy.amount || 0), currency: 'ZAR', method: 'paystack', paidAtMs: Number(legacy.settledAtMs || 0), gatewayReference: String(legacy.gatewayReference || ''), status: 'paid' } });
+    return res.status(200).json({ success: true, receipt: { receiptId: String(legacy.gatewayTransactionId || legacy.operationId || ''), requestReference: String(resolved.request.publicRequestReference || requestIdResolved), requestId: requestIdResolved, service: String(resolved.request.subject || 'Uncedo service'), amount: Number(legacy.amount || 0), currency: 'ZAR', method: 'paystack', paidAtMs: Number(legacy.settledAtMs || 0), gatewayReference: String(legacy.gatewayReference || ''), status: 'paid', questionAnswers, priceBreakdown: breakdown.lines } });
   }
   if (!receipt) return res.status(409).json({ success: false, message: 'A verified payment receipt is not available.' });
+  receipt.questionAnswers = questionAnswers;
+  receipt.priceBreakdown = breakdown.lines;
   res.set('Cache-Control', 'no-store, private');
   return res.status(200).json({ success: true, receipt });
 });
@@ -20857,9 +21906,20 @@ exports.paystackServicePaymentWebhook = onRequest({ cors: false, invoker: 'publi
   const eventName = String(event.event || '').trim();
   const isChargeSuccess = eventName === 'charge.success';
   const isTransferEvent = ['transfer.success', 'transfer.failed', 'transfer.reversed'].includes(eventName);
-  if (!isChargeSuccess && !isTransferEvent) return res.status(200).send('Ignored');
+  const isDisputeOrRefundEvent = [
+    'charge.dispute.create',
+    'charge.dispute.remind',
+    'charge.dispute.resolve',
+    'refund.processed',
+  ].includes(eventName);
+  if (!isChargeSuccess && !isTransferEvent && !isDisputeOrRefundEvent) return res.status(200).send('Ignored');
 
-  const reference = String(event.data?.reference || '').trim();
+  const reference = String(
+    event.data?.reference
+    || event.data?.transaction_reference
+    || event.data?.transaction?.reference
+    || '',
+  ).trim();
   if (!reference) return res.status(200).send('Ignored');
 
   const refDocPromise = isTransferEvent
@@ -20905,6 +21965,82 @@ exports.paystackServicePaymentWebhook = onRequest({ cors: false, invoker: 'publi
           }
         }
       }
+    } else if (isDisputeOrRefundEvent) {
+      const nowMs = Date.now();
+      const targetRequestId = String(mapped.requestId || '').trim();
+      const isActionableReversal = ['charge.dispute.create', 'refund.processed'].includes(eventName);
+      if (targetRequestId) {
+        const paymentRef = db.collection(PAYMENT_OPERATIONS).doc(targetRequestId);
+        const requestRef = db.collection('serviceRequests').doc(targetRequestId);
+        await db.runTransaction(async (tx) => {
+          const [paymentSnap, requestSnap] = await Promise.all([tx.get(paymentRef), tx.get(requestRef)]);
+          const paymentData = paymentSnap.exists ? paymentSnap.data() || {} : {};
+          const requestData = requestSnap.exists ? requestSnap.data() || {} : {};
+          const attemptId = String(mapped.attemptId || paymentData.activeAttemptId || '').trim();
+          const attemptSnap = attemptId
+            ? await tx.get(paymentRef.collection('attempts').doc(attemptId))
+            : null;
+          const attemptData = attemptSnap?.exists ? attemptSnap.data() || {} : {};
+          const splitAlloc = attemptData.splitAllocation || paymentData.settlement?.splitAllocation || null;
+          const helperId = String(requestData.helperAssignment?.helperId || splitAlloc?.helperId || '').trim();
+
+          if (isActionableReversal && helperId && splitAlloc && Number(splitAlloc.debtRecoveredMinor || 0) > 0) {
+            await reverseSplitSettlementInTransaction({
+              transaction: tx,
+              db,
+              helperId,
+              requestId: targetRequestId,
+              splitAllocation: splitAlloc,
+              gatewayReference: reference,
+              now: nowMs,
+            });
+          } else if (isActionableReversal && helperId && splitAlloc && Number(splitAlloc.helperSplitMinor || 0) > 0) {
+            tx.set(helperWalletReference(db, helperId), {
+              reconciliationBlocked: true,
+              lastDisputedRequestId: targetRequestId,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            }, { merge: true });
+          }
+
+          tx.set(paymentRef, {
+            disputeStatus: eventName === 'refund.processed'
+              ? 'refunded'
+              : eventName === 'charge.dispute.resolve'
+                ? String(event.data?.status || 'resolved').trim().toLowerCase()
+                : 'disputed',
+            disputeEvents: {
+              ...(paymentData.disputeEvents || {}),
+              [eventId]: {
+                eventName,
+                reference,
+                status: String(event.data?.status || '').trim(),
+                amount: Number(event.data?.amount || 0),
+                recordedAtMs: nowMs,
+              },
+            },
+            ...(eventName === 'refund.processed' ? { refundedAtMs: nowMs } : { disputedAtMs: nowMs }),
+            updatedAtMs: nowMs,
+          }, { merge: true });
+
+          if (requestSnap.exists) {
+            tx.set(requestRef, {
+              paymentDisputeStatus: eventName === 'refund.processed' ? 'refunded' : eventName,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            }, { merge: true });
+          }
+          tx.create(db.collection('auditEvents').doc(), {
+            eventType: 'paystack_dispute_or_refund_received',
+            eventName,
+            requestId: targetRequestId,
+            helperId: helperId || null,
+            reference,
+            reconciliationRequired: isActionableReversal,
+            createdAtMs: nowMs,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        });
+      }
+      logger.warn('paystack_dispute_or_refund_processed', { eventName, reference, requestId: targetRequestId || null });
     } else if (mapped.type === 'customer_wallet_settlement') {
       const walletResult = await verifyAndSettleCustomerWalletPayment({ reference, mapped, paystackSecretKey: secret });
       if (walletResult?.action === 'pending') {
@@ -21031,11 +22167,12 @@ exports.expireRewardPoints = onSchedule({
   ...MICRO_CPU_OPTIONS,
 }, async () => processExpiredCustomerPoints({ db, admin, limit: 200 }));
 
-async function chargeAuthorizationWithPaystack({ paystackSecretKey, email, amount, authorizationCode, reference, requestId, operationId }) {
+async function chargeAuthorizationWithPaystack({ paystackSecretKey, email, amount, authorizationCode, reference, requestId, operationId, splitAllocation = null }) {
   if (!authorizationCode) {
     return { attempted: false, ok: false, reason: 'missing_authorization' };
   }
 
+  const splitParams = buildPaystackSplitParams(splitAllocation);
   const chargeResponse = await fetch('https://api.paystack.co/transaction/charge_authorization', {
     method: 'POST',
     headers: {
@@ -21048,9 +22185,11 @@ async function chargeAuthorizationWithPaystack({ paystackSecretKey, email, amoun
       authorization_code: authorizationCode,
       currency: 'ZAR',
       reference,
+      ...splitParams,
       metadata: {
         uncedo_request_id: String(requestId || ''),
         uncedo_financial_operation_id: String(operationId || ''),
+        ...(splitAllocation?.mode ? { split_mode: splitAllocation.mode } : {}),
       },
     }),
     signal: AbortSignal.timeout(20_000),
@@ -21198,7 +22337,7 @@ function assertValidPayoutInput(input = {}) {
   }
 }
 
-async function verifyAndCreateTutorTransferRecipient({ paystackSecretKey, payout, email, uid }) {
+async function verifyAndCreateTutorTransferRecipient({ paystackSecretKey, payout, email, uid, businessName = '', existingPayout = null }) {
   const validationPayload = {
     account_name: payout.accountHolder,
     account_number: payout.accountNumber,
@@ -21230,32 +22369,69 @@ async function verifyAndCreateTutorTransferRecipient({ paystackSecretKey, payout
     throw validationError;
   }
 
-  const recipient = await callPaystackApi({
-    paystackSecretKey,
-    path: '/transferrecipient',
-    method: 'POST',
-    body: {
-      type: 'basa',
-      name: payout.accountHolder,
-      account_number: payout.accountNumber,
-      bank_code: payout.bankCode,
-      currency: 'ZAR',
-      description: `Parakleo tutor payout recipient ${uid}`,
-      metadata: {
-        uid,
-        email: email || '',
-        bankName: payout.bankName,
+  const prev = existingPayout && typeof existingPayout === 'object' ? existingPayout : {};
+  const sameBankDetails = String(prev.verificationStatus || '').trim().toLowerCase() === 'verified'
+    && String(prev.bankCode || '').trim() === String(payout.bankCode || '').trim()
+    && String(prev.accountNumber || '').replace(/\s+/g, '') === String(payout.accountNumber || '').replace(/\s+/g, '')
+    && String(prev.accountType || '').trim().toLowerCase() === String(payout.accountType || '').trim().toLowerCase()
+    && String(prev.accountHolder || '').trim().toLowerCase() === String(payout.accountHolder || '').trim().toLowerCase();
+
+  const existingRecipientCode = sameBankDetails
+    ? String(prev.recipientCode || prev.paystackRecipientCode || '').trim()
+    : '';
+  let recipientCode = existingRecipientCode;
+  let paystackRecipientId = sameBankDetails ? String(prev.paystackRecipientId || '').trim() : '';
+
+  if (!recipientCode) {
+    const recipient = await callPaystackApi({
+      paystackSecretKey,
+      path: '/transferrecipient',
+      method: 'POST',
+      body: {
+        type: 'basa',
+        name: payout.accountHolder,
+        account_number: payout.accountNumber,
+        bank_code: payout.bankCode,
+        currency: 'ZAR',
+        description: `Uncedo helper payout recipient ${uid}`,
+        metadata: {
+          uid,
+          email: email || '',
+          bankName: payout.bankName,
+        },
       },
-    },
-  });
+    });
+    recipientCode = recipient?.data?.recipient_code || '';
+    paystackRecipientId = recipient?.data?.id ? String(recipient.data.id) : '';
+  }
+
+  const existingSubaccountCode = sameBankDetails
+    ? String(prev.subaccountCode || prev.paystackSubaccountCode || '').trim()
+    : '';
+  const subaccount = existingSubaccountCode
+    ? {
+      subaccountCode: existingSubaccountCode,
+      paystackSubaccountCode: existingSubaccountCode,
+      paystackSubaccountId: String(prev.paystackSubaccountId || '').trim(),
+      subaccountProvisionedAt: prev.subaccountProvisionedAt || new Date().toISOString(),
+    }
+    : await createPaystackSubaccount({
+      callPaystackApi,
+      paystackSecretKey,
+      payout: { ...payout, recipientCode },
+      email: email || '',
+      uid,
+      businessName: businessName || payout.accountHolder,
+    });
 
   return {
     ...payout,
     countryCode: 'ZA',
     currency: 'ZAR',
-    recipientCode: recipient?.data?.recipient_code || '',
-    paystackRecipientCode: recipient?.data?.recipient_code || '',
-    paystackRecipientId: recipient?.data?.id ? String(recipient.data.id) : '',
+    recipientCode,
+    paystackRecipientCode: recipientCode,
+    paystackRecipientId,
+    ...subaccount,
     verified: true,
     verificationStatus: 'verified',
     verifiedAt: new Date().toISOString(),
@@ -21361,6 +22537,8 @@ exports.verifyHelperPayout = onRequest({ cors: true, invoker: 'public', maxInsta
       payout: payoutInput,
       email: decoded.email || user.email || '',
       uid: decoded.uid,
+      businessName: user.businessName || user.fullName || payoutInput.accountHolder,
+      existingPayout: user.payout || null,
     });
     const payout = {
       ...verifiedPayout,
@@ -21759,12 +22937,12 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, invoker: 'public
       const arrivedAtMs = timestampToMillis(request.arrivedAt || request.helperAssignment?.arrivedAt);
       const workStartedAtMs = timestampToMillis(request.workStartedAt || request.helperAssignment?.workStartedAt);
       const quoteTotal = getServiceQuoteTotal(request);
-      let waitingMinutes = 0;
-      let waitingCost = 0;
-      if (arrivedAtMs && workStartedAtMs && workStartedAtMs > arrivedAtMs) {
-        waitingMinutes = Number(((workStartedAtMs - arrivedAtMs) / 60000).toFixed(2));
-        if (quoteTotal <= 0 && waitingMinutes > 2) waitingCost = Math.round(waitingMinutes - 2);
-      }
+      const waitStats = computeWaitingTimeCharge({
+        arrivedAtMs,
+        endedAtMs: workStartedAtMs,
+      });
+      const waitingMinutes = waitStats.waitingMinutes;
+      const waitingCost = waitStats.waitingCost;
       const subtotal = getServiceQuoteSubtotal(request);
       const travelFee = getServiceTravelFee(request);
       const bookingFee = getServiceBookingFee(request);
@@ -21775,7 +22953,7 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, invoker: 'public
         bookingFeeAmount: bookingFee,
       });
       const totalAmount = quoteTotal > 0
-        ? toWholeRand(quoteTotal)
+        ? toWholeRand(quoteTotal + waitingCost)
         : toWholeRand(helperPayoutBreakdown.customerChargeAmount);
       const redemptionId = String(request.serviceCreditRedemptionId || '').trim();
       let serviceCreditAmount = 0;
@@ -21893,6 +23071,32 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, invoker: 'public
       }
     }
 
+    let completionSplitAllocation = null;
+    const willClaimCompletionCharge = !deferCompletionPayment
+      && Boolean(paymentsSecrets.PAYSTACK_SECRET_KEY)
+      && (!existingOperation.exists || (existingOperationStatus === 'settled_failed' && req.body?.retryConfirmedFailure === true));
+    if (willClaimCompletionCharge) {
+      const effectiveData = existingOperation.exists ? (existingOperationData?.settlementData || {}) : settlementData;
+      const effectiveBreakdown = effectiveData?.helperPayoutBreakdown || {};
+      const effectiveChargeMinor = existingOperation.exists
+        ? Number(existingOperationData?.amountMinor || Math.round(Number(existingOperationData?.amount || 0) * 100))
+        : Math.round(Number(cashChargeAmount || 0) * 100);
+      if (effectiveChargeMinor > 0 && selectedCard?.paystackAuthorizationCode) {
+        completionSplitAllocation = await resolveAttemptSplitAllocation({
+          db,
+          admin,
+          callPaystackApi,
+          paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY,
+          requestId,
+          helperId: String(effectiveData?.helperId || helperId || '').trim(),
+          helperAmountMinor: Math.round(Number(effectiveBreakdown.helperAmount || 0) * 100),
+          platformAmountMinor: Math.round(Number(effectiveBreakdown.platformAmount || 0) * 100),
+          customerChargeAmountMinor: effectiveChargeMinor,
+          logger,
+        });
+      }
+    }
+
     const claim = await claimServiceFinancialOperation({
       db,
       requestRef,
@@ -21901,6 +23105,7 @@ exports.finalizeServiceRequestBilling = onRequest({ cors: true, invoker: 'public
       amount: existingOperation.exists ? Number(existingOperation.data()?.amount || 0) : cashChargeAmount,
       currency: 'ZAR',
       settlementData,
+      splitAllocation: completionSplitAllocation,
       allowRetry: req.body?.retryConfirmedFailure === true,
     });
     if (claim.action === 'conflict') return res.status(409).json({ success: false, message: 'A conflicting request financial operation already exists.' });
@@ -22043,13 +23248,13 @@ async function resolveServiceRequestSnapshot(rawRequestId = '') {
   };
 }
 
-async function getCustomerCancellationTerms(requestRef, request) {
+async function getCustomerCancellationTerms(requestRef, request, now = Date.now()) {
   const status = String(request?.status || '').trim().toLowerCase();
   if (isPreAssignmentServiceRequestStatus(status)) {
-    return calculateCustomerCancellationTerms({ request });
+    return calculateCustomerCancellationTerms({ request, now });
   }
   if (!isPostAssignmentServiceRequestStatus(status)) {
-    return calculateCustomerCancellationTerms({ request });
+    return calculateCustomerCancellationTerms({ request, now });
   }
   const [trackingSnap, liveTrackingSnap] = await Promise.all([
     requestRef.collection('tracking').doc('live').get().catch(() => null),
@@ -22063,12 +23268,27 @@ async function getCustomerCancellationTerms(requestRef, request) {
     || liveTrackingData?.distanceTravelledMeters
     || 0,
   );
+  const arrivedAtMs = timestampToMillis(
+    request?.arrivedAt
+    || request?.helperAssignment?.arrivedAt
+    || trackingData?.arrivedAt
+    || liveTrackingData?.arrivedAt,
+  );
+  const workStartedAtMs = timestampToMillis(
+    request?.workStartedAt
+    || request?.helperAssignment?.workStartedAt
+    || trackingData?.workStartedAt
+    || liveTrackingData?.workStartedAt,
+  );
   return calculateCustomerCancellationTerms({
     request,
     distanceTravelledMeters,
     bookingFee: getServiceBookingFee(request),
     travelFee: getServiceTravelFee(request),
     travelRatePerKm: SERVICE_TRAVEL_RATE_PER_KM,
+    now,
+    arrivedAtMs,
+    workStartedAtMs,
     toMoney: toRand,
     payoutBreakdown: (options) => getServiceHelperPayoutBreakdown(request, { closureType: 'canceled', ...options }),
   });
@@ -22182,7 +23402,7 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
     const helperId = String(request.helperAssignment?.helperId || '').trim();
     const status = String(request.status || '').toLowerCase();
     const endedAt = Date.now();
-    const cancellationTerms = await getCustomerCancellationTerms(requestRef, request);
+    const cancellationTerms = await getCustomerCancellationTerms(requestRef, request, endedAt);
     if (cancellationTerms.code !== 'eligible') {
       return res.status(409).json({ success: false, code: cancellationTerms.code, message: 'This request cannot be canceled from its current state.' });
     }
@@ -22197,6 +23417,8 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
           cancellationAmount: cancellationTerms.cancellationAmount,
           currency: 'ZAR',
           billingRule: cancellationTerms.billingRule,
+          waitingCost: Number(cancellationTerms.waitingCost || 0),
+          waitingMinutes: Number(cancellationTerms.waitingMinutes || 0),
         },
       });
     }
@@ -22209,6 +23431,8 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
         cancellationAmount: 0,
         cancellationBillingRule: 'pre_assignment',
         cancellationDistanceKm: 0,
+        waitingMinutes: 0,
+        waitingCost: 0,
         helperPayoutBreakdown: { helperAmount: 0, platformAmount: 0, customerChargeAmount: 0 },
         chargedCardLast4: null,
         paymentTransactionId: null,
@@ -22246,6 +23470,8 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
           paymentStatus: null,
           paymentTransactionId: null,
           cancellationFeeAmount: 0,
+          waitingMinutes: 0,
+          waitingCost: 0,
           helperPayoutBreakdown: {
             helperAmount: 0,
             platformAmount: 0,
@@ -22284,6 +23510,8 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
       const bookingFee = getServiceBookingFee(request);
       const travelFee = getServiceTravelFee(request);
       cancellationAmount = Number(cancellationTerms.cancellationAmount || 0);
+      const cancellationWaitingMinutes = Number(cancellationTerms.waitingMinutes || 0);
+      const cancellationWaitingCost = Number(cancellationTerms.waitingCost || 0);
       const helperPayoutBreakdown = cancellationTerms.helperPayoutBreakdown;
       const bookingCharge = toWholeRand(bookingFee);
       const customerSnap = ownerDocId ? await db.collection('users').doc(ownerDocId).get().catch(() => null) : null;
@@ -22315,6 +23543,8 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
         bookingFee: bookingCharge,
         bookingFeeRate: SERVICE_BOOKING_FEE_RATE,
         bookingFeeCap: SERVICE_BOOKING_FEE_CAP,
+        waitingMinutes: cancellationWaitingMinutes,
+        waitingCost: cancellationWaitingCost,
         cancellationAmount,
         cancellationTravelCharge: Number(cancellationTerms.travelCharge || 0),
         cancellationDistanceKm: Number(cancellationTerms.cancellationDistanceKm || 0),
@@ -22328,6 +23558,8 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
         cancellationAmount,
         cancellationBillingRule: cancellationTerms.billingRule,
         cancellationDistanceKm: Number(cancellationTerms.cancellationDistanceKm || 0),
+        waitingMinutes: cancellationWaitingMinutes,
+        waitingCost: cancellationWaitingCost,
         helperPayoutBreakdown,
         selectedCardId: selectedCard?.id || null,
         chargedCardLast4: selectedCard?.last4 || null,
@@ -22354,6 +23586,8 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
           canceledAt: endedAt,
           canceledBy: 'customer',
           canceledReason,
+          waitingMinutes: cancellationWaitingMinutes,
+          waitingCost: cancellationWaitingCost,
           cancellationFeeAmount: cancellationAmount,
           chargedCardLast4: selectedCard?.last4 || null,
           pricingSnapshot,
@@ -22392,6 +23626,37 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
     }
   }
 
+  let cancellationSplitAllocation = null;
+  const willClaimCancellationCharge = Boolean(paymentsSecrets.PAYSTACK_SECRET_KEY)
+    && (!existingOperation.exists || (existingOperationStatus === 'settled_failed' && req.body?.retryConfirmedFailure === true));
+  if (willClaimCancellationCharge) {
+    const effectiveData = existingOperation.exists ? (existingOperationData?.settlementData || {}) : settlementData;
+    const effectiveBreakdown = effectiveData?.cancellation?.helperPayoutBreakdown || effectiveData?.helperPayoutBreakdown || {};
+    const effectiveChargeMinor = existingOperation.exists
+      ? Number(existingOperationData?.amountMinor || Math.round(Number(existingOperationData?.amount || 0) * 100))
+      : Math.round(Number(cancellationAmount || 0) * 100);
+    const resolvedCancellationHelperId = String(
+      effectiveData?.helperId
+      || effectiveData?.cancellation?.helperId
+      || request.helperAssignment?.helperId
+      || '',
+    ).trim();
+    if (effectiveChargeMinor > 0 && selectedCard?.paystackAuthorizationCode) {
+      cancellationSplitAllocation = await resolveAttemptSplitAllocation({
+        db,
+        admin,
+        callPaystackApi,
+        paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY,
+        requestId,
+        helperId: resolvedCancellationHelperId,
+        helperAmountMinor: Math.round(Number(effectiveBreakdown.helperAmount || 0) * 100),
+        platformAmountMinor: Math.round(Number(effectiveBreakdown.platformAmount || 0) * 100),
+        customerChargeAmountMinor: effectiveChargeMinor,
+        logger,
+      });
+    }
+  }
+
   try {
     const claim = await claimServiceFinancialOperation({
       db,
@@ -22401,6 +23666,7 @@ async function handleCustomerServiceCancellation(req, res, internalPrincipal = n
       amount: existingOperation.exists ? Number(existingOperation.data()?.amount || 0) : cancellationAmount,
       currency: 'ZAR',
       settlementData,
+      splitAllocation: cancellationSplitAllocation,
       allowRetry: req.body?.retryConfirmedFailure === true,
       expectedRequestStatus: existingOperation.exists ? null : request.status,
       expectedHelperId: existingOperation.exists ? null : String(request.helperAssignment?.helperId || ''),
@@ -22783,9 +24049,10 @@ async function syncBackendHelperWeeklyPayoutRecords() {
   return upserted;
 }
 
-async function syncHelperWalletPayoutCandidates(weekKey) {
+async function syncHelperWalletPayoutCandidates(periodKey) {
   const walletCollection = db.collection(HELPER_WALLETS);
   const candidates = [];
+  const { monthStart, monthEnd } = getMonthRange(new Date());
   let page = walletCollection.orderBy(admin.firestore.FieldPath.documentId()).limit(200);
   let lastDocument = null;
   while (true) {
@@ -22794,7 +24061,7 @@ async function syncHelperWalletPayoutCandidates(weekKey) {
     if (walletPage.empty) break;
     for (const walletDoc of walletPage.docs) {
       const helperId = walletDoc.id;
-      const payoutId = `wallet_${weekKey}_${helperId}`;
+      const payoutId = `wallet_${periodKey}_${helperId}`;
       const payoutRef = db.collection(HELPER_PAYOUT_COLLECTION).doc(payoutId);
       const outcome = await db.runTransaction(async (transaction) => {
         const [walletSnapshot, payoutSnapshot] = await Promise.all([transaction.get(walletDoc.ref), transaction.get(payoutRef)]);
@@ -22811,11 +24078,17 @@ async function syncHelperWalletPayoutCandidates(weekKey) {
         const record = {
           id: payoutId,
           helperId,
-          helperName: '',
-          helperEmail: '',
-          weekKey,
-          weekStart: getWeekRange(new Date()).weekStart.toISOString(),
-          weekEnd: getWeekRange(new Date()).weekEnd.toISOString(),
+          helperName: String(wallet.helperName || existing?.helperName || ''),
+          helperEmail: String(wallet.helperEmail || existing?.helperEmail || ''),
+          ...(wallet.payoutSnapshot ? { payoutSnapshot: wallet.payoutSnapshot } : {}),
+          weekKey: periodKey,
+          periodKey,
+          payoutCadence: 'monthly',
+          payoutDayOfMonth: 26,
+          weekStart: monthStart.toISOString(),
+          weekEnd: monthEnd.toISOString(),
+          periodStart: monthStart.toISOString(),
+          periodEnd: monthEnd.toISOString(),
           totalJobs: 0,
           completedJobs: 0,
           canceledJobs: 0,
@@ -22848,6 +24121,7 @@ function payoutNotificationId(payoutId, state) {
 
 async function notifyPayoutOutcome(payout, state, reference = '', details = '') {
   const amount = Number(payout.helperAmount || 0);
+  const periodLabel = payout.periodKey || payout.weekKey || 'monthly';
   const shared = {
     userId: payout.helperId,
     requestId: null,
@@ -22858,8 +24132,8 @@ async function notifyPayoutOutcome(payout, state, reference = '', details = '') 
     return createUserNotificationOnce({
       notificationId: payoutNotificationId(payout.id, 'paid'),
       ...shared,
-      title: 'Helper payout paid',
-      message: `Your ${payout.weekKey || 'weekly'} payout was paid successfully. Amount: ${formatMoney(amount)}.`,
+      title: 'Monthly wallet payout paid',
+      message: `Your ${periodLabel} wallet payout was paid successfully. Amount: ${formatMoney(amount)}.`,
       type: 'helper_payout_paid',
     });
   }
@@ -22867,8 +24141,8 @@ async function notifyPayoutOutcome(payout, state, reference = '', details = '') 
     return createUserNotificationOnce({
       notificationId: payoutNotificationId(payout.id, `processing_${reference}`),
       ...shared,
-      title: 'Helper payout processing',
-      message: `Your ${payout.weekKey || 'weekly'} payout is being processed. Amount: ${formatMoney(amount)}.`,
+      title: 'Monthly wallet payout processing',
+      message: `Your ${periodLabel} wallet payout is being processed. Amount: ${formatMoney(amount)}.`,
       type: 'helper_payout_processing',
     });
   }
@@ -22876,16 +24150,16 @@ async function notifyPayoutOutcome(payout, state, reference = '', details = '') 
     return createUserNotificationOnce({
       notificationId: payoutNotificationId(payout.id, `reversed_${reference}`),
       ...shared,
-      title: 'Helper payout reversed',
-      message: `Your ${payout.weekKey || 'weekly'} payout was reversed by the payment provider. ${details}`.trim(),
+      title: 'Monthly wallet payout reversed',
+      message: `Your ${periodLabel} wallet payout was reversed by the payment provider. ${details}`.trim(),
       type: 'helper_payout_reversed',
     });
   }
   return createUserNotificationOnce({
     notificationId: payoutNotificationId(payout.id, `failed_${reference || 'no_reference'}`),
     ...shared,
-    title: 'Helper payout unsuccessful',
-    message: details || `Your ${payout.weekKey || 'weekly'} payout could not be completed.`,
+    title: 'Monthly wallet payout unsuccessful',
+    message: details || `Your ${periodLabel} wallet payout could not be completed.`,
     type: 'helper_payout_failed',
   });
 }
@@ -23047,7 +24321,7 @@ async function syncMissingWalletEarningsToWallets() {
 }
 
 exports.processWeeklyHelperPayouts = onSchedule({
-  schedule: '0 0 * * 1',
+  schedule: '0 0 26 * *',
   timeZone: 'Africa/Johannesburg',
   maxInstances: 1,
   ...MICRO_CPU_OPTIONS,
@@ -23057,13 +24331,14 @@ exports.processWeeklyHelperPayouts = onSchedule({
   try {
     paymentsSecrets = getPaymentsSecrets();
   } catch (error) {
-    logger.error('weekly_helper_payouts_missing_payment_config', { error: error.message });
+    logger.error('monthly_helper_payouts_missing_payment_config', { error: error.message });
     return;
   }
 
   await syncMissingWalletEarningsToWallets();
-  const syncedRecords = await syncHelperWalletPayoutCandidates(getWeekKey(new Date()));
-  const runKey = `weekly-${getWeekKey(new Date())}`;
+  const periodKey = getMonthKey(new Date());
+  const syncedRecords = await syncHelperWalletPayoutCandidates(periodKey);
+  const runKey = `monthly-${periodKey}`;
   let paidCount = 0;
   let failedCount = 0;
   let skippedCount = 0;
@@ -23079,8 +24354,16 @@ exports.processWeeklyHelperPayouts = onSchedule({
 
     const helperSnap = await db.collection('users').doc(payout.helperId).get();
     const helperData = helperSnap.exists ? helperSnap.data() || {} : {};
-    const payoutDetails = helperData.payout || {};
-    const recipientCode = String(payoutDetails.recipientCode || '').trim();
+    let payoutDetails = helperData.payout || {};
+    if (!helperSnap.exists || !String(payoutDetails.recipientCode || '').trim()) {
+      const walletSnapshotFallback = payout.payoutSnapshot
+        ? payout.payoutSnapshot
+        : (await helperWalletReference(db, payout.helperId).get().catch(() => null))?.data()?.payoutSnapshot;
+      if (walletSnapshotFallback && typeof walletSnapshotFallback === 'object') {
+        payoutDetails = walletSnapshotFallback;
+      }
+    }
+    const recipientCode = String(payoutDetails.recipientCode || payoutDetails.paystackRecipientCode || '').trim();
     const verified = String(payoutDetails.verificationStatus || '').toLowerCase() === 'verified';
     const claim = await claimPayoutTransfer({
       db,
@@ -23088,7 +24371,7 @@ exports.processWeeklyHelperPayouts = onSchedule({
       payoutRef,
       payoutId: payout.id,
       helperId: payout.helperId,
-      weekKey: payout.weekKey,
+      weekKey: payout.periodKey || payout.weekKey || periodKey,
       runKey,
       amount,
       currency: 'ZAR',
@@ -23138,7 +24421,7 @@ exports.processWeeklyHelperPayouts = onSchedule({
       claim,
       amount: transferAmount,
       recipientCode,
-      reason: `Uncedo helper payout ${payout.weekKey}`,
+      reason: `Uncedo monthly helper payout ${payout.periodKey || payout.weekKey || periodKey}`,
       paystack: {
         initiateTransfer: (input) => initiatePaystackTransfer({ paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY, ...input }),
         verifyTransfer: (input) => verifyPaystackTransfer({ paystackSecretKey: paymentsSecrets.PAYSTACK_SECRET_KEY, ...input }),
@@ -23166,7 +24449,8 @@ exports.processWeeklyHelperPayouts = onSchedule({
     else reconciliationCount += 1;
   }
 
-  logger.info('weekly_helper_payouts_processed', {
+  logger.info('monthly_helper_payouts_processed', {
+    periodKey,
     syncedCount: syncedRecords.length,
     paidCount,
     failedCount,
@@ -23501,6 +24785,9 @@ exports.updateWebHelperLiveLocation = onCall({ maxInstances: 2, ...MICRO_CPU_OPT
   }
 
   const existingHelper = snap.data() || {};
+  if (isAccountPendingDeletion(existingHelper) && String(request.data?.onlineStatus || '').trim().toLowerCase() !== 'offline') {
+    throw new HttpsError('failed-precondition', 'Your helper account is scheduled for deletion. Reactivate your account before going online.');
+  }
   const existingOnlineStatus = String(existingHelper.onlineStatus || '').trim().toLowerCase();
   const data = request.data || {};
   const requestedOnlineStatus = String(data.onlineStatus || '').trim().toLowerCase();
@@ -23853,7 +25140,7 @@ exports.evaluateRouteTravelMilestones = onValueWritten({
   const secrets = getWhatsAppSecrets();
   if (!identity.waId || identity.phoneNumberId !== secrets.phoneNumberId || !secrets.accessToken) return;
 
-  const customerLocation = normalizeCoordinate(request.location || request.requestPayload?.location || null);
+  const customerLocation = getServiceRequestLocationSnapshot(request);
   if (!customerLocation) return;
 
   const currentHelperLoc = { latitude: Number(after.latitude), longitude: Number(after.longitude) };
@@ -24046,3 +25333,894 @@ exports.generateAdminOptionImage = onCall({ maxInstances: 1, ...MICRO_CPU_OPTION
     throw new HttpsError('internal', error?.message || 'Unable to generate an option image right now.');
   }
 });
+
+async function enqueueUnpaidRecoveryStageTask({ requestId, stage }) {
+  if (!requestId || !stage) return false;
+  const taskId = getRecoveryTaskId(requestId, stage.index);
+  try {
+    await getFunctions().taskQueue('processUnpaidCompletedRequestRecovery').enqueue({
+      requestId,
+      stageIndex: stage.index,
+      stageLabel: stage.label,
+      expectedRunAtMs: stage.targetRunAtMs,
+    }, {
+      id: taskId,
+      scheduleDelaySeconds: Math.max(0, Number(stage.delaySeconds || 0)),
+      dispatchDeadlineSeconds: 60,
+    });
+    return true;
+  } catch (error) {
+    if (String(error?.code || '').includes('task-already-exists')) {
+      return false;
+    }
+    logger.warn('unpaid_recovery_task_enqueue_failed', {
+      requestId,
+      stageIndex: stage.index,
+      error: error?.message || 'unknown_error',
+    });
+    return false;
+  }
+}
+
+async function sendUnpaidRecoveryCustomerNotice({
+  requestId,
+  request = {},
+  stage,
+  amount = 0,
+  paymentUrl = '',
+  walletDeducted = false,
+}) {
+  const messageText = buildRecoveryMessageText({
+    request,
+    stage,
+    amount,
+    paymentUrl,
+    walletDeducted,
+  });
+  const customerId = String(request.customerId || '').trim();
+  const roundedAmount = Math.round(Number(amount || 0));
+
+  if (customerId) {
+    await createUserNotificationOnce({
+      notificationId: `unpaid_recovery_${requestId}_stage_${stage.index}`,
+      userId: customerId,
+      title: stage.deductWallet
+        ? 'Unpaid service charged to wallet'
+        : `Payment reminder (${stage.label})`,
+      message: messageText,
+      type: stage.deductWallet ? 'payment_failed' : 'payment_required',
+      requestId,
+      targetPath: `/customer/requests/${requestId}`,
+      metadata: {
+        stageIndex: stage.index,
+        stageLabel: stage.label,
+        amount: roundedAmount,
+        walletDeducted: Boolean(walletDeducted),
+        ...(paymentUrl ? { paymentUrl } : {}),
+      },
+    }).catch(() => null);
+  }
+
+  if (!whatsappNotificationsEnabled() || !whatsappMessagingEnabled()) return;
+  const secrets = getWhatsAppSecrets();
+  if (!secrets.accessToken || !secrets.phoneNumberId || !secrets.graphApiVersion) return;
+
+  const target = await resolveCustomerWhatsAppTarget(request).catch(() => null);
+  const recipient = String(target?.cleanRecipient || '');
+  if (!recipient || recipient.length < 8 || !isWhatsAppRecipientAllowed(recipient, process.env)) return;
+
+  const client = createMetaWhatsAppClient({
+    accessToken: secrets.accessToken,
+    phoneNumberId: secrets.phoneNumberId,
+    graphApiVersion: secrets.graphApiVersion,
+    approvedTemplateNames: secrets.approvedTemplateNames,
+    requestTimeoutMs: process.env.WHATSAPP_META_SEND_TIMEOUT_MS,
+    isRecipientAllowed: (to) => isWhatsAppRecipientAllowed(to, process.env),
+  });
+
+  const lastInboundAtMs = Number(target?.lastInboundAtMs || 0);
+  const inWindow = isWithinCustomerServiceWindow(lastInboundAtMs, Date.now());
+  if (inWindow) {
+    await client.sendText({
+      to: recipient,
+      text: formatWhatsAppText(messageText),
+      lastInboundAtMs,
+      now: Date.now(),
+    }).catch(() => null);
+    return;
+  }
+
+  const templateKey = stage.deductWallet ? 'PAYMENT_FAILED' : 'PAYMENT_REQUIRED';
+  const templateName = String(process.env[`WHATSAPP_TEMPLATE_${templateKey}_NAME`] || '').trim();
+  const languageCode = String(process.env[`WHATSAPP_TEMPLATE_${templateKey}_LANGUAGE`] || 'en').trim();
+  if (templateName && secrets.approvedTemplateNames.includes(templateName)) {
+    const components = buildServiceUpdateTemplateComponents({
+      requestReference: String(request.publicRequestReference || request.requestReference || requestId).trim(),
+      statusLabel: stage.deductWallet ? `R${roundedAmount} deducted from wallet` : `Payment reminder (R${roundedAmount})`,
+      detailText: paymentUrl || messageText,
+    });
+    await client.sendTemplate({
+      to: recipient,
+      templateName,
+      languageCode,
+      components,
+    }).catch(() => null);
+  }
+}
+
+async function executeUnpaidRecoveryStage({ requestId, stageIndex, now = Date.now() }) {
+  const safeRequestId = String(requestId || '').trim();
+  const stage = getRecoveryStageByIndex(stageIndex);
+  if (!safeRequestId || !stage) return { skipped: true, reason: 'invalid-stage' };
+
+  const requestRef = db.collection('serviceRequests').doc(safeRequestId);
+  const paymentRef = db.collection(PAYMENT_OPERATIONS).doc(safeRequestId);
+  const legacyRef = db.collection(FINANCIAL_OPERATIONS_COLLECTION).doc(serviceFinancialOperationId(safeRequestId));
+
+  const [requestSnap, paymentSnap, legacySnap] = await Promise.all([
+    requestRef.get(),
+    paymentRef.get(),
+    legacyRef.get(),
+  ]);
+  if (!requestSnap.exists) return { skipped: true, reason: 'not-found' };
+
+  const request = requestSnap.data() || {};
+  const paymentOp = paymentSnap.exists ? paymentSnap.data() || {} : null;
+  const legacyOp = legacySnap.exists ? legacySnap.data() || {} : null;
+  const eligibility = isRequestEligibleForUnpaidRecovery(request, paymentOp, legacyOp);
+  if (!eligibility.eligible) {
+    return { skipped: true, reason: eligibility.reason };
+  }
+
+  const existingCompleted = request?.unpaidRecovery?.completedStages?.[String(stage.index)];
+  if (existingCompleted) {
+    const nextStage = getNextUnpaidRecoveryStage(request, now);
+    if (nextStage) {
+      await enqueueUnpaidRecoveryStageTask({ requestId: safeRequestId, stage: nextStage });
+    }
+    return { skipped: true, reason: 'stage-already-completed' };
+  }
+
+  if (stage.targetRunAtMs === undefined && now < (eligibility.completedAtMs + stage.delayMs - 10_000)) {
+    await enqueueUnpaidRecoveryStageTask({
+      requestId: safeRequestId,
+      stage: {
+        ...stage,
+        targetRunAtMs: eligibility.completedAtMs + stage.delayMs,
+        delaySeconds: Math.max(0, Math.ceil((eligibility.completedAtMs + stage.delayMs - now) / 1000)),
+      },
+    });
+    return { skipped: true, reason: 'requeued-until-due' };
+  }
+
+  let walletDeducted = false;
+  if (stage.deductWallet) {
+    const deductionResult = await applyUnpaidRecoveryWalletDeduction({
+      db,
+      admin,
+      requestId: safeRequestId,
+      now,
+    });
+    if (deductionResult?.action === 'already-paid') {
+      return { skipped: true, reason: 'already-paid' };
+    }
+    walletDeducted = deductionResult?.action === 'wallet_deducted';
+  }
+
+  const refreshedSnap = await requestRef.get();
+  const refreshedRequest = refreshedSnap.exists ? (refreshedSnap.data() || request) : request;
+  const paymentUrl = await buildRequestPaymentLink({
+    requestId: safeRequestId,
+    request: { id: safeRequestId, ...refreshedRequest },
+    expiresInMs: 24 * 60 * 60 * 1000,
+  });
+
+  await sendUnpaidRecoveryCustomerNotice({
+    requestId: safeRequestId,
+    request: refreshedRequest,
+    stage,
+    amount: eligibility.amount,
+    paymentUrl,
+    walletDeducted,
+  });
+
+  const existingRecovery = refreshedRequest.unpaidRecovery && typeof refreshedRequest.unpaidRecovery === 'object'
+    ? refreshedRequest.unpaidRecovery
+    : {};
+  const nextCompletedStages = {
+    ...(existingRecovery.completedStages || {}),
+    [String(stage.index)]: now,
+  };
+  await requestRef.set({
+    unpaidRecovery: {
+      ...existingRecovery,
+      completedStages: nextCompletedStages,
+      lastStageSent: stage.index,
+      lastStageLabel: stage.label,
+      lastReminderAtMs: now,
+      lastPaymentUrl: paymentUrl || existingRecovery.lastPaymentUrl || null,
+      status: stage.deductWallet ? 'wallet_deducted' : 'reminder_sent',
+      updatedAtMs: now,
+    },
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  const nextStage = getNextUnpaidRecoveryStage({
+    ...refreshedRequest,
+    unpaidRecovery: {
+      ...existingRecovery,
+      completedStages: nextCompletedStages,
+    },
+  }, now);
+  if (nextStage) {
+    await enqueueUnpaidRecoveryStageTask({ requestId: safeRequestId, stage: nextStage });
+  }
+
+  return {
+    skipped: false,
+    stageIndex: stage.index,
+    stageLabel: stage.label,
+    walletDeducted,
+    paymentUrlCreated: Boolean(paymentUrl),
+  };
+}
+
+exports.scheduleUnpaidCompletedRequestRecoveryOnWrite = onDocumentWritten({
+  document: 'serviceRequests/{requestId}',
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
+}, async (event) => {
+  const after = event.data.after.exists ? event.data.after.data() : null;
+  if (!after) return;
+  const requestId = String(event.params?.requestId || '').trim();
+  if (!requestId) return;
+
+  const eligibility = isRequestEligibleForUnpaidRecovery(after);
+  if (!eligibility.eligible) return;
+
+  const nextStage = getNextUnpaidRecoveryStage(after, Date.now());
+  if (!nextStage) return;
+
+  const scheduledStages = after?.unpaidRecovery?.scheduledStages || {};
+  if (scheduledStages[String(nextStage.index)]) return;
+
+  const enqueued = await enqueueUnpaidRecoveryStageTask({
+    requestId,
+    stage: nextStage,
+  });
+  if (enqueued) {
+    await db.collection('serviceRequests').doc(requestId).set({
+      unpaidRecovery: {
+        ...(after.unpaidRecovery || {}),
+        status: after?.unpaidRecovery?.status || 'scheduled',
+        scheduledStages: {
+          ...scheduledStages,
+          [String(nextStage.index)]: nextStage.targetRunAtMs,
+        },
+        updatedAtMs: Date.now(),
+      },
+    }, { merge: true }).catch(() => null);
+  }
+});
+
+exports.processUnpaidCompletedRequestRecovery = onTaskDispatched({
+  retryConfig: { maxAttempts: 5, minBackoffSeconds: 10, maxBackoffSeconds: 120 },
+  rateLimits: { maxConcurrentDispatches: 20, maxDispatchesPerSecond: 10 },
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
+  memory: '256MiB',
+  timeoutSeconds: 60,
+}, async (event) => {
+  const input = event.data || {};
+  const requestId = String(input.requestId || '').trim();
+  const stageIndex = Number(input.stageIndex);
+  if (!requestId || !Number.isInteger(stageIndex)) return;
+  await executeUnpaidRecoveryStage({
+    requestId,
+    stageIndex,
+    now: Date.now(),
+  });
+});
+
+exports.sweepOverdueUnpaidCompletedRequests = onSchedule({
+  schedule: 'every 15 minutes',
+  timeZone: 'Africa/Johannesburg',
+  maxInstances: 1,
+  ...MICRO_CPU_OPTIONS,
+  memory: '256MiB',
+  timeoutSeconds: 120,
+}, async () => {
+  const now = Date.now();
+  let lastDoc = null;
+  while (true) {
+    let query = db.collection('serviceRequests')
+      .where('status', '==', SERVICE_REQUEST_STATUS.COMPLETED)
+      .orderBy(admin.firestore.FieldPath.documentId())
+      .limit(250);
+    if (lastDoc) query = query.startAfter(lastDoc);
+
+    let snapshot;
+    try {
+      snapshot = await query.get();
+    } catch (error) {
+      logger.error('unpaid_recovery_sweep_query_failed', { error: error?.message || 'unknown_error' });
+      break;
+    }
+    if (!snapshot || snapshot.empty) break;
+
+    for (const docSnap of snapshot.docs) {
+      const request = docSnap.data() || {};
+      const paymentStatusLower = String(request.paymentStatus || '').trim().toLowerCase();
+      if (paymentStatusLower === 'paid' || request?.unpaidRecovery?.status === 'wallet_deducted') continue;
+      const dueStage = getLatestDueUnpaidRecoveryStage(request, now);
+      if (!dueStage) continue;
+      await executeUnpaidRecoveryStage({
+        requestId: docSnap.id,
+        stageIndex: dueStage.index,
+        now,
+      }).catch((error) => {
+        logger.warn('unpaid_recovery_sweep_failed', {
+          requestId: docSnap.id,
+          stageIndex: dueStage.index,
+          error: error?.message || 'unknown_error',
+        });
+      });
+    }
+
+    lastDoc = snapshot.docs[snapshot.docs.length - 1];
+    if (snapshot.size < 250) break;
+  }
+});
+
+exports.requestAccountDeletion = onCall({
+  invoker: 'public',
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
+  memory: '256MiB',
+  timeoutSeconds: 30,
+}, async (request) => {
+  const uid = String(request.auth?.uid || '').trim();
+  if (!uid) throw new HttpsError('unauthenticated', 'Sign in to delete your account.');
+  const userSnap = await db.collection('users').doc(uid).get();
+  if (!userSnap.exists) throw new HttpsError('not-found', 'Account profile not found.');
+  const profile = userSnap.data() || {};
+  const requestedRole = String(request.data?.role || '').trim().toLowerCase();
+  const effectiveRole = resolveAccountRole(profile, requestedRole);
+  const channel = String(request.data?.channel || 'web').trim().slice(0, 40) || 'web';
+  const reason = String(request.data?.reason || '').trim().slice(0, 500);
+
+  const result = await scheduleAccountDeletion({
+    db,
+    admin,
+    uid,
+    role: effectiveRole,
+    channel,
+    reason,
+  });
+
+  if (!['scheduled', 'already-pending-deletion'].includes(result.code)) {
+    throw new HttpsError('failed-precondition', result.message || 'Your account cannot be deleted right now.');
+  }
+
+  if (effectiveRole === 'helper') {
+    await syncHelperDispatchIndexById(uid).catch(() => null);
+    await admin.database().ref(`liveTracking/helpers/${uid}`).update({
+      online: false,
+      updatedAtMs: Date.now(),
+    }).catch(() => null);
+  }
+
+  await sendWhatsAppAccountLifecycleNotice({
+    uid,
+    purpose: 'account_deletion_scheduled',
+    text: `Your Uncedo ${effectiveRole} account has been scheduled for permanent deletion on *${result.deletionDateLabel}* (30-day grace period). If you change your mind before then, sign back in or reply *reactivate account* here.`,
+  }).catch(() => null);
+
+  return { success: true, ...result };
+});
+
+exports.reactivateDeletedAccount = onCall({
+  invoker: 'public',
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
+  memory: '256MiB',
+  timeoutSeconds: 30,
+}, async (request) => {
+  const uid = String(request.auth?.uid || '').trim();
+  if (!uid) throw new HttpsError('unauthenticated', 'Sign in to reactivate your account.');
+  const channel = String(request.data?.channel || 'web').trim().slice(0, 40) || 'web';
+  const result = await reactivateAccount({ db, admin, uid, channel });
+  if (!['reactivated', 'already-active'].includes(result.code)) {
+    throw new HttpsError(
+      result.code === 'not-found' ? 'not-found' : 'failed-precondition',
+      result.message || 'This account could not be reactivated.',
+    );
+  }
+  if (result.role === 'helper') {
+    await syncHelperDispatchIndexById(uid).catch(() => null);
+  }
+  if (result.code === 'reactivated') {
+    await sendWhatsAppAccountLifecycleNotice({
+      uid,
+      purpose: 'account_deletion_reactivated',
+      text: `Your Uncedo ${result.role} account has been reactivated and the 30-day scheduled deletion has been canceled.`,
+    }).catch(() => null);
+  }
+  return { success: true, ...result };
+});
+
+exports.inspectWhatsAppAccountDeletionLink = onCall({
+  invoker: 'public',
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
+  memory: '256MiB',
+  timeoutSeconds: 20,
+}, async (request) => {
+  const token = String(request.data?.token || '').trim();
+  if (!/^[A-Za-z0-9_-]{40,60}$/.test(token)) {
+    throw new HttpsError('invalid-argument', 'This WhatsApp account deletion link is invalid or expired.');
+  }
+  const tokenHash = createHash('sha256').update(token).digest('hex');
+  const challengeSnap = await db.collection('whatsappAccountDeletionChallenges').doc(tokenHash).get();
+  if (!challengeSnap.exists) {
+    throw new HttpsError('not-found', 'This WhatsApp account deletion link is invalid or expired.');
+  }
+  const challenge = challengeSnap.data() || {};
+  if (!isWhatsAppAccountDeletionChallengeLive(challenge, Date.now())) {
+    throw new HttpsError('deadline-exceeded', 'This link has expired. Send "delete account" in your Uncedo WhatsApp chat to get a fresh link.');
+  }
+  const uid = String(challenge.uid || '').trim();
+  const userSnap = await db.collection('users').doc(uid).get();
+  if (!userSnap.exists) {
+    throw new HttpsError('not-found', 'This Uncedo account is no longer available.');
+  }
+  const profile = userSnap.data() || {};
+  const effectiveRole = resolveAccountRole(profile, challenge.role);
+  const pending = isAccountPendingDeletion(profile);
+  const eligibility = pending
+    ? { eligible: true, role: effectiveRole }
+    : await validateAccountDeletionEligibility({ db, uid, profile, role: effectiveRole });
+  return {
+    valid: true,
+    role: effectiveRole,
+    accountStatus: pending ? 'pending_deletion' : 'active',
+    deletionRequestedAtMs: Number(profile.deletionRequestedAtMs || 0) || null,
+    deletionScheduledAtMs: Number(profile.deletionScheduledAtMs || 0) || null,
+    deletionDateLabel: pending ? formatDeletionDateLabel(profile.deletionScheduledAtMs) : '',
+    gracePeriodDays: ACCOUNT_DELETION_GRACE_DAYS,
+    displayName: String(profile.fullName || profile.displayName || '').trim(),
+    maskedEmail: maskEmailAddress(profile.email || ''),
+    eligible: Boolean(eligibility.eligible),
+    ineligibleReason: eligibility.eligible ? '' : (eligibility.message || ''),
+    returnUrl: getWhatsAppBusinessReturnUrl(),
+  };
+});
+
+exports.confirmWhatsAppAccountDeletionLink = onCall({
+  invoker: 'public',
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
+  memory: '256MiB',
+  timeoutSeconds: 30,
+}, async (request) => {
+  const token = String(request.data?.token || '').trim();
+  const action = String(request.data?.action || '').trim().toLowerCase();
+  const confirmText = String(request.data?.confirmText || '').trim();
+  const reason = String(request.data?.reason || '').trim().slice(0, 500);
+  if (!/^[A-Za-z0-9_-]{40,60}$/.test(token)) {
+    throw new HttpsError('invalid-argument', 'This WhatsApp account deletion link is invalid or expired.');
+  }
+  if (!['schedule_deletion', 'reactivate'].includes(action)) {
+    throw new HttpsError('invalid-argument', 'Unsupported account action requested.');
+  }
+  if (action === 'schedule_deletion' && confirmText !== 'DELETE') {
+    throw new HttpsError('invalid-argument', 'Type DELETE in uppercase to confirm 30-day scheduled deletion.');
+  }
+  const tokenHash = createHash('sha256').update(token).digest('hex');
+  const challengeRef = db.collection('whatsappAccountDeletionChallenges').doc(tokenHash);
+  const challengeSnap = await challengeRef.get();
+  if (!challengeSnap.exists) {
+    throw new HttpsError('not-found', 'This WhatsApp account deletion link is invalid or expired.');
+  }
+  const challenge = challengeSnap.data() || {};
+  if (!isWhatsAppAccountDeletionChallengeLive(challenge, Date.now())) {
+    throw new HttpsError('deadline-exceeded', 'This link has expired. Send "delete account" in your Uncedo WhatsApp chat to get a fresh link.');
+  }
+  const uid = String(challenge.uid || '').trim();
+  const identityId = String(challenge.identityId || '').trim();
+  const [identitySnap, userSnap] = await Promise.all([
+    db.collection('whatsappIdentities').doc(identityId).get(),
+    db.collection('users').doc(uid).get(),
+  ]);
+  if (!identitySnap.exists || !userSnap.exists) {
+    throw new HttpsError('not-found', 'This WhatsApp identity or Uncedo account is no longer available.');
+  }
+  const identity = identitySnap.data() || {};
+  const phone = normalizeWhatsAppIdentityPhone(`+${String(identity.waId || '')}`);
+  if (!phone.phoneNumber || String(identity.linkedFirebaseUid || '') !== uid
+    || String(challenge.phoneHash || '') !== createHash('sha256').update(phone.phoneNumber).digest('hex')) {
+    throw new HttpsError('permission-denied', 'This WhatsApp link no longer matches the linked account.');
+  }
+
+  let outcome;
+  if (action === 'reactivate') {
+    outcome = await reactivateAccount({ db, admin, uid, channel: 'whatsapp_link' });
+    if (!['reactivated', 'already-active'].includes(outcome.code)) {
+      throw new HttpsError('failed-precondition', outcome.message || 'Unable to reactivate this account.');
+    }
+    if (outcome.role === 'helper') {
+      await syncHelperDispatchIndexById(uid).catch(() => null);
+    }
+    await sendWhatsAppAccountLifecycleNotice({
+      uid,
+      purpose: 'account_deletion_reactivated',
+      text: `Your Uncedo ${outcome.role} account has been reactivated and its 30-day scheduled deletion was canceled.`,
+    }).catch(() => null);
+  } else {
+    const profile = userSnap.data() || {};
+    const effectiveRole = resolveAccountRole(profile, challenge.role);
+    outcome = await scheduleAccountDeletion({
+      db,
+      admin,
+      uid,
+      role: effectiveRole,
+      channel: 'whatsapp_link',
+      reason,
+    });
+    if (!['scheduled', 'already-pending-deletion'].includes(outcome.code)) {
+      throw new HttpsError('failed-precondition', outcome.message || 'Your account cannot be deleted right now.');
+    }
+    if (effectiveRole === 'helper') {
+      await syncHelperDispatchIndexById(uid).catch(() => null);
+      await admin.database().ref(`liveTracking/helpers/${uid}`).update({
+        online: false,
+        updatedAtMs: Date.now(),
+      }).catch(() => null);
+    }
+    await admin.auth().revokeRefreshTokens(uid).catch(() => null);
+    await sendWhatsAppAccountLifecycleNotice({
+      uid,
+      purpose: 'account_deletion_scheduled',
+      text: `Your Uncedo ${effectiveRole} account has been scheduled for permanent deletion on *${outcome.deletionDateLabel}* (30-day grace period). You can reply *reactivate account* here anytime before that date to cancel deletion.`,
+    }).catch(() => null);
+  }
+
+  await challengeRef.set({
+    status: 'used',
+    usedAction: action,
+    usedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  return {
+    success: true,
+    ...outcome,
+    returnUrl: getWhatsAppBusinessReturnUrl(),
+  };
+});
+
+exports.processScheduledAccountDeletions = onSchedule({
+  schedule: 'every day 04:00',
+  timeZone: 'Africa/Johannesburg',
+  maxInstances: 1,
+  ...MICRO_CPU_OPTIONS,
+  memory: '256MiB',
+  timeoutSeconds: 300,
+}, async () => {
+  const nowMs = Date.now();
+  let lastDoc = null;
+  while (true) {
+    let query = db.collection('users')
+      .where('accountStatus', '==', 'pending_deletion')
+      .where('deletionScheduledAtMs', '<=', nowMs)
+      .orderBy('deletionScheduledAtMs', 'asc')
+      .limit(50);
+    if (lastDoc) query = query.startAfter(lastDoc);
+
+    let dueSnap;
+    try {
+      dueSnap = await query.get();
+    } catch (error) {
+      logger.error('scheduled_account_deletions_query_failed', { error: error?.message || 'unknown_error' });
+      break;
+    }
+    if (!dueSnap || dueSnap.empty) break;
+
+    for (const docSnap of dueSnap.docs) {
+      await executePermanentAccountDeletion({
+        db,
+        admin,
+        uid: docSnap.id,
+        nowMs,
+      }).catch((error) => {
+        logger.warn('scheduled_account_deletion_failed', {
+          uidHash: whatsappDiagnosticHash(docSnap.id),
+          error: error?.message || 'unknown_error',
+        });
+      });
+    }
+
+    lastDoc = dueSnap.docs[dueSnap.docs.length - 1];
+    if (dueSnap.size < 50) break;
+  }
+});
+
+async function enqueueWaitingChargeNoticeTask({ requestId, arrivedAtMs, helperId = '', delaySeconds = null } = {}) {
+  const safeRequestId = String(requestId || '').trim();
+  const safeArrivedAtMs = Number(arrivedAtMs || 0);
+  if (!safeRequestId || !safeArrivedAtMs) return false;
+  const graceEndMs = safeArrivedAtMs + (WAITING_FREE_GRACE_MINUTES * 60_000);
+  const resolvedDelaySeconds = delaySeconds !== null
+    ? Math.max(0, Number(delaySeconds))
+    : Math.max(0, Math.ceil((graceEndMs - Date.now()) / 1000));
+  const suffix = delaySeconds !== null ? `:requeue:${Math.floor(Date.now() / 10_000)}` : '';
+  const taskId = `wait-grace_${createHash('sha256').update(`${safeRequestId}:${safeArrivedAtMs}${suffix}`).digest('hex').slice(0, 32)}`;
+  try {
+    await getFunctions().taskQueue('sendWaitingChargeStartedWhatsAppNotice').enqueue({
+      requestId: safeRequestId,
+      arrivedAtMs: safeArrivedAtMs,
+      helperId: String(helperId || '').trim(),
+    }, {
+      id: taskId,
+      scheduleDelaySeconds: resolvedDelaySeconds,
+      dispatchDeadlineSeconds: 60,
+    });
+    return true;
+  } catch (error) {
+    if (String(error?.code || '').includes('task-already-exists')) {
+      return false;
+    }
+    logger.warn('waiting_grace_notice_enqueue_failed', {
+      requestId: safeRequestId,
+      error: error?.message || 'unknown_error',
+    });
+    return false;
+  }
+}
+
+exports.scheduleWaitingChargeNoticeOnArrival = onDocumentWritten({
+  document: 'serviceRequests/{requestId}',
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
+}, async (event) => {
+  const before = event.data.before.exists ? event.data.before.data() : null;
+  const after = event.data.after.exists ? event.data.after.data() : null;
+  if (!after) return;
+
+  const beforeStatus = String(before?.status || '').trim().toLowerCase();
+  const afterStatus = String(after.status || '').trim().toLowerCase();
+  if (afterStatus !== SERVICE_REQUEST_STATUS.ARRIVED) return;
+
+  const requestId = String(event.params?.requestId || '').trim();
+  const arrivedAtMs = timestampToMillis(
+    after.arrivedAt
+    || after.helperAssignment?.arrivedAt
+    || after.arrivalVerification?.generatedAtMs,
+  );
+  if (!requestId || !arrivedAtMs) return;
+
+  const alreadyScheduledForMs = Number(after.waitingChargeNoticeArrivedAtMs || 0);
+  if (beforeStatus === SERVICE_REQUEST_STATUS.ARRIVED && alreadyScheduledForMs === arrivedAtMs) return;
+
+  const scheduled = await enqueueWaitingChargeNoticeTask({
+    requestId,
+    arrivedAtMs,
+    helperId: String(after.helperAssignment?.helperId || '').trim(),
+  });
+  if (scheduled) {
+    await db.collection('serviceRequests').doc(requestId).set({
+      waitingChargeNoticeScheduledAtMs: arrivedAtMs + (WAITING_FREE_GRACE_MINUTES * 60_000),
+      waitingChargeNoticeArrivedAtMs: arrivedAtMs,
+    }, { merge: true }).catch(() => null);
+  }
+});
+
+async function runWaitingGraceNoticeForRequest({
+  requestId = '',
+  expectedArrivedAtMs = 0,
+  now = Date.now(),
+  allowEarlyRequeue = true,
+} = {}) {
+  const safeRequestId = String(requestId || '').trim();
+  if (!safeRequestId) return { skipped: true, reason: 'missing-request-id' };
+
+  return executeWaitingGraceNotice({
+    db,
+    admin,
+    requestId: safeRequestId,
+    expectedArrivedAtMs,
+    now,
+    freeGraceMinutes: WAITING_FREE_GRACE_MINUTES,
+    ratePerMinute: WAITING_RATE_PER_MINUTE,
+    timestampToMillis,
+    resolveCustomerWhatsAppIdentityId: ({ customerId, request }) => resolveCustomerWhatsAppIdentityId({ customerId, request }),
+    whatsappNotificationsEnabled,
+    whatsappMessagingEnabled,
+    getWhatsAppSecrets,
+    createMetaWhatsAppClient: (secrets) => createMetaWhatsAppClient({
+      accessToken: secrets.accessToken,
+      phoneNumberId: secrets.phoneNumberId,
+      graphApiVersion: secrets.graphApiVersion,
+      approvedTemplateNames: secrets.approvedTemplateNames,
+      requestTimeoutMs: process.env.WHATSAPP_META_SEND_TIMEOUT_MS,
+      isRecipientAllowed: (recipient) => isWhatsAppRecipientAllowed(recipient, process.env),
+    }),
+    isWhatsAppRecipientAllowed: (recipient) => isWhatsAppRecipientAllowed(recipient, process.env),
+    isWithinCustomerServiceWindow,
+    buildServiceUpdateTemplateComponents,
+    formatWhatsAppText,
+    stableEventId,
+    createUserNotificationOnce,
+    ...(allowEarlyRequeue ? {
+      onRequeueEarly: async ({ requestId: reqId, arrivedAtMs, delaySeconds }) => {
+        await enqueueWaitingChargeNoticeTask({ requestId: reqId, arrivedAtMs, delaySeconds });
+      },
+    } : {}),
+    logger,
+  });
+}
+
+exports.sendWaitingChargeStartedWhatsAppNotice = onTaskDispatched({
+  retryConfig: { maxAttempts: 5, minBackoffSeconds: 5, maxBackoffSeconds: 60 },
+  rateLimits: { maxConcurrentDispatches: 25, maxDispatchesPerSecond: 10 },
+  maxInstances: 2,
+  ...MICRO_CPU_OPTIONS,
+  memory: '256MiB',
+  timeoutSeconds: 60,
+}, async (event) => {
+  const input = event.data || {};
+  const requestId = String(input.requestId || '').trim();
+  const expectedArrivedAtMs = Number(input.arrivedAtMs || 0);
+  if (!requestId) return;
+
+  await runWaitingGraceNoticeForRequest({
+    requestId,
+    expectedArrivedAtMs,
+    now: Date.now(),
+    allowEarlyRequeue: true,
+  });
+});
+
+exports.sweepOverdueWaitingGraceNotices = onSchedule({
+  schedule: 'every 1 minutes',
+  timeZone: 'Africa/Johannesburg',
+  maxInstances: 1,
+  ...MICRO_CPU_OPTIONS,
+  memory: '256MiB',
+  timeoutSeconds: 60,
+}, async () => {
+  const now = Date.now();
+  const graceMs = Math.max(1, Number(WAITING_FREE_GRACE_MINUTES || 2)) * 60_000;
+  let snapshot;
+  try {
+    snapshot = await db.collection('serviceRequests')
+      .where('status', '==', SERVICE_REQUEST_STATUS.ARRIVED)
+      .limit(100)
+      .get();
+  } catch (error) {
+    logger.warn('waiting_grace_sweep_query_failed', { error: error?.message || 'unknown_error' });
+    return;
+  }
+  if (!snapshot || snapshot.empty) return;
+
+  for (const docSnap of snapshot.docs) {
+    const req = docSnap.data() || {};
+    const arrivedAtMs = Number(
+      timestampToMillis(
+        req.arrivedAt
+        || req.helperAssignment?.arrivedAt
+        || req.arrivalVerification?.generatedAtMs,
+      ) || 0,
+    );
+    if (!arrivedAtMs) continue;
+    if (now < (arrivedAtMs + graceMs - 5_000)) continue;
+    if (Number(req.waitingChargeNoticeSentAtMs || 0) >= arrivedAtMs) continue;
+
+    await runWaitingGraceNoticeForRequest({
+      requestId: docSnap.id,
+      expectedArrivedAtMs: arrivedAtMs,
+      now,
+      allowEarlyRequeue: false,
+    }).catch((error) => {
+      logger.warn('waiting_grace_sweep_execution_failed', {
+        requestId: docSnap.id,
+        error: String(error?.message || 'unknown_error').slice(0, 140),
+      });
+    });
+  }
+});
+
+exports.askServiceCatalogAi = onRequest({
+  cors: true,
+  invoker: 'public',
+  maxInstances: 5,
+  ...HALF_CPU_OPTIONS,
+  timeoutSeconds: 30,
+}, async (req, res) => {
+  if (req.method !== 'POST') {
+    return res.status(405).json({ success: false, message: 'Method not allowed.' });
+  }
+
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+    ? req.body
+    : {};
+  const serviceId = String(body.serviceId || '').trim().slice(0, 120);
+  const optionId = String(body.optionId || '').trim().slice(0, 120);
+  const optionTitle = String(body.optionTitle || '').trim().slice(0, 140);
+  const categoryName = String(body.categoryName || '').trim().slice(0, 80);
+  const priceLabel = String(body.priceLabel || '').trim().slice(0, 60);
+  const message = String(body.message || '').trim();
+  const history = Array.isArray(body.history) ? body.history : [];
+
+  if (!message) {
+    return res.status(400).json({
+      success: false,
+      code: 'missing_message',
+      message: 'Please enter a question before sending.',
+    });
+  }
+
+  let catalogEntry = null;
+  if (serviceId) {
+    try {
+      const catalogSnap = await db.collection('serviceCatalog').doc(serviceId).get();
+      if (catalogSnap.exists) {
+        const candidate = { id: catalogSnap.id, ...(catalogSnap.data() || {}) };
+        if (candidate.active !== false && candidate.approved !== false) {
+          catalogEntry = candidate;
+        }
+      }
+    } catch (lookupError) {
+      logger.warn('ask_service_catalog_lookup_failed', {
+        serviceId,
+        error: String(lookupError?.message || 'unknown_error').slice(0, 140),
+      });
+    }
+  }
+
+  try {
+    const result = await runServiceCatalogAskAi({
+      catalogEntry,
+      serviceId,
+      optionId,
+      optionTitle,
+      categoryName,
+      priceLabel,
+      message,
+      history,
+      openAiApiKey: String(process.env.OPENAI_API_KEY || '').trim(),
+      openAiModel: String(process.env.OPENAI_MODEL || 'gpt-6-luna').trim(),
+      geminiModel: String(process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite').trim(),
+      ...whatsappGeminiVertexConfig(),
+    });
+
+    return res.status(200).json({
+      success: true,
+      reply: result.reply,
+      serviceTitle: result.serviceTitle,
+      provider: result.provider,
+      model: result.model,
+    });
+  } catch (error) {
+    const code = String(error?.code || 'ask_service_ai_failed');
+    if (code === 'missing_message') {
+      return res.status(400).json({
+        success: false,
+        code,
+        message: error.message || 'Please enter a question before sending.',
+      });
+    }
+    logger.warn('ask_service_catalog_ai_failed', {
+      serviceId,
+      optionId,
+      code,
+      error: String(error?.message || 'unknown_error').slice(0, 160),
+    });
+    return res.status(503).json({
+      success: false,
+      code,
+      message: error?.message || 'Service assistant is temporarily unavailable. Please try again or tap Ask on WhatsApp.',
+    });
+  }
+});
+

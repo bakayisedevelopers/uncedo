@@ -60,6 +60,14 @@ function getWhatsAppAccountLinkUrl({ role, env = process.env } = {}) {
   return url;
 }
 
+function getWhatsAppAccountDeletionUrl({ role, env = process.env } = {}) {
+  const url = getWhatsAppSignupUrl({ role, mode: 'signup', env });
+  url.pathname = '/delete-account';
+  url.search = '';
+  url.hash = '';
+  return url;
+}
+
 function getWhatsAppHelperAgreementUrl({ env = process.env } = {}) {
   const configured = String(env?.WHATSAPP_HELPER_AGREEMENT_URL || `${DEFAULT_HELPER_BASE_URL}/sign-agreement`).trim();
   let url;
@@ -101,6 +109,7 @@ module.exports = {
   getWhatsAppHelperBaseUrl,
   getWhatsAppSignupUrl,
   getWhatsAppAccountLinkUrl,
+  getWhatsAppAccountDeletionUrl,
   getWhatsAppHelperAgreementUrl,
   getWhatsAppHelperOnboardingUrl,
 };

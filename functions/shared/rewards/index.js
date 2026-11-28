@@ -1,7 +1,7 @@
 const SCHEMA_VERSION = 1;
 const ACCOUNT_TYPES = Object.freeze({ CUSTOMER: 'customer', HELPER: 'helper' });
 const MEMBERSHIP_LEVELS = Object.freeze(['neighbour', 'partner', 'friend', 'family']);
-const MASTERY_LEVELS = Object.freeze(['beginner', 'specialist', 'master', 'legend']);
+const MASTERY_LEVELS = Object.freeze(['beginner', 'verified', 'specialist', 'master', 'legend']);
 const RATING_DIRECTIONS = Object.freeze({ CUSTOMER_TO_HELPER: 'customer_to_helper', HELPER_TO_CUSTOMER: 'helper_to_customer' });
 const RATING_ROLES = Object.freeze({ CUSTOMER: 'customer', HELPER: 'helper' });
 const REWARD_TRANSACTION_DIRECTIONS = Object.freeze({ CREDIT: 'credit', DEBIT: 'debit', REVERSAL: 'reversal', EXPIRY: 'expiry' });

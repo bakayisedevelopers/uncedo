@@ -241,16 +241,24 @@ export function StepServicesPortfolio({
       if (!uploaded.length) {
         throw new Error('Select valid JPG, PNG, or WEBP photos.');
       }
+      const catalogEntry = catalogById.get(normalizeServiceToken(offering.serviceId || ''))
+        || catalogById.get(String(offering.serviceId || '').toLowerCase());
+      const optionToken = normalizeServiceToken(offering.optionId || '');
+      const liveCatalogOption = optionToken && Array.isArray(catalogEntry?.options)
+        ? catalogEntry.options.find((opt) => normalizeServiceToken(opt?.id || '') === optionToken)
+        : null;
+      const liveServiceName = String(catalogEntry?.label || offering.serviceName || offering.serviceId || '').trim();
+      const liveOptionTitle = String(liveCatalogOption?.title || liveCatalogOption?.label || offering.optionTitle || '').trim();
       await saveHelperServiceOffering({
         helperId: user.uid,
         serviceId: offering.serviceId,
-        categoryId: offering.categoryId,
-        serviceName: offering.serviceName,
+        categoryId: catalogEntry?.categoryId || offering.categoryId,
+        serviceName: liveServiceName,
         optionId: offering.optionId,
-        optionTitle: offering.optionTitle,
+        optionTitle: liveOptionTitle,
         photos: [...(offering.photos || []), ...uploaded].slice(0, 10),
       });
-      setNotice(`Added ${uploaded.length} photo(s) to ${offering.optionTitle || offering.serviceName}.`);
+      setNotice(`Added ${uploaded.length} photo(s) to ${liveOptionTitle || liveServiceName}.`);
     } catch (err) {
       setError(err?.message || 'Failed to add portfolio photos.');
     } finally {

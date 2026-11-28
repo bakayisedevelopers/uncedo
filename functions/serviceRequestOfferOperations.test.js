@@ -183,3 +183,30 @@ test('busy_helper_fallback offer allows accepting while keeping activeServiceReq
   });
   assert.equal(secondBusyBlocked.error, 'helper-already-has-queued-request');
 });
+
+test('declining an offer moves the request back to matching and advances selection to the next helper', async () => {
+  const { data, operations } = setup();
+  data.set('serviceRequests/request-0001', {
+    ...data.get('serviceRequests/request-0001'),
+    helperQueue: ['helper-1', 'helper-2'],
+    busyHelperQueue: ['helper-1', 'helper-3'],
+  });
+  const declined = await operations.respond({
+    requestId: 'request-0001',
+    helperId: 'helper-1',
+    offerToken: 'offer-token',
+    offerRevision: 3,
+    action: 'decline',
+  });
+  assert.equal(declined.didApply, true);
+  assert.equal(declined.action, 'decline');
+  const updated = data.get('serviceRequests/request-0001');
+  assert.equal(updated.status, 'matching');
+  assert.equal(updated.currentOfferHelperId, null);
+  assert.equal(updated.offerExpiresAt, null);
+  assert.equal(updated.offerToken, null);
+  assert.deepEqual(updated.helperQueue, ['helper-2']);
+  assert.deepEqual(updated.busyHelperQueue, ['helper-3']);
+  assert.deepEqual(updated.declinedHelperIds, ['helper-1']);
+  assert.deepEqual(updated.offerCycleExcludedHelperIds, ['helper-1']);
+});

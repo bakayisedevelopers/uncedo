@@ -1,4 +1,5 @@
 import { firebaseConfigured, getFirebaseClients, getFunctionEndpoint } from '../firebase/config';
+import { unregisterHelperWebPushToken } from '../utils/fcmPush';
 
 export const HELPER_AGREEMENT_DOCUMENT_ID = 'helper_agreement';
 export const WHATSAPP_CHAT_URL = 'https://wa.me/27605239926';
@@ -96,6 +97,61 @@ function buildDefaultHelperProfile({ uid, email, fullName }) {
   };
 }
 
+const AUTH_PROFILE_CACHE_KEY = 'uncedo_helper_auth_profile_v1';
+
+function readCachedHelperProfile(uid) {
+  if (typeof window === 'undefined' || !uid) return null;
+  try {
+    const raw = window.localStorage.getItem(AUTH_PROFILE_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.uid !== uid || !parsed.profile) return null;
+    if (shouldBlockAsCustomer(parsed.profile)) return null;
+    return parsed.profile;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedHelperProfile(uid, profile) {
+  if (typeof window === 'undefined' || !uid || !profile) return;
+  try {
+    window.localStorage.setItem(
+      AUTH_PROFILE_CACHE_KEY,
+      JSON.stringify({
+        uid,
+        cachedAtMs: Date.now(),
+        profile: {
+          uid,
+          email: String(profile.email || ''),
+          fullName: String(profile.fullName || ''),
+          displayName: String(profile.displayName || ''),
+          role: String(profile.role || 'helper'),
+          activeRole: String(profile.activeRole || 'helper'),
+          roles: Array.isArray(profile.roles) ? profile.roles : ['helper'],
+          providerType: String(profile.providerType || ''),
+          businessName: String(profile.businessName || ''),
+          verificationStatus: String(profile.verificationStatus || ''),
+          onlineStatus: String(profile.onlineStatus || 'offline'),
+          accountStatus: String(profile.accountStatus || ''),
+          locationSharingEnabled: Boolean(profile.locationSharingEnabled),
+        },
+      }),
+    );
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+function clearCachedHelperProfile() {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(AUTH_PROFILE_CACHE_KEY);
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 export function subscribeToAuthSession(onUser, onError) {
   if (!firebaseConfigured) {
     onUser(null);
@@ -110,38 +166,62 @@ export function subscribeToAuthSession(onUser, onError) {
     return () => {};
   }
   const { auth, authModule, db, firestoreModule } = clients;
-  return authModule.onAuthStateChanged(
+  let active = true;
+  const unsub = authModule.onAuthStateChanged(
     auth,
     async (firebaseUser) => {
+      if (!active) return;
       if (!firebaseUser) {
+        clearCachedHelperProfile();
         onUser(null);
         return;
       }
+
+      const cachedProfile = readCachedHelperProfile(firebaseUser.uid);
+      if (cachedProfile) {
+        onUser({
+          uid: firebaseUser.uid,
+          email: firebaseUser.email || '',
+          displayName: cachedProfile.fullName || cachedProfile.displayName || firebaseUser.displayName || '',
+          profile: cachedProfile,
+        });
+      }
+
       try {
         const snap = await firestoreModule.getDoc(firestoreModule.doc(db, 'users', firebaseUser.uid));
+        if (!active || auth.currentUser?.uid !== firebaseUser.uid) return;
         const profile = snap.exists() ? { uid: snap.id, ...snap.data() } : null;
         if (profile && shouldBlockAsCustomer(profile)) {
+          clearCachedHelperProfile();
           await authModule.signOut(auth);
           onError?.(new Error('Customer accounts cannot use Helper onboarding. Sign in or register with a helper email account.'));
           onUser(null);
           return;
         }
+        const resolvedProfile = profile || buildDefaultHelperProfile({
+          uid: firebaseUser.uid,
+          email: firebaseUser.email || '',
+          fullName: firebaseUser.displayName || '',
+        });
+        writeCachedHelperProfile(firebaseUser.uid, resolvedProfile);
         onUser({
           uid: firebaseUser.uid,
           email: firebaseUser.email || '',
           displayName: profile?.fullName || profile?.displayName || firebaseUser.displayName || '',
-          profile: profile || buildDefaultHelperProfile({
-            uid: firebaseUser.uid,
-            email: firebaseUser.email || '',
-            fullName: firebaseUser.displayName || '',
-          }),
+          profile: resolvedProfile,
         });
       } catch (err) {
-        onError?.(err);
+        if (!cachedProfile) {
+          onError?.(err);
+        }
       }
     },
     onError,
   );
+  return () => {
+    active = false;
+    unsub?.();
+  };
 }
 
 export async function saveWhatsAppContactNumber(phoneNumber) {
@@ -226,7 +306,9 @@ export async function signInHelperAccount({ email, password }) {
 }
 
 export async function signOutHelperAccount() {
+  clearCachedHelperProfile();
   const { auth, authModule } = getFirebaseClients();
+  await unregisterHelperWebPushToken(auth.currentUser?.uid || '').catch(() => false);
   await authModule.signOut(auth);
 }
 
@@ -1367,4 +1449,55 @@ export function subscribeToHelperServiceRequests(helperId, callback, onError, li
       callback([]);
     },
   );
+}
+
+export async function requestHelperAccountDeletion({ reason = '' } = {}) {
+  const { auth, functions, httpsCallable } = getFirebaseClients();
+  if (!auth?.currentUser) {
+    throw new Error('Sign in to schedule helper account deletion.');
+  }
+  const call = httpsCallable(functions, 'requestAccountDeletion');
+  const res = await call({
+    role: 'helper',
+    channel: 'web',
+    reason: String(reason || '').trim(),
+  });
+  return res.data || {};
+}
+
+export async function reactivateHelperAccount() {
+  const { auth, functions, httpsCallable } = getFirebaseClients();
+  if (!auth?.currentUser) {
+    throw new Error('Sign in to reactivate your helper account.');
+  }
+  const call = httpsCallable(functions, 'reactivateDeletedAccount');
+  const res = await call({ channel: 'web' });
+  return res.data || {};
+}
+
+export async function inspectWhatsAppHelperDeletionLink(token) {
+  const safeToken = String(token || '').trim();
+  if (!/^[A-Za-z0-9_-]{40,60}$/.test(safeToken)) {
+    throw new Error('This WhatsApp account deletion link is invalid or expired.');
+  }
+  const { functions, httpsCallable } = getFirebaseClients();
+  const call = httpsCallable(functions, 'inspectWhatsAppAccountDeletionLink');
+  const res = await call({ token: safeToken });
+  return res.data || {};
+}
+
+export async function confirmWhatsAppHelperDeletionLink({ token, action, confirmText = '', reason = '' }) {
+  const safeToken = String(token || '').trim();
+  if (!/^[A-Za-z0-9_-]{40,60}$/.test(safeToken)) {
+    throw new Error('This WhatsApp account deletion link is invalid or expired.');
+  }
+  const { functions, httpsCallable } = getFirebaseClients();
+  const call = httpsCallable(functions, 'confirmWhatsAppAccountDeletionLink');
+  const res = await call({
+    token: safeToken,
+    action,
+    confirmText: String(confirmText || '').trim(),
+    reason: String(reason || '').trim(),
+  });
+  return res.data || {};
 }

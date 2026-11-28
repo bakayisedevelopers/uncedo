@@ -5,9 +5,17 @@ import { useAdmin } from '../hooks/useAdmin';
 
 function LoadingState({ message = 'Loading...' }) {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-ink-900 px-4">
-      <div className="max-w-sm rounded-3xl border border-white/10 bg-white/5 px-6 py-8 text-center text-ink-100 shadow-glow backdrop-blur">
-        <div className="mx-auto mb-4 h-12 w-12 animate-pulse rounded-2xl bg-brand/30" />
+    <div className="flex min-h-screen items-center justify-center bg-dashboard-radial px-4">
+      <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-ink-900/80 px-6 py-8 text-center text-ink-100 shadow-glow backdrop-blur">
+        <img
+          src="/admin-wordmark-light.png"
+          alt="Uncedo Admin"
+          referrerPolicy="no-referrer"
+          className="mx-auto mb-5 h-11 w-auto shrink-0 object-contain"
+        />
+        <div className="mx-auto mb-3 h-1 w-16 overflow-hidden rounded-full bg-white/10">
+          <div className="h-full w-full animate-pulse rounded-full bg-brand" />
+        </div>
         <p className="text-sm font-medium tracking-wide text-ink-200">{message}</p>
       </div>
     </div>

@@ -3,13 +3,13 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { auth, firebaseConfigured } from '../firebase/config';
 import {
   ensureCustomerProfile,
-  requestWhatsAppAuthCode,
+  reactivateCustomerAccount,
+  requestCustomerAccountDeletion,
   signInWithEmail,
   signInWithGoogle,
   signOutCustomer,
   signUpWithEmail,
   updateCustomerProfile,
-  verifyWhatsAppAuthCode,
 } from '../services/authService';
 
 const AuthContext = createContext(null);
@@ -57,9 +57,27 @@ export function AuthProvider({ children }) {
     signInWithEmail,
     signInWithGoogle,
     signUpWithEmail,
-    requestWhatsAppAuthCode,
-    verifyWhatsAppAuthCode,
     signOut: signOutCustomer,
+    requestAccountDeletion: async ({ reason = '' } = {}) => {
+      const result = await requestCustomerAccountDeletion({ reason });
+      if (user?.firebaseUser) {
+        const refreshed = await ensureCustomerProfile(user.firebaseUser).catch(() => null);
+        if (refreshed) {
+          setUser((current) => current ? { ...current, profile: refreshed } : current);
+        }
+      }
+      return result;
+    },
+    reactivateAccount: async () => {
+      const result = await reactivateCustomerAccount();
+      if (user?.firebaseUser) {
+        const refreshed = await ensureCustomerProfile(user.firebaseUser).catch(() => null);
+        if (refreshed) {
+          setUser((current) => current ? { ...current, profile: refreshed } : current);
+        }
+      }
+      return result;
+    },
     updateProfile: async (updates) => {
       const profile = await updateCustomerProfile(user?.firebaseUser?.uid, updates);
       setUser((current) => current ? { ...current, profile } : current);

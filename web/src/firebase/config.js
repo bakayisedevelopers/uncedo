@@ -19,5 +19,4 @@ const app = getApps().length ? getApp() : firebaseConfigured ? initializeApp(req
 
 export const auth = app ? getAuth(app) : null;
 export const db = app ? getFirestore(app) : null;
-export const whatsappAuthEnabled = import.meta.env.VITE_WHATSAPP_AUTH_ENABLED === 'true';
 export const googleAuthEnabled = import.meta.env.VITE_GOOGLE_AUTH_ENABLED === 'true';

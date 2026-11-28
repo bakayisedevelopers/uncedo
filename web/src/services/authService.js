@@ -4,13 +4,12 @@ import {
   createUserWithEmailAndPassword,
   reauthenticateWithCredential,
   signInWithEmailAndPassword,
-  signInWithCustomToken,
   signInWithPopup,
   signOut,
   updateProfile,
 } from 'firebase/auth';
 import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
-import { auth, db, firebaseConfigured, whatsappAuthEnabled } from '../firebase/config';
+import { auth, db, firebaseConfigured } from '../firebase/config';
 
 function requireFirebase() {
   if (!firebaseConfigured || !auth || !db) {
@@ -130,28 +129,6 @@ export async function signInWithGoogle({ phoneNumber = '' } = {}) {
   return { firebaseUser: credential.user, profile };
 }
 
-export async function requestWhatsAppAuthCode({ phoneNumber, mode = 'login', name = '', email = '' }) {
-  requireFirebase();
-  if (!whatsappAuthEnabled) throw new Error('WhatsApp sign-in will be available after Uncedo finishes configuring its verified WhatsApp authentication service.');
-  const { getFunctions, httpsCallable } = await import('firebase/functions');
-  const callable = httpsCallable(getFunctions(auth.app, 'us-central1'), 'startWhatsAppAuthChallenge');
-  const result = await callable({ phoneNumber, mode, role: 'customer', name, email });
-  return result.data;
-}
-
-export async function verifyWhatsAppAuthCode({ challengeId, code }) {
-  requireFirebase();
-  if (!whatsappAuthEnabled) throw new Error('WhatsApp sign-in is not configured yet.');
-  const { getFunctions, httpsCallable } = await import('firebase/functions');
-  const callable = httpsCallable(getFunctions(auth.app, 'us-central1'), 'completeWhatsAppAuthChallenge');
-  const result = await callable({ challengeId, code });
-  const credential = await signInWithCustomToken(auth, result.data.customToken);
-  const profile = await ensureCustomerProfile(credential.user);
-  await httpsCallable(getFunctions(auth.app, 'us-central1'), 'linkWhatsAppIdentity')({});
-  const linkedProfile = await ensureCustomerProfile(credential.user);
-  return { firebaseUser: credential.user, profile: linkedProfile || profile };
-}
-
 export async function completeWhatsAppSignupLink({ token }) {
   requireFirebase();
   const safeToken = String(token || '').trim();
@@ -196,4 +173,59 @@ export async function updateCustomerProfile(uid, updates) {
 export async function signOutCustomer() {
   requireFirebase();
   await signOut(auth);
+}
+
+export async function requestCustomerAccountDeletion({ reason = '' } = {}) {
+  requireFirebase();
+  if (!auth.currentUser) {
+    throw new Error('Sign in to schedule account deletion.');
+  }
+  const { getFunctions, httpsCallable } = await import('firebase/functions');
+  const callable = httpsCallable(getFunctions(auth.app, 'us-central1'), 'requestAccountDeletion');
+  const result = await callable({
+    role: 'customer',
+    channel: 'web',
+    reason: String(reason || '').trim(),
+  });
+  return result.data || {};
+}
+
+export async function reactivateCustomerAccount() {
+  requireFirebase();
+  if (!auth.currentUser) {
+    throw new Error('Sign in to reactivate your account.');
+  }
+  const { getFunctions, httpsCallable } = await import('firebase/functions');
+  const callable = httpsCallable(getFunctions(auth.app, 'us-central1'), 'reactivateDeletedAccount');
+  const result = await callable({ channel: 'web' });
+  return result.data || {};
+}
+
+export async function inspectWhatsAppAccountDeletionLink({ token }) {
+  requireFirebase();
+  const safeToken = String(token || '').trim();
+  if (!/^[A-Za-z0-9_-]{40,60}$/.test(safeToken)) {
+    throw new Error('This WhatsApp account deletion link is invalid or expired.');
+  }
+  const { getFunctions, httpsCallable } = await import('firebase/functions');
+  const callable = httpsCallable(getFunctions(auth.app, 'us-central1'), 'inspectWhatsAppAccountDeletionLink');
+  const result = await callable({ token: safeToken });
+  return result.data || {};
+}
+
+export async function confirmWhatsAppAccountDeletionLink({ token, action, confirmText = '', reason = '' }) {
+  requireFirebase();
+  const safeToken = String(token || '').trim();
+  if (!/^[A-Za-z0-9_-]{40,60}$/.test(safeToken)) {
+    throw new Error('This WhatsApp account deletion link is invalid or expired.');
+  }
+  const { getFunctions, httpsCallable } = await import('firebase/functions');
+  const callable = httpsCallable(getFunctions(auth.app, 'us-central1'), 'confirmWhatsAppAccountDeletionLink');
+  const result = await callable({
+    token: safeToken,
+    action,
+    confirmText: String(confirmText || '').trim(),
+    reason: String(reason || '').trim(),
+  });
+  return result.data || {};
 }

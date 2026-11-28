@@ -18,7 +18,7 @@ function assertIncludes(relativePath, expectedSnippet) {
 }
 
 assert.deepEqual(sharedRewards.MEMBERSHIP_LEVELS, ['neighbour', 'partner', 'friend', 'family']);
-assert.deepEqual(sharedRewards.MASTERY_LEVELS, ['beginner', 'specialist', 'master', 'legend']);
+assert.deepEqual(sharedRewards.MASTERY_LEVELS, ['beginner', 'verified', 'specialist', 'master', 'legend']);
 assert.equal(sharedRewards.RATING_DIRECTIONS.CUSTOMER_TO_HELPER, 'customer_to_helper');
 assert.equal(sharedRewards.REWARD_CONFIG_DOCS.GLOBAL, 'global');
 

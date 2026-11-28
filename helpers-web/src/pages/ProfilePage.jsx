@@ -84,6 +84,7 @@ export function ProfilePage({ onNavigate, pwa }) {
   const {
     user,
     profile,
+    catalog,
     offerings,
     evaluation,
     walletSnapshot,
@@ -104,12 +105,13 @@ export function ProfilePage({ onNavigate, pwa }) {
     () =>
       buildHelperApprovedMasteryList({
         offerings,
+        catalog,
         serviceOptionMasteryMap,
         serviceMasteryMap,
         optionRatingMap: serviceOptionRatingMap,
         serviceRatingMap,
       }),
-    [offerings, serviceOptionMasteryMap, serviceMasteryMap, serviceOptionRatingMap, serviceRatingMap],
+    [catalog, offerings, serviceOptionMasteryMap, serviceMasteryMap, serviceOptionRatingMap, serviceRatingMap],
   );
   const membershipLevel = String(rewardAccount?.membership?.currentLevel || 'neighbour').trim().toLowerCase();
 
@@ -328,14 +330,24 @@ export function ProfilePage({ onNavigate, pwa }) {
               Platform membership reflects your overall helper standing; service badges are earned per approved service option.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => onNavigate('/services')}
-            className="inline-flex items-center gap-1 px-3 py-2 min-h-[40px] rounded-lg border border-border bg-well/50 hover:bg-well text-xs font-semibold text-tealbrand-700 whitespace-nowrap shrink-0"
-          >
-            <span>View all options</span>
-            <ChevronRight className="h-3.5 w-3.5" />
-          </button>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => onNavigate('/profile/badges')}
+              className="inline-flex items-center gap-1 px-3 py-2 min-h-[40px] rounded-lg border border-tealbrand-600/25 bg-tealbrand-50/70 hover:bg-tealbrand-50 text-xs font-semibold text-tealbrand-800 whitespace-nowrap shrink-0"
+            >
+              <span>Level guide</span>
+              <ChevronRight className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('/services')}
+              className="inline-flex items-center gap-1 px-3 py-2 min-h-[40px] rounded-lg border border-border bg-well/50 hover:bg-well text-xs font-semibold text-tealbrand-700 whitespace-nowrap shrink-0"
+            >
+              <span>View all options</span>
+              <ChevronRight className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-border/70">
@@ -411,6 +423,12 @@ export function ProfilePage({ onNavigate, pwa }) {
             title="Agreement and legal"
             description="Review your signed Uncedo Helper Agreement and platform policy documents."
             onClick={() => onNavigate('/profile/legal')}
+          />
+          <ProfileRow
+            Icon={Award}
+            title="Badges & level guide"
+            description="See all service badges and helper levels, plus exact requirements to level up."
+            onClick={() => onNavigate('/profile/badges')}
           />
           <ProfileRow
             Icon={MessageSquare}

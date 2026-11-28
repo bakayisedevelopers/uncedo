@@ -117,6 +117,13 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
   const [pricePreview, setPricePreview] = useState(null);
   const [priceLoading, setPriceLoading] = useState(false);
 
+  const savedHomeAddress = String(user?.customerProfile?.serviceAddress || user?.homeAddress || '').trim();
+  const hasSavedHomeAddress = Boolean(savedHomeAddress);
+  const [savedAddressConfirmed, setSavedAddressConfirmed] = useState(false);
+  const [homeAddressInput, setHomeAddressInput] = useState(() => savedHomeAddress);
+  const [savingHomeAddress, setSavingHomeAddress] = useState(false);
+  const [customAddressInput, setCustomAddressInput] = useState('');
+
   const categoryId = String(item?.categoryId || '').trim();
   const serviceIds = useMemo(() => (Array.isArray(item?.serviceIds) ? item.serviceIds : []), [item?.serviceIds]);
   const selectedPackageId = ['package', 'bundle'].includes(String(item?.type || '').trim().toLowerCase())
@@ -297,6 +304,53 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
     };
   }, [categoryId, missingRequired.length, selectedOptionId, selectedPackageId, serviceIds, structuredAnswers]);
 
+  useEffect(() => {
+    setSavedAddressConfirmed(false);
+  }, [savedHomeAddress, structuredAnswers?.service_address_target]);
+
+  useEffect(() => {
+    if (savedHomeAddress && !homeAddressInput.trim()) {
+      setHomeAddressInput(savedHomeAddress);
+    }
+  }, [savedHomeAddress]);
+
+  const handleSaveHomeAddress = async () => {
+    const trimmed = String(homeAddressInput || '').trim();
+    if (trimmed.length < 5) {
+      setError('Please provide your full home address (at least 5 characters).');
+      return;
+    }
+    if (!user?.uid || savingHomeAddress) return;
+    setSavingHomeAddress(true);
+    setError('');
+    try {
+      const updated = await updateUserProfile(user.uid, {
+        homeAddress: trimmed,
+        customerProfile: {
+          ...(user?.customerProfile || {}),
+          serviceAddress: trimmed,
+        },
+      });
+      if (updated) {
+        setUser((prev) => ({ ...prev, ...updated }));
+      } else {
+        setUser((prev) => ({
+          ...prev,
+          homeAddress: trimmed,
+          customerProfile: {
+            ...(prev?.customerProfile || {}),
+            serviceAddress: trimmed,
+          },
+        }));
+      }
+      setSavedAddressConfirmed(true);
+    } catch (nextError) {
+      setError(nextError?.message || 'Unable to save your home address right now.');
+    } finally {
+      setSavingHomeAddress(false);
+    }
+  };
+
   const handleSelectOption = (option) => {
     if (!option?.id) return;
     if (option.onlineHelperCount === 0) return;
@@ -363,6 +417,21 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
       setError('Complete the required details before continuing.');
       return;
     }
+    const serviceAddressTargetCheck = String(structuredAnswers?.service_address_target || '').trim().toLowerCase();
+    if (serviceAddressTargetCheck === 'saved_home_address') {
+      if (!hasSavedHomeAddress) {
+        setError('Please provide your home address before continuing.');
+        return;
+      }
+      if (!savedAddressConfirmed) {
+        setError('Please confirm your saved address before continuing.');
+        return;
+      }
+    }
+    if (serviceAddressTargetCheck === 'another_address' && customAddressInput.trim().length < 5) {
+      setError('Please provide the street address where the helper should come.');
+      return;
+    }
     if (!pricePreview) {
       setError('Wait for the price to finish loading before continuing.');
       return;
@@ -389,6 +458,12 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
         setHomeLocation(requestLocation);
       }
 
+      const resolvedServiceAddress = serviceAddressTarget === 'saved_home_address'
+        ? savedHomeAddress
+        : serviceAddressTarget === 'another_address'
+          ? customAddressInput.trim()
+          : '';
+
       const requestId = await createCustomerServiceRequest({
         user,
         location: requestLocation,
@@ -399,7 +474,7 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
           selectedOptionId: selectedOption?.id || selectedOptionId,
           selectedOptionTitle: selectedOption?.title || '',
           structuredAnswers,
-          serviceAddress: String(user?.customerProfile?.serviceAddress || '').trim(),
+          serviceAddress: resolvedServiceAddress,
           serviceAddressTarget,
         },
       });
@@ -456,18 +531,30 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
     ? `${item.categoryLabel} · ${selectedOption.title}`
     : item.categoryLabel;
 
+  const selectedAddressTarget = String(structuredAnswers?.service_address_target || '').trim().toLowerCase();
+  const needsSavedAddressInput = selectedAddressTarget === 'saved_home_address' && !hasSavedHomeAddress;
+  const needsSavedAddressConfirmation = selectedAddressTarget === 'saved_home_address' && hasSavedHomeAddress && !savedAddressConfirmed;
+  const needsAnotherAddressInput = selectedAddressTarget === 'another_address' && customAddressInput.trim().length < 5;
+  const addressRequirementPending = needsSavedAddressInput || needsSavedAddressConfirmation || needsAnotherAddressInput;
+
   const shouldWaitForPrice = !missingRequired.length;
   const buttonLabel = submitting
     ? 'Preparing request...'
     : serviceOptions.length > 0 && !selectedOption
       ? 'Select an option'
-      : shouldWaitForPrice && priceLoading
-        ? 'Calculating price...'
-        : shouldWaitForPrice && pricePreview
-          ? `Request now - ${formatCurrency(pricePreview.total)}`
-          : 'Complete required details';
+      : needsSavedAddressInput
+        ? 'Please provide home address'
+        : needsSavedAddressConfirmation
+          ? 'Confirm saved address'
+          : needsAnotherAddressInput
+            ? 'Provide street address'
+            : shouldWaitForPrice && priceLoading
+              ? 'Calculating price...'
+              : shouldWaitForPrice && pricePreview
+                ? `Request now - ${formatCurrency(pricePreview.total)}`
+                : 'Complete required details';
 
-  const buttonDisabled = submitting || missingRequired.length > 0 || priceLoading || !pricePreview;
+  const buttonDisabled = submitting || missingRequired.length > 0 || addressRequirementPending || priceLoading || !pricePreview;
 
   return (
     <View style={styles.screen}>
@@ -619,6 +706,81 @@ export function CustomerServiceSelectionScreen({ route, navigate, goBack, system
                   value={structuredAnswers?.[question.id]}
                 />
               ))}
+
+              {selectedAddressTarget === 'saved_home_address' ? (
+                <View style={styles.savedAddressBox}>
+                  {!hasSavedHomeAddress ? (
+                    <>
+                      <Text style={styles.savedAddressTitle}>Please provide your home address</Text>
+                      <Text style={styles.savedAddressCopy}>
+                        You do not have a saved home address yet. Enter your home address below so we can send your helper to the right place.
+                      </Text>
+                      <TextInput
+                        onChangeText={setHomeAddressInput}
+                        placeholder="e.g. 17 Iris Street, Witbank, 1035"
+                        placeholderTextColor="#d8b4fe"
+                        style={styles.input}
+                        value={homeAddressInput}
+                      />
+                      <Button disabled={savingHomeAddress} onPress={handleSaveHomeAddress} style={styles.savedAddressActionBtn}>
+                        {savingHomeAddress ? 'Saving home address...' : 'Save home address'}
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <Text style={styles.savedAddressTitle}>Confirm your saved address</Text>
+                      <Text style={styles.savedAddressValue}>{savedHomeAddress}</Text>
+                      <Text style={styles.savedAddressCopy}>
+                        Please confirm that the helper should come to this saved home address, or switch to another address.
+                      </Text>
+                      <View style={styles.optionWrap}>
+                        <Pressable
+                          accessibilityRole="button"
+                          onPress={() => {
+                            setSavedAddressConfirmed(true);
+                            setError('');
+                          }}
+                          style={({ pressed }) => [
+                            styles.optionChip,
+                            savedAddressConfirmed && styles.optionChipActive,
+                            pressed && styles.optionChipPressed,
+                          ]}
+                        >
+                          <Text style={[styles.optionChipText, savedAddressConfirmed && styles.optionChipTextActive]}>
+                            {savedAddressConfirmed ? 'Saved address confirmed' : 'Confirm saved address'}
+                          </Text>
+                        </Pressable>
+                        <Pressable
+                          accessibilityRole="button"
+                          onPress={() => {
+                            setSavedAddressConfirmed(false);
+                            handleAnswerChange('service_address_target', 'another_address');
+                          }}
+                          style={({ pressed }) => [
+                            styles.optionChip,
+                            pressed && styles.optionChipPressed,
+                          ]}
+                        >
+                          <Text style={styles.optionChipText}>Provide another address</Text>
+                        </Pressable>
+                      </View>
+                    </>
+                  )}
+                </View>
+              ) : null}
+
+              {selectedAddressTarget === 'another_address' ? (
+                <View style={styles.questionBlock}>
+                  <Text style={styles.questionLabel}>Street address for this request</Text>
+                  <TextInput
+                    onChangeText={setCustomAddressInput}
+                    placeholder="e.g. 17 Iris Street, Witbank, 1035"
+                    placeholderTextColor="#d8b4fe"
+                    style={styles.input}
+                    value={customAddressInput}
+                  />
+                </View>
+              ) : null}
             </View>
           </>
         ) : null}
@@ -999,5 +1161,32 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     height: 11,
     width: 11,
+  },
+  savedAddressBox: {
+    backgroundColor: 'rgba(217,70,239,0.05)',
+    borderColor: 'rgba(217,70,239,0.18)',
+    borderRadius: 18,
+    borderWidth: 1,
+    gap: 10,
+    padding: 14,
+  },
+  savedAddressTitle: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  savedAddressValue: {
+    color: colors.brandDark,
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  savedAddressCopy: {
+    color: colors.muted,
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  savedAddressActionBtn: {
+    borderRadius: 16,
+    minHeight: 46,
   },
 });

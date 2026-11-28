@@ -8,11 +8,15 @@ const INDIVIDUAL_TYPES = ['Homeowner', 'Tenant', 'Family representative', 'Event
 const BUSINESS_TYPES = ['Catering', 'Mechanic', 'Salon / beauty', 'Hospitality', 'Retail', 'Office / corporate', 'Property management', 'Events', 'Other'];
 
 export default function CustomerAccountPage() {
-  const { user, initializing, signOut, updateProfile } = useAuth();
+  const { user, initializing, signOut, updateProfile, requestAccountDeletion, reactivateAccount } = useAuth();
   const profile = user?.profile || {};
   const customer = profile.customerProfile || {};
   const whatsappAuthenticated = user?.whatsappAuthenticated === true;
   const authenticatedWhatsAppNumber = profile.whatsappPhoneNumber || user?.firebaseUser?.phoneNumber || profile.phoneNumber || '';
+  const isPendingDeletion = String(profile.accountStatus || '').trim().toLowerCase() === 'pending_deletion';
+  const deletionDateLabel = profile.deletionScheduledAtMs
+    ? new Intl.DateTimeFormat('en-ZA', { day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(profile.deletionScheduledAtMs))
+    : 'in 30 days';
   const [fullName, setFullName] = useState('');
   const [phoneNumber, setPhoneNumber] = useState('');
   const [accountType, setAccountType] = useState('');
@@ -25,6 +29,10 @@ export default function CustomerAccountPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deleteReason, setDeleteReason] = useState('');
+  const [deletionBusy, setDeletionBusy] = useState(false);
+  const [deletionError, setDeletionError] = useState('');
 
   useEffect(() => {
     setFullName(profile.fullName || profile.displayName || '');
@@ -76,6 +84,36 @@ export default function CustomerAccountPage() {
     }
   }
 
+  async function handleScheduleDeletion() {
+    setDeletionError('');
+    if (deleteConfirmText.trim() !== 'DELETE') {
+      setDeletionError('Type DELETE in uppercase to schedule account deletion.');
+      return;
+    }
+    setDeletionBusy(true);
+    try {
+      await requestAccountDeletion({ reason: deleteReason.trim() });
+      await signOut().catch(() => null);
+    } catch (nextError) {
+      setDeletionError(nextError?.message || 'Unable to schedule account deletion right now.');
+    } finally {
+      setDeletionBusy(false);
+    }
+  }
+
+  async function handleReactivate() {
+    setDeletionError('');
+    setDeletionBusy(true);
+    try {
+      await reactivateAccount();
+      setNotice('Your account has been reactivated and the 30-day scheduled deletion was canceled.');
+    } catch (nextError) {
+      setDeletionError(nextError?.message || 'Unable to reactivate your account right now.');
+    } finally {
+      setDeletionBusy(false);
+    }
+  }
+
   return (
     <MainLayout>
       <main className="mx-auto min-h-[75vh] max-w-5xl px-4 py-10 sm:px-6 lg:px-8">
@@ -87,6 +125,28 @@ export default function CustomerAccountPage() {
           </div>
           <button type="button" onClick={() => signOut()} className="rounded-xl border border-zinc-300 px-4 py-2 text-sm font-bold text-zinc-700 hover:bg-zinc-50">Sign out</button>
         </div>
+
+        {isPendingDeletion ? (
+          <section className="mb-6 rounded-2xl border border-red-200 bg-red-50 p-6">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div className="max-w-2xl">
+                <h2 className="text-lg font-black text-red-950">Account scheduled for deletion on {deletionDateLabel}</h2>
+                <p className="mt-1 text-sm leading-6 text-red-900">
+                  Your account is in a 30-day grace period and cannot place new bookings. Cancel deletion now to restore your account immediately.
+                </p>
+                {deletionError ? <p className="mt-2 text-sm font-semibold text-red-800">{deletionError}</p> : null}
+              </div>
+              <button
+                type="button"
+                disabled={deletionBusy}
+                onClick={handleReactivate}
+                className="rounded-xl bg-brand px-5 py-3 text-sm font-bold text-white hover:bg-brand-dark disabled:opacity-50"
+              >
+                {deletionBusy ? 'Reactivating…' : 'Cancel deletion & reactivate'}
+              </button>
+            </div>
+          </section>
+        ) : null}
 
         <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
           <form onSubmit={save} className="app-surface space-y-4 p-6 sm:p-8">
@@ -142,6 +202,37 @@ export default function CustomerAccountPage() {
                 <p className="mt-3 text-sm font-bold text-emerald-800">A payment method is already saved on your account.</p>
               ) : null}
             </section>
+            {!isPendingDeletion ? (
+              <section className="rounded-2xl border border-red-200 bg-white p-6 space-y-3">
+                <h2 className="font-black text-zinc-900">Delete account</h2>
+                <p className="text-sm leading-6 text-zinc-600">
+                  Your account enters a 30-day scheduled deletion window. You can sign back in or use WhatsApp anytime within 30 days to reactivate it. Completed service history stays preserved for record-keeping.
+                </p>
+                {deletionError ? <p className="text-sm font-semibold text-red-700">{deletionError}</p> : null}
+                <input
+                  type="text"
+                  value={deleteReason}
+                  onChange={(event) => setDeleteReason(event.target.value)}
+                  placeholder="Optional reason"
+                  className="w-full rounded-xl border border-zinc-300 bg-white px-4 py-2.5 text-sm outline-none focus:border-brand"
+                />
+                <input
+                  type="text"
+                  value={deleteConfirmText}
+                  onChange={(event) => setDeleteConfirmText(event.target.value)}
+                  placeholder="Type DELETE to confirm"
+                  className="w-full rounded-xl border border-zinc-300 bg-white px-4 py-2.5 text-sm outline-none focus:border-red-500"
+                />
+                <button
+                  type="button"
+                  disabled={deletionBusy || deleteConfirmText.trim() !== 'DELETE'}
+                  onClick={handleScheduleDeletion}
+                  className="w-full rounded-xl bg-red-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-red-700 disabled:opacity-50"
+                >
+                  {deletionBusy ? 'Scheduling deletion…' : 'Schedule 30-day account deletion'}
+                </button>
+              </section>
+            ) : null}
           </aside>
         </div>
       </main>

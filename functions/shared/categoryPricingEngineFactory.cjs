@@ -163,8 +163,13 @@ function buildAiBookingFeeLine(aiUsageSnapshot = null) {
   };
 }
 
-function buildLine(label, amount) {
-  return { label, amount: roundCurrency(amount) };
+function buildLine(label, amount, extra = {}) {
+  const cleanQuestionId = normalizeText(extra?.questionId);
+  return {
+    label,
+    amount: roundCurrency(amount),
+    ...(cleanQuestionId ? { questionId: cleanQuestionId } : {}),
+  };
 }
 
 function createServiceResult(service, amount, lines = []) {
@@ -936,19 +941,222 @@ function computeQuestionnaireOptionAdjustments(service, answers = {}, selectedOp
     selectedValues.forEach((val) => {
       const opt = q.options.find((o) => String(o.value || '').toLowerCase() === String(val || '').toLowerCase());
       if (!opt) return;
+      const cleanQuestionId = normalizeText(qId);
       if (opt.pricingType === 'multiplier' && Number(opt.factor || opt.multiplier || 1) !== 1) {
         const factor = Number(opt.factor || opt.multiplier || 1);
         combinedMultiplier *= factor;
-        lines.push({ label: `${opt.label || opt.value} (×${factor})`, amount: 0 });
+        lines.push({
+          label: `${opt.label || opt.value} (×${factor})`,
+          amount: 0,
+          ...(cleanQuestionId ? { questionId: cleanQuestionId } : {}),
+        });
       } else if (Number(opt.priceAdder || 0) > 0) {
         const adder = Number(opt.priceAdder || 0);
         totalAdder += adder;
-        lines.push({ label: `${opt.label || opt.value}`, amount: adder });
+        lines.push({
+          label: `${opt.label || opt.value}`,
+          amount: adder,
+          ...(cleanQuestionId ? { questionId: cleanQuestionId } : {}),
+        });
       }
     });
   });
 
   return { totalAdder, combinedMultiplier, lines };
+}
+
+const SAST_OFFSET_MS = 2 * 60 * 60 * 1000;
+
+function getSastCalendarParts(inputDate = new Date()) {
+  const date = inputDate instanceof Date && !Number.isNaN(inputDate.getTime())
+    ? inputDate
+    : new Date(inputDate || Date.now());
+  const valid = Number.isNaN(date.getTime()) ? new Date() : date;
+  const shifted = new Date(valid.getTime() + SAST_OFFSET_MS);
+  return {
+    dayOfWeek: shifted.getUTCDay(),
+    hour: shifted.getUTCHours(),
+    month: shifted.getUTCMonth() + 1,
+    effectiveAtMs: valid.getTime(),
+  };
+}
+
+function getScheduleDayBucket(dayOfWeek) {
+  if (dayOfWeek === 5) return 'friday';
+  if (dayOfWeek === 6 || dayOfWeek === 0) return 'weekend';
+  return 'weekday';
+}
+
+function getScheduleTimeBucket(hour) {
+  if (hour < 6 || hour >= 22) return 'overnight';
+  if (hour < 12) return 'morning';
+  if (hour < 17) return 'afternoon';
+  return 'evening';
+}
+
+function getScheduleSeasonBucket(month) {
+  if (month === 12) return 'festive';
+  if (month === 1 || month === 2) return 'summer';
+  if (month >= 3 && month <= 5) return 'autumn';
+  if (month >= 6 && month <= 8) return 'winter';
+  return 'spring';
+}
+
+function resolveMultiplierNumber(value, fallback = 1) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function parseScheduledSastDate(rawScheduled, referenceNowMs = Date.now()) {
+  if (rawScheduled instanceof Date) {
+    return Number.isNaN(rawScheduled.getTime()) ? null : rawScheduled;
+  }
+  const text = normalizeText(rawScheduled);
+  if (!text) return null;
+
+  if (/(?:Z|[+-]\d{2}(?::?\d{2})?)$/i.test(text)) {
+    const parsedExplicit = Date.parse(text);
+    if (Number.isFinite(parsedExplicit)) return new Date(parsedExplicit);
+  }
+
+  const isoNoTzMatch = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (isoNoTzMatch) {
+    const yyyy = isoNoTzMatch[1];
+    const mm = isoNoTzMatch[2];
+    const dd = isoNoTzMatch[3];
+    const hh = String(isoNoTzMatch[4] ?? '09').padStart(2, '0');
+    const min = String(isoNoTzMatch[5] ?? '00').padStart(2, '0');
+    const sec = String(isoNoTzMatch[6] ?? '00').padStart(2, '0');
+    const parsedSast = Date.parse(`${yyyy}-${mm}-${dd}T${hh}:${min}:${sec}+02:00`);
+    if (Number.isFinite(parsedSast)) return new Date(parsedSast);
+  }
+
+  const lower = text.toLowerCase();
+  const baseRefMs = Number.isFinite(Number(referenceNowMs)) && Number(referenceNowMs) > 0
+    ? Number(referenceNowMs)
+    : Date.now();
+  const shiftedRef = new Date(baseRefMs + SAST_OFFSET_MS);
+  const baseYear = shiftedRef.getUTCFullYear();
+  const baseMonth = shiftedRef.getUTCMonth();
+  const baseDay = shiftedRef.getUTCDate();
+  const baseDow = shiftedRef.getUTCDay();
+
+  let dayDelta = null;
+  if (/\btomorrow\b/.test(lower)) {
+    dayDelta = 1;
+  } else if (/\b(?:today|tonight|this\s+(?:morning|afternoon|evening|night))\b/.test(lower)) {
+    dayDelta = 0;
+  } else {
+    const weekdays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    for (let idx = 0; idx < weekdays.length; idx += 1) {
+      if (new RegExp(`\\b${weekdays[idx]}\\b`).test(lower)) {
+        let delta = (idx - baseDow + 7) % 7;
+        if (/\bnext\b/.test(lower) && delta === 0) delta = 7;
+        dayDelta = delta;
+        break;
+      }
+    }
+  }
+
+  let hour = null;
+  let minute = 0;
+  const amPmMatch = lower.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/);
+  if (amPmMatch) {
+    let h = Number(amPmMatch[1]);
+    const m = Number(amPmMatch[2] || 0);
+    if (h >= 1 && h <= 12 && m >= 0 && m <= 59) {
+      if (amPmMatch[3] === 'pm' && h < 12) h += 12;
+      if (amPmMatch[3] === 'am' && h === 12) h = 0;
+      hour = h;
+      minute = m;
+    }
+  } else {
+    const hhmmMatch = lower.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
+    if (hhmmMatch) {
+      hour = Number(hhmmMatch[1]);
+      minute = Number(hhmmMatch[2]);
+    } else if (/\b(?:overnight|midnight|late\s+night)\b/.test(lower)) {
+      hour = 23;
+    } else if (/\b(?:evening|tonight|night)\b/.test(lower)) {
+      hour = 19;
+    } else if (/\b(?:afternoon|lunchtime|lunch|midday)\b/.test(lower)) {
+      hour = 14;
+    } else if (/\b(?:morning|early)\b/.test(lower)) {
+      hour = 9;
+    }
+  }
+
+  if (dayDelta !== null || hour !== null) {
+    const resolvedDelta = dayDelta !== null ? dayDelta : 0;
+    const resolvedHour = hour !== null ? hour : 9;
+    const utcMs = Date.UTC(baseYear, baseMonth, baseDay + resolvedDelta, resolvedHour, minute, 0, 0) - SAST_OFFSET_MS;
+    if (Number.isFinite(utcMs)) return new Date(utcMs);
+  }
+
+  const parsedFallback = Date.parse(text);
+  return Number.isFinite(parsedFallback) ? new Date(parsedFallback) : null;
+}
+
+function getSchedulePricingDetails(pricing = {}, signalContext = {}, structuredAnswers = {}) {
+  let referenceDate = signalContext?.now instanceof Date ? signalContext.now : null;
+  if (!referenceDate && signalContext?.now) {
+    const parsedNow = new Date(signalContext.now);
+    if (!Number.isNaN(parsedNow.getTime())) referenceDate = parsedNow;
+  }
+  let effectiveDate = referenceDate;
+  if (toLower(structuredAnswers?.timing_preference) === 'later') {
+    const rawScheduled = normalizeText(structuredAnswers?.scheduled_for_text);
+    const parsedScheduled = parseScheduledSastDate(rawScheduled, referenceDate ? referenceDate.getTime() : Date.now());
+    if (parsedScheduled) {
+      effectiveDate = parsedScheduled;
+    }
+  }
+  const parts = getSastCalendarParts(effectiveDate || new Date());
+  const dayBucket = toLower(signalContext?.dayBucket || getScheduleDayBucket(parts.dayOfWeek));
+  const timeBucket = toLower(signalContext?.timeOfDayBucket || getScheduleTimeBucket(parts.hour));
+  const seasonBucket = toLower(signalContext?.seasonBucket || getScheduleSeasonBucket(parts.month));
+
+  const dayMultipliers = pricing?.dayMultipliers || {};
+  const timeMultipliers = pricing?.timeMultipliers || pricing?.timeOfDayMultipliers || {};
+  const seasonMultipliers = pricing?.seasonMultipliers || {};
+
+  const dayMultiplier = dayBucket === 'weekend'
+    ? resolveMultiplierNumber(pricing?.weekendMultiplier ?? dayMultipliers.weekend, 1.08)
+    : dayBucket === 'friday'
+      ? resolveMultiplierNumber(pricing?.fridayMultiplier ?? dayMultipliers.friday, 1.04)
+      : resolveMultiplierNumber(pricing?.weekdayMultiplier ?? dayMultipliers.weekday, 1);
+
+  const timeMultiplier = timeBucket === 'overnight'
+    ? resolveMultiplierNumber(pricing?.overnightMultiplier ?? timeMultipliers.overnight, 1.12)
+    : timeBucket === 'evening'
+      ? resolveMultiplierNumber(pricing?.eveningMultiplier ?? timeMultipliers.evening, 1.08)
+      : timeBucket === 'afternoon'
+        ? resolveMultiplierNumber(pricing?.afternoonMultiplier ?? timeMultipliers.afternoon, 1.02)
+        : resolveMultiplierNumber(pricing?.morningMultiplier ?? timeMultipliers.morning, 1);
+
+  const seasonMultiplier = seasonBucket === 'festive'
+    ? resolveMultiplierNumber(pricing?.festiveSeasonMultiplier ?? pricing?.peakSeasonMultiplier ?? seasonMultipliers.festive ?? seasonMultipliers.peakSeason, 1.1)
+    : seasonBucket === 'summer'
+      ? resolveMultiplierNumber(pricing?.summerSeasonMultiplier ?? seasonMultipliers.summer, 1.04)
+      : seasonBucket === 'winter'
+        ? resolveMultiplierNumber(pricing?.winterSeasonMultiplier ?? pricing?.offSeasonMultiplier ?? seasonMultipliers.winter ?? seasonMultipliers.offSeason, 0.96)
+        : seasonBucket === 'autumn'
+          ? resolveMultiplierNumber(pricing?.autumnSeasonMultiplier ?? seasonMultipliers.autumn ?? seasonMultipliers.normal, 1)
+          : resolveMultiplierNumber(pricing?.springSeasonMultiplier ?? seasonMultipliers.spring ?? seasonMultipliers.normal, 1);
+
+  const combinedMultiplier = Number((dayMultiplier * timeMultiplier * seasonMultiplier).toFixed(6));
+
+  return {
+    timezone: 'Africa/Johannesburg',
+    effectiveAtMs: parts.effectiveAtMs,
+    dayBucket,
+    timeBucket,
+    seasonBucket,
+    dayMultiplier,
+    timeMultiplier,
+    seasonMultiplier,
+    combinedMultiplier,
+  };
 }
 
 function createCategoryPricingEngine(categoryId, catalogue = {}) {
@@ -964,6 +1172,7 @@ function createCategoryPricingEngine(categoryId, catalogue = {}) {
     selectedOptionId = '',
     structuredAnswers = {},
     serviceOverrides = {},
+    signalContext = {},
     currency = 'ZAR',
     travelDistanceKm = null,
     aiUsageSnapshot = null,
@@ -976,20 +1185,33 @@ function createCategoryPricingEngine(categoryId, catalogue = {}) {
     const serviceBreakdown = selectedServices.map((service) => {
       const override = serviceOverrides[service.id] || {};
       const resolvedOption = resolveEngineServiceOption(service, override.selectedOptionId || selectedOptionId);
+      const effectivePricing = { ...(service?.pricing || {}), ...(override?.pricing || {}) };
+      const schedule = getSchedulePricingDetails(effectivePricing, signalContext, structuredAnswers);
+
       if (resolvedOption) {
         const optionBasePrice = Math.max(0, roundCurrency(Number(resolvedOption.price || 0)));
         const optionAdjustments = computeQuestionnaireOptionAdjustments(service, structuredAnswers, resolvedOption);
-        const subtotal = roundCurrency((optionBasePrice + optionAdjustments.totalAdder) * optionAdjustments.combinedMultiplier);
+        const preScheduleSubtotal = roundCurrency((optionBasePrice + optionAdjustments.totalAdder) * optionAdjustments.combinedMultiplier);
+        const subtotal = roundCurrency(preScheduleSubtotal * schedule.combinedMultiplier);
+        const scheduleDelta = roundCurrency(subtotal - preScheduleSubtotal);
         const optionTitle = normalizeText(resolvedOption.title || resolvedOption.label || resolvedOption.id);
         const lines = [
           buildLine(`${service.label}: ${optionTitle}`, optionBasePrice),
-          ...optionAdjustments.lines.map((l) => buildLine(`${service.label}: ${l.label}`, l.amount)),
+          ...optionAdjustments.lines.map((l) => buildLine(`${service.label}: ${l.label}`, l.amount, { questionId: l.questionId })),
+          ...(scheduleDelta !== 0
+            ? [buildLine(
+              `${service.label}: schedule adjustment (${schedule.dayBucket}, ${schedule.timeBucket}, ${schedule.seasonBucket} ×${schedule.combinedMultiplier.toFixed(2)})`,
+              scheduleDelta,
+            )]
+            : []),
         ];
         return {
           serviceId: service.id,
           label: service.label,
           selectedOptionId: resolvedOption.id,
           selectedOptionTitle: optionTitle,
+          preScheduleSubtotal,
+          schedulePricing: schedule,
           subtotal,
           lines,
         };
@@ -997,21 +1219,33 @@ function createCategoryPricingEngine(categoryId, catalogue = {}) {
 
       const baseResult = priceService(service, structuredAnswers, override);
       const optionAdjustments = computeQuestionnaireOptionAdjustments(service, structuredAnswers, null);
-      const subtotal = roundCurrency((baseResult.subtotal + optionAdjustments.totalAdder) * optionAdjustments.combinedMultiplier);
+      const preScheduleSubtotal = roundCurrency((baseResult.subtotal + optionAdjustments.totalAdder) * optionAdjustments.combinedMultiplier);
+      const subtotal = roundCurrency(preScheduleSubtotal * schedule.combinedMultiplier);
+      const scheduleDelta = roundCurrency(subtotal - preScheduleSubtotal);
       const lines = [
         ...baseResult.lines,
-        ...optionAdjustments.lines.map((l) => buildLine(`${service.label}: ${l.label}`, l.amount)),
+        ...optionAdjustments.lines.map((l) => buildLine(`${service.label}: ${l.label}`, l.amount, { questionId: l.questionId })),
+        ...(scheduleDelta !== 0
+          ? [buildLine(
+            `${service.label}: schedule adjustment (${schedule.dayBucket}, ${schedule.timeBucket}, ${schedule.seasonBucket} ×${schedule.combinedMultiplier.toFixed(2)})`,
+            scheduleDelta,
+          )]
+          : []),
       ];
       return {
         serviceId: service.id,
         label: service.label,
         selectedOptionId: null,
         selectedOptionTitle: null,
+        preScheduleSubtotal,
+        schedulePricing: schedule,
         subtotal,
         lines,
       };
     });
 
+    const quoteSchedule = serviceBreakdown.find((item) => item.schedulePricing)?.schedulePricing
+      || getSchedulePricingDetails(selectedServices[0]?.pricing || {}, signalContext, structuredAnswers);
     const resolvedTravelFee = resolveServiceTravelFee(selectedServices, serviceOverrides);
     const travelLine = buildTravelLine(resolvedTravelFee);
     const serviceLines = serviceBreakdown.flatMap((item) => item.lines);
@@ -1034,6 +1268,7 @@ function createCategoryPricingEngine(categoryId, catalogue = {}) {
       currency,
       minimumCallout: travelLine.amount,
       estimatedDurationMinutes: 0,
+      schedulePricing: quoteSchedule,
       serviceBreakdown,
       lines: allLines,
       subtotal: roundCurrency(serviceTotal),
@@ -1048,4 +1283,8 @@ function createCategoryPricingEngine(categoryId, catalogue = {}) {
   };
 }
 
-module.exports = { createCategoryPricingEngine };
+module.exports = {
+  createCategoryPricingEngine,
+  getSchedulePricingDetails,
+  parseScheduledSastDate,
+};

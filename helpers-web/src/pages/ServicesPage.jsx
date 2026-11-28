@@ -34,12 +34,13 @@ export function ServicesPage({ onNavigate }) {
     () =>
       buildHelperApprovedMasteryList({
         offerings,
+        catalog,
         serviceOptionMasteryMap,
         serviceMasteryMap,
         optionRatingMap: serviceOptionRatingMap,
         serviceRatingMap,
       }),
-    [offerings, serviceOptionMasteryMap, serviceMasteryMap, serviceOptionRatingMap, serviceRatingMap],
+    [catalog, offerings, serviceOptionMasteryMap, serviceMasteryMap, serviceOptionRatingMap, serviceRatingMap],
   );
 
   return (
@@ -114,7 +115,7 @@ export function ServicesPage({ onNavigate }) {
                 <span>Service Option Mastery Badges</span>
               </h2>
               <p className="text-xs text-ink-500 mt-0.5">
-                Each approved service option earns its own Beginner, Specialist, Master, or Legend tier independently from paid jobs and ratings.
+                Each approved service option earns its own Beginner, Verified, Specialist, Master, or Legend tier independently from paid jobs and ratings.
               </p>
             </div>
           </div>

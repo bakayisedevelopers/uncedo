@@ -8,7 +8,6 @@ This folder contains the React + Vite customer website for Uncedo.
 - Customer email/password sign-in and optional account linking (`/sign-in`, `/sign-up`, `/whatsapp-link`)
 - Required international WhatsApp contact number during account creation; an existing account with a matching number is linked from WhatsApp only after its one-time, 24-hour link is opened
 - Google sign-in and sign-up
-- WhatsApp authentication entry point, enabled only after the backend OTP flow and Meta configuration are active
 - Authenticated customer profile completion using the shared `users/{uid}` profile
 - Privacy policy & POPIA notice page
 - Terms of service, payment & pricing policy, refund & cancellation policy, and data/location policy pages
@@ -34,7 +33,6 @@ npm run preview
 ## Environment
 
 - Firebase client values are read from `VITE_FIREBASE_*` settings in `.env`.
-- `VITE_WHATSAPP_AUTH_ENABLED` defaults to `false`; enable it only after the WhatsApp OTP Cloud Functions and Meta authentication template have been configured and deployed.
 - The standalone admin console lives in `/admin` and uses a separate Firebase Hosting site.
 
 ## Agent Notes
@@ -44,4 +42,4 @@ npm run preview
 - Use `../docs/skills/agent-developer-workflow.md` when changes affect deployment or release flow.
 - Keep this README in sync with major route, service, or shell changes.
 - Customer profile details are saved in Firestore at `users/{uid}`. Payment-card saving is also available on `/payment` (checked by default) for both signed-in and guest customers via Paystack reusable authorisations.
-- Routes: `/sign-in`, `/sign-up`, `/whatsapp-link`, `/account`, `/payment`, in addition to `/`, `/privacy-policy`, `/terms`, `/payment-pricing-policy`, `/refund-policy`, and `/data-voice-policy`. `/whatsapp-link` consumes a one-time link delivered to the same WhatsApp chat and returns the user to Uncedo without requiring an email sign-in.
+- Routes: `/` for the full-screen Instagram Reels-style service options home page (`?service=<id>` deep-link support), `/about` for the WhatsApp-first Uncedo overview, `/policies` for the legal policies directory, `/services` (and `/browse` redirect) for the visual Pinterest-style masonry grid, `/sign-in`, `/sign-up`, `/whatsapp-link`, `/account`, `/payment`, `/privacy-policy`, `/terms`, `/payment-pricing-policy`, `/refund-policy`, and `/data-voice-policy`. `/whatsapp-link` consumes a one-time link delivered to the same WhatsApp chat and returns the user to Uncedo without requiring an email sign-in.

@@ -6,6 +6,8 @@ const SERVICE_TRAVEL_RATE_PER_KM = 4;
 const SERVICE_DEFAULT_TRAVEL_FEE = 35;
 const HELPER_LABOR_PAYOUT_RATE = 0.75;
 const PLATFORM_LABOR_SHARE_RATE = 0.25;
+const WAITING_FREE_GRACE_MINUTES = 2;
+const WAITING_RATE_PER_MINUTE = 1;
 
 function toMoney(value) {
   const numeric = Number(value || 0);
@@ -42,6 +44,28 @@ function computeServiceBookingFee(baseAmount = 0) {
   const normalizedBase = Math.max(0, Number(baseAmount || 0));
   if (!Number.isFinite(normalizedBase) || normalizedBase <= 0) return 0;
   return Math.round(Math.min(SERVICE_BOOKING_FEE_CAP, normalizedBase * SERVICE_BOOKING_FEE_RATE));
+}
+
+function computeWaitingTimeCharge({ arrivedAtMs = 0, endedAtMs = 0 } = {}) {
+  const startMs = Number(arrivedAtMs || 0);
+  const endMs = Number(endedAtMs || 0);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs <= 0 || endMs <= startMs) {
+    return {
+      waitingMinutes: 0,
+      chargeableWaitingMinutes: 0,
+      waitingCost: 0,
+    };
+  }
+  const waitingMinutes = Number(((endMs - startMs) / 60000).toFixed(2));
+  const chargeableWaitingMinutes = waitingMinutes > WAITING_FREE_GRACE_MINUTES
+    ? Math.round(waitingMinutes - WAITING_FREE_GRACE_MINUTES)
+    : 0;
+  const waitingCost = toWholeRand(chargeableWaitingMinutes * WAITING_RATE_PER_MINUTE);
+  return {
+    waitingMinutes,
+    chargeableWaitingMinutes,
+    waitingCost,
+  };
 }
 
 function getServiceTravelFee(request = {}) {
@@ -125,28 +149,29 @@ function getServiceHelperPayoutBreakdown(request = {}, options = {}) {
     ?? getServiceTravelFee(request),
   );
   const quoteSubtotal = getServiceQuoteSubtotal(request);
-  const laborAmount = toRand(quoteSubtotal + waitingCost);
+  const laborAmount = toRand(quoteSubtotal);
 
   if (closureType === 'completed') {
     const quotedTotal = getServiceQuoteTotal(request);
-    const shouldLockToQuotedTotal = options.preserveQuotedTotal !== false
-      && quotedTotal > 0
-      && waitingCost === 0;
-    const customerChargeAmount = shouldLockToQuotedTotal
-      ? toWholeRand(quotedTotal)
-      : toWholeRand(laborAmount + baseTravelFee + bookingFee);
+    const shouldUseQuotedBase = options.preserveQuotedTotal !== false && quotedTotal > 0;
+    const customerChargeAmount = shouldUseQuotedBase
+      ? toWholeRand(quotedTotal + waitingCost)
+      : toWholeRand(laborAmount + baseTravelFee + bookingFee + waitingCost);
     const rawHelperLaborAmount = toRand(laborAmount * HELPER_LABOR_PAYOUT_RATE);
     const rawHelperTravelAmount = baseTravelFee;
-    const rawHelperAmount = toRand(rawHelperLaborAmount + rawHelperTravelAmount);
+    const rawHelperWaitingAmount = waitingCost;
+    const rawHelperAmount = toRand(rawHelperLaborAmount + rawHelperTravelAmount + rawHelperWaitingAmount);
     const helperAmount = customerChargeAmount > 0
       ? toRand(Math.min(customerChargeAmount, rawHelperAmount))
       : rawHelperAmount;
-    const helperTravelAmount = helperAmount < rawHelperAmount && rawHelperTravelAmount > helperAmount
-      ? helperAmount
-      : rawHelperTravelAmount;
-    const helperLaborAmount = helperAmount < rawHelperAmount
-      ? toRand(Math.max(0, helperAmount - helperTravelAmount))
-      : rawHelperLaborAmount;
+
+    let remainingHelper = helperAmount;
+    const helperWaitingAmount = toRand(Math.min(remainingHelper, rawHelperWaitingAmount));
+    remainingHelper = toRand(Math.max(0, remainingHelper - helperWaitingAmount));
+    const helperTravelAmount = toRand(Math.min(remainingHelper, rawHelperTravelAmount));
+    remainingHelper = toRand(Math.max(0, remainingHelper - helperTravelAmount));
+    const helperLaborAmount = toRand(Math.min(remainingHelper, rawHelperLaborAmount));
+
     const platformAmount = toRand(Math.max(0, customerChargeAmount - helperAmount));
     const platformBookingAmount = Math.min(platformAmount, bookingFee);
     const platformLaborAmount = toRand(Math.max(0, platformAmount - platformBookingAmount));
@@ -158,13 +183,14 @@ function getServiceHelperPayoutBreakdown(request = {}, options = {}) {
       helperAmount,
       helperLaborAmount,
       helperTravelAmount,
+      helperWaitingAmount,
       platformAmount,
       platformLaborAmount,
       platformBookingAmount,
       laborAmount,
       travelAmount: helperTravelAmount,
       bookingFeeAmount: platformBookingAmount,
-      waitingCost,
+      waitingCost: helperWaitingAmount,
       travelledKm: Number(travelledKm.toFixed(2)),
       customerChargeAmount,
     };
@@ -172,6 +198,7 @@ function getServiceHelperPayoutBreakdown(request = {}, options = {}) {
 
   const billingRule = String(options.billingRule || 'booking_fee_only').trim().toLowerCase();
   let helperTravelAmount = 0;
+  let helperWaitingAmount = 0;
   let platformBookingAmount = 0;
   let payoutRule = billingRule;
 
@@ -183,6 +210,7 @@ function getServiceHelperPayoutBreakdown(request = {}, options = {}) {
       break;
     case 'travel_fee_plus_booking_fee':
       helperTravelAmount = baseTravelFee;
+      helperWaitingAmount = waitingCost;
       platformBookingAmount = bookingFee;
       payoutRule = 'travel_fee_plus_booking_fee';
       break;
@@ -194,7 +222,7 @@ function getServiceHelperPayoutBreakdown(request = {}, options = {}) {
       break;
   }
 
-  const helperAmount = toRand(helperTravelAmount);
+  const helperAmount = toRand(helperTravelAmount + helperWaitingAmount);
   const platformAmount = toRand(platformBookingAmount);
 
   return {
@@ -204,13 +232,14 @@ function getServiceHelperPayoutBreakdown(request = {}, options = {}) {
     helperAmount,
     helperLaborAmount: 0,
     helperTravelAmount,
+    helperWaitingAmount,
     platformAmount,
     platformLaborAmount: 0,
     platformBookingAmount,
     laborAmount: 0,
     travelAmount: helperTravelAmount,
     bookingFeeAmount: platformBookingAmount,
-    waitingCost: 0,
+    waitingCost: helperWaitingAmount,
     travelledKm: Number(travelledKm.toFixed(2)),
     customerChargeAmount: toRand(helperAmount + platformAmount),
   };
@@ -223,7 +252,10 @@ module.exports = {
   SERVICE_BOOKING_FEE_RATE,
   SERVICE_DEFAULT_TRAVEL_FEE,
   SERVICE_TRAVEL_RATE_PER_KM,
+  WAITING_FREE_GRACE_MINUTES,
+  WAITING_RATE_PER_MINUTE,
   computeServiceBookingFee,
+  computeWaitingTimeCharge,
   formatWholeRandDisplay,
   getServiceBookingFee,
   getServiceHelperPayoutBreakdown,

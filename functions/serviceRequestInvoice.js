@@ -128,23 +128,66 @@ function buildQuestionIndex(catalogEntries = []) {
   return map;
 }
 
+const SPECIFICATION_IGNORED_KEYS = new Set([
+  'travel_distance_km',
+  'service_address_target',
+  'service_address',
+  'timing_preference',
+  'scheduled_for_text',
+]);
+
+function extractSavedQuestionAnswers(request = {}) {
+  const candidates = [
+    request?.questionAnswers,
+    request?.pricingSnapshot?.questionAnswers,
+    request?.requestPayload?.questionAnswers,
+  ];
+  for (const list of candidates) {
+    if (!Array.isArray(list) || !list.length) continue;
+    const normalized = [];
+    for (const item of list) {
+      if (!item || typeof item !== 'object') continue;
+      const questionId = sanitizeText(item.questionId || item.id || '', 100);
+      if (questionId && SPECIFICATION_IGNORED_KEYS.has(questionId)) continue;
+      const label = sanitizeText(item.prompt || item.label || titleizeKey(questionId), 90);
+      const rawDisplay = item.answerLabel ?? (Array.isArray(item.answer) ? item.answer.join(', ') : item.answer);
+      const value = sanitizeText(rawDisplay || '', 160);
+      if (!label || !value) continue;
+      const amount = toFiniteNumber(item.amount, 0) || 0;
+      const materialAmount = toFiniteNumber(item.materialAmount, 0) || 0;
+      const multiplier = toFiniteNumber(item.multiplier, null);
+      normalized.push({
+        questionId: questionId || null,
+        label,
+        value,
+        answer: item.answer ?? value,
+        pricingEffect: sanitizeText(item.pricingEffect || '', 30) || (amount > 0 ? 'adder' : materialAmount > 0 ? 'materials' : multiplier && multiplier !== 1 ? 'multiplier' : 'included'),
+        amount: roundCurrency(amount),
+        materialAmount: roundCurrency(materialAmount),
+        multiplier: multiplier && multiplier !== 1 ? multiplier : null,
+      });
+      if (normalized.length >= 16) break;
+    }
+    if (normalized.length) return normalized;
+  }
+  return null;
+}
+
 function extractRequestSpecifications({ request = {}, catalogEntries = [] } = {}) {
+  const savedSpecs = extractSavedQuestionAnswers(request);
+  if (savedSpecs && savedSpecs.length) {
+    return savedSpecs;
+  }
+
   const answers = request.structuredAnswers || request.requestPayload?.structuredAnswers || {};
   if (!answers || typeof answers !== 'object' || Array.isArray(answers)) return [];
 
   const questionMap = buildQuestionIndex(catalogEntries);
-  const ignoredKeys = new Set([
-    'travel_distance_km',
-    'service_address_target',
-    'service_address',
-    'timing_preference',
-    'scheduled_for_text',
-  ]);
   const specs = [];
 
   for (const [rawKey, rawVal] of Object.entries(answers)) {
     const key = String(rawKey || '').trim();
-    if (!key || ignoredKeys.has(key)) continue;
+    if (!key || SPECIFICATION_IGNORED_KEYS.has(key)) continue;
     const values = Array.isArray(rawVal) ? rawVal : rawVal === null || rawVal === undefined ? [] : [rawVal];
     const cleanedValues = values.map((v) => sanitizeText(v, 140)).filter(Boolean);
     if (!cleanedValues.length) continue;
@@ -155,15 +198,42 @@ function extractRequestSpecifications({ request = {}, catalogEntries = [] } = {}
       (Array.isArray(question?.options) ? question.options : [])
         .map((opt) => [
           String(opt?.value || opt?.id || '').trim().toLowerCase(),
-          sanitizeText(opt?.label || opt?.value || '', 120),
+          {
+            label: sanitizeText(opt?.label || opt?.value || '', 120),
+            amount: toFiniteNumber(opt?.priceAdder ?? opt?.priceValue, 0) || 0,
+            materialAmount: toFiniteNumber(opt?.materialAdder, 0) || 0,
+            multiplier: toFiniteNumber(opt?.factor ?? opt?.multiplier, 1) || 1,
+            pricingType: String(opt?.pricingType || '').trim().toLowerCase(),
+          },
         ]),
     );
+    let adderAmount = 0;
+    let materialAmount = 0;
+    let combinedMultiplier = 1;
     const displayValue = cleanedValues
-      .map((val) => optionMap.get(val.toLowerCase()) || (val.includes('_') ? titleizeKey(val) : val))
+      .map((val) => {
+        const matched = optionMap.get(val.toLowerCase());
+        if (matched) {
+          adderAmount += matched.amount;
+          materialAmount += matched.materialAmount;
+          if (matched.pricingType === 'multiplier' && matched.multiplier !== 1) {
+            combinedMultiplier *= matched.multiplier;
+          }
+          return matched.label;
+        }
+        return val.includes('_') ? titleizeKey(val) : val;
+      })
       .filter(Boolean)
       .join(', ');
     if (label && displayValue) {
-      specs.push({ label, value: sanitizeText(displayValue, 160) });
+      specs.push({
+        questionId: key,
+        label,
+        value: sanitizeText(displayValue, 160),
+        amount: roundCurrency(adderAmount),
+        materialAmount: roundCurrency(materialAmount),
+        multiplier: combinedMultiplier !== 1 ? combinedMultiplier : null,
+      });
     }
     if (specs.length >= 16) break;
   }
@@ -183,14 +253,107 @@ function classifyBreakdownComponent(label = '') {
   return 'Service';
 }
 
+function matchesQuestionLine(line = {}, spec = {}) {
+  if (!line || !spec) return false;
+  if (line.questionId && spec.questionId && String(line.questionId) === String(spec.questionId)) {
+    return true;
+  }
+  if (line.questionId && spec.questionId && String(line.questionId) !== String(spec.questionId)) {
+    return false;
+  }
+  const lineLabelLower = String(line.label || '').toLowerCase();
+  const valueLower = String(spec.value || '').toLowerCase();
+  const specLabelLower = String(spec.label || '').toLowerCase();
+  if (specLabelLower && specLabelLower.length >= 4 && lineLabelLower.includes(specLabelLower)) return true;
+  if (!valueLower) return false;
+  const isGenericValue = ['yes', 'no', '1', '0', 'true', 'false'].includes(valueLower) || valueLower.length < 3;
+  const lineAmount = roundCurrency(toFiniteNumber(line.amount, 0));
+  const specAmount = roundCurrency(toFiniteNumber(spec.amount, 0));
+  const specMaterialAmount = roundCurrency(toFiniteNumber(spec.materialAmount, 0));
+  if (!isGenericValue && specAmount > 0 && lineAmount === specAmount && lineLabelLower.includes(valueLower)) {
+    return true;
+  }
+  if (!isGenericValue && specMaterialAmount > 0 && lineAmount === specMaterialAmount && lineLabelLower.includes(valueLower)) {
+    return true;
+  }
+  if (!isGenericValue && spec.multiplier && spec.multiplier !== 1 && lineAmount === 0 && lineLabelLower.includes(valueLower)) {
+    return true;
+  }
+  return false;
+}
+
+function insertQuestionAnswerBreakdownLines(lines = [], specs = []) {
+  if (!Array.isArray(specs) || !specs.length) return lines;
+  const matchedSpecIndices = new Set();
+  const specIndexByQuestionId = new Map();
+  specs.forEach((spec, idx) => {
+    const qId = String(spec?.questionId || '').trim();
+    if (qId && !specIndexByQuestionId.has(qId)) {
+      specIndexByQuestionId.set(qId, idx);
+    }
+  });
+
+  const enriched = lines.map((line) => {
+    let matchIdx = -1;
+    const lineQuestionId = String(line?.questionId || '').trim();
+    if (lineQuestionId && specIndexByQuestionId.has(lineQuestionId)) {
+      matchIdx = specIndexByQuestionId.get(lineQuestionId);
+    } else {
+      matchIdx = specs.findIndex((spec, idx) => !matchedSpecIndices.has(idx) && matchesQuestionLine(line, spec));
+    }
+    if (matchIdx === -1) return line;
+    matchedSpecIndices.add(matchIdx);
+    const spec = specs[matchIdx];
+    const lineLower = String(line.label || '').toLowerCase();
+    const hasPrompt = lineLower.includes(String(spec.label || '').toLowerCase());
+    const enrichedLabel = hasPrompt
+      ? line.label
+      : sanitizeText(`${line.label} (${spec.label}: ${spec.value})`, 140);
+    return {
+      ...line,
+      label: enrichedLabel,
+      questionId: spec.questionId || line.questionId || undefined,
+      questionPrompt: spec.label,
+      questionAnswer: spec.value,
+      ...(spec.multiplier && spec.multiplier !== 1 && line.amount === 0 ? { displayAmount: `×${spec.multiplier} multiplier` } : {}),
+    };
+  });
+
+  const unmatchedQaLines = specs
+    .filter((_, idx) => !matchedSpecIndices.has(idx))
+    .map((spec) => ({
+      label: sanitizeText(`${spec.label}: ${spec.value}`, 140),
+      component: 'Question & Answer',
+      amount: 0,
+      displayAmount: spec.multiplier && spec.multiplier !== 1 ? `×${spec.multiplier} multiplier` : 'Included',
+      questionId: spec.questionId || undefined,
+      questionPrompt: spec.label,
+      questionAnswer: spec.value,
+      isQuestionAnswer: true,
+    }));
+
+  if (!unmatchedQaLines.length) return enriched;
+
+  const firstFeeIdx = enriched.findIndex((item) => ['Travel', 'Platform Fee', 'Waiting Time', 'Discount / Credit', 'Adjustment'].includes(item.component));
+  if (firstFeeIdx === -1) {
+    return [...enriched, ...unmatchedQaLines];
+  }
+  return [
+    ...enriched.slice(0, firstFeeIdx),
+    ...unmatchedQaLines,
+    ...enriched.slice(firstFeeIdx),
+  ];
+}
+
 function buildPriceBreakdownLines({
   request = {},
   settledAmount = 0,
   legacyOperation = null,
   isCanceled = false,
+  catalogEntries = [],
 } = {}) {
   const pricing = request.pricingSnapshot || request.requestPayload?.pricingSnapshot || {};
-  const lines = [];
+  let lines = [];
   const targetTotal = roundCurrency(
     toFiniteNumber(settledAmount, null)
     ?? (isCanceled
@@ -203,6 +366,20 @@ function buildPriceBreakdownLines({
       || request.helperPayoutBreakdown
       || {};
     const travelAmount = roundCurrency(toFiniteNumber(payout.travelAmount ?? payout.helperTravelAmount, 0));
+    const waitingCost = roundCurrency(toFiniteNumber(
+      payout.helperWaitingAmount
+        ?? payout.waitingCost
+        ?? legacyOperation?.settlementData?.cancellation?.waitingCost
+        ?? request.waitingCost
+        ?? pricing.waitingCost,
+      0,
+    ));
+    const waitingMinutes = roundCurrency(toFiniteNumber(
+      legacyOperation?.settlementData?.cancellation?.waitingMinutes
+        ?? request.waitingMinutes
+        ?? pricing.waitingMinutes,
+      0,
+    ));
     const bookingAmount = roundCurrency(toFiniteNumber(payout.bookingFeeAmount ?? payout.platformBookingAmount, 0));
     const travelledKm = roundCurrency(toFiniteNumber(payout.travelledKm ?? request.cancellationDistanceKm, 0));
 
@@ -213,6 +390,15 @@ function buildPriceBreakdownLines({
           : 'Service travel charge',
         component: 'Travel',
         amount: travelAmount,
+      });
+    }
+    if (waitingCost > 0) {
+      lines.push({
+        label: waitingMinutes > 0
+          ? `Waiting time fee (${waitingMinutes.toFixed(1)} min)`
+          : 'Waiting time fee',
+        component: 'Waiting Time',
+        amount: waitingCost,
       });
     }
     if (bookingAmount > 0) {
@@ -243,6 +429,7 @@ function buildPriceBreakdownLines({
           label,
           component: classifyBreakdownComponent(label),
           amount: roundCurrency(amount),
+          ...(item?.questionId ? { questionId: String(item.questionId) } : {}),
         });
       }
     } else {
@@ -311,6 +498,11 @@ function buildPriceBreakdownLines({
         amount: targetTotal,
       });
     }
+  }
+
+  const qaSpecs = extractRequestSpecifications({ request, catalogEntries });
+  if (qaSpecs.length > 0) {
+    lines = insertQuestionAnswerBreakdownLines(lines, qaSpecs);
   }
 
   const lineSum = roundCurrency(lines.reduce((sum, item) => sum + Number(item.amount || 0), 0));
@@ -438,6 +630,7 @@ function buildServiceInvoiceData({
     settledAmount,
     legacyOperation,
     isCanceled,
+    catalogEntries,
   });
 
   const resolvedInvoiceNumber = sanitizeText(invoiceNumber, 60) || deriveInvoiceNumber({ requestId, request });
@@ -477,6 +670,7 @@ function buildServiceInvoiceData({
     ? `Scheduled (${sanitizeText(request.scheduledForText || request.requestPayload?.scheduledForText || 'Requested slot', 80)})`
     : 'Immediate / On-Demand';
 
+  const specifications = extractRequestSpecifications({ request, catalogEntries });
   return {
     invoiceNumber: resolvedInvoiceNumber,
     receiptId: resolvedReceiptId,
@@ -505,8 +699,9 @@ function buildServiceInvoiceData({
       serviceName,
       selectedOption,
       timing: timingLabel,
-      specifications: extractRequestSpecifications({ request, catalogEntries }),
+      specifications,
     },
+    questionAnswers: specifications,
     priceBreakdown: lines,
   };
 }
@@ -755,9 +950,11 @@ function buildServiceRequestInvoicePdfBuffer(invoice) {
         doc.rect(left, ry, contentWidth, rowHeight).fill(palette.well);
         doc.restore();
       }
-      const amountDisplay = item.amount === 0 && safeLabel.toLowerCase().includes('multiplier')
-        ? 'Included'
-        : formatMoney(item.amount, invoice.currency);
+      const amountDisplay = item.displayAmount && item.amount === 0
+        ? toPdfSafeText(item.displayAmount, 24)
+        : item.amount === 0 && (item.isQuestionAnswer || safeLabel.toLowerCase().includes('multiplier'))
+          ? 'Included'
+          : formatMoney(item.amount, invoice.currency);
 
       doc.font('Helvetica').fontSize(9).fillColor(palette.ink)
         .text(safeLabel, left + 10, ry + 6, { width: contentWidth - 210 });
@@ -995,6 +1192,8 @@ async function ensureAndSendServiceRequestInvoice({
       pdfGenerated: true,
       storagePath,
       pdfUrl,
+      questionAnswers: invoiceData.questionAnswers || [],
+      priceBreakdown: invoiceData.priceBreakdown || [],
       whatsappDeliveryStatus,
       ...(whatsappMessageId ? { whatsappMessageId } : {}),
       ...(whatsappErrorCode ? { whatsappErrorCode } : {}),

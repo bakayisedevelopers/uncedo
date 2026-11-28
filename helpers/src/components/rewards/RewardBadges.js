@@ -9,6 +9,12 @@ const PALETTE = {
     textColor: '#475569',
     accentColor: '#94a3b8',
   },
+  sky: {
+    backgroundColor: '#f0f9ff',
+    borderColor: '#7dd3fc',
+    textColor: '#075985',
+    accentColor: '#0ea5e9',
+  },
   info: {
     backgroundColor: '#fdf2f8',
     borderColor: '#f9a8d4',

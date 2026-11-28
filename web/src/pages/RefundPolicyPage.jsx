@@ -5,8 +5,8 @@ export default function RefundPolicyPage() {
   return (
     <LegalPageShell
       title="Refund & Cancellation Policy"
-      updatedAt="21 November 2026"
-      intro="This policy sets out when cancellations are free, when cancellation fees apply, how unpaid wallet debt is handled, and how refunds or payment disputes are processed on Uncedo."
+      updatedAt="27 November 2026"
+      intro="This policy sets out when cancellations are free, when travel and R1/min waiting cancellation fees apply, how unpaid wallet debt restricts new bookings, and how refunds or payment disputes are processed on Uncedo."
       contact="If you believe a charge, cancellation fee, or cash confirmation is incorrect, contact Uncedo support in-app or via WhatsApp (wa.me/27605239926) with your request reference."
     >
       <LegalSection title="1. Free customer cancellations (R0 fee)">
@@ -20,10 +20,10 @@ export default function RefundPolicyPage() {
         </ul>
       </LegalSection>
 
-      <LegalSection title="2. Post-driving cancellation fees">
+      <LegalSection title="2. Post-driving and post-arrival cancellation fees">
         <p>
           Once the assigned helper transitions the job to driving, en route, or purchasing resources (or after the helper
-          has arrived or started work), cancelling compensates for travel incurred and platform allocation:
+          has arrived or started work), cancelling compensates for travel incurred, waiting time, and platform allocation:
         </p>
         <ul className="list-disc space-y-2 pl-5">
           <li>
@@ -31,23 +31,25 @@ export default function RefundPolicyPage() {
             verified tracking progress) plus the request’s integer booking fee.
           </li>
           <li>
-            <strong>After helper arrival or work started:</strong> The service’s full travel fee plus the integer booking
-            fee.
+            <strong>After helper arrival or work started:</strong> The service’s full travel fee, any accrued post-arrival
+            waiting fee after the <strong>2-minute free grace period at R1 per minute</strong> (you receive a WhatsApp
+            alert when the 2 free minutes end and R1/min charging starts), plus the integer booking fee.
           </li>
         </ul>
         <p>
           Before your cancellation is finalised, Uncedo shows the exact calculated cancellation fee so you can review
-          and confirm it. Cancellation fees are payable by <strong>card only</strong>; if no saved card succeeds, the
-          unpaid fee is recorded in your wallet and must be settled by card via your <code>/payment</code> link to clear
-          the debt.
+          and confirm it. Cancellation fees are payable by <strong>card only</strong> (cash is not accepted); if no saved
+          card succeeds, the unpaid fee is recorded in your wallet and new bookings remain blocked across your linked
+          accounts until you settle the debt by card via your <code>/payment</code> link.
         </p>
       </LegalSection>
 
       <LegalSection title="3. Helper cancellations & no-shows">
         <p>
           If the assigned helper cancels a request before completion, you owe no cancellation fee for that helper
-          cancellation and the cancelling helper receives <strong>R0 payout</strong>. Uncedo may attempt to rematch your
-          request or allow you to rebook.
+          cancellation and the cancelling helper receives <strong>R0 payout</strong>. Uncedo permanently excludes that
+          cancelling helper from rematching onto the same request and automatically searches for another eligible helper
+          (or lets you rebook).
         </p>
       </LegalSection>
 
@@ -60,8 +62,8 @@ export default function RefundPolicyPage() {
         <p>
           Approved card refunds are returned to the original Paystack payment method used for the transaction. Processing
           times depend on Paystack and the customer’s issuing South African bank (typically 3–7 business days once
-          initiated). Where a refund or chargeback relates to a completed job, Uncedo may reverse or adjust the
-          associated helper wallet credit accordingly.
+          initiated). Where a Paystack refund or chargeback dispute is received, Uncedo records the dispute audit trail
+          and reverses split debt recovery credits or restricts helper wallet reconciliation accordingly.
         </p>
       </LegalSection>
 

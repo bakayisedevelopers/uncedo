@@ -637,15 +637,52 @@ function formatWhatsAppRecoverySavedCardMenu({
   };
 }
 
+function formatWhatsAppSavedAddressConfirmationPrompt({ service = {}, savedAddress = '' } = {}) {
+  const serviceLabel = safeLabel(service.label || service.id || 'Selected service', 100);
+  const safeAddress = safeLabel(savedAddress, 400);
+  const text = formatWhatsAppText(
+    `🏠 *${serviceLabel}*\n\nYour saved home address is:\n*${safeAddress}*\n\nPlease confirm if we should use this saved address, or provide a new address.\n\n1. Confirm address\n2. Provide new address`,
+  );
+  const buttonBody = formatWhatsAppText(
+    `🏠 *${serviceLabel}*\n\nYour saved home address is:\n*${safeAddress}*\n\nPlease confirm this saved address or provide a new address.`,
+  ).slice(0, 1024);
+
+  return {
+    text,
+    interactive: {
+      type: 'button',
+      body: { text: buttonBody },
+      action: {
+        buttons: [
+          { type: 'reply', reply: { id: 'wa_opt_sac_confirm', title: 'Confirm address' } },
+          { type: 'reply', reply: { id: 'wa_opt_sac_change', title: 'Provide new address' } },
+        ],
+      },
+    },
+  };
+}
+
+function formatWhatsAppMissingHomeAddressPrompt({ service = {} } = {}) {
+  const serviceLabel = safeLabel(service.label || service.id || 'Selected service', 100);
+  return {
+    text: formatWhatsAppText(
+      `🏠 *${serviceLabel}*\n\nYou don't have a saved home address on file yet. Please provide your home address (for example: 17 Iris Street, Witbank, 1035).`,
+    ),
+    interactive: null,
+  };
+}
+
 module.exports = {
   formatVerifiedWhatsAppNextQuestion,
   formatWhatsAppBookingConfirmation,
   formatWhatsAppCompletionCardFailureRecovery,
+  formatWhatsAppMissingHomeAddressPrompt,
   formatWhatsAppNextQuestion,
   formatWhatsAppPreBookingPaymentPrompt,
   formatWhatsAppPreBookingSavedCardMenu,
   formatWhatsAppRecoverySavedCardMenu,
   formatWhatsAppRequestExpiredMessage,
+  formatWhatsAppSavedAddressConfirmationPrompt,
   formatWhatsAppServiceOptionPrompt,
   formatWhatsAppSubmittedRequestConfirmation,
   renderMissingWhatsAppQuestions,

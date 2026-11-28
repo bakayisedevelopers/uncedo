@@ -7,11 +7,20 @@ const {
   cancellationQuoteMatches,
 } = require('./serviceRequestCancellation');
 
-function samplePayout({ billingRule, travelledKm, travelFeeAmount, bookingFeeAmount }) {
-  const helperAmount = billingRule === 'travelled_distance_plus_booking_fee'
+function samplePayout({ billingRule, travelledKm, travelFeeAmount, bookingFeeAmount, waitingCost = 0 }) {
+  const helperTravelAmount = billingRule === 'travelled_distance_plus_booking_fee'
     ? Math.round(travelledKm * 400) / 100
     : billingRule === 'travel_fee_plus_booking_fee' ? travelFeeAmount : 0;
-  return { helperAmount, platformAmount: bookingFeeAmount, customerChargeAmount: helperAmount + bookingFeeAmount };
+  const helperWaitingAmount = billingRule === 'travel_fee_plus_booking_fee' ? waitingCost : 0;
+  const helperAmount = helperTravelAmount + helperWaitingAmount;
+  return {
+    helperAmount,
+    helperTravelAmount,
+    helperWaitingAmount,
+    waitingCost: helperWaitingAmount,
+    platformAmount: bookingFeeAmount,
+    customerChargeAmount: helperAmount + bookingFeeAmount,
+  };
 }
 
 test('pre-assignment cancellation has no charge and post-assignment terms follow current billing rules', () => {
@@ -47,7 +56,36 @@ test('pre-assignment cancellation has no charge and post-assignment terms follow
     payoutBreakdown: samplePayout,
   });
   assert.equal(arrived.billingRule, 'travel_fee_plus_booking_fee');
+  assert.equal(arrived.waitingCost, 0);
   assert.equal(arrived.cancellationAmount, 40);
+
+  const arrivedAfterWaiting = calculateCustomerCancellationTerms({
+    request: { status: 'arrived', arrivedAt: 100_000 },
+    now: 100_000 + 7 * 60_000,
+    distanceTravelledMeters: 2750,
+    bookingFee: 5,
+    travelFee: 35,
+    payoutBreakdown: samplePayout,
+  });
+  assert.equal(arrivedAfterWaiting.billingRule, 'travel_fee_plus_booking_fee');
+  assert.equal(arrivedAfterWaiting.waitingMinutes, 7);
+  assert.equal(arrivedAfterWaiting.waitingCost, 5);
+  assert.equal(arrivedAfterWaiting.helperPayoutBreakdown.helperTravelAmount, 35);
+  assert.equal(arrivedAfterWaiting.helperPayoutBreakdown.helperWaitingAmount, 5);
+  assert.equal(arrivedAfterWaiting.helperPayoutBreakdown.helperAmount, 40);
+  assert.equal(arrivedAfterWaiting.cancellationAmount, 45);
+
+  const workStartedAfterWaiting = calculateCustomerCancellationTerms({
+    request: { status: 'work_started', arrivedAt: 100_000, workStartedAt: 100_000 + 10 * 60_000 },
+    now: 100_000 + 30 * 60_000,
+    bookingFee: 3,
+    travelFee: 35,
+    payoutBreakdown: samplePayout,
+  });
+  assert.equal(workStartedAfterWaiting.waitingMinutes, 10);
+  assert.equal(workStartedAfterWaiting.waitingCost, 8);
+  assert.equal(workStartedAfterWaiting.helperPayoutBreakdown.helperAmount, 43);
+  assert.equal(workStartedAfterWaiting.cancellationAmount, 46);
 });
 
 test('terminal and unsupported request states cannot be quoted for cancellation', () => {

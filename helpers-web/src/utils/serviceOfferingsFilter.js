@@ -43,6 +43,11 @@ export function groupSubmittedOfferings(offerings = [], catalogById = new Map())
     const catalogEntry = catalogById.get(serviceId)
       || catalogById.get(String(offering.serviceId || '').toLowerCase());
     const serviceName = String(catalogEntry?.label || offering.serviceName || serviceId).trim();
+    const optionToken = normalizeServiceToken(offering.optionId || '');
+    const catalogOption = optionToken && Array.isArray(catalogEntry?.options)
+      ? catalogEntry.options.find((opt) => normalizeServiceToken(opt?.id || '') === optionToken)
+      : null;
+    const liveOptionTitle = String(catalogOption?.title || catalogOption?.label || offering.optionTitle || '').trim();
 
     if (!groups.has(serviceId)) {
       groups.set(serviceId, {
@@ -56,7 +61,11 @@ export function groupSubmittedOfferings(offerings = [], catalogById = new Map())
     }
 
     const group = groups.get(serviceId);
-    group.items.push(offering);
+    group.items.push({
+      ...offering,
+      serviceName,
+      optionTitle: liveOptionTitle,
+    });
     const meta = getOfferingStatusMeta(offering);
     if (meta.key === 'approved') group.approvedCount += 1;
     else if (meta.key === 'declined') group.declinedCount += 1;
@@ -96,8 +105,11 @@ export function getAvailableCatalogEntries(catalog = [], offerings = []) {
       appliedOptionsByService.set(serviceKey, new Set());
     }
     const set = appliedOptionsByService.get(serviceKey);
-    if (optionIdKey) set.add(optionIdKey);
-    if (optionTitleKey) set.add(optionTitleKey);
+    if (optionIdKey) {
+      set.add(optionIdKey);
+    } else if (optionTitleKey) {
+      set.add(optionTitleKey);
+    }
   }
 
   const available = [];
@@ -117,7 +129,7 @@ export function getAvailableCatalogEntries(catalog = [], offerings = []) {
         const optIdKey = normalizeServiceToken(opt?.id || '');
         const optTitleKey = normalizeServiceToken(opt?.title || opt?.label || '');
         const matchedById = optIdKey && appliedSet.has(optIdKey);
-        const matchedByTitle = optTitleKey && appliedSet.has(optTitleKey);
+        const matchedByTitle = !optIdKey && optTitleKey && appliedSet.has(optTitleKey);
         return !matchedById && !matchedByTitle;
       });
 

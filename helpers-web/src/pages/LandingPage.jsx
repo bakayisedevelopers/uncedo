@@ -24,7 +24,7 @@ const PREPARATION_ITEMS = [
   },
   {
     label: 'South African cheque or savings account',
-    detail: 'Verified instantaneously via Paystack for automated Monday earnings payouts.',
+    detail: 'Verified instantaneously via Paystack for automatic card split settlements and monthly 26th wallet payouts.',
   },
 ];
 
@@ -180,9 +180,9 @@ export function LandingPage({ user, onNavigate, pwa }) {
               <div className="text-xs text-ink-500 mt-0.5">Portfolio and clearance checks</div>
             </div>
             <div className="p-5 sm:p-6">
-              <div className="tabular-nums-mono text-2xl font-bold text-ink-900">Monday</div>
-              <div className="text-sm font-semibold text-ink-900 mt-1">Weekly payouts</div>
-              <div className="text-xs text-ink-500 mt-0.5">Direct ZAR transfers via Paystack</div>
+              <div className="tabular-nums-mono text-2xl font-bold text-ink-900">26th</div>
+              <div className="text-sm font-semibold text-ink-900 mt-1">Monthly payouts</div>
+              <div className="text-xs text-ink-500 mt-0.5">Card splits settle automatically; wallet balances pay on the 26th</div>
             </div>
             <div className="p-5 sm:p-6">
               <div className="tabular-nums-mono text-2xl font-bold text-ink-900">50 km</div>
@@ -281,7 +281,7 @@ export function LandingPage({ user, onNavigate, pwa }) {
           <div className="max-w-7xl mx-auto px-4 sm:px-8 grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
             <div className="lg:col-span-8 space-y-3">
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-tealbrand-500">
-                Automated Weekly Settlement &amp; WhatsApp Dispatch
+                Automatic Split Settlement &amp; WhatsApp Dispatch
               </p>
               <h2 className="font-display text-2xl sm:text-3xl font-bold text-white tracking-tight">
                 Ready to start receiving verified service requests?

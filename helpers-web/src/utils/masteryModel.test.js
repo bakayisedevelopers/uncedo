@@ -119,21 +119,37 @@ test('resolveOfferingMastery falls back to service rollup only for optionless of
 });
 
 test('buildMasteryProgressModel computes next tier requirements cleanly', () => {
-  const progress = buildMasteryProgressModel({
+  const toVerified = buildMasteryProgressModel({
     mastery: {
       level: 'beginner',
+      eligibleCompletedJobCount: 6,
+      averageRating: 4.2,
+      ratingCount: 2,
+    },
+    masteryConfig: DEFAULT_MASTERY_CONFIG,
+  });
+
+  assert.equal(toVerified.nextLevel, 'verified');
+  assert.equal(toVerified.requirements[0].met, false);
+  assert.equal(toVerified.requirements[0].targetValue, 10);
+  assert.equal(toVerified.requirements[1].met, true);
+  assert.equal(toVerified.requirements[2].met, false);
+
+  const toSpecialist = buildMasteryProgressModel({
+    mastery: {
+      level: 'verified',
       eligibleCompletedJobCount: 25,
-      averageRating: 4.7,
+      averageRating: 4.2,
       ratingCount: 5,
     },
     masteryConfig: DEFAULT_MASTERY_CONFIG,
   });
 
-  assert.equal(progress.nextLevel, 'specialist');
-  assert.equal(progress.requirements[0].met, false);
-  assert.equal(progress.requirements[0].targetValue, 50);
-  assert.equal(progress.requirements[1].met, true);
-  assert.equal(progress.requirements[2].met, false);
+  assert.equal(toSpecialist.nextLevel, 'specialist');
+  assert.equal(toSpecialist.requirements[0].met, false);
+  assert.equal(toSpecialist.requirements[0].targetValue, 50);
+  assert.equal(toSpecialist.requirements[1].met, true);
+  assert.equal(toSpecialist.requirements[2].met, false);
 });
 
 test('buildHelperApprovedMasteryList filters to approved offerings and sorts by highest rank first', () => {
@@ -155,4 +171,36 @@ test('buildHelperApprovedMasteryList filters to approved offerings and sorts by 
   assert.equal(list[0].mastery.level, 'specialist');
   assert.equal(list[1].optionTitle, 'Move-out');
   assert.equal(list[1].mastery.level, 'beginner');
+});
+
+test('buildHelperApprovedMasteryList reflects updated live catalog service and option names by ID', () => {
+  const list = buildHelperApprovedMasteryList({
+    offerings: [
+      {
+        id: 'h1_haircut__option_1',
+        serviceId: 'haircut',
+        serviceName: 'Old Haircut',
+        optionId: 'option_1',
+        optionTitle: 'Old Fade',
+        status: 'approved',
+        approved: true,
+      },
+    ],
+    catalog: [
+      {
+        id: 'haircut',
+        label: 'Mens Grooming & Cut',
+        options: [
+          { id: 'option_1', title: 'Executive Taper Fade' },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(list.length, 1);
+  assert.equal(list[0].serviceId, 'haircut');
+  assert.equal(list[0].optionId, 'option_1');
+  assert.equal(list[0].serviceName, 'Mens Grooming & Cut');
+  assert.equal(list[0].optionTitle, 'Executive Taper Fade');
+  assert.equal(list[0].displayName, 'Mens Grooming & Cut — Executive Taper Fade');
 });

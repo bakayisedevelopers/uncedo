@@ -90,7 +90,7 @@ function createInMemoryFirestore() {
 
 test('shared constants expose required levels and directions', () => {
   assert.deepEqual(shared.MEMBERSHIP_LEVELS, ['neighbour', 'partner', 'friend', 'family']);
-  assert.deepEqual(shared.MASTERY_LEVELS, ['beginner', 'specialist', 'master', 'legend']);
+  assert.deepEqual(shared.MASTERY_LEVELS, ['beginner', 'verified', 'specialist', 'master', 'legend']);
   assert.equal(shared.RATING_DIRECTIONS.CUSTOMER_TO_HELPER, 'customer_to_helper');
   assert.equal(shared.RATING_DIRECTIONS.HELPER_TO_CUSTOMER, 'helper_to_customer');
   assert.equal(functionsShared.buildServiceOptionMasteryKey('hair_styling', 'Knotless Braids'), 'hair_styling__knotless_braids');

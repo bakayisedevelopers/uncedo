@@ -1,6 +1,5 @@
 import {
   createUserWithEmailAndPassword,
-  deleteUser,
   GoogleAuthProvider,
   onAuthStateChanged,
   signInWithEmailAndPassword,
@@ -11,7 +10,7 @@ import {
 } from 'firebase/auth';
 import { httpsCallable } from 'firebase/functions';
 import { getFirebaseClients } from '../firebase/config';
-import { deleteUserProfile, getUserProfile, upsertCustomerProfile } from './userService';
+import { getUserProfile, upsertCustomerProfile } from './userService';
 
 export const HELPER_LOGIN_BLOCKED_CODE = 'HELPER_LOGIN_BLOCKED';
 
@@ -150,13 +149,29 @@ export async function logoutUser() {
   await signOut(auth);
 }
 
-export async function deleteAccount(uid) {
-  const { auth } = getFirebaseClients();
+export async function deleteAccount(_uid, reason = '') {
+  const { auth, functions } = getFirebaseClients();
   const authUser = auth.currentUser;
   if (!authUser) {
     throw new Error('No active user session found.');
   }
 
-  await deleteUserProfile(uid);
-  await deleteUser(authUser);
+  const call = httpsCallable(functions, 'requestAccountDeletion');
+  const result = await call({
+    role: 'customer',
+    channel: 'mobile',
+    reason: String(reason || '').trim(),
+  });
+  await signOut(auth).catch(() => null);
+  return result.data || {};
+}
+
+export async function reactivateAccount() {
+  const { auth, functions } = getFirebaseClients();
+  if (!auth.currentUser) {
+    throw new Error('No active user session found.');
+  }
+  const call = httpsCallable(functions, 'reactivateDeletedAccount');
+  const result = await call({ channel: 'mobile' });
+  return result.data || {};
 }

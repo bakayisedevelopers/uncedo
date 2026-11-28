@@ -12,6 +12,7 @@
   ],
   "MASTERY_LEVELS": [
     "beginner",
+    "verified",
     "specialist",
     "master",
     "legend"

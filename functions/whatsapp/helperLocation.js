@@ -85,7 +85,8 @@ function isHelperProfileBlocked(profile = {}) {
   const truthy = (value) => value === true || String(value || '').trim().toLowerCase() === 'true';
   return truthy(profile.dispatchPaused ?? profile.isDispatchPaused)
     || truthy(profile.suspended ?? profile.isSuspended)
-    || truthy(profile.blocked ?? profile.isBlocked);
+    || truthy(profile.blocked ?? profile.isBlocked)
+    || String(profile.accountStatus || '').trim().toLowerCase() === 'pending_deletion';
 }
 
 function resolveWhatsAppHelperLocationMode({

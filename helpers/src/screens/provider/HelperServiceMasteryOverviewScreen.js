@@ -128,7 +128,7 @@ export function HelperServiceMasteryOverviewScreen({ navigate, goBack }) {
       <Card>
         <SectionHeading
           title="Your service options"
-          subtitle="Each service option can have its own Beginner, Specialist, Master, or Legend level."
+          subtitle="Each service option can have its own Beginner, Verified, Specialist, Master, or Legend level."
         />
         {loading ? (
           <EmptyState title="Loading mastery" description="Reading trusted service option mastery and rating records." />

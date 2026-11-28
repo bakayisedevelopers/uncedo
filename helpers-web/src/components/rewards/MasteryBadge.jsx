@@ -1,4 +1,4 @@
-import { Award, Check, Crown, Medal, ShieldCheck } from 'lucide-react';
+import { Award, BadgeCheck, Check, Crown, Medal, ShieldCheck } from 'lucide-react';
 import {
   buildMasteryProgressModel,
   DEFAULT_MASTERY_CONFIG,
@@ -10,6 +10,10 @@ const TONE_CLASSES = {
   neutral: {
     container: 'border-slate-300 bg-slate-100 text-slate-700',
     icon: 'text-slate-600',
+  },
+  sky: {
+    container: 'border-sky-300 bg-sky-50 text-sky-800',
+    icon: 'text-sky-700',
   },
   teal: {
     container: 'border-tealbrand-600/30 bg-tealbrand-50 text-tealbrand-800',
@@ -36,6 +40,8 @@ function resolveBadgeIcon(level) {
     case 'specialist':
     case 'partner':
       return Award;
+    case 'verified':
+      return BadgeCheck;
     default:
       return ShieldCheck;
   }

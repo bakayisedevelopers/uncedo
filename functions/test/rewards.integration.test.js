@@ -687,7 +687,7 @@ test('membership and mastery progression honour thresholds, preserve highest ach
   assert.equal(customerDowngraded.highestLevel, 'partner');
   assert.equal(helperFriend.currentLevel, 'friend');
   assert.equal(helperMaster.level, 'master');
-  assert.equal(helperMasterAfterDrop.level, 'beginner');
+  assert.equal(helperMasterAfterDrop.level, 'verified');
   assert.equal(helperMasterAfterDrop.highestLevel, 'master');
   assert.equal(helperProgress.exists, true);
   assert.equal(helperMasteryDoc.data().eligibleCompletedJobCount, 220);

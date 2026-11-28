@@ -5,6 +5,7 @@ const { serviceOptionsFor } = require('../rewards/ratingService');
 
 const MASTERY_LABELS = Object.freeze({
   beginner: 'Beginner',
+  verified: 'Verified',
   specialist: 'Specialist',
   master: 'Master',
   legend: 'Legend',

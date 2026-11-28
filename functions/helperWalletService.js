@@ -113,8 +113,18 @@ function walletBalanceIsValid(wallet = {}) {
   return true;
 }
 
+const SPLIT_SETTLED_REQUEST_MODES = new Set([
+  'paystack_split',
+  'paystack_split_with_debt_recovery',
+  'debt_recovery_platform_only',
+  'recovery_platform_only',
+]);
+
 function isWalletEarningEligible(request = {}) {
   if (Number(request.helperWalletAccountingVersion) !== 1) return false;
+  if (SPLIT_SETTLED_REQUEST_MODES.has(String(request.paymentSettlementMode || '').trim().toLowerCase())) {
+    return false;
+  }
   if (!['paid', 'wallet_debt_recorded'].includes(String(request.paymentStatus || '').toLowerCase())) return false;
   return String(request.cashPayment?.status || '').toLowerCase() !== 'helper_confirmed';
 }
@@ -371,6 +381,236 @@ async function applyHelperPayoutInTransaction({
 }
 
 /**
+ * Record helper wallet impact for a confirmed Paystack card settlement when split metadata is present.
+ * MUST be invoked after all other transaction reads complete and BEFORE any writes in the transaction.
+ */
+async function applySplitSettlementInTransaction({
+  transaction,
+  db,
+  helperId,
+  requestId,
+  splitAllocation = null,
+  helperAmountMinor = 0,
+  platformAmountMinor = 0,
+  customerChargeAmountMinor = 0,
+  closureType = 'completed',
+  gatewayReference = '',
+  now = Date.now(),
+}) {
+  const safeHelperId = String(helperId || '').trim();
+  const safeRequestId = String(requestId || '').trim();
+  if (!safeHelperId || !safeRequestId) return { applied: false, reason: 'invalid-input' };
+
+  const mode = String(splitAllocation?.mode || 'platform_hold_fallback').trim().toLowerCase();
+  const safeHelperMinor = minorAmount(splitAllocation?.helperAmountMinor ?? helperAmountMinor) ?? 0;
+  const safePlatformMinor = minorAmount(splitAllocation?.platformAmountMinor ?? platformAmountMinor) ?? 0;
+  const safeCustomerMinor = minorAmount(splitAllocation?.customerChargeAmountMinor ?? customerChargeAmountMinor) ?? 0;
+
+  if (mode === 'platform_only' || safeHelperMinor <= 0) {
+    return {
+      applied: false,
+      reason: 'zero-helper-share',
+      mode: mode || 'platform_only',
+      deltaMinor: 0,
+      debtRecoveredMinor: 0,
+      splitHelperMinor: 0,
+    };
+  }
+
+  if (mode === 'platform_hold_fallback') {
+    const fallbackResult = await applyHelperPayoutInTransaction({
+      transaction,
+      db,
+      helperId: safeHelperId,
+      requestId: safeRequestId,
+      helperAmountMinor: safeHelperMinor,
+      platformAmountMinor: safePlatformMinor,
+      customerChargeAmountMinor: safeCustomerMinor,
+      isCash: false,
+      closureType,
+      now,
+    });
+    return {
+      ...fallbackResult,
+      mode: 'platform_hold_fallback',
+      debtRecoveredMinor: 0,
+      splitHelperMinor: 0,
+    };
+  }
+
+  const walletRef = helperWalletReference(db, safeHelperId);
+  const userRef = helperProfileReference(db, safeHelperId);
+  const earningLedgerRef = walletLedgerReference(walletRef, walletEarningLedgerId(safeRequestId));
+  const [walletSnapshot, earningLedgerSnap, userSnapshot] = await Promise.all([
+    transaction.get(walletRef),
+    transaction.get(earningLedgerRef),
+    transaction.get(userRef),
+  ]);
+  const current = walletFromSnapshot(walletSnapshot, safeHelperId, now);
+
+  if (earningLedgerSnap.exists || mode === 'recovery_platform_only') {
+    return {
+      applied: false,
+      duplicate: true,
+      mode,
+      deltaMinor: 0,
+      debtRecoveredMinor: 0,
+      splitHelperMinor: 0,
+      balanceBeforeMinor: resolveSignedBalanceMinor(current),
+      balanceAfterMinor: resolveSignedBalanceMinor(current),
+      wallet: current,
+    };
+  }
+
+  if (current.reconciliationBlocked || !walletBalanceIsValid(current)) {
+    return {
+      applied: false,
+      mode,
+      reason: current.reconciliationBlocked ? 'reconciliation-blocked' : 'invalid-wallet-balance',
+      wallet: current,
+    };
+  }
+
+  const balanceBeforeMinor = resolveSignedBalanceMinor(current);
+  const splitHelperMinor = minorAmount(splitAllocation?.helperSplitMinor) ?? 0;
+  const debtRecoveredMinor = minorAmount(splitAllocation?.debtRecoveredMinor) ?? 0;
+  const normalizedClosure = String(closureType || 'completed').trim().toLowerCase();
+
+  let deltaMinor = 0;
+  let entryType = 'split_direct_settlement';
+  let description = `Paid directly to bank via Paystack Split (R${toRandFromMinor(splitHelperMinor || safeHelperMinor).toFixed(2)}).`;
+
+  if (mode === 'paystack_split_with_debt_recovery' || mode === 'debt_recovery_platform_only') {
+    deltaMinor = debtRecoveredMinor;
+    entryType = 'split_debt_recovery';
+    description = splitHelperMinor > 0
+      ? `Offset R${toRandFromMinor(debtRecoveredMinor).toFixed(2)} negative wallet balance via Paystack Split; R${toRandFromMinor(splitHelperMinor).toFixed(2)} settled to bank.`
+      : `Offset R${toRandFromMinor(debtRecoveredMinor).toFixed(2)} negative wallet balance from card settlement.`;
+  }
+
+  const balanceAfterMinor = balanceBeforeMinor + deltaMinor;
+  const nextWallet = syncHelperWalletDocumentsInTransaction({
+    transaction,
+    walletRef,
+    userRef,
+    userSnap: userSnapshot,
+    helperId: safeHelperId,
+    current,
+    nextBalanceMinor: balanceAfterMinor,
+    now,
+  });
+
+  writeWalletLedger(transaction, earningLedgerRef, {
+    operationId: `split:${safeRequestId}`,
+    requestId: safeRequestId,
+    helperId: safeHelperId,
+    entryType,
+    settlementMode: mode,
+    amountMinor: safeHelperMinor,
+    deltaMinor,
+    splitHelperAmountMinor: splitHelperMinor,
+    debtRecoveredMinor,
+    platformAmountMinor: safePlatformMinor,
+    customerChargeAmountMinor: safeCustomerMinor,
+    balanceBeforeMinor,
+    balanceAfterMinor,
+    closureType: normalizedClosure,
+    ...(gatewayReference ? { gatewayReference: String(gatewayReference) } : {}),
+    description,
+    createdAtMs: now,
+  });
+
+  return {
+    applied: true,
+    mode,
+    deltaMinor,
+    debtRecoveredMinor,
+    splitHelperMinor,
+    balanceBeforeMinor,
+    balanceAfterMinor,
+    wallet: nextWallet,
+  };
+}
+
+/**
+ * Reverse debt recovery credit if a previously settled Paystack split charge is reversed.
+ */
+async function reverseSplitSettlementInTransaction({
+  transaction,
+  db,
+  helperId,
+  requestId,
+  splitAllocation = null,
+  gatewayReference = '',
+  now = Date.now(),
+}) {
+  const safeHelperId = String(helperId || '').trim();
+  const safeRequestId = String(requestId || '').trim();
+  const debtRecoveredMinor = minorAmount(splitAllocation?.debtRecoveredMinor) ?? 0;
+  if (!safeHelperId || !safeRequestId || debtRecoveredMinor <= 0) {
+    return { applied: false, reason: 'no-debt-recovery-to-reverse', deltaMinor: 0 };
+  }
+
+  const walletRef = helperWalletReference(db, safeHelperId);
+  const userRef = helperProfileReference(db, safeHelperId);
+  const earningLedgerRef = walletLedgerReference(walletRef, walletEarningLedgerId(safeRequestId));
+  const reversalRef = walletLedgerReference(walletRef, walletLedgerId(`split_rev:${safeRequestId}`, 'split_reversal'));
+  const [walletSnap, earningSnap, reversalSnap, userSnap] = await Promise.all([
+    transaction.get(walletRef),
+    transaction.get(earningLedgerRef),
+    transaction.get(reversalRef),
+    transaction.get(userRef),
+  ]);
+
+  if (reversalSnap.exists) {
+    return { applied: false, duplicate: true, deltaMinor: 0, wallet: walletFromSnapshot(walletSnap, safeHelperId, now) };
+  }
+  if (!earningSnap.exists || String(earningSnap.data()?.entryType || '') !== 'split_debt_recovery') {
+    return { applied: false, reason: 'no-split-debt-recovery-entry', deltaMinor: 0 };
+  }
+
+  const current = walletFromSnapshot(walletSnap, safeHelperId, now);
+  if (current.reconciliationBlocked || !walletBalanceIsValid(current)) {
+    return { applied: false, reason: current.reconciliationBlocked ? 'reconciliation-blocked' : 'invalid-wallet-balance' };
+  }
+
+  const balanceBeforeMinor = resolveSignedBalanceMinor(current);
+  const balanceAfterMinor = balanceBeforeMinor - debtRecoveredMinor;
+  const nextWallet = syncHelperWalletDocumentsInTransaction({
+    transaction,
+    walletRef,
+    userRef,
+    userSnap,
+    helperId: safeHelperId,
+    current,
+    nextBalanceMinor: balanceAfterMinor,
+    now,
+  });
+
+  writeWalletLedger(transaction, reversalRef, {
+    operationId: `split_reversal:${safeRequestId}`,
+    requestId: safeRequestId,
+    helperId: safeHelperId,
+    entryType: 'split_settlement_reversal',
+    amountMinor: debtRecoveredMinor,
+    deltaMinor: -debtRecoveredMinor,
+    balanceBeforeMinor,
+    balanceAfterMinor,
+    ...(gatewayReference ? { gatewayReference: String(gatewayReference) } : {}),
+    description: 'Reversed Paystack split debt offset following payment reversal.',
+    createdAtMs: now,
+  });
+
+  return {
+    applied: true,
+    deltaMinor: -debtRecoveredMinor,
+    balanceBeforeMinor,
+    balanceAfterMinor,
+    wallet: nextWallet,
+  };
+}
+
+/**
  * Compatible wrapper for cash commission settlement on a helper's single wallet balance.
  */
 async function applyCashCommissionInTransaction({
@@ -466,6 +706,9 @@ const ACCOUNTED_WALLET_ENTRY_TYPES = new Set([
   'cancellation_earning_credit',
   'cash_commission_assessed',
   'legacy_job_resolved',
+  'split_direct_settlement',
+  'split_debt_recovery',
+  'split_settlement_reversal',
 ]);
 
 const PENDING_EXPLICIT_PAYMENT_STATUSES = new Set([
@@ -611,6 +854,7 @@ module.exports = {
   HELPER_WALLETS,
   applyCashCommissionInTransaction,
   applyHelperPayoutInTransaction,
+  applySplitSettlementInTransaction,
   computeLegacyCompletedJobResolution,
   creditHelperWalletEarning,
   emptyHelperWallet,
@@ -622,6 +866,7 @@ module.exports = {
   profileWalletPayload,
   resolveLegacyHelperPayoutMinor,
   resolveSignedBalanceMinor,
+  reverseSplitSettlementInTransaction,
   signedMinorAmount,
   syncHelperWalletDocumentsInTransaction,
   toRandFromMinor,

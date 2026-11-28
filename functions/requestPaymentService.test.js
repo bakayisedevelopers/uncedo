@@ -787,4 +787,114 @@ test('failed explicit card completion credits helper wallet immediately and dedu
   assert.equal((await db.collection('helperWallets').doc('helper-9').get()).data().balance, 50);
 });
 
+test('checkout settlement with Paystack Split settles bank direct (0 wallet delta) or offsets negative wallet debt', async () => {
+  const { recordCheckoutInitialization } = require('./requestPaymentService');
+  const { resolvePaystackSplitAllocation } = require('./splitPaymentService');
+
+  const reqNormal = 'rq_split_checkout_normal';
+  const dbNormal = new MemoryDb({
+    [`serviceRequests/${reqNormal}`]: {
+      customerId: 'cust-split-1',
+      status: 'completed',
+      paymentStatus: 'payment_processing',
+      totalAmount: 100,
+      helperAssignment: { helperId: 'helper-split-1' },
+      helperPayoutBreakdown: { customerChargeAmount: 100, helperAmount: 75, platformAmount: 25 },
+    },
+    'users/helper-split-1': { uid: 'helper-split-1', wallet: { balance: 20, balanceMinor: 2000, currency: 'ZAR' } },
+    'helperWallets/helper-split-1': { helperId: 'helper-split-1', balance: 20, balanceMinor: 2000, schemaVersion: 2, currency: 'ZAR' },
+    [`servicePaymentOperations/${reqNormal}`]: { status: 'payment_processing', activeAttemptId: 'attempt-split-1' },
+    [`servicePaymentOperations/${reqNormal}/attempts/attempt-split-1`]: {
+      method: 'paystack_checkout',
+      status: 'initializing',
+      amount: 100,
+      amountMinor: 10000,
+      customerId: 'cust-split-1',
+    },
+  });
+
+  const normalAlloc = resolvePaystackSplitAllocation({
+    helperId: 'helper-split-1',
+    payoutProfile: { verificationStatus: 'verified', subaccountCode: 'ACCT_split_1' },
+    helperWalletBalanceMinor: 2000,
+    helperAmountMinor: 7500,
+    platformAmountMinor: 2500,
+    customerChargeAmountMinor: 10000,
+  });
+  await recordCheckoutInitialization({
+    db: dbNormal,
+    admin,
+    requestId: reqNormal,
+    attemptId: 'attempt-split-1',
+    gatewayReference: 'ref-split-1',
+    authorizationUrl: 'https://checkout.paystack.com/pay/1',
+    splitAllocation: normalAlloc,
+    now: 1_000,
+  });
+  const settledNormal = await settleRequestPayment({
+    db: dbNormal,
+    admin,
+    requestId: reqNormal,
+    attemptId: 'attempt-split-1',
+    outcome: 'success',
+    gatewayReference: 'ref-split-1',
+    gatewayTransactionId: 'tx-split-1',
+    now: 2_000,
+  });
+  assert.equal(settledNormal.action, 'settled');
+  assert.equal(settledNormal.paymentSettlementMode, 'paystack_split');
+  assert.equal(settledNormal.splitBreakdown.helperSplitAmount, 75);
+  assert.equal((await dbNormal.collection('helperWallets').doc('helper-split-1').get()).data().balanceMinor, 2000);
+  assert.equal((await dbNormal.collection('serviceRequests').doc(reqNormal).get()).data().paymentSettlementMode, 'paystack_split');
+
+  // Negative wallet helper: -R30 owed from prior cash job -> +R30 debt recovery credited to wallet, R45 split to bank
+  const reqDebt = 'rq_split_checkout_debt';
+  const dbDebt = new MemoryDb({
+    [`serviceRequests/${reqDebt}`]: {
+      customerId: 'cust-split-2',
+      status: 'completed',
+      paymentStatus: 'payment_processing',
+      totalAmount: 100,
+      helperAssignment: { helperId: 'helper-split-2' },
+      helperPayoutBreakdown: { customerChargeAmount: 100, helperAmount: 75, platformAmount: 25 },
+    },
+    'users/helper-split-2': { uid: 'helper-split-2', wallet: { balance: -30, balanceMinor: -3000, currency: 'ZAR' } },
+    'helperWallets/helper-split-2': { helperId: 'helper-split-2', balance: -30, balanceMinor: -3000, schemaVersion: 2, currency: 'ZAR' },
+    [`servicePaymentOperations/${reqDebt}`]: { status: 'payment_processing', activeAttemptId: 'attempt-split-2' },
+    [`servicePaymentOperations/${reqDebt}/attempts/attempt-split-2`]: {
+      method: 'paystack_checkout',
+      status: 'processing',
+      amount: 100,
+      amountMinor: 10000,
+      customerId: 'cust-split-2',
+      gatewayReference: 'ref-split-2',
+      splitAllocation: resolvePaystackSplitAllocation({
+        helperId: 'helper-split-2',
+        payoutProfile: { verificationStatus: 'verified', subaccountCode: 'ACCT_split_2' },
+        helperWalletBalanceMinor: -3000,
+        helperAmountMinor: 7500,
+        platformAmountMinor: 2500,
+        customerChargeAmountMinor: 10000,
+      }),
+    },
+  });
+  const settledDebt = await settleRequestPayment({
+    db: dbDebt,
+    admin,
+    requestId: reqDebt,
+    attemptId: 'attempt-split-2',
+    outcome: 'success',
+    gatewayReference: 'ref-split-2',
+    gatewayTransactionId: 'tx-split-2',
+    now: 3_000,
+  });
+  assert.equal(settledDebt.action, 'settled');
+  assert.equal(settledDebt.paymentSettlementMode, 'paystack_split_with_debt_recovery');
+  assert.equal(settledDebt.splitBreakdown.debtRecoveredAmount, 30);
+  assert.equal(settledDebt.splitBreakdown.helperSplitAmount, 45);
+  assert.equal((await dbDebt.collection('helperWallets').doc('helper-split-2').get()).data().balanceMinor, 0);
+  assert.equal((await dbDebt.collection('users').doc('helper-split-2').get()).data().wallet.balanceMinor, 0);
+});
+
+
 

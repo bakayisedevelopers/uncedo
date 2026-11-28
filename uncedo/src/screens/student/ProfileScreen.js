@@ -16,14 +16,19 @@ import { colors } from '../../theme/colors';
 import { getStudentOnboardingStatus } from '../../utils/onboarding';
 
 export function ProfileScreen({ navigate, bottomInset = 0 }) {
-  const { deleteAccount, logout, setUser, user } = useAuth();
+  const { deleteAccount, logout, reactivateAccount, setUser, user } = useAuth();
   const currentUser = user;
   const onboardingStatus = getStudentOnboardingStatus(currentUser);
   const hydratedUserIdRef = useRef(null);
   const [confirmText, setConfirmText] = useState('');
+  const [deleteReason, setDeleteReason] = useState('');
   const [isDeleting, setIsDeleting] = useState(false);
   const [message, setMessage] = useState('');
   const [isSaving, setIsSaving] = useState(false);
+  const isPendingDeletion = String(currentUser?.accountStatus || '').trim().toLowerCase() === 'pending_deletion';
+  const deletionDateLabel = currentUser?.deletionScheduledAtMs
+    ? new Intl.DateTimeFormat('en-ZA', { day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(currentUser.deletionScheduledAtMs))
+    : 'in 30 days';
   const [form, setForm] = useState({
     fullName: '',
     phoneNumber: '',
@@ -110,16 +115,30 @@ export function ProfileScreen({ navigate, bottomInset = 0 }) {
   };
 
   const handleDelete = async () => {
-    if (confirmText !== 'DELETE') {
-      setMessage('Type DELETE to confirm account deletion.');
+    if (confirmText.trim() !== 'DELETE') {
+      setMessage('Type DELETE to confirm scheduling account deletion.');
       return;
     }
     try {
       setIsDeleting(true);
-      await deleteAccount(user.uid);
+      setMessage('');
+      await deleteAccount(user.uid, deleteReason);
       setUser(null);
     } catch (error) {
-      setMessage(error.message || 'Unable to delete account. You may need to sign in again.');
+      setMessage(error.message || 'Unable to schedule account deletion right now.');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const handleReactivate = async () => {
+    try {
+      setIsDeleting(true);
+      setMessage('');
+      await reactivateAccount();
+      setMessage('Your account has been reactivated and the 30-day scheduled deletion was canceled.');
+    } catch (error) {
+      setMessage(error.message || 'Unable to reactivate account right now.');
     } finally {
       setIsDeleting(false);
     }
@@ -300,19 +319,43 @@ export function ProfileScreen({ navigate, bottomInset = 0 }) {
       </Card>
 
       <Card style={styles.card}>
-        <Text style={styles.sectionTitle}>Delete account</Text>
-        <Text style={styles.copy}>This permanently removes your profile and access.</Text>
-        <Text style={styles.danger}>Type DELETE below to confirm permanent account deletion.</Text>
-        <TextInput
-          placeholder="Type DELETE"
-          placeholderTextColor={colors.muted}
-          style={styles.deleteInput}
-          value={confirmText}
-          onChangeText={setConfirmText}
-        />
-        <Button variant="secondary" disabled={isDeleting} onPress={handleDelete}>
-          {isDeleting ? 'Deleting account...' : 'Delete my account'}
-        </Button>
+        <Text style={styles.sectionTitle}>
+          {isPendingDeletion ? 'Scheduled account deletion' : 'Delete account'}
+        </Text>
+        {isPendingDeletion ? (
+          <>
+            <Text style={styles.copy}>
+              Your account is scheduled for permanent deletion on {deletionDateLabel}. Cancel deletion now to restore full booking access immediately.
+            </Text>
+            <Button disabled={isDeleting} onPress={handleReactivate}>
+              {isDeleting ? 'Reactivating...' : 'Cancel deletion & reactivate account'}
+            </Button>
+          </>
+        ) : (
+          <>
+            <Text style={styles.copy}>
+              Deleting schedules your account for permanent removal in 30 days. You can sign back in or reply on WhatsApp within 30 days to reactivate. After 30 days, your profile is removed while past service records retain your details for helper and platform records.
+            </Text>
+            <TextInput
+              placeholder="Optional reason (why are you leaving?)"
+              placeholderTextColor={colors.muted}
+              style={styles.deleteInput}
+              value={deleteReason}
+              onChangeText={setDeleteReason}
+            />
+            <Text style={styles.danger}>Type DELETE below to confirm scheduling 30-day account deletion.</Text>
+            <TextInput
+              placeholder="Type DELETE"
+              placeholderTextColor={colors.muted}
+              style={styles.deleteInput}
+              value={confirmText}
+              onChangeText={setConfirmText}
+            />
+            <Button variant="secondary" disabled={isDeleting} onPress={handleDelete}>
+              {isDeleting ? 'Scheduling deletion...' : 'Schedule 30-day deletion'}
+            </Button>
+          </>
+        )}
         {message ? <Text style={styles.message}>{message}</Text> : null}
       </Card>
     </ScrollView>
